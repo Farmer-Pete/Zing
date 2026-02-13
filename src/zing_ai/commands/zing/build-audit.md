@@ -6,7 +6,7 @@ Perform a code review of the current branch like a senior developer would. Read 
 <process>
 
 <step name="load_review_reference">
-Read the shared review reference file at `~/.claude/skills/_shared/review-core.md` using the Read tool. This contains the tone guidelines, review categories, severity/confidence scales, and other shared review standards used throughout this process.
+Read the shared review reference file at `~/.claude/commands/zing/_shared/review-core.md` using the Read tool. This contains the tone guidelines, review categories, severity/confidence scales, and other shared review standards used throughout this process.
 </step>
 
 <step name="detect_branch_and_diff">
