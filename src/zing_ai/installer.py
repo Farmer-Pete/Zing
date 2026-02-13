@@ -37,6 +37,13 @@ def install_claude(target_dir: Path | None = None) -> None:
     if target_dir is None:
         target_dir = Path.home() / ".claude" / "commands"
 
+    # Back up any user-modified files before overwriting.
+    from zing_ai.backup import backup_modified_files
+
+    backed_up = backup_modified_files(target_dir)
+    for relpath, backup_path in backed_up:
+        print(f"  Backed up modified file: {relpath} -> {backup_path}")
+
     commands_root = importlib.resources.files("zing_ai.commands")
 
     # Track files and directories created during this run so we can roll back
@@ -103,6 +110,13 @@ def install_opencode(target_dir: Path | None = None) -> None:
 
     if target_dir is None:
         target_dir = Path.home() / ".config" / "opencode" / "commands"
+
+    # Back up any user-modified files before overwriting.
+    from zing_ai.backup import backup_modified_files
+
+    backed_up = backup_modified_files(target_dir)
+    for relpath, backup_path in backed_up:
+        print(f"  Backed up modified file: {relpath} -> {backup_path}")
 
     commands_root = importlib.resources.files("zing_ai.commands")
 

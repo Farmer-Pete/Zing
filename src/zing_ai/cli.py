@@ -106,10 +106,20 @@ def _handle_install(args: argparse.Namespace) -> None:
 
 def _handle_reapply_patches(args: argparse.Namespace) -> None:
     """Handle the ``reapply-patches`` subcommand."""
+    from pathlib import Path
+
+    from zing_ai.backup import reapply_patches
+
     runtimes = _resolve_runtimes(args)
     for rt in runtimes:
-        print(f"Reapplying patches for {rt}...")
-    # Actual patch logic will be added in a later step.
+        print(f"Patches for {rt}:")
+        if rt == "claude":
+            target_dir = Path.home() / ".claude" / "commands"
+        elif rt == "opencode":
+            target_dir = Path.home() / ".config" / "opencode" / "commands"
+        else:
+            continue
+        reapply_patches(target_dir)
 
 
 # ---- main -------------------------------------------------------------------
