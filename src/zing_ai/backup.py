@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from zing_ai.manifest import detect_modified_files
+
+logger = logging.getLogger(__name__)
 
 _PATCHES_DIR = "zing-patches"
 
@@ -33,19 +36,25 @@ def backup_modified_files(target_dir: Path) -> list[tuple[str, Path]]:
         that was backed up.  Returns an empty list when no manifest
         exists (fresh install) or when no files have been modified.
     """
+    logger.debug("Checking for modified files in %s", target_dir)
     try:
         modified = detect_modified_files(target_dir)
     except Exception:
         # Manifest missing or corrupt -- treat as fresh install.
+        logger.debug("No manifest found or manifest corrupt, treating as fresh install")
         return []
 
     if not modified:
+        logger.debug("No modified files detected")
         return []
+
+    logger.info("Detected %d modified file(s), backing up", len(modified))
 
     patches_dir = target_dir / _PATCHES_DIR
     try:
         patches_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
+        logger.warning("Could not create patches directory: %s", exc)
         print(
             f"warning: could not create patches directory: {exc}",
             file=sys.stderr,
@@ -59,11 +68,13 @@ def backup_modified_files(target_dir: Path) -> list[tuple[str, Path]]:
         src = target_dir / relpath
         if not src.is_file():
             # File was deleted -- nothing to back up.
+            logger.debug("Skipping deleted file: %s", relpath)
             continue
         backup_name = f"{relpath}.{timestamp}"
         backup_path = patches_dir / backup_name
         # Ensure parent dirs exist for nested relpaths (e.g. zing/_shared/foo.md).
         backup_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.debug("Backing up %s -> %s", relpath, backup_path)
         shutil.copy2(src, backup_path)
         backed_up.append((relpath, backup_path))
 
@@ -91,6 +102,7 @@ def list_patches(target_dir: Path) -> list[tuple[str, Path]]:
     """
     patches_dir = target_dir / _PATCHES_DIR
     if not patches_dir.is_dir():
+        logger.debug("No patches directory at %s", patches_dir)
         return []
 
     results: list[tuple[str, Path]] = []
@@ -108,6 +120,7 @@ def list_patches(target_dir: Path) -> list[tuple[str, Path]]:
         original_relpath = name[:last_dot]
         results.append((original_relpath, backup_path))
 
+    logger.debug("Found %d patch backup(s)", len(results))
     return results
 
 

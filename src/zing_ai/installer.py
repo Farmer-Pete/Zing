@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import sys
 from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Files that live directly in the commands/ package root.
 # zing.md is special: it installs one level up from the zing/ subdirectory.
@@ -36,6 +39,8 @@ def install_claude(target_dir: Path | None = None) -> None:
     if target_dir is None:
         target_dir = Path.home() / ".claude" / "commands"
 
+    logger.info("Installing Claude Code commands to %s", target_dir)
+
     # Back up any user-modified files before overwriting.
     from zing_ai.backup import backup_modified_files
 
@@ -44,6 +49,7 @@ def install_claude(target_dir: Path | None = None) -> None:
         print(f"  Backed up modified file: {relpath} -> {backup_path}")
 
     commands_root = importlib.resources.files("zing_ai.commands")
+    logger.debug("Commands package root: %s", commands_root)
 
     # Track files and directories created during this run so we can roll back
     # on failure.
@@ -73,9 +79,12 @@ def install_claude(target_dir: Path | None = None) -> None:
         raise
     except Exception as exc:
         # Roll back any files/dirs we created during this run.
+        logger.warning("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    logger.debug("Installed %d files", len(created_files))
 
     # Write manifest for update detection (non-fatal on failure).
     from zing_ai.manifest import write_manifest
@@ -114,6 +123,8 @@ def install_opencode(target_dir: Path | None = None) -> None:
     if target_dir is None:
         target_dir = Path.home() / ".config" / "opencode" / "commands"
 
+    logger.info("Installing OpenCode commands to %s", target_dir)
+
     # Back up any user-modified files before overwriting.
     from zing_ai.backup import backup_modified_files
 
@@ -122,6 +133,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
         print(f"  Backed up modified file: {relpath} -> {backup_path}")
 
     commands_root = importlib.resources.files("zing_ai.commands")
+    logger.debug("Commands package root: %s", commands_root)
 
     created_files: list[Path] = []
     created_dirs: list[Path] = []
@@ -145,6 +157,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
         for item in src_zing.iterdir():
             if item.is_file() and item.name.endswith(".md"):
                 dst_name = f"zing-{item.name}"
+                logger.debug("Converting sub-command: %s -> %s", item.name, dst_name)
                 _copy_resource_file_converted(
                     item,
                     target_dir / dst_name,
@@ -166,9 +179,12 @@ def install_opencode(target_dir: Path | None = None) -> None:
     except SystemExit:
         raise
     except Exception as exc:
+        logger.warning("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    logger.debug("Installed %d files", len(created_files))
 
     # Write manifest for update detection (non-fatal on failure).
     from zing_ai.manifest import write_manifest
@@ -186,6 +202,9 @@ def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:
         dirs_to_check.append(current)
         current = current.parent
 
+    if dirs_to_check:
+        logger.debug("Creating directory tree: %s", path)
+
     # Create the directory tree.
     path.mkdir(parents=True, exist_ok=True)
 
@@ -200,6 +219,7 @@ def _copy_resource_file(
     created_files: list[Path],
 ) -> None:
     """Copy a single resource file to *dst*, tracking it for rollback."""
+    logger.debug("Copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
     dst.write_text(data, encoding="utf-8")
     created_files.append(dst)
@@ -231,6 +251,7 @@ def _copy_resource_file_converted(
     created_files: list[Path],
 ) -> None:
     """Read *src*, run through *converter*, write to *dst*."""
+    logger.debug("Converting and copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
     data = converter(data)
     dst.write_text(data, encoding="utf-8")
@@ -271,8 +292,11 @@ def _rollback(created_files: list[Path], created_dirs: list[Path]) -> None:
     """Remove files and directories created during a failed install."""
     import contextlib
 
+    logger.debug("Rolling back %d files and %d dirs", len(created_files), len(created_dirs))
+
     for f in reversed(created_files):
         with contextlib.suppress(OSError):
+            logger.debug("Removing file: %s", f)
             f.unlink(missing_ok=True)
 
     # Remove directories in reverse order (deepest first).
@@ -280,4 +304,5 @@ def _rollback(created_files: list[Path], created_dirs: list[Path]) -> None:
         with contextlib.suppress(OSError):
             # Only remove if empty — we don't want to delete user files.
             if d.exists() and not any(d.iterdir()):
+                logger.debug("Removing empty directory: %s", d)
                 d.rmdir()

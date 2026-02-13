@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import click
+
+logger = logging.getLogger("zing_ai")
 
 RUNTIMES = ("claude", "opencode")
 
@@ -24,11 +28,26 @@ def _runtime_options[F: Callable[..., object]](f: F) -> F:
     return f
 
 
+def _setup_logging(*, verbose: bool) -> None:
+    """Configure the ``zing_ai`` logger to write to stderr."""
+    level = logging.DEBUG if verbose else logging.WARNING
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(name)s: %(message)s"))
+    root = logging.getLogger("zing_ai")
+    root.setLevel(level)
+    root.addHandler(handler)
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(package_name="zing-ai", prog_name="zing-ai")
+@click.option(
+    "--verbose", "-v", is_flag=True, default=False, help="Enable debug logging to stderr."
+)
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, *, verbose: bool) -> None:
     """Zing AI development pipeline installer."""
+    _setup_logging(verbose=verbose)
+    logger.debug("CLI invoked (verbose=%s)", verbose)
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -38,6 +57,7 @@ def cli(ctx: click.Context) -> None:
 def install(claude: bool, opencode: bool, all_runtimes: bool) -> None:
     """Install Zing commands for the selected runtime(s)."""
     runtimes = _resolve_runtimes(claude, opencode, all_runtimes)
+    logger.info("Resolved runtimes: %s", runtimes)
     for rt in runtimes:
         if rt == "claude":
             from zing_ai.installer import install_claude
@@ -60,6 +80,7 @@ def reapply_patches_cmd(claude: bool, opencode: bool, all_runtimes: bool) -> Non
     from zing_ai.backup import reapply_patches
 
     runtimes = _resolve_runtimes(claude, opencode, all_runtimes)
+    logger.info("Resolved runtimes for reapply-patches: %s", runtimes)
     for rt in runtimes:
         click.echo(f"Patches for {rt}:")
         if rt == "claude":
@@ -68,11 +89,15 @@ def reapply_patches_cmd(claude: bool, opencode: bool, all_runtimes: bool) -> Non
             target_dir = Path.home() / ".config" / "opencode" / "commands"
         else:
             continue
+        logger.debug("Scanning patches in %s", target_dir)
         reapply_patches(target_dir)
 
 
 def _resolve_runtimes(claude: bool, opencode: bool, all_runtimes: bool) -> list[str]:
     """Return the list of selected runtimes, prompting interactively if needed."""
+    logger.debug(
+        "Resolving runtimes (claude=%s, opencode=%s, all=%s)", claude, opencode, all_runtimes
+    )
     if all_runtimes and (claude or opencode):
         raise click.UsageError("--all cannot be combined with --claude or --opencode")
 
@@ -88,6 +113,7 @@ def _resolve_runtimes(claude: bool, opencode: bool, all_runtimes: bool) -> list[
     if selected:
         return selected
 
+    logger.debug("No runtime flags given, prompting interactively")
     return _prompt_runtime_selection()
 
 

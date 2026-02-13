@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from zing_ai import __version__
+
+logger = logging.getLogger(__name__)
 
 _MANIFEST_FILENAME = "zing-manifest.json"
 
@@ -90,11 +93,13 @@ def write_manifest(
             "files": hash_installed_files(target_dir, file_relpaths),
         }
         manifest_path = target_dir / _MANIFEST_FILENAME
+        logger.debug("Writing manifest to %s (%d files)", manifest_path, len(file_relpaths))
         manifest_path.write_text(
             json.dumps(manifest, indent=2) + "\n",
             encoding="utf-8",
         )
     except Exception as exc:
+        logger.warning("Could not write manifest: %s", exc)
         print(
             f"warning: could not write manifest: {exc}",
             file=sys.stderr,
@@ -116,10 +121,19 @@ def read_manifest(target_dir: Path) -> dict | None:
         contains invalid JSON.
     """
     manifest_path = target_dir / _MANIFEST_FILENAME
+    logger.debug("Reading manifest from %s", manifest_path)
     try:
         text = manifest_path.read_text(encoding="utf-8")
-        return json.loads(text)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = json.loads(text)
+        logger.debug(
+            "Manifest loaded (version=%s, runtime=%s)", data.get("version"), data.get("runtime")
+        )
+        return data
+    except FileNotFoundError:
+        logger.debug("Manifest not found at %s", manifest_path)
+        return None
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read manifest at %s: %s", manifest_path, exc)
         return None
 
 
@@ -149,10 +163,17 @@ def detect_modified_files(target_dir: Path) -> list[str]:
         full_path = target_dir / relpath
         if not full_path.is_file():
             # File was deleted -- treat as modified.
+            logger.debug("File deleted since install: %s", relpath)
             modified.append(relpath)
             continue
         current_hash = hash_file(full_path)
         if current_hash != entry.get("sha256"):
+            logger.debug("File modified since install: %s", relpath)
             modified.append(relpath)
 
+    logger.debug(
+        "Detected %d modified file(s) out of %d tracked",
+        len(modified),
+        len(manifest.get("files", {})),
+    )
     return modified

@@ -6,7 +6,10 @@ path references from Claude Code format to OpenCode format.
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tool name mapping — Claude Code name -> OpenCode name.
@@ -139,8 +142,10 @@ def convert_for_opencode(text: str) -> str:
     3. Task invocations
     4. Path references
     """
+    logger.debug("Running OpenCode conversion pipeline (%d chars input)", len(text))
     text = convert_skill_calls(text)
     text = convert_tool_names(text)
     text = convert_task_invocations(text)
     text = convert_path_references(text)
+    logger.debug("Conversion complete (%d chars output)", len(text))
     return text
