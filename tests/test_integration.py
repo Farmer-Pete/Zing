@@ -7,22 +7,19 @@ created on re-install, and content correctness for both runtimes.
 
 from __future__ import annotations
 
-import argparse
-import os
+import importlib.resources
 import re
-import shutil
-import tempfile
-import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from click.testing import CliRunner
+
+from zing_ai.cli import cli
 from zing_ai.installer import install_claude, install_opencode
 from zing_ai.manifest import detect_modified_files, read_manifest
 
-
 # ---------------------------------------------------------------------------
-# Expected file lists (shared with unit tests; duplicated here so that
-# integration tests are self-contained).
+# Expected file lists (duplicated here so integration tests are self-contained)
 # ---------------------------------------------------------------------------
 
 CLAUDE_EXPECTED_FILES = [
@@ -58,103 +55,67 @@ CLAUDE_TOOL_NAMES = ["AskUserQuestion", "TaskCreate", "Bash", "Read", "Grep"]
 # ===================================================================
 
 
-class TestClaudeCodeE2E(unittest.TestCase):
-    """Full install flow for Claude Code."""
+def test_claude_full_install_flow(tmp_path: Path) -> None:
+    """install_claude produces all 9 files, a manifest, and content matches source."""
+    target = tmp_path / "commands"
+    install_claude(target_dir=target)
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp()
-        self.target = Path(self.tmp) / "commands"
+    for relpath in CLAUDE_EXPECTED_FILES:
+        assert (target / relpath).is_file(), f"Expected file missing: {relpath}"
 
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
+    manifest = read_manifest(target)
+    assert manifest is not None, "Manifest not written"
+    assert manifest["runtime"] == "claude-code"
+    assert len(manifest["files"]) == len(CLAUDE_EXPECTED_FILES)
 
-    # -- Test 1: Full install flow ------------------------------------------
+    commands_root = importlib.resources.files("zing_ai.commands")
+    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    dst_content = (target / "zing.md").read_text(encoding="utf-8")
+    assert src_content == dst_content, "zing.md content mismatch"
 
-    def test_full_install_flow(self) -> None:
-        """install_claude produces all 9 files, a manifest, and content matches source."""
-        install_claude(target_dir=self.target)
 
-        # All 9 files exist.
-        for relpath in CLAUDE_EXPECTED_FILES:
-            self.assertTrue(
-                (self.target / relpath).is_file(),
-                f"Expected file missing: {relpath}",
-            )
+def test_claude_reinstall_no_modifications(tmp_path: Path) -> None:
+    """Re-installing when no files were modified creates no patches."""
+    target = tmp_path / "commands"
+    install_claude(target_dir=target)
+    install_claude(target_dir=target)
 
-        # Manifest exists and is valid.
-        manifest = read_manifest(self.target)
-        self.assertIsNotNone(manifest, "Manifest not written")
-        self.assertEqual(manifest["runtime"], "claude-code")
-        self.assertEqual(len(manifest["files"]), len(CLAUDE_EXPECTED_FILES))
+    patches_dir = target / "zing-patches"
+    if patches_dir.exists():
+        patch_files = [p for p in patches_dir.rglob("*") if p.is_file()]
+        assert patch_files == [], "Patches created despite no modifications"
 
-        # Content matches bundled source.
-        import importlib.resources
+    for relpath in CLAUDE_EXPECTED_FILES:
+        assert (target / relpath).is_file(), f"File missing after re-install: {relpath}"
 
-        commands_root = importlib.resources.files("zing_ai.commands")
-        src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
-        dst_content = (self.target / "zing.md").read_text(encoding="utf-8")
-        self.assertEqual(src_content, dst_content, "zing.md content mismatch")
 
-    # -- Test 2: Re-install with no modifications ---------------------------
+def test_claude_reinstall_with_modifications(tmp_path: Path) -> None:
+    """Modified files are backed up on re-install, then overwritten."""
+    target = tmp_path / "commands"
+    install_claude(target_dir=target)
 
-    def test_reinstall_no_modifications(self) -> None:
-        """Re-installing when no files were modified creates no patches."""
-        install_claude(target_dir=self.target)
-        install_claude(target_dir=self.target)
+    modified_file = target / "zing.md"
+    original_content = modified_file.read_text(encoding="utf-8")
+    modified_file.write_text("USER MODIFICATION", encoding="utf-8")
 
-        patches_dir = self.target / "zing-patches"
-        if patches_dir.exists():
-            patches = list(patches_dir.rglob("*"))
-            patch_files = [p for p in patches if p.is_file()]
-            self.assertEqual(
-                patch_files, [], "Patches created despite no modifications",
-            )
+    modified = detect_modified_files(target)
+    assert "zing.md" in modified
 
-        # All files still present and identical.
-        for relpath in CLAUDE_EXPECTED_FILES:
-            self.assertTrue(
-                (self.target / relpath).is_file(),
-                f"File missing after re-install: {relpath}",
-            )
+    install_claude(target_dir=target)
 
-    # -- Test 3: Re-install with modifications ------------------------------
+    patches_dir = target / "zing-patches"
+    assert patches_dir.is_dir(), "zing-patches/ not created"
+    patch_files = list(patches_dir.rglob("zing.md.*"))
+    assert len(patch_files) >= 1, "No backup found for modified zing.md"
 
-    def test_reinstall_with_modifications(self) -> None:
-        """Modified files are backed up on re-install, then overwritten."""
-        install_claude(target_dir=self.target)
+    backup_content = patch_files[0].read_text(encoding="utf-8")
+    assert backup_content == "USER MODIFICATION"
 
-        # Modify a file.
-        modified_file = self.target / "zing.md"
-        original_content = modified_file.read_text(encoding="utf-8")
-        modified_file.write_text("USER MODIFICATION", encoding="utf-8")
+    restored_content = modified_file.read_text(encoding="utf-8")
+    assert restored_content == original_content
 
-        # Verify modification is detected.
-        modified = detect_modified_files(self.target)
-        self.assertIn("zing.md", modified)
-
-        # Re-install.
-        install_claude(target_dir=self.target)
-
-        # Backup should exist in zing-patches/.
-        patches_dir = self.target / "zing-patches"
-        self.assertTrue(patches_dir.is_dir(), "zing-patches/ not created")
-        patch_files = list(patches_dir.rglob("zing.md.*"))
-        self.assertGreaterEqual(
-            len(patch_files), 1,
-            "No backup found for modified zing.md",
-        )
-
-        # The backup should contain the user modification.
-        backup_content = patch_files[0].read_text(encoding="utf-8")
-        self.assertEqual(backup_content, "USER MODIFICATION")
-
-        # The installed file should be back to the original.
-        restored_content = modified_file.read_text(encoding="utf-8")
-        self.assertEqual(restored_content, original_content)
-
-        # Manifest should be updated.
-        manifest = read_manifest(self.target)
-        self.assertIsNotNone(manifest)
+    manifest = read_manifest(target)
+    assert manifest is not None
 
 
 # ===================================================================
@@ -162,80 +123,52 @@ class TestClaudeCodeE2E(unittest.TestCase):
 # ===================================================================
 
 
-class TestOpenCodeE2E(unittest.TestCase):
-    """Full install flow for OpenCode."""
+def test_opencode_full_install_flow(tmp_path: Path) -> None:
+    """install_opencode produces all 9 files in flat naming, manifest exists, content converted."""
+    from zing_ai.converter import convert_for_opencode
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp()
-        self.target = Path(self.tmp) / "commands"
+    target = tmp_path / "commands"
+    install_opencode(target_dir=target)
 
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
+    for relpath in OPENCODE_EXPECTED_FILES:
+        assert (target / relpath).is_file(), f"Expected file missing: {relpath}"
 
-    # -- Test 4: Full install flow ------------------------------------------
+    manifest = read_manifest(target)
+    assert manifest is not None, "Manifest not written"
+    assert manifest["runtime"] == "opencode"
+    assert len(manifest["files"]) == len(OPENCODE_EXPECTED_FILES)
 
-    def test_full_install_flow(self) -> None:
-        """install_opencode produces all 9 files in flat naming, manifest exists, content converted."""
-        install_opencode(target_dir=self.target)
+    commands_root = importlib.resources.files("zing_ai.commands")
+    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    expected = convert_for_opencode(src_content)
+    actual = (target / "zing.md").read_text(encoding="utf-8")
+    assert actual == expected, "zing.md not converted for OpenCode"
 
-        # All 9 files exist.
-        for relpath in OPENCODE_EXPECTED_FILES:
-            self.assertTrue(
-                (self.target / relpath).is_file(),
-                f"Expected file missing: {relpath}",
-            )
 
-        # Manifest exists and is valid.
-        manifest = read_manifest(self.target)
-        self.assertIsNotNone(manifest, "Manifest not written")
-        self.assertEqual(manifest["runtime"], "opencode")
-        self.assertEqual(len(manifest["files"]), len(OPENCODE_EXPECTED_FILES))
+def test_opencode_reinstall_with_modifications(tmp_path: Path) -> None:
+    """Modified OpenCode files are backed up on re-install, then overwritten."""
+    target = tmp_path / "commands"
+    install_opencode(target_dir=target)
 
-        # Content is converted (not raw source).
-        from zing_ai.converter import convert_for_opencode
+    modified_file = target / "zing-build.md"
+    original_content = modified_file.read_text(encoding="utf-8")
+    modified_file.write_text("OPENCODE USER MOD", encoding="utf-8")
 
-        import importlib.resources
+    modified = detect_modified_files(target)
+    assert "zing-build.md" in modified
 
-        commands_root = importlib.resources.files("zing_ai.commands")
-        src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
-        expected = convert_for_opencode(src_content)
-        actual = (self.target / "zing.md").read_text(encoding="utf-8")
-        self.assertEqual(actual, expected, "zing.md not converted for OpenCode")
+    install_opencode(target_dir=target)
 
-    # -- Test 5: Re-install with modifications ------------------------------
+    patches_dir = target / "zing-patches"
+    assert patches_dir.is_dir(), "zing-patches/ not created"
+    patch_files = list(patches_dir.rglob("zing-build.md.*"))
+    assert len(patch_files) >= 1, "No backup found for modified zing-build.md"
 
-    def test_reinstall_with_modifications(self) -> None:
-        """Modified OpenCode files are backed up on re-install, then overwritten."""
-        install_opencode(target_dir=self.target)
+    backup_content = patch_files[0].read_text(encoding="utf-8")
+    assert backup_content == "OPENCODE USER MOD"
 
-        # Modify a file.
-        modified_file = self.target / "zing-build.md"
-        original_content = modified_file.read_text(encoding="utf-8")
-        modified_file.write_text("OPENCODE USER MOD", encoding="utf-8")
-
-        # Verify modification is detected.
-        modified = detect_modified_files(self.target)
-        self.assertIn("zing-build.md", modified)
-
-        # Re-install.
-        install_opencode(target_dir=self.target)
-
-        # Backup should exist.
-        patches_dir = self.target / "zing-patches"
-        self.assertTrue(patches_dir.is_dir(), "zing-patches/ not created")
-        patch_files = list(patches_dir.rglob("zing-build.md.*"))
-        self.assertGreaterEqual(
-            len(patch_files), 1,
-            "No backup found for modified zing-build.md",
-        )
-
-        # Backup contains the user modification.
-        backup_content = patch_files[0].read_text(encoding="utf-8")
-        self.assertEqual(backup_content, "OPENCODE USER MOD")
-
-        # Installed file is restored.
-        restored_content = modified_file.read_text(encoding="utf-8")
-        self.assertEqual(restored_content, original_content)
+    restored_content = modified_file.read_text(encoding="utf-8")
+    assert restored_content == original_content
 
 
 # ===================================================================
@@ -243,53 +176,32 @@ class TestOpenCodeE2E(unittest.TestCase):
 # ===================================================================
 
 
-class TestCLIDispatchE2E(unittest.TestCase):
-    """Test 6: CLI _handle_install dispatches to both runtimes."""
+def test_cli_dispatch_both_runtimes(tmp_path: Path) -> None:
+    """CLI install --all dispatches to both Claude Code and OpenCode installers."""
+    claude_target = tmp_path / "claude_commands"
+    opencode_target = tmp_path / "opencode_commands"
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp()
-        self.claude_target = Path(self.tmp) / "claude_commands"
-        self.opencode_target = Path(self.tmp) / "opencode_commands"
+    runner = CliRunner()
 
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
+    with (
+        patch(
+            "zing_ai.installer.install_claude",
+            side_effect=lambda: install_claude(target_dir=claude_target),
+        ),
+        patch(
+            "zing_ai.installer.install_opencode",
+            side_effect=lambda: install_opencode(target_dir=opencode_target),
+        ),
+    ):
+        result = runner.invoke(cli, ["install", "--all"])
 
-    def test_cli_dispatch_both_runtimes(self) -> None:
-        """_handle_install with --all creates files for both Claude Code and OpenCode."""
-        from zing_ai.cli import _handle_install
+    assert result.exit_code == 0
 
-        args = argparse.Namespace(claude=False, opencode=False, all=True)
+    for relpath in CLAUDE_EXPECTED_FILES:
+        assert (claude_target / relpath).is_file(), f"Claude file missing: {relpath}"
 
-        # Patch the install functions to use our temp directories.
-        with (
-            patch(
-                "zing_ai.installer.install_claude",
-                side_effect=lambda target_dir=None: install_claude(
-                    target_dir=self.claude_target,
-                ),
-            ) as mock_claude,
-            patch(
-                "zing_ai.installer.install_opencode",
-                side_effect=lambda target_dir=None: install_opencode(
-                    target_dir=self.opencode_target,
-                ),
-            ) as mock_opencode,
-        ):
-            _handle_install(args)
-
-        # Verify Claude Code files were created.
-        for relpath in CLAUDE_EXPECTED_FILES:
-            self.assertTrue(
-                (self.claude_target / relpath).is_file(),
-                f"Claude file missing: {relpath}",
-            )
-
-        # Verify OpenCode files were created.
-        for relpath in OPENCODE_EXPECTED_FILES:
-            self.assertTrue(
-                (self.opencode_target / relpath).is_file(),
-                f"OpenCode file missing: {relpath}",
-            )
+    for relpath in OPENCODE_EXPECTED_FILES:
+        assert (opencode_target / relpath).is_file(), f"OpenCode file missing: {relpath}"
 
 
 # ===================================================================
@@ -297,76 +209,52 @@ class TestCLIDispatchE2E(unittest.TestCase):
 # ===================================================================
 
 
-class TestContentVerification(unittest.TestCase):
-    """Cross-runtime content checks."""
+def test_no_yaml_frontmatter_claude(tmp_path: Path) -> None:
+    """No Claude Code installed file starts with YAML frontmatter ('---')."""
+    target = tmp_path / "commands"
+    install_claude(target_dir=target)
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp()
-        self.claude_target = Path(self.tmp) / "claude_commands"
-        self.opencode_target = Path(self.tmp) / "opencode_commands"
-        install_claude(target_dir=self.claude_target)
-        install_opencode(target_dir=self.opencode_target)
+    for relpath in CLAUDE_EXPECTED_FILES:
+        content = (target / relpath).read_text(encoding="utf-8")
+        assert not content.startswith("---"), f"Claude file {relpath} starts with YAML frontmatter"
 
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
-    # -- Test 7: No YAML frontmatter ---------------------------------------
+def test_no_yaml_frontmatter_opencode(tmp_path: Path) -> None:
+    """No OpenCode installed file starts with YAML frontmatter ('---')."""
+    target = tmp_path / "commands"
+    install_opencode(target_dir=target)
 
-    def test_no_yaml_frontmatter_claude(self) -> None:
-        """No Claude Code installed file starts with YAML frontmatter ('---')."""
-        for relpath in CLAUDE_EXPECTED_FILES:
-            content = (self.claude_target / relpath).read_text(encoding="utf-8")
-            self.assertFalse(
-                content.startswith("---"),
-                f"Claude file {relpath} starts with YAML frontmatter",
+    for relpath in OPENCODE_EXPECTED_FILES:
+        content = (target / relpath).read_text(encoding="utf-8")
+        assert not content.startswith("---"), (
+            f"OpenCode file {relpath} starts with YAML frontmatter"
+        )
+
+
+def test_opencode_no_pascal_case_tool_names(tmp_path: Path) -> None:
+    """No PascalCase Claude tool names remain in OpenCode files."""
+    target = tmp_path / "commands"
+    install_opencode(target_dir=target)
+
+    for relpath in OPENCODE_EXPECTED_FILES:
+        content = (target / relpath).read_text(encoding="utf-8")
+        for tool_name in CLAUDE_TOOL_NAMES:
+            assert not re.search(rf"\b{tool_name}\b", content), (
+                f"Claude tool name '{tool_name}' found unconverted in OpenCode file {relpath}"
             )
 
-    def test_no_yaml_frontmatter_opencode(self) -> None:
-        """No OpenCode installed file starts with YAML frontmatter ('---')."""
-        for relpath in OPENCODE_EXPECTED_FILES:
-            content = (self.opencode_target / relpath).read_text(encoding="utf-8")
-            self.assertFalse(
-                content.startswith("---"),
-                f"OpenCode file {relpath} starts with YAML frontmatter",
-            )
 
-    # -- Test 8: OpenCode tool names are lowercase --------------------------
+def test_opencode_skill_chaining_syntax(tmp_path: Path) -> None:
+    """OpenCode files use skill({ name: syntax, not Skill(skill: syntax."""
+    target = tmp_path / "commands"
+    install_opencode(target_dir=target)
 
-    def test_opencode_no_pascal_case_tool_names(self) -> None:
-        """No PascalCase Claude tool names remain in OpenCode files."""
-        for relpath in OPENCODE_EXPECTED_FILES:
-            content = (self.opencode_target / relpath).read_text(encoding="utf-8")
-            for tool_name in CLAUDE_TOOL_NAMES:
-                if re.search(rf"\b{tool_name}\b", content):
-                    self.fail(
-                        f"Claude tool name '{tool_name}' found unconverted "
-                        f"in OpenCode file {relpath}",
-                    )
+    for relpath in OPENCODE_EXPECTED_FILES:
+        content = (target / relpath).read_text(encoding="utf-8")
 
-    # -- Test 9: OpenCode skill chaining syntax -----------------------------
+        assert not re.search(r"Skill\(skill:", content), (
+            f"Claude-style Skill(skill: found in OpenCode file {relpath}"
+        )
 
-    def test_opencode_skill_chaining_syntax(self) -> None:
-        """OpenCode files use skill({ name: syntax, not Skill(skill: syntax."""
-        for relpath in OPENCODE_EXPECTED_FILES:
-            content = (self.opencode_target / relpath).read_text(encoding="utf-8")
-
-            # Should NOT contain Claude-style Skill(skill: calls.
-            self.assertNotRegex(
-                content,
-                r"Skill\(skill:",
-                f"Claude-style Skill(skill: found in OpenCode file {relpath}",
-            )
-
-            # If the source had skill calls, the OpenCode version should
-            # use skill({ name: syntax.  We check files known to contain
-            # skill calls.
-            if relpath == "zing.md":
-                self.assertRegex(
-                    content,
-                    r'skill\(\{',
-                    f"Expected skill({{ name: syntax in {relpath}",
-                )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        if relpath == "zing.md":
+            assert re.search(r"skill\(\{", content), f"Expected skill({{ name: syntax in {relpath}"

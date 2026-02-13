@@ -1,5 +1,6 @@
-.zing/
-dist/
-*.egg-info/
 __pycache__/
+.serena/
 .venv/
+.zing/
+*.egg-info/
+dist/

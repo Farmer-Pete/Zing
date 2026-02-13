@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from zing_ai.manifest import detect_modified_files
@@ -52,7 +52,7 @@ def backup_modified_files(target_dir: Path) -> list[tuple[str, Path]]:
         )
         return []
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%S")
     backed_up: list[tuple[str, Path]] = []
 
     for relpath in modified:

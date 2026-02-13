@@ -8,7 +8,6 @@ from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-
 # Files that live directly in the commands/ package root.
 # zing.md is special: it installs one level up from the zing/ subdirectory.
 _TOP_LEVEL_FILE = "zing.md"
@@ -63,7 +62,11 @@ def install_claude(target_dir: Path | None = None) -> None:
         # -- 3. Copy subdirectories (zing/, _shared/) ------------------------
         for subdir_name in _SUBDIRS:
             src_subdir = commands_root.joinpath(subdir_name)
-            dst_subdir = target_dir / "zing" / subdir_name if subdir_name == "_shared" else target_dir / subdir_name
+            dst_subdir = (
+                target_dir / "zing" / subdir_name
+                if subdir_name == "_shared"
+                else target_dir / subdir_name
+            )
             _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs)
 
     except SystemExit:
@@ -131,7 +134,10 @@ def install_opencode(target_dir: Path | None = None) -> None:
         src_top = commands_root.joinpath(_TOP_LEVEL_FILE)
         dst_top = target_dir / _TOP_LEVEL_FILE
         _copy_resource_file_converted(
-            src_top, dst_top, convert_for_opencode, created_files,
+            src_top,
+            dst_top,
+            convert_for_opencode,
+            created_files,
         )
 
         # -- 3. Copy and convert zing/ sub-commands (flattened) --------------
@@ -140,7 +146,9 @@ def install_opencode(target_dir: Path | None = None) -> None:
             if item.is_file() and item.name.endswith(".md"):
                 dst_name = f"zing-{item.name}"
                 _copy_resource_file_converted(
-                    item, target_dir / dst_name, convert_for_opencode,
+                    item,
+                    target_dir / dst_name,
+                    convert_for_opencode,
                     created_files,
                 )
 
@@ -148,8 +156,11 @@ def install_opencode(target_dir: Path | None = None) -> None:
         src_shared = commands_root.joinpath("_shared")
         dst_shared = target_dir / "_shared"
         _copy_resource_tree_converted(
-            src_shared, dst_shared, convert_for_opencode,
-            created_files, created_dirs,
+            src_shared,
+            dst_shared,
+            convert_for_opencode,
+            created_files,
+            created_dirs,
         )
 
     except SystemExit:
@@ -241,28 +252,32 @@ def _copy_resource_tree_converted(
             if not item.name.endswith(".md"):
                 continue
             _copy_resource_file_converted(
-                item, dst_dir / item.name, converter, created_files,
+                item,
+                dst_dir / item.name,
+                converter,
+                created_files,
             )
         elif item.is_dir():
             _copy_resource_tree_converted(
-                item, dst_dir / item.name, converter,
-                created_files, created_dirs,
+                item,
+                dst_dir / item.name,
+                converter,
+                created_files,
+                created_dirs,
             )
 
 
 def _rollback(created_files: list[Path], created_dirs: list[Path]) -> None:
     """Remove files and directories created during a failed install."""
+    import contextlib
+
     for f in reversed(created_files):
-        try:
+        with contextlib.suppress(OSError):
             f.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     # Remove directories in reverse order (deepest first).
     for d in reversed(created_dirs):
-        try:
+        with contextlib.suppress(OSError):
             # Only remove if empty — we don't want to delete user files.
             if d.exists() and not any(d.iterdir()):
                 d.rmdir()
-        except OSError:
-            pass

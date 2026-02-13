@@ -36,8 +36,7 @@ _TOOL_MAP: list[tuple[str, str]] = [
 
 # Pre-compile word-boundary patterns for each tool name.
 _TOOL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(rf"\b{re.escape(cc_name)}\b"), oc_name)
-    for cc_name, oc_name in _TOOL_MAP
+    (re.compile(rf"\b{re.escape(cc_name)}\b"), oc_name) for cc_name, oc_name in _TOOL_MAP
 ]
 
 
@@ -49,9 +48,7 @@ _TOOL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _SKILL_WITH_ARGS_RE = re.compile(
     r"""`?Skill\(\s*skill:\s*'([^']+)'\s*,\s*args:\s*'([^']+)'\s*\)`?"""
 )
-_SKILL_NO_ARGS_RE = re.compile(
-    r"""`?Skill\(\s*skill:\s*'([^']+)'\s*\)`?"""
-)
+_SKILL_NO_ARGS_RE = re.compile(r"""`?Skill\(\s*skill:\s*'([^']+)'\s*\)`?""")
 
 
 def _convert_skill_name(name: str) -> str:
@@ -76,9 +73,7 @@ def _skill_no_args_repl(m: re.Match[str]) -> str:
 # ---------------------------------------------------------------------------
 # Task invocation conversion
 # ---------------------------------------------------------------------------
-_SUBAGENT_TYPE_RE = re.compile(
-    r'\bsubagent_type\s*[=:]\s*"general-purpose"'
-)
+_SUBAGENT_TYPE_RE = re.compile(r'\bsubagent_type\s*[=:]\s*"general-purpose"')
 
 
 # ---------------------------------------------------------------------------
@@ -88,17 +83,11 @@ _SUBAGENT_TYPE_RE = re.compile(
 # 2. ~/.claude/commands/zing/X.md      ->  ~/.config/opencode/commands/zing-X.md
 # 3. ~/.claude/commands/zing.md        ->  ~/.config/opencode/commands/zing.md
 # ---------------------------------------------------------------------------
-_PATH_SHARED_RE = re.compile(
-    r"~/.claude/commands/zing/_shared/"
-)
+_PATH_SHARED_RE = re.compile(r"~/.claude/commands/zing/_shared/")
 
-_PATH_ZING_SUBCOMMAND_RE = re.compile(
-    r"~/.claude/commands/zing/(?!_shared/)([A-Za-z0-9_-]+\.md)"
-)
+_PATH_ZING_SUBCOMMAND_RE = re.compile(r"~/.claude/commands/zing/(?!_shared/)([A-Za-z0-9_-]+\.md)")
 
-_PATH_ZING_TOP_RE = re.compile(
-    r"~/.claude/commands/zing\.md"
-)
+_PATH_ZING_TOP_RE = re.compile(r"~/.claude/commands/zing\.md")
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +125,8 @@ def convert_path_references(text: str) -> str:
     # Order matters: shared paths first (they include ``zing/_shared/``),
     # then sub-command paths, then the top-level zing.md.
     text = _PATH_SHARED_RE.sub("~/.config/opencode/commands/_shared/", text)
-    text = _PATH_ZING_SUBCOMMAND_RE.sub(
-        r"~/.config/opencode/commands/zing-\1", text
-    )
-    text = _PATH_ZING_TOP_RE.sub(
-        "~/.config/opencode/commands/zing.md", text
-    )
+    text = _PATH_ZING_SUBCOMMAND_RE.sub(r"~/.config/opencode/commands/zing-\1", text)
+    text = _PATH_ZING_TOP_RE.sub("~/.config/opencode/commands/zing.md", text)
     return text
 
 

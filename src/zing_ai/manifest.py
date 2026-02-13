@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from zing_ai import __version__
@@ -85,7 +85,7 @@ def write_manifest(
     try:
         manifest = {
             "version": __version__,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "installed_at": datetime.now(UTC).isoformat(),
             "runtime": runtime,
             "files": hash_installed_files(target_dir, file_relpaths),
         }

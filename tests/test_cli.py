@@ -1,153 +1,198 @@
-"""Tests for the zing-ai CLI argument parsing and dispatch."""
+"""Tests for the zing-ai CLI (click-based)."""
 
 from __future__ import annotations
 
-import io
-import sys
-import unittest
 from unittest.mock import patch
 
-from zing_ai.cli import build_parser, main, _resolve_runtimes
+import click
+import pytest
+from click.testing import CliRunner
+
+from zing_ai.cli import _resolve_runtimes, cli
+
+# -- CLI structure -----------------------------------------------------------
 
 
-class TestBuildParser(unittest.TestCase):
-    """Verify the argparse structure produced by ``build_parser``."""
-
-    def setUp(self) -> None:
-        self.parser = build_parser()
-
-    # -- top-level -----------------------------------------------------------
-
-    def test_no_args_prints_help_and_exits_zero(self) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            main([])
-        self.assertEqual(ctx.exception.code, 0)
-
-    def test_version_flag(self) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            self.parser.parse_args(["--version"])
-        self.assertEqual(ctx.exception.code, 0)
-
-    # -- install subcommand --------------------------------------------------
-
-    def test_install_claude(self) -> None:
-        args = self.parser.parse_args(["install", "--claude"])
-        self.assertTrue(args.claude)
-        self.assertFalse(args.opencode)
-        self.assertFalse(args.all)
-        self.assertEqual(args.command, "install")
-
-    def test_install_opencode(self) -> None:
-        args = self.parser.parse_args(["install", "--opencode"])
-        self.assertFalse(args.claude)
-        self.assertTrue(args.opencode)
-        self.assertFalse(args.all)
-
-    def test_install_all(self) -> None:
-        args = self.parser.parse_args(["install", "--all"])
-        self.assertTrue(args.all)
-
-    def test_install_claude_and_opencode(self) -> None:
-        args = self.parser.parse_args(["install", "--claude", "--opencode"])
-        self.assertTrue(args.claude)
-        self.assertTrue(args.opencode)
-
-    # -- reapply-patches subcommand ------------------------------------------
-
-    def test_reapply_patches_claude(self) -> None:
-        args = self.parser.parse_args(["reapply-patches", "--claude"])
-        self.assertTrue(args.claude)
-        self.assertEqual(args.command, "reapply-patches")
-
-    def test_reapply_patches_all(self) -> None:
-        args = self.parser.parse_args(["reapply-patches", "--all"])
-        self.assertTrue(args.all)
+def test_no_args_prints_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0
+    assert "Usage" in result.output
 
 
-class TestResolveRuntimes(unittest.TestCase):
-    """Verify runtime resolution logic."""
-
-    def _make_ns(self, *, claude: bool = False, opencode: bool = False, all: bool = False) -> object:
-        """Build a minimal namespace."""
-        import argparse
-
-        return argparse.Namespace(claude=claude, opencode=opencode, all=all)
-
-    def test_all_flag_returns_both(self) -> None:
-        result = _resolve_runtimes(self._make_ns(all=True))
-        self.assertEqual(result, ["claude", "opencode"])
-
-    def test_claude_only(self) -> None:
-        result = _resolve_runtimes(self._make_ns(claude=True))
-        self.assertEqual(result, ["claude"])
-
-    def test_opencode_only(self) -> None:
-        result = _resolve_runtimes(self._make_ns(opencode=True))
-        self.assertEqual(result, ["opencode"])
-
-    def test_both_explicit(self) -> None:
-        result = _resolve_runtimes(self._make_ns(claude=True, opencode=True))
-        self.assertEqual(result, ["claude", "opencode"])
-
-    def test_all_with_claude_is_error(self) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            _resolve_runtimes(self._make_ns(all=True, claude=True))
-        self.assertEqual(ctx.exception.code, 1)
-
-    def test_all_with_opencode_is_error(self) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            _resolve_runtimes(self._make_ns(all=True, opencode=True))
-        self.assertEqual(ctx.exception.code, 1)
+def test_version_flag():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert "zing-ai" in result.output
 
 
-class TestInteractivePrompt(unittest.TestCase):
-    """Verify interactive runtime selection."""
-
-    def _make_ns(self) -> object:
-        import argparse
-
-        return argparse.Namespace(claude=False, opencode=False, all=False)
-
-    @patch("builtins.input", return_value="1")
-    def test_choice_1_selects_claude(self, _mock_input: object) -> None:
-        result = _resolve_runtimes(self._make_ns())
-        self.assertEqual(result, ["claude"])
-
-    @patch("builtins.input", return_value="2")
-    def test_choice_2_selects_opencode(self, _mock_input: object) -> None:
-        result = _resolve_runtimes(self._make_ns())
-        self.assertEqual(result, ["opencode"])
-
-    @patch("builtins.input", return_value="3")
-    def test_choice_3_selects_all(self, _mock_input: object) -> None:
-        result = _resolve_runtimes(self._make_ns())
-        self.assertEqual(result, ["claude", "opencode"])
-
-    @patch("builtins.input", side_effect=EOFError)
-    def test_eof_exits_130(self, _mock_input: object) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            _resolve_runtimes(self._make_ns())
-        self.assertEqual(ctx.exception.code, 130)
-
-    @patch("builtins.input", side_effect=["x", "1"])
-    def test_invalid_then_valid(self, _mock_input: object) -> None:
-        result = _resolve_runtimes(self._make_ns())
-        self.assertEqual(result, ["claude"])
+# -- install subcommand -----------------------------------------------------
 
 
-class TestMainDispatch(unittest.TestCase):
-    """Verify that ``main`` dispatches to the correct handler."""
-
-    @patch("zing_ai.cli._handle_install")
-    def test_install_dispatches(self, mock_handler: object) -> None:
-        main(["install", "--claude"])
-        mock_handler.assert_called_once()
-
-    @patch("zing_ai.cli._handle_reapply_patches")
-    def test_reapply_patches_dispatches(self, mock_handler: object) -> None:
-        main(["reapply-patches", "--opencode"])
-        mock_handler.assert_called_once()
+def test_install_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["install", "--help"])
+    assert result.exit_code == 0
+    assert "--claude" in result.output
+    assert "--opencode" in result.output
+    assert "--all" in result.output
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_install_claude():
+    runner = CliRunner()
+    with patch("zing_ai.installer.install_claude") as mock:
+        result = runner.invoke(cli, ["install", "--claude"])
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_install_opencode():
+    runner = CliRunner()
+    with patch("zing_ai.installer.install_opencode") as mock:
+        result = runner.invoke(cli, ["install", "--opencode"])
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_install_all():
+    runner = CliRunner()
+    with (
+        patch("zing_ai.installer.install_claude") as mock_claude,
+        patch("zing_ai.installer.install_opencode") as mock_opencode,
+    ):
+        result = runner.invoke(cli, ["install", "--all"])
+    assert result.exit_code == 0
+    mock_claude.assert_called_once()
+    mock_opencode.assert_called_once()
+
+
+def test_install_claude_and_opencode():
+    runner = CliRunner()
+    with (
+        patch("zing_ai.installer.install_claude") as mock_claude,
+        patch("zing_ai.installer.install_opencode") as mock_opencode,
+    ):
+        result = runner.invoke(cli, ["install", "--claude", "--opencode"])
+    assert result.exit_code == 0
+    mock_claude.assert_called_once()
+    mock_opencode.assert_called_once()
+
+
+# -- reapply-patches subcommand ---------------------------------------------
+
+
+def test_reapply_patches_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["reapply-patches", "--help"])
+    assert result.exit_code == 0
+    assert "--claude" in result.output
+
+
+def test_reapply_patches_claude():
+    runner = CliRunner()
+    with patch("zing_ai.backup.reapply_patches") as mock:
+        result = runner.invoke(cli, ["reapply-patches", "--claude"])
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_reapply_patches_all():
+    runner = CliRunner()
+    with patch("zing_ai.backup.reapply_patches") as mock:
+        result = runner.invoke(cli, ["reapply-patches", "--all"])
+    assert result.exit_code == 0
+    assert mock.call_count == 2
+
+
+# -- resolve runtimes -------------------------------------------------------
+
+
+def test_resolve_all_flag_returns_both():
+    assert _resolve_runtimes(claude=False, opencode=False, all_runtimes=True) == [
+        "claude",
+        "opencode",
+    ]
+
+
+def test_resolve_claude_only():
+    assert _resolve_runtimes(claude=True, opencode=False, all_runtimes=False) == [
+        "claude",
+    ]
+
+
+def test_resolve_opencode_only():
+    assert _resolve_runtimes(claude=False, opencode=True, all_runtimes=False) == [
+        "opencode",
+    ]
+
+
+def test_resolve_both_explicit():
+    assert _resolve_runtimes(claude=True, opencode=True, all_runtimes=False) == [
+        "claude",
+        "opencode",
+    ]
+
+
+def test_resolve_all_with_claude_is_error():
+    with pytest.raises(click.UsageError):
+        _resolve_runtimes(claude=True, opencode=False, all_runtimes=True)
+
+
+def test_resolve_all_with_opencode_is_error():
+    with pytest.raises(click.UsageError):
+        _resolve_runtimes(claude=False, opencode=True, all_runtimes=True)
+
+
+# -- interactive prompt ------------------------------------------------------
+
+
+def test_interactive_choice_1_selects_claude():
+    runner = CliRunner()
+    with patch("zing_ai.installer.install_claude") as mock:
+        result = runner.invoke(cli, ["install"], input="1\n")
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_interactive_choice_2_selects_opencode():
+    runner = CliRunner()
+    with patch("zing_ai.installer.install_opencode") as mock:
+        result = runner.invoke(cli, ["install"], input="2\n")
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_interactive_choice_3_selects_all():
+    runner = CliRunner()
+    with (
+        patch("zing_ai.installer.install_claude") as mock_claude,
+        patch("zing_ai.installer.install_opencode") as mock_opencode,
+    ):
+        result = runner.invoke(cli, ["install"], input="3\n")
+    assert result.exit_code == 0
+    mock_claude.assert_called_once()
+    mock_opencode.assert_called_once()
+
+
+def test_interactive_invalid_then_valid():
+    runner = CliRunner()
+    with patch("zing_ai.installer.install_claude") as mock:
+        result = runner.invoke(cli, ["install"], input="x\n1\n")
+    assert result.exit_code == 0
+    mock.assert_called_once()
+
+
+def test_interactive_eof_exits_130():
+    runner = CliRunner()
+    with patch("click.prompt", side_effect=EOFError):
+        result = runner.invoke(cli, ["install"])
+    assert result.exit_code == 130
+
+
+def test_reapply_patches_dispatches():
+    runner = CliRunner()
+    with patch("zing_ai.backup.reapply_patches") as mock:
+        result = runner.invoke(cli, ["reapply-patches", "--opencode"])
+    assert result.exit_code == 0
+    mock.assert_called_once()

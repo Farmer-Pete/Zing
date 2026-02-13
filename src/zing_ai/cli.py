@@ -2,117 +2,66 @@
 
 from __future__ import annotations
 
-import argparse
-import sys
+from collections.abc import Callable
+from pathlib import Path
 
+import click
 
 RUNTIMES = ("claude", "opencode")
 
 
-def _add_runtime_flags(parser: argparse.ArgumentParser) -> None:
-    """Add --claude, --opencode, and --all flags to *parser*."""
-    group = parser.add_argument_group("runtime selection")
-    group.add_argument(
-        "--claude",
-        action="store_true",
-        default=False,
-        help="target Claude Code",
-    )
-    group.add_argument(
-        "--opencode",
-        action="store_true",
-        default=False,
-        help="target OpenCode",
-    )
-    group.add_argument(
+def _runtime_options[F: Callable[..., object]](f: F) -> F:
+    """Shared --claude/--opencode/--all options for subcommands."""
+    f = click.option(
         "--all",
-        action="store_true",
+        "all_runtimes",
+        is_flag=True,
         default=False,
-        help="target all supported runtimes",
-    )
+        help="Target all supported runtimes.",
+    )(f)
+    f = click.option("--opencode", is_flag=True, default=False, help="Target OpenCode.")(f)
+    f = click.option("--claude", is_flag=True, default=False, help="Target Claude Code.")(f)
+    return f
 
 
-def _resolve_runtimes(args: argparse.Namespace) -> list[str]:
-    """Return the list of selected runtimes, prompting interactively if needed.
-
-    Raises ``SystemExit`` when ``--all`` is combined with an explicit runtime
-    flag (that is an invalid combination).
-    """
-    if args.all and (args.claude or args.opencode):
-        print("error: --all cannot be combined with --claude or --opencode", file=sys.stderr)
-        raise SystemExit(1)
-
-    if args.all:
-        return list(RUNTIMES)
-
-    selected: list[str] = []
-    if args.claude:
-        selected.append("claude")
-    if args.opencode:
-        selected.append("opencode")
-
-    if selected:
-        return selected
-
-    # Interactive selection
-    return _prompt_runtime_selection()
+@click.group(invoke_without_command=True)
+@click.version_option(package_name="zing-ai", prog_name="zing-ai")
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    """Zing AI development pipeline installer."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
 
-def _prompt_runtime_selection() -> list[str]:
-    """Interactively ask the user which runtimes to target."""
-    print("Which runtimes would you like to target?\n")
-    print("  1) Claude Code")
-    print("  2) OpenCode")
-    print("  3) All")
-    print()
-
-    while True:
-        try:
-            choice = input("Enter choice [1/2/3]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            raise SystemExit(130)
-
-        if choice == "1":
-            return ["claude"]
-        if choice == "2":
-            return ["opencode"]
-        if choice == "3":
-            return list(RUNTIMES)
-
-        print(f"Invalid choice: {choice!r}. Please enter 1, 2, or 3.")
-
-
-# ---- subcommand handlers ----------------------------------------------------
-
-
-def _handle_install(args: argparse.Namespace) -> None:
-    """Handle the ``install`` subcommand."""
-    runtimes = _resolve_runtimes(args)
+@cli.command()
+@_runtime_options
+def install(claude: bool, opencode: bool, all_runtimes: bool) -> None:
+    """Install Zing commands for the selected runtime(s)."""
+    runtimes = _resolve_runtimes(claude, opencode, all_runtimes)
     for rt in runtimes:
         if rt == "claude":
             from zing_ai.installer import install_claude
 
-            print("Installing for Claude Code...")
+            click.echo("Installing for Claude Code...")
             install_claude()
-            print("Claude Code commands installed successfully.")
+            click.echo("Claude Code commands installed successfully.")
         elif rt == "opencode":
             from zing_ai.installer import install_opencode
 
-            print("Installing for OpenCode...")
+            click.echo("Installing for OpenCode...")
             install_opencode()
-            print("OpenCode commands installed successfully.")
+            click.echo("OpenCode commands installed successfully.")
 
 
-def _handle_reapply_patches(args: argparse.Namespace) -> None:
-    """Handle the ``reapply-patches`` subcommand."""
-    from pathlib import Path
-
+@cli.command("reapply-patches")
+@_runtime_options
+def reapply_patches_cmd(claude: bool, opencode: bool, all_runtimes: bool) -> None:
+    """List backed-up patches for the selected runtime(s)."""
     from zing_ai.backup import reapply_patches
 
-    runtimes = _resolve_runtimes(args)
+    runtimes = _resolve_runtimes(claude, opencode, all_runtimes)
     for rt in runtimes:
-        print(f"Patches for {rt}:")
+        click.echo(f"Patches for {rt}:")
         if rt == "claude":
             target_dir = Path.home() / ".claude" / "commands"
         elif rt == "opencode":
@@ -122,55 +71,50 @@ def _handle_reapply_patches(args: argparse.Namespace) -> None:
         reapply_patches(target_dir)
 
 
-# ---- main -------------------------------------------------------------------
+def _resolve_runtimes(claude: bool, opencode: bool, all_runtimes: bool) -> list[str]:
+    """Return the list of selected runtimes, prompting interactively if needed."""
+    if all_runtimes and (claude or opencode):
+        raise click.UsageError("--all cannot be combined with --claude or --opencode")
+
+    if all_runtimes:
+        return list(RUNTIMES)
+
+    selected: list[str] = []
+    if claude:
+        selected.append("claude")
+    if opencode:
+        selected.append("opencode")
+
+    if selected:
+        return selected
+
+    return _prompt_runtime_selection()
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build and return the top-level argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="zing-ai",
-        description="Zing AI development pipeline installer",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {_get_version()}",
-    )
+def _prompt_runtime_selection() -> list[str]:
+    """Interactively ask the user which runtimes to target."""
+    click.echo("Which runtimes would you like to target?\n")
+    click.echo("  1) Claude Code")
+    click.echo("  2) OpenCode")
+    click.echo("  3) All")
+    click.echo()
 
-    subparsers = parser.add_subparsers(dest="command")
+    while True:
+        try:
+            choice = click.prompt("Enter choice [1/2/3]", default="", show_default=False).strip()
+        except (EOFError, click.Abort):
+            raise SystemExit(130) from None
 
-    # install
-    install_parser = subparsers.add_parser(
-        "install",
-        help="install Zing commands for the selected runtime(s)",
-    )
-    _add_runtime_flags(install_parser)
-    install_parser.set_defaults(handler=_handle_install)
+        if choice == "1":
+            return ["claude"]
+        if choice == "2":
+            return ["opencode"]
+        if choice == "3":
+            return list(RUNTIMES)
 
-    # reapply-patches
-    reapply_parser = subparsers.add_parser(
-        "reapply-patches",
-        help="re-apply patches for the selected runtime(s)",
-    )
-    _add_runtime_flags(reapply_parser)
-    reapply_parser.set_defaults(handler=_handle_reapply_patches)
-
-    return parser
+        click.echo(f"Invalid choice: {choice!r}. Please enter 1, 2, or 3.")
 
 
-def _get_version() -> str:
-    from zing_ai import __version__
-
-    return __version__
-
-
-def main(argv: list[str] | None = None) -> None:
+def main() -> None:
     """CLI entry point."""
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command is None:
-        parser.print_help()
-        raise SystemExit(0)
-
-    args.handler(args)
+    cli()

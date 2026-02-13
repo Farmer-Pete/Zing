@@ -5,7 +5,9 @@ description = "Zing AI development pipeline installer"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "click>=8.1",
+]
 
 [project.scripts]
 zing-ai = "zing_ai.cli:main"
@@ -13,3 +15,26 @@ zing-ai = "zing_ai.cli:main"
 [build-system]
 requires = ["uv_build>=0.10.2,<0.11.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pre-commit>=4.0",
+    "ruff>=0.15",
+    "pyright>=1.1",
+    "pyleft>=1.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "W"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[tool.pyleft]
+paths = ["src"]
