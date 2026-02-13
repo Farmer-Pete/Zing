@@ -84,6 +84,68 @@ Once a PR is open, Zing can review it the way a senior developer would — on Gi
 
 ---
 
-## Coming Soon
+## Installation
 
-Zing is in active development and not yet publicly available. Watch this repo for updates.
+### Prerequisites
+
+- Python >= 3.12
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+### Install from PyPI
+
+```
+uv tool install zing-ai
+```
+
+### Set up commands for your AI coding assistant
+
+**Interactive mode** (asks which runtime to install for):
+```
+zing-ai install
+```
+
+**Claude Code:**
+```
+zing-ai install --claude
+```
+
+**OpenCode:**
+```
+zing-ai install --opencode
+```
+
+**Both:**
+```
+zing-ai install --all
+```
+
+---
+
+## Updating
+
+```
+uv tool upgrade zing-ai
+zing-ai install --claude   # or --opencode or --all
+```
+
+If you've customized any commands, they'll be backed up to a `zing-patches/` directory before being overwritten. To see your backed-up customizations:
+
+```
+zing-ai reapply-patches --claude   # or --opencode
+```
+
+---
+
+## Usage
+
+After installation, the zing commands are available as slash commands in your AI coding assistant:
+
+- `/zing` — Start a new zing (capture what you want to build)
+- `/zing:plan` — Break it down into an actionable plan
+- `/zing:plan-audit` — Audit the plan for soundness
+- `/zing:build` — Execute the plan step by step
+- `/zing:build-audit` — Review the code changes
+- `/zing:pr-audit` — Review a pull request on GitHub
+- `/zing:plan-linear` — Create Linear tickets from the plan
+
+In OpenCode, use flat naming: `/zing-plan`, `/zing-build`, etc.
