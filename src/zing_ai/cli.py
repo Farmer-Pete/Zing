@@ -97,8 +97,11 @@ def _handle_install(args: argparse.Namespace) -> None:
             install_claude()
             print("Claude Code commands installed successfully.")
         elif rt == "opencode":
-            print(f"Installing for {rt}...")
-            # OpenCode installation will be added in a later step.
+            from zing_ai.installer import install_opencode
+
+            print("Installing for OpenCode...")
+            install_opencode()
+            print("OpenCode commands installed successfully.")
 
 
 def _handle_reapply_patches(args: argparse.Namespace) -> None:
