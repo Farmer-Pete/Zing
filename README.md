@@ -3,7 +3,9 @@
 <img width="500" height="607" alt="Zing! Don't wing your code. Zing your code." src="https://github.com/user-attachments/assets/57de6005-633f-4c13-93a3-427264fd3ee1" />
 <br /><br /><br />
 
-Zing is an end-to-end AI development pipeline that takes you from a rough idea to a reviewed, committed, project-tracked pull request, with a human in the loop at every decision point.
+> Zing plans, builds, tests, and ships clean code with AI.<br/>
+> Zing keeps you in charge at each step.<br/>
+> This is the Zen of Zing.
 
 ---
 
