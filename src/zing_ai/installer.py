@@ -67,6 +67,12 @@ def install_claude(target_dir: Path | None = None) -> None:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
+    # Write manifest for update detection (non-fatal on failure).
+    from zing_ai.manifest import write_manifest
+
+    relpaths = [str(f.relative_to(target_dir)) for f in created_files]
+    write_manifest(target_dir, "claude-code", relpaths)
+
 
 def install_opencode(target_dir: Path | None = None) -> None:
     """Install Zing command files for OpenCode.
@@ -138,6 +144,12 @@ def install_opencode(target_dir: Path | None = None) -> None:
         _rollback(created_files, created_dirs)
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    # Write manifest for update detection (non-fatal on failure).
+    from zing_ai.manifest import write_manifest
+
+    relpaths = [str(f.relative_to(target_dir)) for f in created_files]
+    write_manifest(target_dir, "opencode", relpaths)
 
 
 def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:

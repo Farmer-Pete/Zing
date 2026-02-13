@@ -72,6 +72,7 @@ class TestInstallClaude(unittest.TestCase):
                 installed.add(rel)
 
         expected_set = {f.replace("/", os.sep) for f in EXPECTED_FILES}
+        expected_set.add("zing-manifest.json")
         self.assertEqual(installed, expected_set)
 
     def test_file_contents_match_source(self) -> None:
@@ -238,6 +239,7 @@ class TestInstallOpencode(unittest.TestCase):
                 installed.add(rel)
 
         expected_set = {f.replace("/", os.sep) for f in OPENCODE_EXPECTED_FILES}
+        expected_set.add("zing-manifest.json")
         self.assertEqual(installed, expected_set)
 
     def test_flat_naming_scheme(self) -> None:
