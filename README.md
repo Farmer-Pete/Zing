@@ -1,6 +1,7 @@
-# Zing
+# Zing!
 
-**Don't wing your code. Zing your code.**
+<img width="500" height="607" alt="Zing! Don't wing your code. Zing your code." src="https://github.com/user-attachments/assets/57de6005-633f-4c13-93a3-427264fd3ee1" />
+<br /><br /><br />
 
 Zing is an end-to-end AI development pipeline that takes you from a rough idea to a reviewed, committed, project-tracked pull request, with a human in the loop at every decision point.
 
@@ -16,7 +17,7 @@ AI coding assistants are great at writing functions. But shipping software isn't
 
 ## What Zing Does
 
-Zing is a pipeline of seven coordinated stages, each one a specialized AI skill:
+Zing is a pipeline of eight specialized AI tools that integrate with one another:
 
 ### 1. Capture (`/zing`)
 Zing starts with a conversation or a Linear ticket URL. It listens, asks the right questions, and saves a structured spec to your `.zing/` directory. No templates to fill out. Just talk about what you want to build.
@@ -52,6 +53,9 @@ Findings come with severity and confidence ratings. Zing walks you through each 
 
 ### 7. Ship
 When the review is clean, Zing offers to open your pull request. Draft by default, because you're still in control.
+
+### 8. PR Review (`/zing-pr-audit`)
+Once a PR is open, Zing can review it the way a senior developer would — on GitHub, with line-level comments. It checks out the PR branch, reads every changed file in full, fans out four parallel review agents (the same ones from the build review), and walks you through each finding before submitting. The final review is posted via the GitHub API with inline comments on the exact lines that matter, severity ratings, and code suggestions where the fix is obvious. The review action (approve, comment, or request changes) is your call. A local markdown report is also saved so you can feed findings straight back into `/zing-plan` if fixes are needed.
 
 ---
 
