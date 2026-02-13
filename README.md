@@ -97,6 +97,12 @@ Once a PR is open, Zing can review it the way a senior developer would — on Gi
 uv tool install zing-ai
 ```
 
+### Install bleeding edge from GitHub
+
+```
+uv tool install git+https://github.com/Farmer-Pete/Zing
+```
+
 ### Set up commands for your AI coding assistant
 
 **Interactive mode** (asks which runtime to install for):
