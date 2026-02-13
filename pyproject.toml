@@ -1,0 +1,15 @@
+[project]
+name = "zing-ai"
+version = "0.1.0"
+description = "Zing AI development pipeline installer"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+zing-ai = "zing_ai.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.2,<0.11.0"]
+build-backend = "uv_build"
