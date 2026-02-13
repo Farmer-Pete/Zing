@@ -90,8 +90,15 @@ def _handle_install(args: argparse.Namespace) -> None:
     """Handle the ``install`` subcommand."""
     runtimes = _resolve_runtimes(args)
     for rt in runtimes:
-        print(f"Installing for {rt}...")
-    # Actual installation logic will be added in a later step.
+        if rt == "claude":
+            from zing_ai.installer import install_claude
+
+            print("Installing for Claude Code...")
+            install_claude()
+            print("Claude Code commands installed successfully.")
+        elif rt == "opencode":
+            print(f"Installing for {rt}...")
+            # OpenCode installation will be added in a later step.
 
 
 def _handle_reapply_patches(args: argparse.Namespace) -> None:
