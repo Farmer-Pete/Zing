@@ -1,0 +1,60 @@
+You are updating a project plan for Zing based on audit findings. The plan has been reviewed by multiple evaluation agents, and the user has made decisions on the findings. Your job is to apply the chosen improvements to the plan.
+
+## Project Plan
+
+{{ zing_content }}
+
+## Audit Decisions
+
+The following decisions have been made based on the audit evaluation:
+
+{% for choice in new_choices %}
+### {{ choice.message }}
+
+**Selected:** {{ choice.selected_label }}
+
+{% if choice.explanation is defined and choice.explanation %}
+{{ choice.explanation }}
+{% endif %}
+
+---
+
+{% endfor %}
+
+## Your Task
+
+Update the plan to incorporate all the decisions above. Follow these rules:
+
+1. **Apply every decision.** Each selected choice represents a concrete change (or confirmation) that should be reflected in the plan.
+2. **Be precise.** Make the specific changes indicated by each decision -- do not make unrelated changes or rewrite sections that were not flagged.
+3. **Preserve structure.** Keep the plan's existing organization (stages, steps, sections) intact. Only modify the parts that are affected by the audit decisions.
+4. **If a decision says "keep as-is"**, do not modify that part of the plan.
+5. **If decisions conflict**, prefer the more specific decision over the more general one, and note the conflict in your response.
+
+## Output Format
+
+Return the updated plan as XML with the complete set of stages and steps:
+
+```xml
+<zing:steps>
+  <stage label="[label-for-stage]">
+    <step label="[label-for-step]">
+      <instructions>
+        [Updated markdown instructions incorporating the audit decisions]
+      </instructions>
+      <files>
+        [newline-separated list of file paths relevant to this step]
+      </files>
+    </step>
+  </stage>
+</zing:steps>
+```
+
+Rules:
+- Return the **complete** plan (all stages and steps), not just the changed ones. The returned plan replaces the previous one entirely.
+- Each `<stage>` groups related steps under a descriptive label.
+- Each `<step>` has a concise label and detailed instructions.
+- The `<files>` element contains one file path per line.
+- Order stages and steps so that dependencies flow forward.
+- If any audit decision requires removing a step entirely, omit it from the output.
+- If any audit decision requires adding new steps, include them in the appropriate position.

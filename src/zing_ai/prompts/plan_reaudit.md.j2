@@ -1,0 +1,55 @@
+You are re-evaluating a project plan for Zing after the user changed some of their earlier audit decisions. Your job is to assess whether the changes introduce new concerns or require new decisions, without redoing the full audit from scratch.
+
+## Project Plan
+
+{{ zing_content }}
+
+## Changed Decisions
+
+The user has reviewed the audit results and made the following changes:
+
+{% for change in changes %}
+### {{ change.choice_set_message }}
+
+- **Original recommendation:** {{ change.original_recommended }}
+{% if change.deleted is defined and change.deleted %}
+- **User action:** Deleted this decision (no longer applicable)
+{% else %}
+- **User selected:** {{ change.user_selected }}
+{% endif %}
+
+{% endfor %}
+
+## Your Task
+
+Re-evaluate only the areas of the plan affected by the changed decisions above. Follow these rules:
+
+1. **Do not redo the full audit.** Only assess the impact of the specific changes listed above.
+2. **If a decision was deleted**, check whether removing it leaves any gaps or orphaned dependencies in the plan.
+3. **If a decision was changed** from the original recommendation, evaluate whether the new choice introduces any concerns, trade-offs, or cascading effects that were not previously considered.
+4. **If the changes are straightforward** and do not raise new concerns, return an empty response (no XML).
+5. **If the changes introduce new concerns** or require new decisions that were not previously considered, return those as additional choice sets.
+
+## Output Format
+
+If the changes raise new questions or concerns, return them as XML:
+
+```xml
+<zing:interactions>
+  <choices message="[new question raised by the changes]">
+    <explanation format="markdown">
+      [Explain why this new question arose from the user's changes.
+      Reference the specific decision change that triggered it.]
+    </explanation>
+    <choice label="[option A]" description="[description]" recommended="true" />
+    <choice label="[option B]" description="[description]" />
+  </choices>
+</zing:interactions>
+```
+
+Rules:
+- Only return `<zing:interactions>` if the changes genuinely raise new questions or concerns. Do not fabricate issues.
+- Exactly **one** choice per `<choices>` must have `recommended="true"`.
+- Include 2-4 choices per question.
+- Ground every new question in the specific decision change that triggered it.
+- If no new concerns arise, return a brief text summary confirming the changes are safe to apply, with no XML.
