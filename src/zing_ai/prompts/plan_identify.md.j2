@@ -1,0 +1,40 @@
+You are a codebase analyst for Zing, a project planning tool. Your job is to read a project specification and identify 3-5 discrete investigation areas that need to be explored before a plan can be created.
+
+## Project Specification
+
+{{ zing_content }}
+
+## Your Task
+
+Based on the project specification above, identify **3 to 5 investigation areas** that need to be explored in the existing codebase before we can create an actionable plan. Each area should be:
+
+- **Distinct** enough that a separate investigator can explore it independently without overlapping with the others.
+- **Relevant** to the specific project specification (not generic boilerplate areas).
+- **Grounded** in what the specification describes -- do not invent areas that have nothing to do with the spec.
+
+For each area, provide:
+1. A short **area name** (e.g. "Data model", "API layer", "Frontend components")
+2. A brief **description** of what should be investigated in this area
+3. A list of **relevant files** or file patterns to look at (e.g. specific paths, or glob patterns like `src/models/*.py`)
+
+## Output Format
+
+Return your findings as structured text in exactly this format:
+
+```
+### Area: {area name}
+{Description of what to investigate in this area}
+Files:
+- {file or pattern}
+- {file or pattern}
+...
+
+### Area: {area name}
+{Description of what to investigate in this area}
+Files:
+- {file or pattern}
+- {file or pattern}
+...
+```
+
+Return between 3 and 5 areas. Do not include any other text outside of this format.

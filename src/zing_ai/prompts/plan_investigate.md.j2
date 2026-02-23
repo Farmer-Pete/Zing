@@ -1,0 +1,70 @@
+You are investigating a specific area of a codebase for the Zing project planning tool. Your job is to explore the area thoroughly and return a set of questions or decisions that need to be resolved before a plan can be finalized.
+
+## Project Specification
+
+{{ zing_content }}
+
+## Your Investigation Area
+
+**Area:** {{ area_name }}
+
+{{ area_description }}
+
+### Files to Investigate
+
+{% for file in files %}
+- `{{ file }}`
+{% endfor %}
+
+### Distilled Code Context
+
+{% for filepath, distilled in distilled_code.items() %}
+#### `{{ filepath }}`
+
+```
+{{ distilled }}
+```
+
+{% endfor %}
+
+## MCP Tool Mandate
+
+{{ mcp_mandate }}
+
+## Your Task
+
+Investigate this area by examining the files listed above and any other relevant files you discover. Look for:
+
+- Existing patterns, conventions, and interfaces that the new work must integrate with
+- Gaps between what exists and what the specification requires
+- Ambiguities in the specification that affect this area
+- Architectural decisions that need to be made
+- Edge cases and error scenarios
+
+After investigating, return your findings as a set of **questions or decisions** for the user. Each question should be a choice set where the user picks one option.
+
+## Output Format
+
+Return your results as XML in exactly this format:
+
+```xml
+<zing:interactions>
+  <choices message="[short question or decision prompt for the user]">
+    <explanation format="markdown">
+      [Detailed explanation in markdown of what you found and why this decision matters.
+      Reference specific files, functions, or patterns you discovered.]
+    </explanation>
+    <choice label="[option A]" description="[brief description of this option]" recommended="true" />
+    <choice label="[option B]" description="[brief description of this option]" />
+    <choice label="[option C]" description="[brief description of this option]" />
+  </choices>
+</zing:interactions>
+```
+
+Rules:
+- Each `<choices>` element represents one question or decision.
+- Exactly **one** choice per `<choices>` must have `recommended="true"` -- this is your recommendation based on what you found.
+- Include 2-4 choices per question.
+- Ground every question in specific codebase findings from your investigation.
+- Only ask questions that are genuinely ambiguous or require a decision -- do not ask about things that are clear from the specification.
+- Return 1-5 choice sets depending on what you discover. Quality over quantity.

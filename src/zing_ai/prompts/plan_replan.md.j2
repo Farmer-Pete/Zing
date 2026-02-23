@@ -1,0 +1,72 @@
+You are updating an existing project plan for Zing. The user has reviewed the plan and changed some of their earlier decisions. Your job is to update the plan to reflect these changes without redoing the full investigation from scratch.
+
+## Project Specification
+
+{{ zing_content }}
+
+## Changed Decisions
+
+The user has reviewed the plan and made the following changes:
+
+{% for change in changes %}
+### {{ change.choice_set_message }}
+
+- **Original recommendation:** {{ change.original_recommended }}
+{% if change.deleted is defined and change.deleted %}
+- **User action:** Deleted this decision (no longer applicable)
+{% else %}
+- **User selected:** {{ change.user_selected }}
+{% endif %}
+
+{% endfor %}
+
+## Your Task
+
+Update the plan stages and steps to reflect the user's changed decisions. Follow these rules:
+
+1. **Do not redo the full investigation.** Only update the parts of the plan that are affected by the changed decisions.
+2. **If a decision was deleted**, remove any plan steps that were solely motivated by that decision.
+3. **If a decision was changed**, update the instructions, files, and approach in affected steps to match the new choice.
+4. **If changes cascade** -- for example, choosing a different database affects both the data model and the API layer -- update all affected stages and steps.
+5. **If changes raise new questions** or require new decisions that were not previously considered, return those as additional `<zing:interactions>` choice sets.
+
+## Output Format
+
+Your response may contain one or both of the following XML blocks:
+
+### Updated plan (if steps need to change):
+
+```xml
+<zing:steps>
+  <stage label="[label-for-stage]">
+    <step label="[label-for-step]">
+      <instructions>
+        [Updated markdown instructions reflecting the new decisions]
+      </instructions>
+      <files>
+        [newline-separated list of file paths]
+      </files>
+    </step>
+  </stage>
+</zing:steps>
+```
+
+### New questions (if changes raise new decisions):
+
+```xml
+<zing:interactions>
+  <choices message="[new question raised by the changes]">
+    <explanation format="markdown">
+      [Explain why this new question arose from the user's changes]
+    </explanation>
+    <choice label="[option A]" description="[description]" recommended="true" />
+    <choice label="[option B]" description="[description]" />
+  </choices>
+</zing:interactions>
+```
+
+Rules:
+- If the changes are minor and only affect step instructions, return only `<zing:steps>` with the full updated plan.
+- If the changes raise new questions, return `<zing:interactions>` with the new choice sets. You may also return `<zing:steps>` if you can partially update the plan.
+- If you return `<zing:steps>`, include the **complete** plan (all stages and steps), not just the changed ones. The returned plan replaces the previous one entirely.
+- Exactly **one** choice per `<choices>` must have `recommended="true"`.
