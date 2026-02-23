@@ -321,3 +321,100 @@ class TestBuildAuditReviewTemplate:
         sample_context["distilled_code"] = {}
         result = render_prompt(self.TEMPLATE, **sample_context)
         assert "Files Assigned to You" in result
+
+
+# ---------------------------------------------------------------------------
+# retry.md.j2
+# ---------------------------------------------------------------------------
+
+
+class TestRetryTemplate:
+    """Verify retry.md.j2 renders with its required variables."""
+
+    TEMPLATE = "retry.md.j2"
+
+    @pytest.fixture()
+    def parse_error_context(self) -> dict:
+        return {
+            "error_type": "parse_error",
+            "error_message": "Malformed XML: unclosed tag <plan> at line 5",
+            "original_response": "Here is my response with <plan>...</plan",
+        }
+
+    @pytest.fixture()
+    def validation_error_context(self) -> dict:
+        return {
+            "error_type": "validation_error",
+            "error_message": "Missing required element: exactly one choice must be recommended",
+            "original_response": "<choices><choice>A</choice><choice>B</choice></choices>",
+        }
+
+    def test_renders_without_error_parse(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_renders_without_error_validation(
+        self, validation_error_context: dict
+    ) -> None:
+        result = render_prompt(self.TEMPLATE, **validation_error_context)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_contains_error_message(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "Malformed XML: unclosed tag <plan> at line 5" in result
+
+    def test_contains_original_response(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "Here is my response with <plan>...</plan" in result
+
+    def test_parse_error_type_renders_parse_section(
+        self, parse_error_context: dict
+    ) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "Parse Error" in result
+        assert "malformed XML" in result.lower() or "could not be parsed" in result.lower()
+
+    def test_validation_error_type_renders_validation_section(
+        self, validation_error_context: dict
+    ) -> None:
+        result = render_prompt(self.TEMPLATE, **validation_error_context)
+        assert "Validation Error" in result
+        assert "failed validation" in result.lower()
+
+    def test_unknown_error_type_renders_generic_section(self) -> None:
+        context = {
+            "error_type": "unknown_error",
+            "error_message": "Something went wrong",
+            "original_response": "Some response text",
+        }
+        result = render_prompt(self.TEMPLATE, **context)
+        # Should not contain parse_error or validation_error specific text
+        assert "Parse Error" not in result
+        assert "Validation Error" not in result
+        assert "unexpected error" in result.lower()
+
+    def test_instructs_to_fix_and_retry(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "corrected response" in result.lower()
+
+    def test_instructs_not_to_apologize(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "not" in result.lower() and "apologize" in result.lower()
+
+    def test_instructs_to_follow_format(self, parse_error_context: dict) -> None:
+        result = render_prompt(self.TEMPLATE, **parse_error_context)
+        assert "output format" in result.lower() or "exact" in result.lower()
+
+    def test_truncated_original_response(self) -> None:
+        """Verify the template renders correctly when original_response is
+        already truncated to 500 chars (truncation is done by the caller)."""
+        long_response = "x" * 500
+        context = {
+            "error_type": "parse_error",
+            "error_message": "Bad XML",
+            "original_response": long_response,
+        }
+        result = render_prompt(self.TEMPLATE, **context)
+        assert long_response in result

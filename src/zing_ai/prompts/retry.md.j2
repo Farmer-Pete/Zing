@@ -1,0 +1,33 @@
+Your previous response was **invalid** and could not be processed. Please read the error details below and try again, producing a corrected response that satisfies the original instructions.
+
+## Error Type
+
+{% if error_type == "parse_error" %}
+**Parse Error** -- Your response could not be parsed. The output was either malformed XML, missing required XML elements, or not in the expected format.
+{% elif error_type == "validation_error" %}
+**Validation Error** -- Your response was parsed but failed validation. One or more structural or content constraints were not satisfied.
+{% else %}
+**Error** -- An unexpected error occurred while processing your response.
+{% endif %}
+
+## Error Message
+
+```
+{{ error_message }}
+```
+
+## Your Previous Response (truncated)
+
+```
+{{ original_response }}
+```
+
+## Instructions
+
+Please carefully review the error message above and your previous response. Then produce a **new, corrected response** that:
+
+1. Fixes the specific issue described in the error message.
+2. Follows the exact output format requested in the original instructions.
+3. Contains all required XML elements and attributes with valid values.
+
+Do **not** apologize or explain the mistake. Just output the corrected response.
