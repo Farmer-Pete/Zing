@@ -36,7 +36,9 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-async def distill_file(file_path: Path, *, project_root: Path) -> str:
+async def distill_file(
+    file_path: Path, *, project_root: Path, timeout: float = 60,
+) -> str | None:
     """Distill a single file using the ``aid`` CLI, with caching.
 
     Computes the SHA256 hash of the file content and checks for a cached
@@ -50,11 +52,13 @@ async def distill_file(file_path: Path, *, project_root: Path) -> str:
         Path to the file to distill.
     project_root:
         The project root directory (used to locate the cache).
+    timeout:
+        Maximum seconds to wait for the ``aid`` subprocess (default 60).
 
     Returns
     -------
-    str
-        The distilled content of the file.
+    str | None
+        The distilled content of the file, or ``None`` on failure.
     """
     file_hash = _hash_file(file_path)
     cache_dir = project_root / CACHE_DIR
@@ -76,7 +80,23 @@ async def distill_file(file_path: Path, *, project_root: Path) -> str:
         stderr=asyncio.subprocess.PIPE,
     )
 
-    stdout_data, stderr_data = await proc.communicate()
+    try:
+        stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.warning("aid distill_file timed out for %s after %.0fs", file_path, timeout)
+        return None
+
+    if proc.returncode != 0:
+        stderr_text = stderr_data.decode("utf-8", errors="replace")
+        logger.warning(
+            "aid distill_file failed for %s (returncode=%d): %s",
+            file_path,
+            proc.returncode,
+            stderr_text.strip(),
+        )
+        return None
 
     if stderr_data:
         stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -114,4 +134,5 @@ async def distill_files(
     results = await asyncio.gather(
         *(distill_file(fp, project_root=project_root) for fp in file_paths)
     )
-    return dict(zip(file_paths, results, strict=True))
+
+    return {fp: r for fp, r in zip(file_paths, results, strict=True) if r is not None}

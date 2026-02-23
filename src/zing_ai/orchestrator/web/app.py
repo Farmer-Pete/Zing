@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -72,3 +74,43 @@ def start_server(
         webbrowser.open(url)
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+
+
+def start_server_background(
+    zing_file_path: Path | None,
+    *,
+    port: int,
+    no_browser: bool,
+    **app_state: Any,
+) -> threading.Thread:
+    """Start the FastAPI web server in a background daemon thread.
+
+    Parameters
+    ----------
+    zing_file_path:
+        Path to the zing XML file (stored on app state).
+    port:
+        Port to listen on.
+    no_browser:
+        If ``True``, do not open the browser.
+    **app_state:
+        Extra attributes to set on ``app.state`` (e.g. ``finding_groups``).
+
+    Returns
+    -------
+    threading.Thread
+        The daemon thread running the server.
+    """
+    app = create_app(zing_file=zing_file_path)
+
+    for key, value in app_state.items():
+        setattr(app.state, key, value)
+
+    thread = threading.Thread(
+        target=start_server,
+        args=(app,),
+        kwargs={"port": port, "no_browser": no_browser},
+        daemon=True,
+    )
+    thread.start()
+    return thread

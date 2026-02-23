@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +29,9 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import AuditGroup
+from zing_ai.orchestrator.web.app import (
+    start_server_background as _start_web_server_background,
+)
 from zing_ai.orchestrator.xml_parser import parse_audit_response, parse_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -183,56 +185,6 @@ def collect_plan_files(doc_path: Path) -> list[str]:
         for step in stage.steps:
             all_files.update(step.files)
     return sorted(all_files)
-
-
-# ---------------------------------------------------------------------------
-# Web server helper
-# ---------------------------------------------------------------------------
-
-
-def _start_web_server_background(
-    zing_file_path: Path | None,
-    *,
-    port: int,
-    no_browser: bool,
-    finding_groups: list[FindingGroup] | None = None,
-) -> threading.Thread:
-    """Start the FastAPI web server in a background daemon thread.
-
-    Stores ``finding_groups`` on ``app.state`` so the ``audit.html``
-    template can render them.
-
-    Parameters
-    ----------
-    zing_file_path:
-        Path to the zing XML file (stored on app state).
-    port:
-        Port to listen on.
-    no_browser:
-        If ``True``, do not open the browser.
-    finding_groups:
-        Audit findings grouped by severity, to be stored on app state.
-
-    Returns
-    -------
-    threading.Thread
-        The daemon thread running the server.
-    """
-    from zing_ai.orchestrator.web.app import create_app, start_server
-
-    app = create_app(zing_file=zing_file_path)
-
-    # Store finding groups for the audit template
-    app.state.finding_groups = finding_groups or []
-
-    thread = threading.Thread(
-        target=start_server,
-        args=(app,),
-        kwargs={"port": port, "no_browser": no_browser},
-        daemon=True,
-    )
-    thread.start()
-    return thread
 
 
 # ---------------------------------------------------------------------------

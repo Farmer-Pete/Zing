@@ -43,6 +43,7 @@
     {% endif %}
 </div>
 
+{% if choice_sets %}
 <div class="review-actions">
     {% if has_modifications %}
         <button class="btn btn-primary"
@@ -52,4 +53,5 @@
                 data-on-click="$$post('/review/approve')">Approve &amp; Build</button>
     {% endif %}
 </div>
+{% endif %}
 {% endblock %}

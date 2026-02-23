@@ -24,9 +24,18 @@ from pathlib import Path
 import jinja2
 
 from zing_ai.orchestrator import claude, project
+
+# Re-use the identification parser from plan (same format)
+from zing_ai.orchestrator.commands.plan import (
+    InvestigationArea,
+    _parse_identification_response,
+)
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, ZingDocument
+from zing_ai.orchestrator.web.app import (
+    start_server_background as _start_web_server_background,
+)
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_interactions_response,
@@ -35,13 +44,6 @@ from zing_ai.orchestrator.xml_parser import (
     write_zing_file,
 )
 from zing_ai.prompts import render_prompt
-
-# Re-use the identification parser from plan (same format)
-from zing_ai.orchestrator.commands.plan import (
-    InvestigationArea,
-    _parse_identification_response,
-    _start_web_server_background,
-)
 
 logger = logging.getLogger(__name__)
 

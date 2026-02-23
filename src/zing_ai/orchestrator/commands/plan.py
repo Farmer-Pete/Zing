@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +29,9 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
+from zing_ai.orchestrator.web.app import (
+    start_server_background as _start_web_server_background,
+)
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_interactions_response,
@@ -148,47 +150,6 @@ def _parse_identification_response(text: str) -> list[InvestigationArea]:
         )
 
     return areas
-
-
-# ---------------------------------------------------------------------------
-# Web server helper
-# ---------------------------------------------------------------------------
-
-
-def _start_web_server_background(
-    zing_file_path: Path | None,
-    *,
-    port: int,
-    no_browser: bool,
-) -> threading.Thread:
-    """Start the FastAPI web server in a background daemon thread.
-
-    Parameters
-    ----------
-    zing_file_path:
-        Path to the zing XML file (stored on app state).
-    port:
-        Port to listen on.
-    no_browser:
-        If ``True``, do not open the browser.
-
-    Returns
-    -------
-    threading.Thread
-        The daemon thread running the server.
-    """
-    from zing_ai.orchestrator.web.app import create_app, start_server
-
-    app = create_app(zing_file=zing_file_path)
-
-    thread = threading.Thread(
-        target=start_server,
-        args=(app,),
-        kwargs={"port": port, "no_browser": no_browser},
-        daemon=True,
-    )
-    thread.start()
-    return thread
 
 
 # ---------------------------------------------------------------------------

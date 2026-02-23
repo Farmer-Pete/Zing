@@ -133,9 +133,26 @@ class TestReviewPage:
         assert "Review Plan Decisions" in response.text
 
     @pytest.mark.anyio()
-    async def test_shows_approve_button(self, client: AsyncClient) -> None:
+    async def test_shows_approve_button(self, app, client: AsyncClient) -> None:
+        from zing_ai.orchestrator.commands.plan_review import ReviewState
+        from zing_ai.orchestrator.models import Choice, ChoiceSet
+
+        app.state.review = ReviewState(
+            choice_sets=[
+                ChoiceSet(
+                    message="Test",
+                    explanation="Test explanation",
+                    choices=[Choice(label="A", description="a", recommended=True)],
+                ),
+            ],
+        )
         response = await client.get("/review")
         assert "Approve" in response.text
+
+    @pytest.mark.anyio()
+    async def test_hides_approve_button_when_no_choices(self, client: AsyncClient) -> None:
+        response = await client.get("/review")
+        assert "Approve" not in response.text
 
 
 class TestReviewUpdate:

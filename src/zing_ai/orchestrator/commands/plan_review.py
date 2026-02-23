@@ -46,8 +46,10 @@ class ReviewState:
     approved: bool = False
 
     #: Event signalled when the user has made their final decision
-    #: (either approve or modify-and-submit).
-    decision_event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: (either approve or modify-and-submit).  Uses ``threading.Event``
+    #: (not ``asyncio.Event``) because it is set from the uvicorn daemon
+    #: thread and waited on from the main asyncio thread.
+    decision_event: threading.Event = field(default_factory=threading.Event)
 
     @property
     def has_modifications(self) -> bool:
@@ -249,8 +251,11 @@ async def run_plan_review(
         len(choice_sets),
     )
 
-    # Wait for the user to approve or modify
-    await review.decision_event.wait()
+    # Wait for the user to approve or modify.  ``decision_event`` is a
+    # threading.Event (set from the uvicorn daemon thread), so we poll it
+    # from the async loop to avoid blocking.
+    while not review.decision_event.is_set():
+        await asyncio.sleep(0.2)
 
     if review.approved and not review.has_modifications:
         # --- Approval path: no changes ---

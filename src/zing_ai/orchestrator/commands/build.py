@@ -10,13 +10,15 @@ After all steps are finished, delegates to :func:`run_build_audit`.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
 from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import ZingDocument
+from zing_ai.orchestrator.web.app import (
+    start_server_background as _start_web_server_background,
+)
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -31,47 +33,6 @@ MCP_MANDATE = (
     "replace_symbol_body/insert_before_symbol/insert_after_symbol over Edit "
     "for symbol-level edits."
 )
-
-
-# ---------------------------------------------------------------------------
-# Web server helper
-# ---------------------------------------------------------------------------
-
-
-def _start_web_server_background(
-    zing_file_path: Path | None,
-    *,
-    port: int,
-    no_browser: bool,
-) -> threading.Thread:
-    """Start the FastAPI web server in a background daemon thread.
-
-    Parameters
-    ----------
-    zing_file_path:
-        Path to the zing XML file (stored on app state).
-    port:
-        Port to listen on.
-    no_browser:
-        If ``True``, do not open the browser.
-
-    Returns
-    -------
-    threading.Thread
-        The daemon thread running the server.
-    """
-    from zing_ai.orchestrator.web.app import create_app, start_server
-
-    app = create_app(zing_file=zing_file_path)
-
-    thread = threading.Thread(
-        target=start_server,
-        args=(app,),
-        kwargs={"port": port, "no_browser": no_browser},
-        daemon=True,
-    )
-    thread.start()
-    return thread
 
 
 # ---------------------------------------------------------------------------

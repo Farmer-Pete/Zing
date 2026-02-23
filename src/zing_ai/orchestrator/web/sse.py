@@ -7,6 +7,7 @@ DOM elements via the ``datastar-py`` SDK.
 from __future__ import annotations
 
 import html
+import json
 
 from datastar_py import ServerSentEventGenerator as SSE
 
@@ -80,8 +81,10 @@ def notify_event(title: str, body: str) -> object:
     Appends a script tag to the body that calls the global
     ``showNotification()`` function defined in ``base.html``.
     """
-    safe_title = title.replace("'", "\\'")
-    safe_body = body.replace("'", "\\'")
+    # Use json.dumps for proper JS string escaping (handles </script>,
+    # backslashes, newlines, quotes, and all other special characters).
+    safe_title = json.dumps(title)
+    safe_body = json.dumps(body)
 
-    script = f"<script>showNotification('{safe_title}', '{safe_body}')</script>"
+    script = f"<script>showNotification({safe_title}, {safe_body})</script>"
     return SSE.patch_elements(script, selector="body", mode="append")

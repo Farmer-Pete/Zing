@@ -809,6 +809,7 @@ class TestDistillerCaching:
 
         async def mock_create_subprocess_exec(*args, **kwargs):
             proc = MagicMock()
+            proc.returncode = 0
             proc.communicate = AsyncMock(
                 return_value=(b"distilled: def hello()", b"")
             )
@@ -871,6 +872,7 @@ class TestDistillerCaching:
             nonlocal call_count
             call_count += 1
             proc = MagicMock()
+            proc.returncode = 0
             proc.communicate = AsyncMock(
                 return_value=(f"distilled version {call_count}".encode(), b"")
             )
@@ -908,6 +910,7 @@ class TestDistillerCaching:
 
         async def mock_create_subprocess_exec(*args, **kwargs):
             proc = MagicMock()
+            proc.returncode = 0
             proc.communicate = AsyncMock(
                 return_value=(b"distilled content", b"")
             )
