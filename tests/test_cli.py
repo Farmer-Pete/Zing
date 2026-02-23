@@ -196,3 +196,150 @@ def test_reapply_patches_dispatches():
         result = runner.invoke(cli, ["reapply-patches", "--opencode"])
     assert result.exit_code == 0
     mock.assert_called_once()
+
+
+# -- orchestrator subcommands -----------------------------------------------
+
+ORCHESTRATOR_COMMANDS = ["new", "plan", "plan-audit", "plan-review", "build", "build-audit"]
+
+
+class TestOrchestratorCommandsRegistered:
+    """Verify all 6 orchestrator commands are registered on the CLI group."""
+
+    def test_all_orchestrator_commands_registered(self):
+        for cmd_name in ORCHESTRATOR_COMMANDS:
+            assert cmd_name in cli.commands, f"{cmd_name!r} not registered"
+
+    def test_existing_commands_still_registered(self):
+        assert "install" in cli.commands
+        assert "reapply-patches" in cli.commands
+
+
+class TestOrchestratorCommandHelp:
+    """Verify each orchestrator command shows --help with expected options."""
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_help_shows_zing_file_argument(self, cmd_name):
+        runner = CliRunner()
+        result = runner.invoke(cli, [cmd_name, "--help"])
+        assert result.exit_code == 0
+        assert "ZING_FILE" in result.output or "zing_file" in result.output.lower()
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_help_shows_no_browser_flag(self, cmd_name):
+        runner = CliRunner()
+        result = runner.invoke(cli, [cmd_name, "--help"])
+        assert result.exit_code == 0
+        assert "--no-browser" in result.output
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_help_shows_skip_permissions_flag(self, cmd_name):
+        runner = CliRunner()
+        result = runner.invoke(cli, [cmd_name, "--help"])
+        assert result.exit_code == 0
+        assert "--skip-permissions" in result.output
+
+
+class TestOrchestratorCommandDelegation:
+    """Verify each orchestrator command delegates to its corresponding module."""
+
+    _COMMAND_MODULES = {
+        "new": "zing_ai.orchestrator.commands.new.run_new",
+        "plan": "zing_ai.orchestrator.commands.plan.run_plan",
+        "plan-audit": "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+        "plan-review": "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+        "build": "zing_ai.orchestrator.commands.build.run_build",
+        "build-audit": "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+    }
+
+    @pytest.mark.parametrize(
+        ("cmd_name", "run_func_path"),
+        list(_COMMAND_MODULES.items()),
+    )
+    def test_command_delegates_to_module(self, cmd_name, run_func_path, tmp_path):
+        """Each command loads config, finds project root, and calls asyncio.run()."""
+        # Create a fake .git dir so find_project_root() works
+        (tmp_path / ".git").mkdir()
+
+        runner = CliRunner()
+        with (
+            patch(run_func_path, side_effect=NotImplementedError("stub")) as mock_run,
+            patch(
+                "zing_ai.orchestrator.project.find_project_root",
+                return_value=tmp_path,
+            ),
+            patch(
+                "zing_ai.orchestrator.config.load_config",
+            ) as mock_config,
+        ):
+            result = runner.invoke(cli, [cmd_name])
+
+        # The stub raises NotImplementedError which asyncio.run propagates
+        assert result.exit_code == 1
+        mock_config.assert_called_once_with(tmp_path)
+        mock_run.assert_called_once()
+
+        # Verify keyword arguments passed to the run function
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["zing_file"] is None
+        assert call_kwargs["no_browser"] is False
+        assert call_kwargs["skip_permissions"] is False
+        assert call_kwargs["config"] == mock_config.return_value
+        assert call_kwargs["project_root"] == tmp_path
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_command_passes_zing_file_argument(self, cmd_name, tmp_path):
+        (tmp_path / ".git").mkdir()
+        run_func_path = self._COMMAND_MODULES[cmd_name]
+
+        runner = CliRunner()
+        with (
+            patch(run_func_path, side_effect=NotImplementedError("stub")) as mock_run,
+            patch(
+                "zing_ai.orchestrator.project.find_project_root",
+                return_value=tmp_path,
+            ),
+            patch("zing_ai.orchestrator.config.load_config"),
+        ):
+            result = runner.invoke(cli, [cmd_name, "my-feature.xml"])
+
+        assert result.exit_code == 1
+        assert mock_run.call_args.kwargs["zing_file"] == "my-feature.xml"
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_command_passes_no_browser_flag(self, cmd_name, tmp_path):
+        (tmp_path / ".git").mkdir()
+        run_func_path = self._COMMAND_MODULES[cmd_name]
+
+        runner = CliRunner()
+        with (
+            patch(run_func_path, side_effect=NotImplementedError("stub")) as mock_run,
+            patch(
+                "zing_ai.orchestrator.project.find_project_root",
+                return_value=tmp_path,
+            ),
+            patch("zing_ai.orchestrator.config.load_config"),
+        ):
+            result = runner.invoke(cli, [cmd_name, "--no-browser"])
+
+        assert result.exit_code == 1
+        assert mock_run.call_args.kwargs["no_browser"] is True
+
+    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
+    def test_command_passes_skip_permissions_flag(self, cmd_name, tmp_path):
+        (tmp_path / ".git").mkdir()
+        run_func_path = self._COMMAND_MODULES[cmd_name]
+
+        runner = CliRunner()
+        with (
+            patch(run_func_path, side_effect=NotImplementedError("stub")) as mock_run,
+            patch(
+                "zing_ai.orchestrator.project.find_project_root",
+                return_value=tmp_path,
+            ),
+            patch("zing_ai.orchestrator.config.load_config"),
+        ):
+            result = runner.invoke(cli, [cmd_name, "--skip-permissions"])
+
+        assert result.exit_code == 1
+        assert mock_run.call_args.kwargs["skip_permissions"] is True

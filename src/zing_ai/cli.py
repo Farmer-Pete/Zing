@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from collections.abc import Callable
@@ -91,6 +92,179 @@ def reapply_patches_cmd(claude: bool, opencode: bool, all_runtimes: bool) -> Non
             continue
         logger.debug("Scanning patches in %s", target_dir)
         reapply_patches(target_dir)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator subcommands
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def new(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Collect requirements for a new zing file."""
+    from zing_ai.orchestrator.commands.new import run_new
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_new(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
+
+
+@cli.command()
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def plan(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Generate a development plan from a zing file."""
+    from zing_ai.orchestrator.commands.plan import run_plan
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_plan(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
+
+
+@cli.command("plan-audit")
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def plan_audit(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Audit an existing development plan."""
+    from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_plan_audit(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
+
+
+@cli.command("plan-review")
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def plan_review(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Review and approve a development plan."""
+    from zing_ai.orchestrator.commands.plan_review import run_plan_review
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_plan_review(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
+
+
+@cli.command()
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def build(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Execute plan steps to build the project."""
+    from zing_ai.orchestrator.commands.build import run_build
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_build(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
+
+
+@cli.command("build-audit")
+@click.argument("zing_file", required=False)
+@click.option("--no-browser", is_flag=True, default=False, help="Do not open the browser.")
+@click.option(
+    "--skip-permissions",
+    is_flag=True,
+    default=False,
+    help="Pass --dangerously-skip-permissions to all Claude calls.",
+)
+def build_audit(zing_file: str | None, *, no_browser: bool, skip_permissions: bool) -> None:
+    """Audit build output for issues."""
+    from zing_ai.orchestrator.commands.build_audit import run_build_audit
+    from zing_ai.orchestrator.config import load_config
+    from zing_ai.orchestrator.project import find_project_root
+
+    project_root = find_project_root()
+    config = load_config(project_root)
+    asyncio.run(
+        run_build_audit(
+            zing_file=zing_file,
+            no_browser=no_browser,
+            skip_permissions=skip_permissions,
+            config=config,
+            project_root=project_root,
+        )
+    )
 
 
 def _resolve_runtimes(claude: bool, opencode: bool, all_runtimes: bool) -> list[str]:
