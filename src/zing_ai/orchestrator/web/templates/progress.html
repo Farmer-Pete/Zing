@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Progress - Zing Orchestrator{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Investigation Progress</h1>
+</div>
+
+<div class="process-list" data-on-load="$$get('/progress/stream')">
+    {% if processes %}
+        {% for process in processes %}
+        <div class="process-card{% if process.status == 'success' %} collapsed{% endif %}"
+             data-status="{{ process.status }}"
+             id="process-{{ process.id }}">
+            <div class="process-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                <span class="status-dot status-dot--{{ process.status }}"></span>
+                <span class="process-title">{{ process.title }}</span>
+                <span id="badge-{{ process.id }}" class="badge badge--{{ process.status }}">{{ process.status | capitalize }}</span>
+            </div>
+            <div class="process-body">
+                <pre class="log-output" id="log-{{ process.id }}">{{ process.output or "" }}</pre>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="process-card" data-status="pending" id="process-init">
+            <div class="process-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                <span class="status-dot status-dot--pending"></span>
+                <span class="process-title">Waiting for subprocesses...</span>
+                <span id="badge-init" class="badge badge--pending">Pending</span>
+            </div>
+            <div class="process-body">
+                <pre class="log-output" id="log-init"></pre>
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}
