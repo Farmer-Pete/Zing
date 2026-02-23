@@ -66,14 +66,55 @@ async def progress_stream(request: Request):
 async def review(request: Request):
     """Render the plan review view with current choices."""
     templates = request.app.state.templates
+    review_state = getattr(request.app.state, "review", None)
+
+    choice_sets: list = []
+    has_modifications = False
+
+    if review_state is not None:
+        # Build template-friendly choice set data with current selections
+        for i, cs in enumerate(review_state.choice_sets):
+            sel_idx = review_state.user_selections.get(i)
+            deleted = sel_idx is None and i in review_state.user_selections
+            modified = False
+
+            choices_data = []
+            for j, choice in enumerate(cs.choices):
+                # Determine if this choice is currently selected
+                if i in review_state.user_selections:
+                    selected = review_state.user_selections[i] == j
+                else:
+                    selected = choice.recommended
+
+                choices_data.append({
+                    "label": choice.label,
+                    "description": choice.description,
+                    "recommended": choice.recommended,
+                    "selected": selected,
+                })
+
+                if selected and not choice.recommended:
+                    modified = True
+
+            choice_sets.append({
+                "message": cs.message,
+                "explanation": cs.explanation,
+                "choices": choices_data,
+                "has_recommended": any(c.recommended for c in cs.choices),
+                "modified": modified,
+                "deleted": deleted,
+            })
+
+        has_modifications = review_state.has_modifications
+
     return templates.TemplateResponse(
         request,
         "plan_review.html",
         {
             "zing_file": request.app.state.zing_file,
             "active_stage": "review",
-            "choice_sets": [],
-            "has_modifications": False,
+            "choice_sets": choice_sets,
+            "has_modifications": has_modifications,
         },
     )
 
@@ -93,6 +134,10 @@ async def review_update(request: Request):
         if choice_set_index is None:
             return JSONResponse({"error": "choice_set_index is required"}, status_code=400)
 
+        review_state = getattr(request.app.state, "review", None)
+        if review_state is not None:
+            review_state.user_selections[choice_set_index] = selected_choice_index
+
         logger.debug(
             "Review update: choice_set=%s, selected=%s",
             choice_set_index,
@@ -109,9 +154,19 @@ async def review_approve(request: Request):
     """Approve the current plan.
 
     Marks the plan as approved and signals the pipeline to continue.
+    If the user has modifications, signals re-plan instead of build.
     """
-    logger.debug("Plan approved")
-    return JSONResponse({"ok": True, "next_stage": "build"})
+    review_state = getattr(request.app.state, "review", None)
+    has_modifications = False
+
+    if review_state is not None:
+        review_state.approved = True
+        has_modifications = review_state.has_modifications
+        review_state.decision_event.set()
+
+    next_stage = "replan" if has_modifications else "build"
+    logger.debug("Plan approved (next_stage=%s)", next_stage)
+    return JSONResponse({"ok": True, "next_stage": next_stage})
 
 
 @router.get("/build")

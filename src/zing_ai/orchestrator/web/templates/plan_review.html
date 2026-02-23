@@ -10,10 +10,11 @@
 <div class="choice-list">
     {% if choice_sets %}
         {% for cs in choice_sets %}
+        {% set cs_idx = loop.index0 %}
         <div class="choice-card{% if cs.has_recommended %} recommended{% endif %}{% if cs.modified %} modified{% endif %}"
-             id="choice-{{ loop.index0 }}">
+             id="choice-{{ cs_idx }}">
             <button class="btn btn-danger delete-btn"
-                    data-on-click="$$post('/review/update', {choice_set_index: {{ loop.index0 }}, selected_choice_index: null})"
+                    data-on-click="$$post('/review/update', {choice_set_index: {{ cs_idx }}, selected_choice_index: null})"
                     title="Delete choice set">&times;</button>
             <div class="choice-message">{{ cs.message }}</div>
             <div class="choice-explanation">{{ cs.explanation }}</div>
@@ -21,10 +22,10 @@
                 {% for choice in cs.choices %}
                 <label class="choice-option">
                     <input type="radio"
-                           name="choice-{{ loop.parent.loop.index0 }}"
+                           name="choice-{{ cs_idx }}"
                            value="{{ loop.index0 }}"
-                           {% if choice.recommended %}checked{% endif %}
-                           data-on-change="$$post('/review/update', {choice_set_index: {{ loop.parent.loop.index0 }}, selected_choice_index: {{ loop.index0 }}})">
+                           {% if choice.selected %}checked{% endif %}
+                           data-on-change="$$post('/review/update', {choice_set_index: {{ cs_idx }}, selected_choice_index: {{ loop.index0 }}})">
                     <span class="choice-label">{{ choice.label }}</span>
                     {% if choice.recommended %}
                     <span class="recommended-pill">Recommended</span>
