@@ -17,7 +17,7 @@ from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Static
 
-from zing_ai.orchestrator.commands.build_audit import Finding, FindingGroup
+from zing_ai.orchestrator.commands.build_audit import FindingGroup
 from zing_ai.orchestrator.tui.results import AuditResult
 from zing_ai.orchestrator.tui.widgets.finding_group import (
     FindingData,

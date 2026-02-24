@@ -10,7 +10,7 @@ Emits :class:`ChoiceCard.Modified` and :class:`ChoiceCard.Deleted` messages.
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -110,7 +110,7 @@ class ChoiceCard(Widget, can_focus=True):
         yield Markdown(self._explanation, classes="cc-explanation")
 
         radio_buttons: list[RadioButton] = []
-        for i, (label, description) in enumerate(self._choices):
+        for i, (label, _description) in enumerate(self._choices):
             display_label = label
             if i == self._recommended_index:
                 display_label = f"{label} [recommended]"
@@ -133,7 +133,6 @@ class ChoiceCard(Widget, can_focus=True):
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         """Track whether current selection differs from recommended."""
         selected_index = event.radio_set.pressed_index
-        was_modified = self.is_modified
         self.is_modified = selected_index != self._recommended_index
 
         if self.is_modified:

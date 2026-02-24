@@ -25,6 +25,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import jinja2
 
@@ -34,6 +35,9 @@ from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import AuditGroup
 from zing_ai.orchestrator.xml_parser import parse_audit_response, parse_zing_file
 from zing_ai.prompts import render_prompt
+
+if TYPE_CHECKING:
+    from zing_ai.orchestrator.tui.results import ProgressResult
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +375,6 @@ def _run_review_tui(
         (one per group, in the same order as *audit_groups*).
     """
     from zing_ai.orchestrator.tui.app import ZingApp
-    from zing_ai.orchestrator.tui.results import ProgressResult
     from zing_ai.orchestrator.tui.screens.progress import ProgressScreen
 
     screen = ProgressScreen()
@@ -444,7 +447,7 @@ def _run_review_tui(
 
     # Launch all workers as daemon threads
     threads: list[threading.Thread] = []
-    for i, (group, group_id) in enumerate(zip(audit_groups, group_ids)):
+    for i, (group, group_id) in enumerate(zip(audit_groups, group_ids, strict=True)):
         t = threading.Thread(
             target=_review_worker,
             args=(group, i, group_id),

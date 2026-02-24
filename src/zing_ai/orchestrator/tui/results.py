@@ -15,9 +15,8 @@ class ReviewResult:
     """Returned by PlanReviewScreen on user approval or re-plan."""
 
     action: Literal["approve", "replan"]
-    changes: list[
-        dict
-    ]  # empty if action=="approve"; list of {"choice_id": str, "new_selection": int | None} if replan (None = deleted)
+    # empty if action=="approve"; list of {"choice_id": str, "new_selection": int | None} if replan
+    changes: list[dict]
 
 
 @dataclass
@@ -34,6 +33,5 @@ class BuildResult:
 class AuditResult:
     """Returned by AuditScreen with user decisions on findings."""
 
-    decisions: list[
-        dict
-    ]  # [{"finding_index": int, "action": "fix" | "skip" | "discuss"}]
+    # [{"finding_index": int, "action": "fix" | "skip" | "discuss"}]
+    decisions: list[dict]

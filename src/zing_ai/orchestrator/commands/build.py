@@ -18,7 +18,6 @@ from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import ZingDocument
 from zing_ai.orchestrator.tui.app import ZingApp
-from zing_ai.orchestrator.tui.results import BuildResult
 from zing_ai.orchestrator.tui.screens.build import BuildScreen
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 from zing_ai.prompts import render_prompt
@@ -190,7 +189,7 @@ def run_build(
     worker = threading.Thread(target=_build_worker, daemon=True)
     worker.start()
 
-    build_result: BuildResult = ZingApp.run_with_screen(screen)
+    ZingApp.run_with_screen(screen)
 
     logger.info("Build TUI dismissed. Starting build audit.")
 

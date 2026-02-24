@@ -19,6 +19,7 @@ saved session and merges updated steps/interactions.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -268,10 +269,8 @@ def _invoke_replan_with_session(
 
             # Optionally parse new interactions (not required)
             new_interactions: Interaction | None = None
-            try:
+            with contextlib.suppress(ValidationError):
                 new_interactions = parse_interactions_response(output)
-            except ValidationError:
-                pass  # No new interactions -- that's fine
 
             return plan, new_interactions, session_id
         except ValidationError as exc:
@@ -448,7 +447,7 @@ def _run_investigation_tui(
     # Launch all workers as daemon threads that interact with the screen.
     # We track them so we can call mark_all_complete when they're done.
     threads: list[threading.Thread] = []
-    for (area, prompt), area_id in zip(area_prompts, area_ids):
+    for (area, prompt), area_id in zip(area_prompts, area_ids, strict=True):
         t = threading.Thread(
             target=_investigate_worker,
             args=(area, prompt, area_id),

@@ -9,9 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from textual.app import ComposeResult
-from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Label, Static
+from textual.widgets import Static
 
 
 class StepStatus(Enum):
@@ -63,7 +62,6 @@ class _StepRow(Static):
 
     def render(self) -> str:
         icon = _STATUS_ICONS.get(self._step.status, "\u25cb")
-        connector = "  " if self._is_last else "\u2502 "
         return f" {icon} {self._step.label}"
 
     @property
