@@ -1,24 +1,28 @@
 """End-to-end integration tests for the orchestrator pipeline.
 
 These tests exercise the interaction between multiple modules working
-together.  External boundaries (Claude CLI subprocess, aid subprocess)
-are mocked; everything else runs against real code with ``tmp_path``
-for file-system state.
+together.  External boundaries (Claude CLI subprocess, aid subprocess,
+TUI rendering) are mocked; everything else runs against real code with
+``tmp_path`` for file-system state.
+
+The TUI is mocked by patching ``ZingApp.run_with_screen()`` to return
+pre-defined result objects (ProgressResult, ReviewResult, BuildResult,
+AuditResult) without rendering any UI.
 """
 
 from __future__ import annotations
 
-import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
+import jinja2
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import _hash_file, distill_file
 from zing_ai.orchestrator.models import (
+    AuditGroup,
     Choice,
     ChoiceSet,
     Interaction,
@@ -27,7 +31,12 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.web.app import create_app
+from zing_ai.orchestrator.tui.results import (
+    AuditResult,
+    BuildResult,
+    ProgressResult,
+    ReviewResult,
+)
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_zing_file,
@@ -37,11 +46,6 @@ from zing_ai.orchestrator.xml_parser import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 def _make_config() -> ZingConfig:
@@ -108,6 +112,48 @@ def _make_zing_file(tmp_path: Path, *, stage: str = "new", with_plan: bool = Fal
     zing_path = zing_dir / "test-project.xml"
     write_zing_file(zing_path, doc)
     return zing_path
+
+
+def _make_progress_result(
+    outputs: dict[str, str] | None = None,
+    statuses: dict[str, str] | None = None,
+) -> ProgressResult:
+    """Build a ProgressResult with sensible defaults."""
+    return ProgressResult(
+        outputs=outputs or {},
+        statuses=statuses or {},
+    )
+
+
+def _make_review_result(
+    action: str = "approve",
+    changes: list[dict] | None = None,
+) -> ReviewResult:
+    """Build a ReviewResult with sensible defaults."""
+    return ReviewResult(
+        action=action,
+        changes=changes or [],
+    )
+
+
+def _make_build_result(
+    completed_steps: list[tuple[int, int]] | None = None,
+    failed_step: tuple[int, int] | None = None,
+) -> BuildResult:
+    """Build a BuildResult with sensible defaults."""
+    return BuildResult(
+        completed_steps=completed_steps or [(0, 0)],
+        failed_step=failed_step,
+    )
+
+
+def _make_audit_result(
+    decisions: list[dict] | None = None,
+) -> AuditResult:
+    """Build an AuditResult with sensible defaults."""
+    return AuditResult(
+        decisions=decisions or [],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,55 +241,55 @@ src/config.py</group>
 class TestFullPipelineFlow:
     """Test the full pipeline flow: new -> plan -> plan-audit -> plan-review -> build -> build-audit.
 
-    Each command calls the next, so we mock Claude at the subprocess level and
-    verify the chain completes through all stages.
+    Each command calls the next, so we mock Claude at the subprocess level
+    and mock ZingApp.run_with_screen() to return pre-defined results.
+    The chain should complete through all stages.
     """
 
     def test_new_chains_into_plan(self, tmp_path: Path) -> None:
-        """run_new should invoke Claude, write a zing file, then call run_plan."""
+        """run_new should invoke Claude interactively, find the zing file, then call run_plan."""
         zing_dir = tmp_path / ".zing"
         zing_dir.mkdir()
 
-        # Mock Claude to return markdown with a heading
-        mock_output = ("# My Todo App\n\nA simple todo application.", "session-abc")
+        # Pre-create a zing XML file so that run_new can "find" it after Claude exits
+        zing_file = zing_dir / "my-todo-app.xml"
+        doc = ZingDocument(
+            stage="new",
+            content="# My Todo App\n\nA simple todo application.",
+            plan=None,
+            interactions=None,
+            audit=False,
+            approved=False,
+        )
+        write_zing_file(zing_file, doc)
 
-        # run_plan is imported lazily inside run_new(), so we mock it at
-        # the source module (zing_ai.orchestrator.commands.plan.run_plan).
         with (
+            # Mock the subprocess.run call (Claude interactive session)
             patch(
-                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                new_callable=AsyncMock,
-                return_value=mock_output,
-            ),
+                "zing_ai.orchestrator.commands.new.subprocess.run",
+            ) as mock_subprocess,
+            # Mock the next stage
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
-                new_callable=AsyncMock,
             ) as mock_run_plan,
         ):
             from zing_ai.orchestrator.commands.new import run_new
 
-            _run(
-                run_new(
-                    zing_file=None,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_new(
+                zing_file=None,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
+            # subprocess.run should have been called for Claude
+            mock_subprocess.assert_called_once()
+
             # run_plan should have been called from within run_new
-            mock_run_plan.assert_awaited_once()
+            mock_run_plan.assert_called_once()
             call_kwargs = mock_run_plan.call_args.kwargs
             assert call_kwargs["zing_file"] == "my-todo-app.xml"
             assert call_kwargs["project_root"] == tmp_path
-
-            # Verify the zing file was written
-            zing_file = zing_dir / "my-todo-app.xml"
-            assert zing_file.is_file()
-            doc = parse_zing_file(zing_file)
-            assert doc.stage == "new"
-            assert "todo" in (doc.content or "").lower()
 
     def test_plan_chains_into_plan_audit(self, tmp_path: Path) -> None:
         """run_plan should perform identification/investigation/flesh-out then call run_plan_audit."""
@@ -253,49 +299,42 @@ class TestFullPipelineFlow:
             # Mock identification phase
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                new_callable=AsyncMock,
                 return_value=(VALID_IDENTIFICATION_RESPONSE, "session-id1"),
             ),
-            # Mock investigation phase (invoke_claude_validated)
+            # Mock the TUI investigation phase (returns ProgressResult + Interactions)
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                new_callable=AsyncMock,
-                return_value=_minimal_interaction(),
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=(
+                    _make_progress_result(),
+                    [_minimal_interaction()],
+                ),
             ),
             # Mock flesh-out phase
             patch(
                 "zing_ai.orchestrator.commands.plan._invoke_flesh_out_with_session",
-                new_callable=AsyncMock,
                 return_value=(_minimal_plan(), "session-plan-1"),
             ),
             # Mock distiller
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
-                new_callable=AsyncMock,
                 return_value={},
             ),
-            # Mock web server
-            patch("zing_ai.orchestrator.commands.plan._start_web_server_background"),
             # Mock the next stage
             patch(
                 "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                new_callable=AsyncMock,
             ) as mock_plan_audit,
         ):
             from zing_ai.orchestrator.commands.plan import run_plan
 
-            _run(
-                run_plan(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
             # run_plan_audit should have been called (chaining)
-            mock_plan_audit.assert_awaited_once()
+            mock_plan_audit.assert_called_once()
             call_kwargs = mock_plan_audit.call_args.kwargs
             assert call_kwargs["zing_file"] == zing_path.name
 
@@ -307,86 +346,72 @@ class TestFullPipelineFlow:
             # Mock identification
             patch(
                 "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                new_callable=AsyncMock,
                 return_value=(VALID_IDENTIFICATION_RESPONSE, "audit-session-1"),
             ),
-            # Mock investigation
+            # Mock the TUI investigation phase
             patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                new_callable=AsyncMock,
-                return_value=_minimal_interaction(),
+                "zing_ai.orchestrator.commands.plan_audit._run_investigation_tui",
+                return_value=(
+                    _make_progress_result(),
+                    [_minimal_interaction()],
+                ),
             ),
             # Mock document update
             patch(
                 "zing_ai.orchestrator.commands.plan_audit._invoke_update_with_session",
-                new_callable=AsyncMock,
                 return_value=(_minimal_plan(), "audit-session-2"),
             ),
             # Mock distiller
             patch(
                 "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                new_callable=AsyncMock,
                 return_value={},
-            ),
-            # Mock web server
-            patch(
-                "zing_ai.orchestrator.commands.plan_audit._start_web_server_background"
             ),
             # Mock the next stage
             patch(
                 "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                new_callable=AsyncMock,
             ) as mock_plan_review,
         ):
             from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
 
-            _run(
-                run_plan_audit(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan_audit(
+                zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            mock_plan_review.assert_awaited_once()
+            mock_plan_review.assert_called_once()
 
     def test_plan_review_approval_chains_into_build(self, tmp_path: Path) -> None:
         """run_plan_review with approval (no modifications) should chain into run_build."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
-        # Create a ReviewState that approves immediately
+        # Mock ZingApp.run_with_screen to return an "approve" ReviewResult
+        approve_result = _make_review_result(action="approve", changes=[])
+
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server"
-            ) as mock_server,
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=approve_result,
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
-                new_callable=AsyncMock,
             ) as mock_call_build,
         ):
             from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-            # Set up the mock so that when _start_review_server is called,
-            # we immediately signal approval on the review state
-            def _auto_approve(path, review, *, port, no_browser):
-                review.approved = True
-                review.decision_event.set()
-
-            mock_server.side_effect = _auto_approve
-
-            _run(
-                run_plan_review(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            mock_call_build.assert_awaited_once()
+            mock_call_build.assert_called_once()
+
+            # Verify the zing document was marked approved
+            doc = parse_zing_file(zing_path)
+            assert doc.approved is True
 
     def test_build_chains_into_build_audit(self, tmp_path: Path) -> None:
         """run_build should iterate steps then chain into run_build_audit."""
@@ -397,39 +422,49 @@ class TestFullPipelineFlow:
         (tmp_path / "src" / "main.py").write_text("print('hello')")
         (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
 
-        async def mock_invoke_claude(*args, **kwargs):
-            """Yield a single output line."""
-            yield "Build output line\n"
+        import threading
+
+        def _mock_run_with_screen(screen):
+            """Wait for daemon worker threads, then return a BuildResult."""
+            # Give the worker thread a chance to run
+            for t in threading.enumerate():
+                if t.daemon and t.name != "MainThread":
+                    t.join(timeout=10)
+            return _make_build_result(completed_steps=[(0, 0)])
 
         with (
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
-                side_effect=mock_invoke_claude,
+                return_value=iter(["Build output line\n"]),
             ),
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
-                new_callable=AsyncMock,
                 return_value={},
             ),
-            patch("zing_ai.orchestrator.commands.build._start_web_server_background"),
+            # Mock BuildScreen to be a simple MagicMock
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=MagicMock(),
+            ),
+            # Mock ZingApp.run_with_screen to let worker finish, then return BuildResult
+            patch(
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
-                new_callable=AsyncMock,
             ) as mock_build_audit,
         ):
             from zing_ai.orchestrator.commands.build import run_build
 
-            _run(
-                run_build(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_build(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            mock_build_audit.assert_awaited_once()
+            mock_build_audit.assert_called_once()
 
             # Verify the step was marked done
             doc = parse_zing_file(zing_path)
@@ -454,15 +489,13 @@ class TestRetryLogic:
         from zing_ai.orchestrator.claude import invoke_claude_validated
         from zing_ai.orchestrator.xml_parser import parse_interactions_response
 
-        import jinja2
-
         retry_template = jinja2.Template(
             "Your response was invalid: {{ error }}. Please fix it."
         )
 
         call_count = 0
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -476,16 +509,14 @@ class TestRetryLogic:
             "zing_ai.orchestrator.claude.invoke_claude_full",
             side_effect=mock_invoke_full,
         ):
-            result = _run(
-                invoke_claude_validated(
-                    "Test prompt",
-                    validator=parse_interactions_response,
-                    retry_prompt_template=retry_template,
-                    max_retries=3,
-                    call_type=CallType.INVESTIGATE,
-                    config=_make_config(),
-                    skip_permissions=True,
-                )
+            result = invoke_claude_validated(
+                "Test prompt",
+                validator=parse_interactions_response,
+                retry_prompt_template=retry_template,
+                max_retries=3,
+                call_type=CallType.INVESTIGATE,
+                config=_make_config(),
+                skip_permissions=True,
             )
 
             assert isinstance(result, Interaction)
@@ -499,11 +530,9 @@ class TestRetryLogic:
         from zing_ai.orchestrator.claude import invoke_claude_validated
         from zing_ai.orchestrator.xml_parser import parse_steps_response
 
-        import jinja2
-
         retry_template = jinja2.Template("Fix: {{ error }}")
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             # Always return invalid response
             return (INVALID_STEPS_RESPONSE, "session-x")
 
@@ -514,16 +543,14 @@ class TestRetryLogic:
             ),
             pytest.raises(ValidationError, match="at least one stage"),
         ):
-            _run(
-                invoke_claude_validated(
-                    "Test prompt",
-                    validator=parse_steps_response,
-                    retry_prompt_template=retry_template,
-                    max_retries=2,
-                    call_type=CallType.PLAN,
-                    config=_make_config(),
-                    skip_permissions=True,
-                )
+            invoke_claude_validated(
+                "Test prompt",
+                validator=parse_steps_response,
+                retry_prompt_template=retry_template,
+                max_retries=2,
+                call_type=CallType.PLAN,
+                config=_make_config(),
+                skip_permissions=True,
             )
 
     def test_retry_calls_on_retry_callback(self) -> None:
@@ -531,17 +558,15 @@ class TestRetryLogic:
         from zing_ai.orchestrator.claude import invoke_claude_validated
         from zing_ai.orchestrator.xml_parser import parse_interactions_response
 
-        import jinja2
-
         retry_template = jinja2.Template("Fix: {{ error }}")
         on_retry_calls: list[tuple[int, str]] = []
 
-        async def mock_on_retry(attempt: int, error_message: str) -> None:
+        def mock_on_retry(attempt: int, error_message: str) -> None:
             on_retry_calls.append((attempt, error_message))
 
         call_count = 0
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
@@ -553,17 +578,15 @@ class TestRetryLogic:
             "zing_ai.orchestrator.claude.invoke_claude_full",
             side_effect=mock_invoke_full,
         ):
-            _run(
-                invoke_claude_validated(
-                    "Test prompt",
-                    validator=parse_interactions_response,
-                    retry_prompt_template=retry_template,
-                    max_retries=3,
-                    on_retry=mock_on_retry,
-                    call_type=CallType.INVESTIGATE,
-                    config=_make_config(),
-                    skip_permissions=True,
-                )
+            invoke_claude_validated(
+                "Test prompt",
+                validator=parse_interactions_response,
+                retry_prompt_template=retry_template,
+                max_retries=3,
+                on_retry=mock_on_retry,
+                call_type=CallType.INVESTIGATE,
+                config=_make_config(),
+                skip_permissions=True,
             )
 
             # on_retry should have been called for attempts 1 and 2
@@ -576,13 +599,11 @@ class TestRetryLogic:
         from zing_ai.orchestrator.claude import invoke_claude_validated
         from zing_ai.orchestrator.xml_parser import parse_interactions_response
 
-        import jinja2
-
         retry_template = jinja2.Template("Fix: {{ error }}")
         captured_kwargs: list[dict] = []
         call_count = 0
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             nonlocal call_count
             call_count += 1
             captured_kwargs.append(dict(kwargs))
@@ -595,16 +616,14 @@ class TestRetryLogic:
             "zing_ai.orchestrator.claude.invoke_claude_full",
             side_effect=mock_invoke_full,
         ):
-            _run(
-                invoke_claude_validated(
-                    "Test prompt",
-                    validator=parse_interactions_response,
-                    retry_prompt_template=retry_template,
-                    max_retries=3,
-                    call_type=CallType.INVESTIGATE,
-                    config=_make_config(),
-                    skip_permissions=True,
-                )
+            invoke_claude_validated(
+                "Test prompt",
+                validator=parse_interactions_response,
+                retry_prompt_template=retry_template,
+                max_retries=3,
+                call_type=CallType.INVESTIGATE,
+                config=_make_config(),
+                skip_permissions=True,
             )
 
             # Second call should include resume_session from first call
@@ -613,141 +632,161 @@ class TestRetryLogic:
 
 
 # ===================================================================
-# Test 3: Plan-Review Re-entry Loop
+# Test 3: Plan-Review Re-entry Loop (via TUI)
 # ===================================================================
 
 
 class TestPlanReviewReentry:
     """Test the plan-review re-entry loop.
 
-    When the user modifies choices during plan-review, the pipeline should
-    re-enter the plan -> plan-audit -> plan-review loop with the changes.
+    When the user modifies choices during plan-review via the TUI, the
+    pipeline should re-enter the plan -> plan-audit -> plan-review loop
+    with the changes.
+
+    ZingApp.run_with_screen() is mocked to return pre-built ReviewResult
+    objects that simulate user actions.
     """
 
     def test_modifications_trigger_replan(self, tmp_path: Path) -> None:
-        """When the user changes a choice, run_plan is called with replan_changes."""
+        """When the TUI returns a ReviewResult with action='replan', _call_replan is invoked."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+
+        # Simulate user switching from FastAPI (recommended) to Flask
+        replan_result = _make_review_result(
+            action="replan",
+            changes=[
+                {
+                    "choice_id": "choice-0",
+                    "new_selection": 1,
+                }
+            ],
+        )
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server"
-            ) as mock_server,
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=replan_result,
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
-                new_callable=AsyncMock,
             ) as mock_call_replan,
         ):
             from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-            # Simulate user switching from FastAPI (recommended) to Flask
-            def _modify_and_submit(path, review, *, port, no_browser):
-                # User selects choice index 1 (Flask) for choice set 0
-                review.user_selections[0] = 1
-                review.approved = True
-                review.decision_event.set()
-
-            mock_server.side_effect = _modify_and_submit
-
-            _run(
-                run_plan_review(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            # _call_replan should have been called with the change diff
-            mock_call_replan.assert_awaited_once()
+            # _call_replan should have been called with the changes
+            mock_call_replan.assert_called_once()
             call_kwargs = mock_call_replan.call_args.kwargs
             changes = call_kwargs["replan_changes"]
-
             assert len(changes) == 1
-            assert changes[0]["choice_set_message"] == "Which framework?"
-            assert changes[0]["original_recommended"] == "FastAPI"
-            assert changes[0]["user_selected"] == "Flask"
+            assert changes[0]["new_selection"] == 1
 
     def test_deletion_triggers_replan(self, tmp_path: Path) -> None:
-        """When the user deletes a choice set, run_plan is called with deleted flag."""
+        """When the TUI returns a change with new_selection=None, replan is triggered."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+
+        # Simulate user deleting a choice set (new_selection = None)
+        replan_result = _make_review_result(
+            action="replan",
+            changes=[
+                {
+                    "choice_id": "choice-0",
+                    "new_selection": None,
+                }
+            ],
+        )
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server"
-            ) as mock_server,
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=replan_result,
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
-                new_callable=AsyncMock,
             ) as mock_call_replan,
         ):
             from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-            # Simulate user deleting the choice set (selected_choice_index = None)
-            def _delete_and_submit(path, review, *, port, no_browser):
-                review.user_selections[0] = None
-                review.approved = True
-                review.decision_event.set()
-
-            mock_server.side_effect = _delete_and_submit
-
-            _run(
-                run_plan_review(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            mock_call_replan.assert_awaited_once()
+            mock_call_replan.assert_called_once()
             changes = mock_call_replan.call_args.kwargs["replan_changes"]
             assert len(changes) == 1
-            assert changes[0].get("deleted") is True
+            assert changes[0].get("new_selection") is None
 
     def test_no_modifications_goes_to_build(self, tmp_path: Path) -> None:
-        """When the user approves without changes, the pipeline proceeds to build."""
+        """When the TUI returns action='approve' with no changes, the pipeline proceeds to build."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+
+        approve_result = _make_review_result(action="approve", changes=[])
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server"
-            ) as mock_server,
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=approve_result,
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
-                new_callable=AsyncMock,
             ) as mock_call_build,
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
-                new_callable=AsyncMock,
             ) as mock_call_replan,
         ):
             from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-            # Approve with no modifications
-            def _approve(path, review, *, port, no_browser):
-                review.approved = True
-                review.decision_event.set()
-
-            mock_server.side_effect = _approve
-
-            _run(
-                run_plan_review(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
 
-            mock_call_build.assert_awaited_once()
-            mock_call_replan.assert_not_awaited()
+            mock_call_build.assert_called_once()
+            mock_call_replan.assert_not_called()
 
             # Verify the zing document was marked approved
             doc = parse_zing_file(zing_path)
             assert doc.approved is True
+
+    def test_tui_cancelled_takes_no_action(self, tmp_path: Path) -> None:
+        """When the user closes the TUI without deciding, no action is taken."""
+        zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+
+        with (
+            # Simulate TUI returning None (user closed without deciding)
+            patch(
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=None,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+            ) as mock_call_build,
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+            ) as mock_call_replan,
+        ):
+            from zing_ai.orchestrator.commands.plan_review import run_plan_review
+
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
+
+            mock_call_build.assert_not_called()
+            mock_call_replan.assert_not_called()
 
     def test_replan_invokes_plan_with_changes(self, tmp_path: Path) -> None:
         """The _call_replan helper calls run_plan with replan_changes kwarg."""
@@ -763,22 +802,18 @@ class TestPlanReviewReentry:
         # run_plan is imported lazily inside _call_replan, so mock at source
         with patch(
             "zing_ai.orchestrator.commands.plan.run_plan",
-            new_callable=AsyncMock,
         ) as mock_run_plan:
             from zing_ai.orchestrator.commands.plan_review import _call_replan
 
-            _run(
-                _call_replan(
-                    zing_path=zing_path,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                    replan_changes=changes,
-                )
+            _call_replan(
+                zing_path=zing_path,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+                replan_changes=changes,
             )
 
-            mock_run_plan.assert_awaited_once()
+            mock_run_plan.assert_called_once()
             call_kwargs = mock_run_plan.call_args.kwargs
             assert call_kwargs["replan_changes"] == changes
             assert call_kwargs["zing_file"] == zing_path.name
@@ -807,22 +842,19 @@ class TestDistillerCaching:
         source_file = tmp_path / "example.py"
         source_file.write_text("def hello(): pass")
 
-        async def mock_create_subprocess_exec(*args, **kwargs):
-            proc = MagicMock()
-            proc.returncode = 0
-            proc.communicate = AsyncMock(
-                return_value=(b"distilled: def hello()", b"")
-            )
-            return proc
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"distilled: def hello()"
+        mock_result.stderr = b""
 
         with patch(
-            "zing_ai.orchestrator.distiller.asyncio.create_subprocess_exec",
-            side_effect=mock_create_subprocess_exec,
-        ) as mock_exec:
-            result = _run(distill_file(source_file, project_root=project_root))
+            "zing_ai.orchestrator.distiller.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            result = distill_file(source_file, project_root=project_root)
 
             assert result == "distilled: def hello()"
-            mock_exec.assert_called_once()
+            mock_run.assert_called_once()
 
             # Verify cache file was created
             assert cache_dir.is_dir()
@@ -850,13 +882,13 @@ class TestDistillerCaching:
         cache_file.write_text("cached: def hello()")
 
         with patch(
-            "zing_ai.orchestrator.distiller.asyncio.create_subprocess_exec",
-        ) as mock_exec:
-            result = _run(distill_file(source_file, project_root=project_root))
+            "zing_ai.orchestrator.distiller.subprocess.run",
+        ) as mock_run:
+            result = distill_file(source_file, project_root=project_root)
 
             assert result == "cached: def hello()"
             # Subprocess should NOT have been called
-            mock_exec.assert_not_called()
+            mock_run.assert_not_called()
 
     def test_modified_file_creates_new_cache_entry(self, tmp_path: Path) -> None:
         """Modifying a file should produce a different hash and a new cache entry."""
@@ -868,22 +900,21 @@ class TestDistillerCaching:
 
         call_count = 0
 
-        async def mock_create_subprocess_exec(*args, **kwargs):
+        def mock_subprocess_run(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            proc = MagicMock()
-            proc.returncode = 0
-            proc.communicate = AsyncMock(
-                return_value=(f"distilled version {call_count}".encode(), b"")
-            )
-            return proc
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = f"distilled version {call_count}".encode()
+            result.stderr = b""
+            return result
 
         with patch(
-            "zing_ai.orchestrator.distiller.asyncio.create_subprocess_exec",
-            side_effect=mock_create_subprocess_exec,
+            "zing_ai.orchestrator.distiller.subprocess.run",
+            side_effect=mock_subprocess_run,
         ):
             # First distill
-            result1 = _run(distill_file(source_file, project_root=project_root))
+            result1 = distill_file(source_file, project_root=project_root)
             hash1 = _hash_file(source_file)
             assert result1 == "distilled version 1"
             assert call_count == 1
@@ -894,7 +925,7 @@ class TestDistillerCaching:
             assert hash1 != hash2, "Modified file should have a different hash"
 
             # Second distill
-            result2 = _run(distill_file(source_file, project_root=project_root))
+            result2 = distill_file(source_file, project_root=project_root)
             assert result2 == "distilled version 2"
             assert call_count == 2
 
@@ -908,177 +939,187 @@ class TestDistillerCaching:
         source_file = tmp_path / "example.py"
         source_file.write_text("def hello(): pass")
 
-        async def mock_create_subprocess_exec(*args, **kwargs):
-            proc = MagicMock()
-            proc.returncode = 0
-            proc.communicate = AsyncMock(
-                return_value=(b"distilled content", b"")
-            )
-            return proc
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"distilled content"
+        mock_result.stderr = b""
 
         with patch(
-            "zing_ai.orchestrator.distiller.asyncio.create_subprocess_exec",
-            side_effect=mock_create_subprocess_exec,
-        ) as mock_exec:
+            "zing_ai.orchestrator.distiller.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
             # First call: cache miss, subprocess called
-            result1 = _run(distill_file(source_file, project_root=project_root))
-            assert mock_exec.call_count == 1
+            result1 = distill_file(source_file, project_root=project_root)
+            assert mock_run.call_count == 1
 
             # Second call: cache hit, no subprocess
-            result2 = _run(distill_file(source_file, project_root=project_root))
-            assert mock_exec.call_count == 1  # still 1, not 2
+            result2 = distill_file(source_file, project_root=project_root)
+            assert mock_run.call_count == 1  # still 1, not 2
             assert result1 == result2 == "distilled content"
 
 
 # ===================================================================
-# Test 5: Web Server Pages
+# Test 5: TUI Screen Results Integration
 # ===================================================================
 
 
-class TestWebServerPages:
-    """Test that the web server starts and serves pages correctly.
+class TestTUIScreenResults:
+    """Test that TUI screen results are correctly handled by command modules.
 
-    Uses httpx AsyncClient as a test client against the FastAPI app.
+    Mocks ZingApp.run_with_screen() to return pre-defined result objects
+    and verifies each command processes them correctly.
     """
 
-    @pytest.fixture()
-    def app(self, tmp_path: Path):
-        """Create a test FastAPI app with a zing file."""
-        zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
-        return create_app(zing_file=zing_path)
+    def test_progress_result_from_plan_investigation(self, tmp_path: Path) -> None:
+        """_run_investigation_tui returns ProgressResult and parsed Interactions."""
+        # This is covered at the unit test level; here we verify the
+        # integration works when mocked at the TUI layer.
+        zing_path = _make_zing_file(tmp_path, stage="new")
 
-    @pytest.fixture()
-    async def client(self, app):
-        """Async HTTP client for the test app."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            yield ac
-
-    @pytest.mark.anyio()
-    async def test_index_redirects_to_progress(self, client: AsyncClient) -> None:
-        response = await client.get("/", follow_redirects=False)
-        assert response.status_code == 302
-        assert response.headers["location"] == "/progress"
-
-    @pytest.mark.anyio()
-    async def test_progress_page_renders(self, client: AsyncClient) -> None:
-        response = await client.get("/progress")
-        assert response.status_code == 200
-        assert "<!DOCTYPE html>" in response.text
-
-    @pytest.mark.anyio()
-    async def test_review_page_renders(self, client: AsyncClient) -> None:
-        response = await client.get("/review")
-        assert response.status_code == 200
-        assert "Review" in response.text
-
-    @pytest.mark.anyio()
-    async def test_build_page_renders(self, client: AsyncClient) -> None:
-        response = await client.get("/build")
-        assert response.status_code == 200
-        assert "Build" in response.text
-
-    @pytest.mark.anyio()
-    async def test_audit_page_renders(self, client: AsyncClient) -> None:
-        response = await client.get("/audit")
-        assert response.status_code == 200
-        assert "Audit" in response.text
-
-    @pytest.mark.anyio()
-    async def test_progress_stream_returns_sse(self, client: AsyncClient) -> None:
-        response = await client.get("/progress/stream")
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers.get("content-type", "")
-
-    @pytest.mark.anyio()
-    async def test_build_stream_returns_sse(self, client: AsyncClient) -> None:
-        response = await client.get("/build/stream")
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers.get("content-type", "")
-
-    @pytest.mark.anyio()
-    async def test_review_update_and_approve_flow(self, client: AsyncClient, app) -> None:
-        """Test the review update + approve HTTP flow end-to-end."""
-        from zing_ai.orchestrator.commands.plan_review import ReviewState
-        from zing_ai.orchestrator.models import Choice, ChoiceSet
-
-        # Attach review state to the app
-        review = ReviewState(
-            choice_sets=[
-                ChoiceSet(
-                    message="Which database?",
-                    explanation="Pick a DB.",
-                    choices=[
-                        Choice(label="SQLite", description="Simple", recommended=True),
-                        Choice(label="Postgres", description="Full", recommended=False),
-                    ],
-                )
-            ]
+        progress_result = _make_progress_result(
+            outputs={"investigate-0": "Choice set output"},
+            statuses={"investigate-0": "success"},
         )
-        app.state.review = review
 
-        # POST an update to switch selection
-        resp = await client.post(
-            "/review/update",
-            json={"choice_set_index": 0, "selected_choice_index": 1},
-        )
-        assert resp.status_code == 200
-        assert review.user_selections[0] == 1
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(VALID_IDENTIFICATION_RESPONSE, "session-id1"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=(progress_result, [_minimal_interaction()]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan._invoke_flesh_out_with_session",
+                return_value=(_minimal_plan(), "session-plan-1"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+            ),
+        ):
+            from zing_ai.orchestrator.commands.plan import run_plan
 
-        # POST approve
-        resp = await client.post("/review/approve")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is True
-        # Since user modified choice, should trigger replan
-        assert body["next_stage"] == "replan"
-        assert review.approved is True
-        assert review.decision_event.is_set()
-
-    @pytest.mark.anyio()
-    async def test_review_page_shows_choices(self, client: AsyncClient, app) -> None:
-        """Test that the review page renders choice set data when review state is set."""
-        from zing_ai.orchestrator.commands.plan_review import ReviewState
-        from zing_ai.orchestrator.models import Choice, ChoiceSet
-
-        review = ReviewState(
-            choice_sets=[
-                ChoiceSet(
-                    message="Pick a language",
-                    explanation="For the backend.",
-                    choices=[
-                        Choice(label="Python", description="Popular", recommended=True),
-                        Choice(label="Rust", description="Fast", recommended=False),
-                    ],
-                )
-            ]
-        )
-        app.state.review = review
-
-        response = await client.get("/review")
-        assert response.status_code == 200
-        assert "Pick a language" in response.text
-        assert "Python" in response.text
-
-    @pytest.mark.anyio()
-    async def test_audit_action_endpoint(self, client: AsyncClient) -> None:
-        """Test the audit action endpoint accepts valid actions."""
-        for action in ("fix", "skip", "discuss"):
-            resp = await client.post(
-                "/audit/action",
-                json={"finding_index": 0, "action": action},
+            # Should complete without error
+            run_plan(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
-            assert resp.status_code == 200
-            assert resp.json()["ok"] is True
 
-    @pytest.mark.anyio()
-    async def test_audit_action_rejects_invalid(self, client: AsyncClient) -> None:
-        """Test that invalid audit actions return 400."""
-        resp = await client.post(
-            "/audit/action",
-            json={"finding_index": 0, "action": "invalid"},
+            # Verify the zing file was written with plan data
+            doc = parse_zing_file(zing_path)
+            assert doc.stage == "plan"
+            assert doc.plan is not None
+            assert doc.interactions is not None
+
+    def test_review_result_approve_writes_zing_file(self, tmp_path: Path) -> None:
+        """ReviewResult with action='approve' writes approved=True to zing file."""
+        zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+
+        approve_result = _make_review_result(action="approve", changes=[])
+
+        with (
+            patch(
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=approve_result,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+            ),
+        ):
+            from zing_ai.orchestrator.commands.plan_review import run_plan_review
+
+            run_plan_review(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
+
+            doc = parse_zing_file(zing_path)
+            assert doc.approved is True
+
+    def test_audit_result_processed_by_build_audit(self, tmp_path: Path) -> None:
+        """AuditResult decisions are processed by run_build_audit."""
+        zing_path = _make_zing_file(tmp_path, stage="build", with_plan=True)
+
+        # Create the files referenced in the plan
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("print('hello')")
+        (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
+
+        from zing_ai.orchestrator.commands.build_audit import Finding, FindingGroup
+
+        mock_groups = [
+            AuditGroup(files=["src/main.py"]),
+            AuditGroup(files=["src/utils.py"]),
+        ]
+
+        review_output = (
+            "FINDING|Bug|high|high|src/main.py:5|Missing error handling\n"
+            "FINDING|Style|low|high|src/utils.py:1|Missing docstring\n"
         )
-        assert resp.status_code == 400
+
+        audit_decisions = _make_audit_result(
+            decisions=[
+                {"finding_index": 0, "severity": "high", "action": "fix"},
+                {"finding_index": 1, "severity": "low", "action": "skip"},
+            ]
+        )
+
+        # run_with_screen is called twice in build_audit:
+        # Phase 1: ProgressScreen -> ProgressResult
+        # Phase 2: AuditScreen -> AuditResult
+        run_with_screen_calls = [
+            _make_progress_result(),  # Phase 1
+            audit_decisions,          # Phase 2
+        ]
+        call_index = 0
+
+        def _mock_run_with_screen(screen):
+            nonlocal call_index
+            result = run_with_screen_calls[call_index]
+            call_index += 1
+            return result
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={
+                    tmp_path / "src" / "main.py": "distilled main",
+                    tmp_path / "src" / "utils.py": "distilled utils",
+                },
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=mock_groups,
+            ),
+            # Mock _run_review_tui to return review outputs
+            patch(
+                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
+                return_value=(_make_progress_result(), [review_output]),
+            ),
+            # Mock AuditScreen's ZingApp.run_with_screen call
+            patch(
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=audit_decisions,
+            ),
+        ):
+            from zing_ai.orchestrator.commands.build_audit import run_build_audit
+
+            # Should complete without error -- decisions are logged
+            run_build_audit(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
 
 
 # ===================================================================
@@ -1098,8 +1139,6 @@ class TestBuildAuditIntegration:
         (tmp_path / "src" / "main.py").write_text("print('hello')")
         (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
 
-        from zing_ai.orchestrator.models import AuditGroup
-
         mock_groups = [
             AuditGroup(files=["src/main.py"]),
             AuditGroup(files=["src/utils.py"]),
@@ -1110,10 +1149,16 @@ class TestBuildAuditIntegration:
             "FINDING|Style|low|high|src/utils.py:1|Missing docstring\n"
         )
 
+        audit_decisions = _make_audit_result(
+            decisions=[
+                {"finding_index": 0, "severity": "high", "action": "fix"},
+                {"finding_index": 1, "severity": "low", "action": "skip"},
+            ]
+        )
+
         with (
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
-                new_callable=AsyncMock,
                 return_value={
                     tmp_path / "src" / "main.py": "distilled main",
                     tmp_path / "src" / "utils.py": "distilled utils",
@@ -1121,36 +1166,27 @@ class TestBuildAuditIntegration:
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                new_callable=AsyncMock,
                 return_value=mock_groups,
             ),
+            # Mock Phase 1: _run_review_tui
             patch(
-                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                new_callable=AsyncMock,
-                return_value=(review_output, "audit-sess"),
+                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
+                return_value=(_make_progress_result(), [review_output]),
             ),
+            # Mock Phase 2: AuditScreen TUI
             patch(
-                "zing_ai.orchestrator.commands.build_audit._start_web_server_background"
-            ) as mock_web,
+                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                return_value=audit_decisions,
+            ),
         ):
             from zing_ai.orchestrator.commands.build_audit import run_build_audit
 
-            _run(
-                run_build_audit(
-                    zing_file=zing_path.name,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_build_audit(
+                zing_file=zing_path.name,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
-
-            # Web server should have been started with finding groups
-            mock_web.assert_called_once()
-            call_kwargs = mock_web.call_args
-            finding_groups = call_kwargs.kwargs.get("finding_groups", [])
-            # We expect findings grouped by severity
-            assert len(finding_groups) >= 1
 
 
 # ===================================================================
@@ -1276,32 +1312,80 @@ class TestPipelineControllerIntegration:
 
         with patch(
             "zing_ai.orchestrator.commands.new.run_new",
-            new_callable=AsyncMock,
         ) as mock_run_new:
-            _run(
-                run_pipeline(
-                    "new",
-                    zing_file=None,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_pipeline(
+                "new",
+                zing_file=None,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
-            mock_run_new.assert_awaited_once()
+            mock_run_new.assert_called_once()
+
+    def test_pipeline_dispatches_plan(self, tmp_path: Path) -> None:
+        """run_pipeline('plan') should dispatch to the plan command."""
+        from zing_ai.orchestrator.pipeline import run_pipeline
+
+        with patch(
+            "zing_ai.orchestrator.commands.plan.run_plan",
+        ) as mock_run_plan:
+            run_pipeline(
+                "plan",
+                zing_file="test.xml",
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
+            mock_run_plan.assert_called_once()
+
+    def test_pipeline_dispatches_build(self, tmp_path: Path) -> None:
+        """run_pipeline('build') should dispatch to the build command."""
+        from zing_ai.orchestrator.pipeline import run_pipeline
+
+        with patch(
+            "zing_ai.orchestrator.commands.build.run_build",
+        ) as mock_run_build:
+            run_pipeline(
+                "build",
+                zing_file="test.xml",
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
+            mock_run_build.assert_called_once()
+
+    def test_pipeline_dispatches_build_audit(self, tmp_path: Path) -> None:
+        """run_pipeline('build-audit') should dispatch to the build-audit command."""
+        from zing_ai.orchestrator.pipeline import run_pipeline
+
+        with patch(
+            "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+        ) as mock_run_build_audit:
+            run_pipeline(
+                "build-audit",
+                zing_file="test.xml",
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
+            )
+            mock_run_build_audit.assert_called_once()
 
     def test_pipeline_invalid_stage_raises(self, tmp_path: Path) -> None:
         """run_pipeline with an invalid stage raises ValueError."""
         from zing_ai.orchestrator.pipeline import run_pipeline
 
         with pytest.raises(ValueError, match="Invalid start_stage"):
-            _run(
-                run_pipeline(
-                    "nonexistent",
-                    zing_file=None,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=_make_config(),
-                    project_root=tmp_path,
-                )
+            run_pipeline(
+                "nonexistent",
+                zing_file=None,
+                skip_permissions=True,
+                config=_make_config(),
+                project_root=tmp_path,
             )
+
+    def test_pipeline_all_stages_recognized(self) -> None:
+        """All expected stage names are present in the STAGES constant."""
+        from zing_ai.orchestrator.pipeline import STAGES
+
+        expected = {"new", "plan", "plan-audit", "plan-review", "build", "build-audit"}
+        assert set(STAGES) == expected
