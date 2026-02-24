@@ -17,7 +17,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Label, Markdown, RadioButton, RadioSet
 
 
-class ChoiceCard(Widget):
+class ChoiceCard(Widget, can_focus=True):
     """A card displaying choices with explanation and selection tracking.
 
     Parameters
