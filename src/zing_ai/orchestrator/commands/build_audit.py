@@ -1,7 +1,7 @@
 """Orchestrator ``build-audit`` command -- audit build output.
 
 Groups changed files and runs parallel audit subprocesses to review them,
-then displays findings.
+then displays findings in a Textual TUI.
 
 Pipeline:
 
@@ -9,16 +9,20 @@ Pipeline:
 2. Distill those files via ``distiller.distill_files()``.
 3. Render ``build_audit_group.md.j2`` and invoke Claude to partition files
    into audit groups (parsed via ``xml_parser.parse_audit_response()``).
-4. For each group, render ``build_audit_review.md.j2`` and invoke Claude
-   in parallel (via ``ThreadPoolExecutor``), collecting findings.
-5. Display findings (will be shown in the TUI in a later step).
+4. **Phase 1 (investigation):** Push a ``ProgressScreen`` and run parallel
+   review Claude calls per group via worker threads.  Each group gets its
+   own subprocess entry in the TUI.
+5. **Phase 2 (results):** Pop the ``ProgressScreen``, parse findings,
+   group by severity, and push an ``AuditScreen`` for user triage.
+6. Handle user action decisions from the ``AuditResult`` returned by
+   ``AuditScreen.dismiss()``.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -198,8 +202,13 @@ def run_build_audit(
     """Run the ``build-audit`` orchestrator command.
 
     Collects files referenced in the plan, distills them, groups them
-    via a Claude call, runs parallel review Claude calls per group,
-    then starts the web server so the user can review audit findings.
+    via a Claude call, then runs a two-phase TUI flow:
+
+    * **Phase 1 (investigation):** A ``ProgressScreen`` shows parallel
+      review Claude calls per audit group, each as a subprocess entry.
+    * **Phase 2 (results):** An ``AuditScreen`` presents grouped
+      findings for user triage, returning an ``AuditResult`` with
+      user decisions.
 
     Parameters
     ----------
@@ -268,45 +277,29 @@ def run_build_audit(
     for i, group in enumerate(audit_groups):
         logger.debug("  Group %d: %d files -- %s", i + 1, len(group.files), group.files)
 
-    # --- Step 4: Run parallel reviews per group ---
-    logger.info("Build-audit Step 4: Running parallel reviews for %d groups", len(audit_groups))
+    # --- Phase 1: Investigation via ProgressScreen ---
+    # Deferred TUI imports to avoid circular dependency (AuditScreen
+    # imports Finding/FindingGroup from this module; the screens
+    # __init__.py re-exports all screens, so importing any screen
+    # triggers the cycle).
+    from zing_ai.orchestrator.tui.app import ZingApp
+    from zing_ai.orchestrator.tui.results import AuditResult
 
-    def _review_group(args: tuple[AuditGroup, int]) -> str:
-        """Run a single audit review for a group of files.
+    logger.info(
+        "Build-audit Phase 1: Running parallel reviews for %d groups",
+        len(audit_groups),
+    )
 
-        Returns the raw review output text.
-        """
-        group, group_index = args
-        # Build distilled code context for this group's files
-        group_distilled: dict[str, str] = {}
-        for f in group.files:
-            if f in distilled_files:
-                group_distilled[f] = distilled_files[f]
+    progress_result, review_outputs = _run_review_tui(
+        audit_groups=audit_groups,
+        zing_content=zing_content,
+        distilled_files=distilled_files,
+        config=config,
+        skip_permissions=skip_permissions,
+    )
 
-        review_prompt = render_prompt(
-            "build_audit_review.md.j2",
-            zing_content=zing_content,
-            group_files=group.files,
-            distilled_code=group_distilled,
-        )
-
-        output, _session_id = claude.invoke_claude_full(
-            review_prompt,
-            call_type=CallType.AUDIT,
-            config=config,
-            skip_permissions=skip_permissions,
-        )
-
-        logger.info("Review group %d completed (%d chars)", group_index + 1, len(output))
-        return output
-
-    with ThreadPoolExecutor() as executor:
-        review_outputs: list[str] = list(
-            executor.map(_review_group, [(group, i) for i, group in enumerate(audit_groups)])
-        )
-
-    # --- Step 5: Parse and collect findings ---
-    logger.info("Build-audit Step 5: Parsing findings")
+    # --- Parse and collect findings ---
+    logger.info("Build-audit: Parsing findings from %d review outputs", len(review_outputs))
     all_findings: list[Finding] = []
     for output in review_outputs:
         group_findings = parse_review_findings(output, start_index=len(all_findings))
@@ -314,22 +307,169 @@ def run_build_audit(
 
     logger.info("Collected %d total findings", len(all_findings))
 
-    # Group findings by severity for the template
+    # Group findings by severity
     finding_groups = group_findings_by_severity(all_findings)
     logger.info(
         "Findings by severity: %s",
         {g.severity: len(g.findings) for g in finding_groups},
     )
 
-    # --- Step 6: Display findings ---
-    # TODO: Replace with Textual TUI in a later step.
-    logger.info("Build-audit Step 6: Audit complete")
-    for group in finding_groups:
-        for finding in group.findings:
-            logger.info(
-                "[%s] %s -- %s (%s)",
-                finding.severity.upper(),
-                finding.location,
-                finding.title,
-                finding.category,
+    # --- Phase 2: Display findings via AuditScreen ---
+    logger.info("Build-audit Phase 2: Presenting %d finding groups", len(finding_groups))
+
+    # Deferred import to avoid circular dependency (AuditScreen imports
+    # Finding/FindingGroup from this module).
+    from zing_ai.orchestrator.tui.screens.audit import AuditScreen
+
+    audit_result: AuditResult = ZingApp.run_with_screen(AuditScreen(finding_groups))
+
+    # --- Handle user decisions ---
+    logger.info("Build-audit: Processing %d user decisions", len(audit_result.decisions))
+    for decision in audit_result.decisions:
+        action = decision.get("action", "skip")
+        severity = decision.get("severity", "unknown")
+        finding_index = decision.get("finding_index", -1)
+        logger.info(
+            "Decision for finding %d (%s): %s",
+            finding_index,
+            severity,
+            action,
+        )
+
+
+def _run_review_tui(
+    *,
+    audit_groups: list[AuditGroup],
+    zing_content: str,
+    distilled_files: dict[str, str],
+    config: ZingConfig,
+    skip_permissions: bool,
+) -> tuple[ProgressResult, list[str]]:
+    """Run parallel review Claude calls inside a ProgressScreen.
+
+    Each audit group gets its own subprocess entry in the TUI.
+    When all reviews complete, the screen is dismissed and the raw
+    review outputs are returned.
+
+    Parameters
+    ----------
+    audit_groups:
+        The audit groups from the grouping step.
+    zing_content:
+        The zing document overview content.
+    distilled_files:
+        String-keyed distilled file contents.
+    config:
+        Zing configuration.
+    skip_permissions:
+        Whether to skip permission checks.
+
+    Returns
+    -------
+    tuple[ProgressResult, list[str]]
+        The TUI progress result and a list of raw review outputs
+        (one per group, in the same order as *audit_groups*).
+    """
+    from zing_ai.orchestrator.tui.app import ZingApp
+    from zing_ai.orchestrator.tui.results import ProgressResult
+    from zing_ai.orchestrator.tui.screens.progress import ProgressScreen
+
+    screen = ProgressScreen()
+
+    # Shared state guarded by a lock so workers can safely record
+    # their results without races.
+    results_lock = threading.Lock()
+    review_results: dict[str, str] = {}
+
+    def _review_worker(
+        group: AuditGroup,
+        group_index: int,
+        group_id: str,
+    ) -> None:
+        """Worker function executed in a thread for each audit group."""
+        screen.update_status(group_id, "running")
+
+        try:
+            # Build distilled code context for this group's files
+            group_distilled: dict[str, str] = {}
+            for f in group.files:
+                if f in distilled_files:
+                    group_distilled[f] = distilled_files[f]
+
+            review_prompt = render_prompt(
+                "build_audit_review.md.j2",
+                zing_content=zing_content,
+                group_files=group.files,
+                distilled_code=group_distilled,
             )
+
+            output, _session_id = claude.invoke_claude_full(
+                review_prompt,
+                call_type=CallType.AUDIT,
+                config=config,
+                skip_permissions=skip_permissions,
+            )
+
+            screen.append_output(group_id, f"Review complete ({len(output)} chars)")
+            logger.info(
+                "Review group %d completed (%d chars)",
+                group_index + 1,
+                len(output),
+            )
+
+            with results_lock:
+                review_results[group_id] = output
+
+            screen.update_status(group_id, "success")
+        except Exception as exc:
+            logger.error(
+                "Review failed for group %d: %s", group_index + 1, exc
+            )
+            screen.append_output(group_id, f"ERROR: {exc}")
+            screen.update_status(group_id, "failed")
+
+            # Store empty output so the pipeline can continue
+            with results_lock:
+                review_results[group_id] = ""
+
+    # Register subprocess entries and build group ID mapping
+    group_ids: list[str] = []
+    for i, group in enumerate(audit_groups):
+        group_id = f"review-{i}"
+        group_ids.append(group_id)
+        file_summary = ", ".join(group.files[:3])
+        if len(group.files) > 3:
+            file_summary += f" (+{len(group.files) - 3} more)"
+        screen.add_subprocess(group_id, f"Review: {file_summary}")
+
+    # Launch all workers as daemon threads
+    threads: list[threading.Thread] = []
+    for i, (group, group_id) in enumerate(zip(audit_groups, group_ids)):
+        t = threading.Thread(
+            target=_review_worker,
+            args=(group, i, group_id),
+            daemon=True,
+        )
+        threads.append(t)
+
+    # A coordinator thread that waits for all workers and then
+    # dismisses the screen.
+    def _coordinator() -> None:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        screen.mark_all_complete()
+
+    coordinator = threading.Thread(target=_coordinator, daemon=True)
+    coordinator.start()
+
+    # Block until the screen is dismissed.
+    progress_result: ProgressResult = ZingApp.run_with_screen(screen)
+
+    # Gather results in original group order.
+    ordered_outputs: list[str] = []
+    for group_id in group_ids:
+        ordered_outputs.append(review_results.get(group_id, ""))
+
+    return progress_result, ordered_outputs
