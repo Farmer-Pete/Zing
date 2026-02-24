@@ -18,7 +18,7 @@ saved audit session and merges updated interactions.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 
 import jinja2
@@ -33,6 +33,9 @@ from zing_ai.orchestrator.commands.plan import (
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, ZingDocument
+from zing_ai.orchestrator.tui.app import ZingApp
+from zing_ai.orchestrator.tui.results import ProgressResult
+from zing_ai.orchestrator.tui.screens.progress import ProgressScreen
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_interactions_response,
@@ -258,6 +261,127 @@ def run_plan_audit(
 
 
 # ---------------------------------------------------------------------------
+# TUI investigation helper
+# ---------------------------------------------------------------------------
+
+
+def _run_investigation_tui(
+    *,
+    area_prompts: list[tuple[InvestigationArea, str]],
+    config: ZingConfig,
+    skip_permissions: bool,
+) -> tuple[ProgressResult, list[Interaction]]:
+    """Run parallel audit investigation Claude calls inside a ProgressScreen.
+
+    Each evaluation area gets its own subprocess entry in the TUI.
+    Output is streamed line-by-line to the screen.  When all areas
+    complete, the screen is dismissed and the parsed results are
+    returned.
+
+    Parameters
+    ----------
+    area_prompts:
+        A list of ``(InvestigationArea, rendered_prompt)`` tuples.
+    config:
+        Zing configuration.
+    skip_permissions:
+        Whether to skip permission checks.
+
+    Returns
+    -------
+    tuple[ProgressResult, list[Interaction]]
+        The TUI progress result and a list of parsed interactions
+        (one per area, in the same order as *area_prompts*).
+    """
+    screen = ProgressScreen()
+
+    # Shared state guarded by a lock so workers can safely record their
+    # results without races.
+    results_lock = threading.Lock()
+    investigation_results: dict[str, Interaction] = {}
+
+    def _investigate_worker(
+        area: InvestigationArea,
+        prompt: str,
+        area_id: str,
+    ) -> None:
+        """Worker function executed in a thread by each investigation."""
+        screen.update_status(area_id, "running")
+
+        try:
+            interaction = claude.invoke_claude_validated(
+                prompt,
+                validator=parse_interactions_response,
+                retry_prompt_template=_RETRY_TEMPLATE,
+                call_type=CallType.AUDIT,
+                config=config,
+                skip_permissions=skip_permissions,
+            )
+
+            screen.append_output(area_id, f"Produced {len(interaction.choice_sets)} choice set(s)")
+            logger.info(
+                "Area '%s' produced %d choice sets",
+                area.name,
+                len(interaction.choice_sets),
+            )
+
+            with results_lock:
+                investigation_results[area_id] = interaction
+
+            screen.update_status(area_id, "success")
+        except Exception as exc:
+            logger.error("Investigation failed for area '%s': %s", area.name, exc)
+            screen.append_output(area_id, f"ERROR: {exc}")
+            screen.update_status(area_id, "failed")
+
+            # Store an empty interaction so the pipeline can continue
+            with results_lock:
+                investigation_results[area_id] = Interaction(choice_sets=[])
+
+    # Register subprocess entries and build area ID mapping
+    area_ids: list[str] = []
+    for i, (area, _prompt) in enumerate(area_prompts):
+        area_id = f"investigate-{i}"
+        area_ids.append(area_id)
+        screen.add_subprocess(area_id, f"Investigate: {area.name}")
+
+    # Launch all workers as daemon threads that interact with the screen.
+    # We track them so we can call mark_all_complete when they're done.
+    threads: list[threading.Thread] = []
+    for (area, prompt), area_id in zip(area_prompts, area_ids):
+        t = threading.Thread(
+            target=_investigate_worker,
+            args=(area, prompt, area_id),
+            daemon=True,
+        )
+        threads.append(t)
+
+    # A coordinator thread that waits for all workers and then
+    # dismisses the screen.
+    def _coordinator() -> None:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        screen.mark_all_complete()
+
+    coordinator = threading.Thread(target=_coordinator, daemon=True)
+    coordinator.start()
+
+    # Block until the screen is dismissed.
+    progress_result: ProgressResult = ZingApp.run_with_screen(screen)
+
+    # Gather results in original area order.
+    ordered_results: list[Interaction] = []
+    for area_id in area_ids:
+        ordered_results.append(
+            investigation_results.get(area_id, Interaction(choice_sets=[]))
+        )
+
+    return progress_result, ordered_results
+
+
+# ---------------------------------------------------------------------------
 # First-run flow
 # ---------------------------------------------------------------------------
 
@@ -313,12 +437,13 @@ def _run_first_audit(
         distilled = distill_files(file_paths, project_root=project_root)
         logger.info("Distilled %d files", len(distilled))
 
-    # --- Phase 3: Investigation (parallel) ---
+    # --- Phase 3: Investigation (parallel, via TUI) ---
     logger.info("Audit Phase 3: Investigation (parallel)")
 
-    def _investigate_area(area: InvestigationArea) -> Interaction:
-        """Run investigation for a single evaluation area."""
-        # Build distilled code context for this area's files
+    # Build the investigation prompts ahead of time so the TUI workers
+    # only need to invoke Claude and stream output.
+    area_prompts: list[tuple[InvestigationArea, str]] = []
+    for area in areas:
         area_distilled: dict[str, str] = {}
         for f in area.files:
             fp = project_root / f
@@ -333,23 +458,14 @@ def _run_first_audit(
             files=area.files,
             distilled_code=area_distilled,
         )
+        area_prompts.append((area, investigate_prompt))
 
-        interaction = claude.invoke_claude_validated(
-            investigate_prompt,
-            validator=parse_interactions_response,
-            retry_prompt_template=_RETRY_TEMPLATE,
-            call_type=CallType.AUDIT,
-            config=config,
-            skip_permissions=skip_permissions,
-        )
-
-        logger.info("Area '%s' produced %d choice sets", area.name, len(interaction.choice_sets))
-        return interaction
-
-    with ThreadPoolExecutor() as executor:
-        investigation_results: list[Interaction] = list(
-            executor.map(_investigate_area, areas)
-        )
+    # Run all investigations in a ProgressScreen via the TUI.
+    progress_result, investigation_results = _run_investigation_tui(
+        area_prompts=area_prompts,
+        config=config,
+        skip_permissions=skip_permissions,
+    )
 
     # Merge all interactions into one
     all_choice_sets = []
