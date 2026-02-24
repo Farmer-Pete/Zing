@@ -3,85 +3,15 @@
 from __future__ import annotations
 
 import logging
-import re
+import subprocess
+import sys
 from pathlib import Path
 
-from zing_ai.orchestrator import claude, project
-from zing_ai.orchestrator.config import CallType, ZingConfig
-from zing_ai.orchestrator.models import ZingDocument
-from zing_ai.orchestrator.xml_parser import write_zing_file
+from zing_ai.orchestrator import project
+from zing_ai.orchestrator.config import ZingConfig
 from zing_ai.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_project_name(markdown: str) -> str:
-    """Extract a project name from Claude's markdown output.
-
-    Strategy:
-    1. Look for the first markdown heading (``# ...``).
-    2. If no heading is found, use the first non-empty line.
-    3. Convert the extracted name to kebab-case suitable for a filename.
-
-    Returns
-    -------
-    str
-        A kebab-case project name (e.g. ``"recipe-app"``).
-
-    Raises
-    ------
-    ValueError
-        If *markdown* is empty or contains no usable text.
-    """
-    name: str | None = None
-
-    # Try to find the first markdown heading
-    for line in markdown.splitlines():
-        stripped = line.strip()
-        match = re.match(r"^#+\s+(.+)$", stripped)
-        if match:
-            name = match.group(1).strip()
-            break
-
-    # Fallback: first non-empty line
-    if name is None:
-        for line in markdown.splitlines():
-            stripped = line.strip()
-            if stripped:
-                name = stripped
-                break
-
-    if not name:
-        raise ValueError("Cannot extract project name from empty markdown output")
-
-    return _to_kebab_case(name)
-
-
-def _to_kebab_case(text: str) -> str:
-    """Convert a human-readable name to kebab-case.
-
-    Examples
-    --------
-    >>> _to_kebab_case("Recipe App")
-    'recipe-app'
-    >>> _to_kebab_case("My Cool Project!!!")
-    'my-cool-project'
-    >>> _to_kebab_case("  hello   world  ")
-    'hello-world'
-    """
-    # Lowercase
-    text = text.lower()
-    # Replace non-alphanumeric characters (except hyphens) with spaces
-    text = re.sub(r"[^a-z0-9-]", " ", text)
-    # Collapse whitespace and strip
-    text = re.sub(r"\s+", " ", text).strip()
-    # Replace spaces with hyphens
-    text = text.replace(" ", "-")
-    # Collapse multiple hyphens
-    text = re.sub(r"-+", "-", text)
-    # Strip leading/trailing hyphens
-    text = text.strip("-")
-    return text
 
 
 def run_new(
@@ -94,8 +24,12 @@ def run_new(
     """Run the ``new`` orchestrator command.
 
     Launches an interactive Claude session to collect project requirements
-    from the user.  The resulting markdown is saved as a ``.zing/{name}.xml``
-    file, then the flow continues into ``run_plan()``.
+    from the user.  Claude is invoked directly via ``subprocess.run`` with
+    inherited stdio so the user interacts with Claude in their terminal.
+
+    After Claude exits, the newest ``.xml`` file in ``.zing/`` (by mtime)
+    is identified as the file Claude created, and the flow auto-chains
+    into ``run_plan()``.
 
     Parameters
     ----------
@@ -114,43 +48,35 @@ def run_new(
     zing_dir = project.ensure_zing_dir(project_root)
     logger.debug("Ensured .zing directory at %s", zing_dir)
 
-    # 2. Render the prompt template
-    prompt = render_prompt("new.md.j2")
-    logger.debug("Rendered new.md.j2 prompt (%d chars)", len(prompt))
+    # 2. Render the system prompt template
+    system_prompt = render_prompt("new.md.j2")
+    logger.debug("Rendered new.md.j2 system prompt (%d chars)", len(system_prompt))
 
-    # 3. Invoke Claude interactively to collect requirements
-    #    This is an interactive session — Claude talks to the user via the terminal.
-    #    We use invoke_claude_full() which collects all output.
-    markdown, _session_id = claude.invoke_claude_full(
-        prompt,
-        call_type=CallType.INVESTIGATE,
-        config=config,
-        skip_permissions=skip_permissions,
+    # 3. Invoke Claude interactively with inherited stdio
+    #    The user talks to Claude directly in the terminal.
+    subprocess.run(
+        ["claude", "--system-prompt", system_prompt],
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
-    logger.debug("Claude returned %d chars of output", len(markdown))
+    logger.debug("Claude process exited")
 
-    # 4. Extract project name from the markdown output
-    name = _extract_project_name(markdown)
-    logger.info("Extracted project name: %s", name)
+    # 4. Scan .zing/ for the newest .xml file (by mtime)
+    xml_files = sorted(zing_dir.glob("*.xml"), key=lambda p: p.stat().st_mtime)
+    if not xml_files:
+        logger.error("No .xml file found in %s after Claude exited", zing_dir)
+        print("No valid zing file was created. Please run `zing-ai new` again.")
+        return
 
-    # 5. Create the zing file
-    zing_path = zing_dir / f"{name}.xml"
-    doc = ZingDocument(
-        stage="new",
-        content=markdown,
-        plan=None,
-        interactions=None,
-        audit=False,
-        approved=False,
-    )
-    write_zing_file(zing_path, doc)
-    logger.info("Wrote zing file: %s", zing_path)
+    newest_xml = xml_files[-1]
+    logger.info("Found newest zing file: %s", newest_xml)
 
-    # 6. Flow into planning
+    # 5. Auto-chain into planning
     from zing_ai.orchestrator.commands.plan import run_plan
 
     run_plan(
-        zing_file=zing_path.name,
+        zing_file=newest_xml.name,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,
