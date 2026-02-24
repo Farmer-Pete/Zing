@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.tui.results import BuildResult
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 
 # ---------------------------------------------------------------------------
@@ -147,6 +149,32 @@ def _mock_invoke_claude_gen(prompt, **kwargs):
     yield "Line 1\n"
     yield "Line 2\n"
     yield "Done.\n"
+
+
+def _mock_run_with_screen(screen):
+    """Mock ``ZingApp.run_with_screen`` that lets the worker thread finish.
+
+    The build command starts a daemon worker thread *before* calling
+    ``run_with_screen``.  This mock waits for all daemon threads to
+    finish so assertions in the test can inspect side-effects produced
+    by the worker (e.g. zing file updates).
+    """
+    current = threading.current_thread()
+    for t in threading.enumerate():
+        if t is not current and t.daemon:
+            t.join(timeout=10)
+
+    return BuildResult(completed_steps=[], failed_step=None)
+
+
+def _make_mock_screen():
+    """Create a MagicMock that stands in for BuildScreen.
+
+    Methods like ``start_step``, ``append_output``, ``complete_step``,
+    and ``finish`` are simple no-ops, allowing the worker thread to run
+    without a real Textual app.
+    """
+    return MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +331,14 @@ class TestRunBuildFullPipeline:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 mock_build_audit,
             ),
@@ -343,6 +379,14 @@ class TestRunBuildFullPipeline:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -394,6 +438,14 @@ class TestRunBuildSkipsCompletedSteps:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -429,6 +481,14 @@ class TestRunBuildSkipsCompletedSteps:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -497,6 +557,14 @@ class TestRunBuildDistillation:
                 side_effect=mock_distill,
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -556,6 +624,14 @@ class TestRunBuildDistillation:
                 side_effect=mock_distill,
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -604,6 +680,14 @@ class TestRunBuildDistillation:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 side_effect=mock_distill,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -660,6 +744,14 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -703,6 +795,14 @@ class TestRunBuildClaudeInvocation:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -754,6 +854,14 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -798,6 +906,14 @@ class TestRunBuildClaudeInvocation:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -851,6 +967,14 @@ class TestRunBuildClaudeInvocation:
                 side_effect=mock_distill,
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -900,6 +1024,14 @@ class TestRunBuildDocumentUpdates:
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -955,6 +1087,14 @@ class TestRunBuildDocumentUpdates:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 MagicMock(),
             ),
@@ -993,10 +1133,18 @@ class TestRunBuildNoPlan:
             invoke_calls.append({})
             yield "done\n"
 
+        mock_run = MagicMock(
+            side_effect=AssertionError("TUI should not be launched"),
+        )
+
         with (
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                mock_run,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1012,6 +1160,8 @@ class TestRunBuildNoPlan:
 
         # No Claude calls should have been made
         assert len(invoke_calls) == 0
+        # TUI should not have been launched
+        mock_run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1201,14 @@ class TestRunBuildCallsAudit:
                 return_value={},
             ),
             patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=_make_mock_screen(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
                 mock_audit,
             ),
@@ -1068,6 +1226,209 @@ class TestRunBuildCallsAudit:
             config=config,
             project_root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# run_build tests -- BuildScreen interaction
+# ---------------------------------------------------------------------------
+
+
+class TestRunBuildScreenInteraction:
+    """Tests that run_build correctly interacts with the BuildScreen."""
+
+    def test_build_screen_created_with_plan_stages(self, tmp_path: Path) -> None:
+        """BuildScreen should be created with the plan stages."""
+        plan = Plan(
+            stages=[
+                Stage(
+                    label="S1",
+                    steps=[
+                        Step(label="Step A", instructions="Do A.", files=[], done=False),
+                    ],
+                ),
+            ]
+        )
+        _make_zing_file_with_plan(tmp_path, plan=plan)
+        config = ZingConfig()
+
+        captured_screen = None
+
+        def capturing_run_with_screen(screen):
+            nonlocal captured_screen
+            captured_screen = screen
+            current = threading.current_thread()
+            for t in threading.enumerate():
+                if t is not current and t.daemon:
+                    t.join(timeout=10)
+            return BuildResult(completed_steps=[], failed_step=None)
+
+        def mock_invoke(prompt, **kwargs):
+            yield "done\n"
+
+        mock_screen = _make_mock_screen()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build.claude.invoke_claude",
+                side_effect=mock_invoke,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=mock_screen,
+            ) as mock_build_screen_cls,
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=capturing_run_with_screen,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+                MagicMock(),
+            ),
+        ):
+            run_build(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        # BuildScreen constructor should have been called with plan stages
+        mock_build_screen_cls.assert_called_once()
+        call_args = mock_build_screen_cls.call_args
+        stages_arg = call_args[0][0]
+        assert len(stages_arg) == 1
+        assert stages_arg[0].label == "S1"
+
+    def test_worker_streams_output_to_screen(self, tmp_path: Path) -> None:
+        """The worker thread should call screen methods for each step."""
+        plan = Plan(
+            stages=[
+                Stage(
+                    label="S1",
+                    steps=[
+                        Step(label="Step A", instructions="Do A.", files=[], done=False),
+                    ],
+                ),
+            ]
+        )
+        _make_zing_file_with_plan(tmp_path, plan=plan)
+        config = ZingConfig()
+
+        def mock_invoke(prompt, **kwargs):
+            yield "line 1\n"
+            yield "line 2\n"
+
+        mock_screen = _make_mock_screen()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build.claude.invoke_claude",
+                side_effect=mock_invoke,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=mock_screen,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+                MagicMock(),
+            ),
+        ):
+            run_build(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        # start_step should have been called for step (0, 0)
+        mock_screen.start_step.assert_called_once_with(0, 0)
+
+        # append_output should have been called for each line
+        assert mock_screen.append_output.call_count == 2
+        mock_screen.append_output.assert_any_call("line 1\n")
+        mock_screen.append_output.assert_any_call("line 2\n")
+
+        # complete_step should have been called with success=True
+        mock_screen.complete_step.assert_called_once_with(0, 0, success=True)
+
+        # finish should have been called
+        mock_screen.finish.assert_called_once()
+
+    def test_worker_calls_finish_after_all_steps(self, tmp_path: Path) -> None:
+        """screen.finish() should be called after all steps complete."""
+        plan = Plan(
+            stages=[
+                Stage(
+                    label="S1",
+                    steps=[
+                        Step(label="Step A", instructions="Do A.", files=[], done=False),
+                        Step(label="Step B", instructions="Do B.", files=[], done=False),
+                    ],
+                ),
+            ]
+        )
+        _make_zing_file_with_plan(tmp_path, plan=plan)
+        config = ZingConfig()
+
+        def mock_invoke(prompt, **kwargs):
+            yield "done\n"
+
+        mock_screen = _make_mock_screen()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build.claude.invoke_claude",
+                side_effect=mock_invoke,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.BuildScreen",
+                return_value=mock_screen,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
+                side_effect=_mock_run_with_screen,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+                MagicMock(),
+            ),
+        ):
+            run_build(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        # start_step called for each step: (0, 0) and (0, 1)
+        assert mock_screen.start_step.call_count == 2
+        mock_screen.start_step.assert_any_call(0, 0)
+        mock_screen.start_step.assert_any_call(0, 1)
+
+        # complete_step called for each step
+        assert mock_screen.complete_step.call_count == 2
+        mock_screen.complete_step.assert_any_call(0, 0, success=True)
+        mock_screen.complete_step.assert_any_call(0, 1, success=True)
+
+        # finish called once at the end
+        mock_screen.finish.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
