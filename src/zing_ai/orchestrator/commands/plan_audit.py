@@ -17,8 +17,8 @@ saved audit session and merges updated interactions.
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import jinja2
@@ -33,9 +33,6 @@ from zing_ai.orchestrator.commands.plan import (
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, ZingDocument
-from zing_ai.orchestrator.web.app import (
-    start_server_background as _start_web_server_background,
-)
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_interactions_response,
@@ -59,7 +56,7 @@ _RETRY_TEMPLATE = jinja2.Template(
 # ---------------------------------------------------------------------------
 
 
-async def _invoke_update_with_session(
+def _invoke_update_with_session(
     prompt: str,
     *,
     call_type: CallType,
@@ -96,7 +93,7 @@ async def _invoke_update_with_session(
     ValidationError
         If validation fails after all retries.
     """
-    output, session_id = await claude.invoke_claude_full(
+    output, session_id = claude.invoke_claude_full(
         prompt,
         call_type=call_type,
         config=config,
@@ -118,7 +115,7 @@ async def _invoke_update_with_session(
                 raise
 
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
-            output, session_id = await claude.invoke_claude_full(
+            output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 call_type=call_type,
                 config=config,
@@ -135,7 +132,7 @@ async def _invoke_update_with_session(
 # ---------------------------------------------------------------------------
 
 
-async def _invoke_reaudit_with_session(
+def _invoke_reaudit_with_session(
     prompt: str,
     *,
     call_type: CallType,
@@ -154,7 +151,7 @@ async def _invoke_reaudit_with_session(
     tuple[Plan, Interaction | None, str]
         ``(updated_plan, new_interactions_or_none, session_id)``
     """
-    output, session_id = await claude.invoke_claude_full(
+    output, session_id = claude.invoke_claude_full(
         prompt,
         call_type=call_type,
         config=config,
@@ -185,7 +182,7 @@ async def _invoke_reaudit_with_session(
                 raise
 
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
-            output, session_id = await claude.invoke_claude_full(
+            output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 call_type=call_type,
                 config=config,
@@ -202,7 +199,7 @@ async def _invoke_reaudit_with_session(
 # ---------------------------------------------------------------------------
 
 
-async def run_plan_audit(
+def run_plan_audit(
     zing_file: str,
     *,
     skip_permissions: bool,
@@ -234,7 +231,7 @@ async def run_plan_audit(
     logger.info("Auditing with zing file: %s", zing_path)
 
     if reaudit_changes is not None:
-        await _run_reaudit(
+        _run_reaudit(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -242,7 +239,7 @@ async def run_plan_audit(
             reaudit_changes=reaudit_changes,
         )
     else:
-        await _run_first_audit(
+        _run_first_audit(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -252,7 +249,7 @@ async def run_plan_audit(
     # Flow into plan review
     from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-    await run_plan_review(
+    run_plan_review(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,
@@ -265,7 +262,7 @@ async def run_plan_audit(
 # ---------------------------------------------------------------------------
 
 
-async def _run_first_audit(
+def _run_first_audit(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -284,7 +281,7 @@ async def _run_first_audit(
     logger.info("Audit Phase 1: Identification")
     identify_prompt = render_prompt("plan_audit_identify.md.j2", zing_content=zing_content)
 
-    identify_output, _identify_session = await claude.invoke_claude_full(
+    identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
         call_type=CallType.AUDIT,
         config=config,
@@ -313,13 +310,13 @@ async def _run_first_audit(
 
     distilled: dict[Path, str] = {}
     if file_paths:
-        distilled = await distill_files(file_paths, project_root=project_root)
+        distilled = distill_files(file_paths, project_root=project_root)
         logger.info("Distilled %d files", len(distilled))
 
     # --- Phase 3: Investigation (parallel) ---
     logger.info("Audit Phase 3: Investigation (parallel)")
 
-    async def _investigate_area(area: InvestigationArea) -> Interaction:
+    def _investigate_area(area: InvestigationArea) -> Interaction:
         """Run investigation for a single evaluation area."""
         # Build distilled code context for this area's files
         area_distilled: dict[str, str] = {}
@@ -337,7 +334,7 @@ async def _run_first_audit(
             distilled_code=area_distilled,
         )
 
-        interaction = await claude.invoke_claude_validated(
+        interaction = claude.invoke_claude_validated(
             investigate_prompt,
             validator=parse_interactions_response,
             retry_prompt_template=_RETRY_TEMPLATE,
@@ -349,9 +346,10 @@ async def _run_first_audit(
         logger.info("Area '%s' produced %d choice sets", area.name, len(interaction.choice_sets))
         return interaction
 
-    investigation_results: list[Interaction] = await asyncio.gather(
-        *(_investigate_area(area) for area in areas)
-    )
+    with ThreadPoolExecutor() as executor:
+        investigation_results: list[Interaction] = list(
+            executor.map(_investigate_area, areas)
+        )
 
     # Merge all interactions into one
     all_choice_sets = []
@@ -379,7 +377,7 @@ async def _run_first_audit(
         new_choices=recommended_choices,
     )
 
-    plan, audit_session_id = await _invoke_update_with_session(
+    plan, audit_session_id = _invoke_update_with_session(
         update_prompt,
         call_type=CallType.AUDIT,
         config=config,
@@ -424,7 +422,7 @@ async def _run_first_audit(
 # ---------------------------------------------------------------------------
 
 
-async def _run_reaudit(
+def _run_reaudit(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -453,7 +451,7 @@ async def _run_reaudit(
     )
 
     # Invoke Claude with session resumption
-    updated_plan, new_interactions, session_id = await _invoke_reaudit_with_session(
+    updated_plan, new_interactions, session_id = _invoke_reaudit_with_session(
         reaudit_prompt,
         call_type=CallType.AUDIT,
         config=config,

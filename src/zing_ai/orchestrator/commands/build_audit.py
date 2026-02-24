@@ -1,7 +1,7 @@
 """Orchestrator ``build-audit`` command -- audit build output.
 
 Groups changed files and runs parallel audit subprocesses to review them,
-then displays findings in the web UI.
+then displays findings.
 
 Pipeline:
 
@@ -10,16 +10,15 @@ Pipeline:
 3. Render ``build_audit_group.md.j2`` and invoke Claude to partition files
    into audit groups (parsed via ``xml_parser.parse_audit_response()``).
 4. For each group, render ``build_audit_review.md.j2`` and invoke Claude
-   in parallel (via ``asyncio.gather``), collecting findings.
-5. Store findings on ``app.state`` and start the web server so the user
-   can review them via ``audit.html``.
+   in parallel (via ``ThreadPoolExecutor``), collecting findings.
+5. Display findings (will be shown in the TUI in a later step).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,9 +28,6 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import AuditGroup
-from zing_ai.orchestrator.web.app import (
-    start_server_background as _start_web_server_background,
-)
 from zing_ai.orchestrator.xml_parser import parse_audit_response, parse_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -192,7 +188,7 @@ def collect_plan_files(doc_path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-async def run_build_audit(
+def run_build_audit(
     *,
     zing_file: str | None,
     skip_permissions: bool,
@@ -230,11 +226,6 @@ async def run_build_audit(
 
     if not plan_file_list:
         logger.warning("No files referenced in plan; nothing to audit")
-        _start_web_server_background(
-            zing_path,
-            port=config.port,
-            finding_groups=[],
-        )
         return
 
     logger.info("Collected %d unique files from plan", len(plan_file_list))
@@ -248,7 +239,7 @@ async def run_build_audit(
     logger.info("Build-audit Step 2: Distilling %d files", len(plan_file_paths))
     distilled: dict[Path, str] = {}
     if plan_file_paths:
-        distilled = await distill_files(plan_file_paths, project_root=project_root)
+        distilled = distill_files(plan_file_paths, project_root=project_root)
 
     # Convert to string-keyed dict for templates
     distilled_files: dict[str, str] = {
@@ -264,7 +255,7 @@ async def run_build_audit(
         distilled_files=distilled_files,
     )
 
-    audit_groups: list[AuditGroup] = await claude.invoke_claude_validated(
+    audit_groups: list[AuditGroup] = claude.invoke_claude_validated(
         group_prompt,
         validator=parse_audit_response,
         retry_prompt_template=_RETRY_TEMPLATE,
@@ -280,11 +271,12 @@ async def run_build_audit(
     # --- Step 4: Run parallel reviews per group ---
     logger.info("Build-audit Step 4: Running parallel reviews for %d groups", len(audit_groups))
 
-    async def _review_group(group: AuditGroup, group_index: int) -> str:
+    def _review_group(args: tuple[AuditGroup, int]) -> str:
         """Run a single audit review for a group of files.
 
         Returns the raw review output text.
         """
+        group, group_index = args
         # Build distilled code context for this group's files
         group_distilled: dict[str, str] = {}
         for f in group.files:
@@ -298,7 +290,7 @@ async def run_build_audit(
             distilled_code=group_distilled,
         )
 
-        output, _session_id = await claude.invoke_claude_full(
+        output, _session_id = claude.invoke_claude_full(
             review_prompt,
             call_type=CallType.AUDIT,
             config=config,
@@ -308,9 +300,10 @@ async def run_build_audit(
         logger.info("Review group %d completed (%d chars)", group_index + 1, len(output))
         return output
 
-    review_outputs: list[str] = await asyncio.gather(
-        *(_review_group(group, i) for i, group in enumerate(audit_groups))
-    )
+    with ThreadPoolExecutor() as executor:
+        review_outputs: list[str] = list(
+            executor.map(_review_group, [(group, i) for i, group in enumerate(audit_groups)])
+        )
 
     # --- Step 5: Parse and collect findings ---
     logger.info("Build-audit Step 5: Parsing findings")
@@ -328,10 +321,15 @@ async def run_build_audit(
         {g.severity: len(g.findings) for g in finding_groups},
     )
 
-    # --- Step 6: Start web server to display findings ---
-    logger.info("Build-audit Step 6: Starting web server for audit review")
-    _start_web_server_background(
-        zing_path,
-        port=config.port,
-        finding_groups=finding_groups,
-    )
+    # --- Step 6: Display findings ---
+    # TODO: Replace with Textual TUI in a later step.
+    logger.info("Build-audit Step 6: Audit complete")
+    for group in finding_groups:
+        for finding in group.findings:
+            logger.info(
+                "[%s] %s -- %s (%s)",
+                finding.severity.upper(),
+                finding.location,
+                finding.title,
+                finding.category,
+            )

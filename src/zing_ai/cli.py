@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 from collections.abc import Callable
@@ -115,13 +114,11 @@ def new(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_new(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_new(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 
@@ -141,13 +138,11 @@ def plan(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_plan(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_plan(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 
@@ -167,13 +162,11 @@ def plan_audit(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_plan_audit(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_plan_audit(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 
@@ -193,13 +186,11 @@ def plan_review(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_plan_review(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_plan_review(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 
@@ -219,13 +210,11 @@ def build(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_build(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_build(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 
@@ -245,13 +234,11 @@ def build_audit(zing_file: str | None, *, skip_permissions: bool) -> None:
 
     project_root = find_project_root()
     config = load_config(project_root)
-    asyncio.run(
-        run_build_audit(
-            zing_file=zing_file,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    run_build_audit(
+        zing_file=zing_file,
+        skip_permissions=skip_permissions,
+        config=config,
+        project_root=project_root,
     )
 
 

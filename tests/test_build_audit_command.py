@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from zing_ai.orchestrator.commands.build_audit import (
     Finding,
@@ -27,11 +26,6 @@ from zing_ai.orchestrator.xml_parser import write_zing_file
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 def _make_zing_file_with_plan(
@@ -317,21 +311,10 @@ class TestRunBuildAuditFullPipeline:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({
-                "zing_file_path": zing_file_path,
-                "port": port,
-                "no_browser": no_browser,
-                "finding_groups": finding_groups,
-            })
-            return MagicMock()
-
         # Track invoke_claude_full calls to return different review outputs
         review_call_count = 0
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             nonlocal review_call_count
             review_call_count += 1
             # Return different findings for different groups
@@ -342,48 +325,32 @@ class TestRunBuildAuditFullPipeline:
             else:
                 return (MOCK_REVIEW_NO_FINDINGS, "session-3")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[
-                        AuditGroup(files=["src/auth.py", "src/models.py"]),
-                        AuditGroup(files=["src/api.py"]),
-                        AuditGroup(files=["tests/test_auth.py"]),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    side_effect=mock_invoke_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
+        finding_groups_result: list[list[FindingGroup]] = []
 
-        _run(_test())
-
-        # Web server should have been started
-        assert len(web_server_calls) == 1
-        finding_groups = web_server_calls[0]["finding_groups"]
-        assert isinstance(finding_groups, list)
-
-        # Should have findings from first two reviews (third had NO_FINDINGS)
-        total = sum(len(g.findings) for g in finding_groups)
-        assert total == 4  # 3 from first review + 1 from second
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[
+                    AuditGroup(files=["src/auth.py", "src/models.py"]),
+                    AuditGroup(files=["src/api.py"]),
+                    AuditGroup(files=["tests/test_auth.py"]),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                side_effect=mock_invoke_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
     def test_parallel_reviews_called_for_each_group(self, tmp_path: Path) -> None:
         """Each audit group should trigger a separate Claude review call."""
@@ -398,42 +365,33 @@ class TestRunBuildAuditFullPipeline:
 
         invoke_full_calls: list[dict] = []
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             invoke_full_calls.append({"prompt": prompt, **kwargs})
             return (MOCK_REVIEW_NO_FINDINGS, "session-x")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[
-                        AuditGroup(files=["src/auth.py"]),
-                        AuditGroup(files=["src/api.py"]),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    side_effect=mock_invoke_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[
+                    AuditGroup(files=["src/auth.py"]),
+                    AuditGroup(files=["src/api.py"]),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                side_effect=mock_invoke_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Two audit groups -> two review calls
         assert len(invoke_full_calls) == 2
@@ -451,42 +409,34 @@ class TestRunBuildAuditFullPipeline:
         validated_kwargs: list[dict] = []
         full_kwargs: list[dict] = []
 
-        async def mock_validated(prompt, validator, retry_prompt_template, **kwargs):
+        def mock_validated(prompt, validator, retry_prompt_template, **kwargs):
             validated_kwargs.append(kwargs)
             return [AuditGroup(files=["src/auth.py"])]
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             full_kwargs.append(kwargs)
             return (MOCK_REVIEW_NO_FINDINGS, "session-x")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    side_effect=mock_validated,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    side_effect=mock_invoke_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                side_effect=mock_validated,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                side_effect=mock_invoke_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert validated_kwargs[0]["call_type"] == CallType.AUDIT
         assert full_kwargs[0]["call_type"] == CallType.AUDIT
@@ -504,42 +454,34 @@ class TestRunBuildAuditFullPipeline:
         validated_kwargs: list[dict] = []
         full_kwargs: list[dict] = []
 
-        async def mock_validated(prompt, validator, retry_prompt_template, **kwargs):
+        def mock_validated(prompt, validator, retry_prompt_template, **kwargs):
             validated_kwargs.append(kwargs)
             return [AuditGroup(files=["src/auth.py"])]
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             full_kwargs.append(kwargs)
             return (MOCK_REVIEW_NO_FINDINGS, "session-x")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    side_effect=mock_validated,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    side_effect=mock_invoke_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                side_effect=mock_validated,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                side_effect=mock_invoke_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert validated_kwargs[0]["skip_permissions"] is True
         assert full_kwargs[0]["skip_permissions"] is True
@@ -553,67 +495,29 @@ class TestRunBuildAuditFullPipeline:
 class TestRunBuildAuditNoFiles:
     """Tests for when the plan has no files to audit."""
 
-    def test_no_plan_starts_empty_server(self, tmp_path: Path) -> None:
-        """When there is no plan, web server should start with empty findings."""
+    def test_no_plan_returns_early(self, tmp_path: Path) -> None:
+        """When there is no plan, run_build_audit should return early."""
         _make_zing_file_no_plan(tmp_path)
         config = ZingConfig()
 
-        web_server_calls: list[dict] = []
+        run_build_audit(
+            zing_file="test-project.xml",
+            skip_permissions=False,
+            config=config,
+            project_root=tmp_path,
+        )
 
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({"finding_groups": finding_groups})
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        assert len(web_server_calls) == 1
-        assert web_server_calls[0]["finding_groups"] == []
-
-    def test_no_files_in_plan_starts_empty_server(self, tmp_path: Path) -> None:
-        """When the plan has no file references, server starts with empty findings."""
+    def test_no_files_in_plan_returns_early(self, tmp_path: Path) -> None:
+        """When the plan has no file references, run_build_audit should return early."""
         _make_zing_file_no_files(tmp_path)
         config = ZingConfig()
 
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({"finding_groups": finding_groups})
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        assert len(web_server_calls) == 1
-        assert web_server_calls[0]["finding_groups"] == []
+        run_build_audit(
+            zing_file="test-project.xml",
+            skip_permissions=False,
+            config=config,
+            project_root=tmp_path,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -637,40 +541,30 @@ class TestRunBuildAuditDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        async def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[AuditGroup(files=["src/auth.py"])],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    new_callable=AsyncMock,
-                    return_value=(MOCK_REVIEW_NO_FINDINGS, "session"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    side_effect=mock_distill,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[AuditGroup(files=["src/auth.py"])],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                return_value=(MOCK_REVIEW_NO_FINDINGS, "session"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                side_effect=mock_distill,
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert len(distill_calls) == 1
         # Only existing files should be distilled (2 out of 4)
@@ -701,161 +595,34 @@ class TestRunBuildAuditDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        async def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[AuditGroup(files=["src/exists.py"])],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    new_callable=AsyncMock,
-                    return_value=(MOCK_REVIEW_NO_FINDINGS, "session"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    side_effect=mock_distill,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[AuditGroup(files=["src/exists.py"])],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                return_value=(MOCK_REVIEW_NO_FINDINGS, "session"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                side_effect=mock_distill,
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert len(distill_calls) == 1
         assert len(distill_calls[0]) == 1
         assert distill_calls[0][0].name == "exists.py"
-
-
-# ---------------------------------------------------------------------------
-# run_build_audit tests -- web server
-# ---------------------------------------------------------------------------
-
-
-class TestRunBuildAuditWebServer:
-    """Tests for web server startup and state."""
-
-    def test_web_server_started_with_findings(self, tmp_path: Path) -> None:
-        """The web server should be started with finding_groups on app state."""
-        _make_zing_file_with_plan(tmp_path)
-        config = ZingConfig()
-
-        for f in ["src/auth.py", "src/models.py", "src/api.py", "tests/test_auth.py"]:
-            fp = tmp_path / f
-            fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(f"# {f}")
-
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({
-                "port": port,
-                "no_browser": no_browser,
-                "finding_groups": finding_groups,
-            })
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[AuditGroup(files=["src/auth.py"])],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    new_callable=AsyncMock,
-                    return_value=(MOCK_REVIEW_WITH_FINDINGS, "session"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        assert len(web_server_calls) == 1
-        assert web_server_calls[0]["no_browser"] is True
-        assert web_server_calls[0]["port"] == config.port
-        finding_groups = web_server_calls[0]["finding_groups"]
-        assert isinstance(finding_groups, list)
-        assert len(finding_groups) > 0
-
-    def test_web_server_port_from_config(self, tmp_path: Path) -> None:
-        """The web server should use the port from config."""
-        _make_zing_file_with_plan(tmp_path)
-        config = ZingConfig()
-        config.port = 9999
-
-        for f in ["src/auth.py", "src/models.py", "src/api.py", "tests/test_auth.py"]:
-            fp = tmp_path / f
-            fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(f"# {f}")
-
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({"port": port})
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[AuditGroup(files=["src/auth.py"])],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    new_callable=AsyncMock,
-                    return_value=(MOCK_REVIEW_NO_FINDINGS, "session"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        assert web_server_calls[0]["port"] == 9999
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +645,7 @@ class TestRunBuildAuditFindingIndexes:
 
         call_count = 0
 
-        async def mock_invoke_full(prompt, **kwargs):
+        def mock_invoke_full(prompt, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -886,52 +653,26 @@ class TestRunBuildAuditFindingIndexes:
             else:
                 return (MOCK_REVIEW_SINGLE_FINDING, "s2")  # 1 finding (3)
 
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser, finding_groups=None):
-            web_server_calls.append({"finding_groups": finding_groups})
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
-                    new_callable=AsyncMock,
-                    return_value=[
-                        AuditGroup(files=["src/auth.py"]),
-                        AuditGroup(files=["src/api.py"]),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
-                    side_effect=mock_invoke_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.build_audit._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-            ):
-                await run_build_audit(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        # Collect all finding indexes
-        all_indexes = []
-        for group in web_server_calls[0]["finding_groups"]:
-            for f in group.findings:
-                all_indexes.append(f.index)
-
-        # Should be unique
-        assert len(all_indexes) == len(set(all_indexes))
-        # Should be sequential 0,1,2,3
-        assert sorted(all_indexes) == [0, 1, 2, 3]
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[
+                    AuditGroup(files=["src/auth.py"]),
+                    AuditGroup(files=["src/api.py"]),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_full",
+                side_effect=mock_invoke_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )

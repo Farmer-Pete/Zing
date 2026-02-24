@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,11 +19,6 @@ from zing_ai.orchestrator.config import CallType, ZingConfig
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 SAMPLE_MARKDOWN = """\
@@ -166,44 +160,39 @@ class TestRunNew:
     def test_full_flow_creates_zing_file_and_calls_plan(self, tmp_path: Path) -> None:
         """The happy path: Claude returns markdown, zing file is created, plan is called."""
         config = ZingConfig()
+        mock_run_plan = MagicMock()
 
-        mock_run_plan = AsyncMock()
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=(SAMPLE_MARKDOWN, "sess-001"),
+            ) as mock_claude,
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="rendered prompt",
+            ) as mock_render,
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=(SAMPLE_MARKDOWN, "sess-001"),
-                ) as mock_claude,
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    mock_run_plan,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="rendered prompt",
-                ) as mock_render,
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
+            # Verify prompt was rendered
+            mock_render.assert_called_once_with("new.md.j2")
 
-                # Verify prompt was rendered
-                mock_render.assert_called_once_with("new.md.j2")
-
-                # Verify Claude was invoked with the rendered prompt
-                mock_claude.assert_called_once_with(
-                    "rendered prompt",
-                    call_type=CallType.INVESTIGATE,
-                    config=config,
-                    skip_permissions=False,
-                )
-
-        _run(_test())
+            # Verify Claude was invoked with the rendered prompt
+            mock_claude.assert_called_once_with(
+                "rendered prompt",
+                call_type=CallType.INVESTIGATE,
+                config=config,
+                skip_permissions=False,
+            )
 
         # Verify .zing directory was created
         assert (tmp_path / ".zing").is_dir()
@@ -227,7 +216,6 @@ class TestRunNew:
         # Verify run_plan was called with the correct arguments
         mock_run_plan.assert_called_once_with(
             zing_file="recipe-app.xml",
-            no_browser=False,
             skip_permissions=False,
             config=config,
             project_root=tmp_path,
@@ -239,30 +227,26 @@ class TestRunNew:
 
         assert not (tmp_path / ".zing").exists()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=(SAMPLE_MARKDOWN, "sess-001"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=(SAMPLE_MARKDOWN, "sess-001"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert (tmp_path / ".zing").is_dir()
 
@@ -270,101 +254,58 @@ class TestRunNew:
         """The skip_permissions flag is forwarded to Claude."""
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=(SAMPLE_MARKDOWN, "sess-001"),
-                ) as mock_claude,
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=(SAMPLE_MARKDOWN, "sess-001"),
+            ) as mock_claude,
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
 
-                mock_claude.assert_called_once_with(
-                    "prompt",
-                    call_type=CallType.INVESTIGATE,
-                    config=config,
-                    skip_permissions=True,
-                )
-
-        _run(_test())
-
-    def test_no_browser_passed_to_plan(self, tmp_path: Path) -> None:
-        """The no_browser flag is forwarded to run_plan."""
-        config = ZingConfig()
-        mock_run_plan = AsyncMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=(SAMPLE_MARKDOWN, "sess-001"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    mock_run_plan,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        mock_run_plan.assert_called_once()
-        call_kwargs = mock_run_plan.call_args.kwargs
-        assert call_kwargs["no_browser"] is True
-        assert call_kwargs["skip_permissions"] is True
+            mock_claude.assert_called_once_with(
+                "prompt",
+                call_type=CallType.INVESTIGATE,
+                config=config,
+                skip_permissions=True,
+            )
 
     def test_markdown_without_heading_uses_first_line(self, tmp_path: Path) -> None:
         """When Claude returns markdown without a heading, use the first line for the filename."""
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=(SAMPLE_MARKDOWN_NO_HEADING, "sess-002"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=(SAMPLE_MARKDOWN_NO_HEADING, "sess-002"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         expected_name = "this-is-a-project-about-weather-forecasting.xml"
         assert (tmp_path / ".zing" / expected_name).is_file()
@@ -373,30 +314,26 @@ class TestRunNew:
         """The created zing file should have stage='new'."""
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=("# Test Project\n\nContent here.", "sess-003"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=("# Test Project\n\nContent here.", "sess-003"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         zing_path = tmp_path / ".zing" / "test-project.xml"
         assert zing_path.is_file()
@@ -407,32 +344,28 @@ class TestRunNew:
     def test_plan_receives_zing_filename(self, tmp_path: Path) -> None:
         """run_plan is called with just the filename (not full path)."""
         config = ZingConfig()
-        mock_run_plan = AsyncMock()
+        mock_run_plan = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=("# My Feature\n\nDetails.", "sess-004"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    mock_run_plan,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=("# My Feature\n\nDetails.", "sess-004"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         call_kwargs = mock_run_plan.call_args.kwargs
         assert call_kwargs["zing_file"] == "my-feature.xml"
@@ -445,30 +378,26 @@ class TestRunNew:
         # Place a marker file to verify the directory isn't replaced
         (zing_dir / "existing.txt").write_text("marker")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=("# Existing Dir Test\n", "sess-005"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=("# Existing Dir Test\n", "sess-005"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Marker file should still exist
         assert (zing_dir / "existing.txt").read_text() == "marker"
@@ -479,30 +408,26 @@ class TestRunNew:
         """The new command should use CallType.INVESTIGATE for the Claude call."""
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
-                    return_value=("# Test\n", "sess-006"),
-                ) as mock_claude,
-                patch(
-                    "zing_ai.orchestrator.commands.plan.run_plan",
-                    AsyncMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.new.render_prompt",
-                    return_value="prompt",
-                ),
-            ):
-                await run_new(
-                    zing_file=None,
-                    no_browser=False,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.claude.invoke_claude_full",
+                return_value=("# Test\n", "sess-006"),
+            ) as mock_claude,
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
-                call_kwargs = mock_claude.call_args.kwargs
-                assert call_kwargs["call_type"] == CallType.INVESTIGATE
-
-        _run(_test())
+            call_kwargs = mock_claude.call_args.kwargs
+            assert call_kwargs["call_type"] == CallType.INVESTIGATE

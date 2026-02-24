@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 STAGES = ("new", "plan", "plan-audit", "plan-review", "build", "build-audit")
 
 
-async def run_pipeline(
+def run_pipeline(
     start_stage: str,
     zing_file: str | None,
     *,
@@ -74,30 +74,30 @@ async def run_pipeline(
     if start_stage == "new":
         from zing_ai.orchestrator.commands.new import run_new
 
-        await run_new(zing_file=zing_file, **common_kwargs)
+        run_new(zing_file=zing_file, **common_kwargs)
 
     elif start_stage == "plan":
         from zing_ai.orchestrator.commands.plan import run_plan
 
-        await run_plan(zing_file=zing_file, **common_kwargs)
+        run_plan(zing_file=zing_file, **common_kwargs)
 
     elif start_stage == "plan-audit":
         from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
 
         # run_plan_audit takes zing_file as a positional str parameter.
-        await run_plan_audit(zing_file or "", **common_kwargs)
+        run_plan_audit(zing_file or "", **common_kwargs)
 
     elif start_stage == "plan-review":
         from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-        await run_plan_review(zing_file=zing_file, **common_kwargs)
+        run_plan_review(zing_file=zing_file, **common_kwargs)
 
     elif start_stage == "build":
         from zing_ai.orchestrator.commands.build import run_build
 
-        await run_build(zing_file=zing_file, **common_kwargs)
+        run_build(zing_file=zing_file, **common_kwargs)
 
     elif start_stage == "build-audit":
         from zing_ai.orchestrator.commands.build_audit import run_build_audit
 
-        await run_build_audit(zing_file=zing_file, **common_kwargs)
+        run_build_audit(zing_file=zing_file, **common_kwargs)

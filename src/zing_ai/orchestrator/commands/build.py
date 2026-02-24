@@ -1,8 +1,8 @@
 """Orchestrator ``build`` command — execute plan steps.
 
 Iterates through all stages and steps in the plan, distilling files,
-invoking Claude with the ``build_step.md.j2`` prompt, streaming output
-to the web UI via SSE, and marking each step done upon completion.
+invoking Claude with the ``build_step.md.j2`` prompt, streaming output,
+and marking each step done upon completion.
 
 After all steps are finished, delegates to :func:`run_build_audit`.
 """
@@ -16,9 +16,6 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import ZingDocument
-from zing_ai.orchestrator.web.app import (
-    start_server_background as _start_web_server_background,
-)
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -40,7 +37,7 @@ MCP_MANDATE = (
 # ---------------------------------------------------------------------------
 
 
-async def run_build(
+def run_build(
     *,
     zing_file: str | None,
     skip_permissions: bool,
@@ -54,7 +51,7 @@ async def run_build(
 
     1. Distills all referenced files (using cache).
     2. Renders the ``build_step.md.j2`` prompt.
-    3. Invokes Claude via streaming and sends output to the web UI.
+    3. Invokes Claude via streaming.
     4. Marks the step as done and writes the updated zing document.
 
     After all steps are complete, delegates to :func:`run_build_audit`.
@@ -119,7 +116,7 @@ async def run_build(
 
             distilled: dict[Path, str] = {}
             if file_paths:
-                distilled = await distill_files(file_paths, project_root=project_root)
+                distilled = distill_files(file_paths, project_root=project_root)
                 logger.info("Distilled %d files for step '%s'", len(distilled), step.label)
 
             # Convert Path keys to string keys for the template
@@ -140,7 +137,7 @@ async def run_build(
             # 3. Invoke Claude via streaming
             output_lines: list[str] = []
             try:
-                async for line in claude.invoke_claude(
+                for line in claude.invoke_claude(
                     prompt,
                     call_type=CallType.BUILD,
                     config=config,
@@ -169,7 +166,7 @@ async def run_build(
     # After all steps done, call run_build_audit()
     from zing_ai.orchestrator.commands.build_audit import run_build_audit
 
-    await run_build_audit(
+    run_build_audit(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,

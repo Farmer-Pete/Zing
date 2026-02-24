@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,11 +29,6 @@ from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 def _make_zing_file_with_plan(
@@ -196,59 +190,54 @@ class TestInvokeUpdateWithSession:
     """Tests for the document-update helper that returns session ID."""
 
     def test_returns_plan_and_session_id(self) -> None:
-        async def _test() -> tuple[Plan, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                return_value=(AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-            ):
-                return await _invoke_update_with_session(
-                    "test prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+            return_value=(AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+        ):
+            plan, session_id = _invoke_update_with_session(
+                "test prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+            )
 
-        plan, session_id = _run(_test())
         assert session_id == "sess-audit-001"
         assert len(plan.stages) == 2
         assert plan.stages[0].label == "Data layer"
 
     def test_retries_on_validation_error(self) -> None:
-        async def _test() -> tuple[Plan, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                side_effect=[
-                    ("invalid output", "sess-001"),
-                    (AUDIT_UPDATE_RESPONSE, "sess-002"),
-                ],
-            ):
-                return await _invoke_update_with_session(
-                    "test prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+            side_effect=[
+                ("invalid output", "sess-001"),
+                (AUDIT_UPDATE_RESPONSE, "sess-002"),
+            ],
+        ):
+            plan, session_id = _invoke_update_with_session(
+                "test prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+            )
 
-        plan, session_id = _run(_test())
         assert session_id == "sess-002"
         assert len(plan.stages) == 2
 
     def test_raises_after_max_retries(self) -> None:
-        async def _test() -> None:
-            with patch(
+        with (
+            patch(
                 "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
                 return_value=("always invalid", "sess-001"),
-            ):
-                await _invoke_update_with_session(
-                    "test prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    max_retries=2,
-                )
-
-        with pytest.raises(ValidationError):
-            _run(_test())
+            ),
+            pytest.raises(ValidationError),
+        ):
+            _invoke_update_with_session(
+                "test prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+                max_retries=2,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -260,63 +249,57 @@ class TestInvokeReauditWithSession:
     """Tests for the re-audit helper."""
 
     def test_returns_plan_without_new_interactions(self) -> None:
-        async def _test() -> tuple[Plan, Interaction | None, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                return_value=(REAUDIT_RESPONSE, "sess-reaudit-001"),
-            ):
-                return await _invoke_reaudit_with_session(
-                    "reaudit prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    resume_session="sess-orig",
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+            return_value=(REAUDIT_RESPONSE, "sess-reaudit-001"),
+        ):
+            plan, interactions, session_id = _invoke_reaudit_with_session(
+                "reaudit prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+                resume_session="sess-orig",
+            )
 
-        plan, interactions, session_id = _run(_test())
         assert session_id == "sess-reaudit-001"
         assert len(plan.stages) == 1
         assert plan.stages[0].steps[0].label == "Set up SQLAlchemy without validation"
         assert interactions is None
 
     def test_returns_plan_with_new_interactions(self) -> None:
-        async def _test() -> tuple[Plan, Interaction | None, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                return_value=(REAUDIT_RESPONSE_WITH_NEW_INTERACTIONS, "sess-reaudit-002"),
-            ):
-                return await _invoke_reaudit_with_session(
-                    "reaudit prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    resume_session="sess-orig",
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+            return_value=(REAUDIT_RESPONSE_WITH_NEW_INTERACTIONS, "sess-reaudit-002"),
+        ):
+            plan, interactions, session_id = _invoke_reaudit_with_session(
+                "reaudit prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+                resume_session="sess-orig",
+            )
 
-        plan, interactions, session_id = _run(_test())
         assert len(plan.stages) == 1
         assert interactions is not None
         assert len(interactions.choice_sets) == 1
         assert interactions.choice_sets[0].message == "Should we add rate limiting?"
 
     def test_retries_on_validation_error(self) -> None:
-        async def _test() -> tuple[Plan, Interaction | None, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                side_effect=[
-                    ("invalid output", "sess-001"),
-                    (REAUDIT_RESPONSE, "sess-002"),
-                ],
-            ):
-                return await _invoke_reaudit_with_session(
-                    "reaudit prompt",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    resume_session="sess-orig",
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+            side_effect=[
+                ("invalid output", "sess-001"),
+                (REAUDIT_RESPONSE, "sess-002"),
+            ],
+        ):
+            plan, interactions, session_id = _invoke_reaudit_with_session(
+                "reaudit prompt",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=False,
+                resume_session="sess-orig",
+            )
 
-        plan, interactions, session_id = _run(_test())
         assert session_id == "sess-002"
         assert len(plan.stages) == 1
 
@@ -333,77 +316,69 @@ class TestRunPlanAuditFirstRun:
         """Happy path: identification -> distillation -> investigation -> update -> assembly."""
         zing_path = _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
-        mock_plan_review = AsyncMock()
+        mock_plan_review = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        # Phase 1: Identification
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        # Phase 4: Document update
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    side_effect=[
-                        # Phase 3: Investigation (3 areas from AUDIT_IDENTIFY_RESPONSE)
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Should we add validation?",
-                                explanation="Validation is important.",
-                                choices=[
-                                    Choice(label="Add validation", description="Add it", recommended=True),
-                                    Choice(label="Skip", description="No validation", recommended=False),
-                                ],
-                            ),
-                        ]),
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Should we add error handling?",
-                                explanation="Error handling is important.",
-                                choices=[
-                                    Choice(label="Add error handling", description="Add it", recommended=True),
-                                    Choice(label="Skip", description="No error handling", recommended=False),
-                                ],
-                            ),
-                        ]),
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Are steps atomic?",
-                                explanation="Steps should be atomic.",
-                                choices=[
-                                    Choice(label="Steps are atomic", description="No changes", recommended=True),
-                                    Choice(label="Split steps", description="Make more granular", recommended=False),
-                                ],
-                            ),
-                        ]),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    mock_plan_review,
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    # Phase 1: Identification
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    # Phase 4: Document update
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                side_effect=[
+                    # Phase 3: Investigation (3 areas from AUDIT_IDENTIFY_RESPONSE)
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Should we add validation?",
+                            explanation="Validation is important.",
+                            choices=[
+                                Choice(label="Add validation", description="Add it", recommended=True),
+                                Choice(label="Skip", description="No validation", recommended=False),
+                            ],
+                        ),
+                    ]),
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Should we add error handling?",
+                            explanation="Error handling is important.",
+                            choices=[
+                                Choice(label="Add error handling", description="Add it", recommended=True),
+                                Choice(label="Skip", description="No error handling", recommended=False),
+                            ],
+                        ),
+                    ]),
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Are steps atomic?",
+                            explanation="Steps should be atomic.",
+                            choices=[
+                                Choice(label="Steps are atomic", description="No changes", recommended=True),
+                                Choice(label="Split steps", description="Make more granular", recommended=False),
+                            ],
+                        ),
+                    ]),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                mock_plan_review,
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Verify the zing file was written
         assert zing_path.is_file()
@@ -439,10 +414,8 @@ class TestRunPlanAuditFirstRun:
         config = ZingConfig()
         call_order: list[str] = []
 
-        async def mock_validate(prompt, validator, retry_prompt_template, **kwargs):
+        def mock_validate(prompt, validator, retry_prompt_template, **kwargs):
             call_order.append("investigate")
-            # Simulate some async work
-            await asyncio.sleep(0.01)
             return Interaction(choice_sets=[
                 ChoiceSet(
                     message="Test question?",
@@ -454,41 +427,33 @@ class TestRunPlanAuditFirstRun:
                 ),
             ])
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    side_effect=mock_validate,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                side_effect=mock_validate,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # 3 investigation calls (one per area in AUDIT_IDENTIFY_RESPONSE)
         assert call_order.count("investigate") == 3
@@ -498,50 +463,42 @@ class TestRunPlanAuditFirstRun:
         zing_path = _make_zing_file_with_plan(tmp_path, audit=False)
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -552,50 +509,42 @@ class TestRunPlanAuditFirstRun:
         zing_path = _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-saved"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-saved"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -606,50 +555,42 @@ class TestRunPlanAuditFirstRun:
         zing_path = _make_zing_file_with_plan(tmp_path, plan_session="sess-plan-original")
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -660,50 +601,42 @@ class TestRunPlanAuditFirstRun:
         zing_path = _make_zing_file_with_plan(tmp_path, with_interactions=False)
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-id-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-audit-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -721,53 +654,45 @@ class TestRunPlanAuditFirstRun:
 
         claude_full_calls: list[dict] = []
 
-        async def mock_full(prompt, **kwargs):
+        def mock_full(prompt, **kwargs):
             claude_full_calls.append(kwargs)
             if len(claude_full_calls) == 1:
                 return (AUDIT_IDENTIFY_RESPONSE, "sess-001")
             return (AUDIT_UPDATE_RESPONSE, "sess-002")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=mock_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=mock_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # All invoke_claude_full calls should use AUDIT call type
         for call_kwargs in claude_full_calls:
@@ -788,7 +713,7 @@ class TestRunPlanAuditReaudit:
             tmp_path, audit_session="sess-audit-orig-001", audit=True
         )
         config = ZingConfig()
-        mock_plan_review = AsyncMock()
+        mock_plan_review = MagicMock()
 
         changes = [
             {
@@ -798,31 +723,27 @@ class TestRunPlanAuditReaudit:
             },
         ]
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE, "sess-reaudit-001"),
-                ) as mock_full,
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    mock_plan_review,
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=changes,
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE, "sess-reaudit-001"),
+            ) as mock_full,
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                mock_plan_review,
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=changes,
+            )
 
-                # Verify Claude was called with session resumption
-                call_kwargs = mock_full.call_args.kwargs
-                assert call_kwargs["resume_session"] == "sess-audit-orig-001"
-
-        _run(_test())
+            # Verify Claude was called with session resumption
+            call_kwargs = mock_full.call_args.kwargs
+            assert call_kwargs["resume_session"] == "sess-audit-orig-001"
 
         # Verify updated zing file
         tree = ET.parse(zing_path)
@@ -848,31 +769,27 @@ class TestRunPlanAuditReaudit:
         )
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE_WITH_NEW_INTERACTIONS, "sess-reaudit-002"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=[{
-                        "choice_set_message": "Should we add validation?",
-                        "original_recommended": "Add validation",
-                        "user_selected": "Keep as-is",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE_WITH_NEW_INTERACTIONS, "sess-reaudit-002"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=[{
+                    "choice_set_message": "Should we add validation?",
+                    "original_recommended": "Add validation",
+                    "user_selected": "Keep as-is",
+                }],
+            )
 
         # Parse the updated zing file
         tree = ET.parse(zing_path)
@@ -891,31 +808,27 @@ class TestRunPlanAuditReaudit:
         )
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE, "sess-new-audit"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE, "sess-new-audit"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -929,35 +842,31 @@ class TestRunPlanAuditReaudit:
         )
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE, "sess-new"),
-                ) as mock_full,
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE, "sess-new"),
+            ) as mock_full,
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
-                # Should still call with empty resume_session
-                call_kwargs = mock_full.call_args.kwargs
-                assert call_kwargs["resume_session"] == ""
-
-        _run(_test())
+            # Should still call with empty resume_session
+            call_kwargs = mock_full.call_args.kwargs
+            assert call_kwargs["resume_session"] == ""
 
     def test_reaudit_preserves_plan_session(self, tmp_path: Path) -> None:
         """The plan session ID should be preserved during re-audit."""
@@ -966,31 +875,27 @@ class TestRunPlanAuditReaudit:
         )
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE, "sess-audit-new"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE, "sess-audit-new"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                MagicMock(),
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -1009,56 +914,47 @@ class TestRunPlanAuditCallsReview:
     def test_first_run_calls_review(self, tmp_path: Path) -> None:
         zing_path = _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
-        mock_review = AsyncMock()
+        mock_review = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    side_effect=[
-                        (AUDIT_IDENTIFY_RESPONSE, "sess-001"),
-                        (AUDIT_UPDATE_RESPONSE, "sess-002"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    mock_review,
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                side_effect=[
+                    (AUDIT_IDENTIFY_RESPONSE, "sess-001"),
+                    (AUDIT_UPDATE_RESPONSE, "sess-002"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                mock_review,
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         mock_review.assert_called_once_with(
             zing_file="test-project.xml",
-            no_browser=True,
             skip_permissions=False,
             config=config,
             project_root=tmp_path,
@@ -1069,37 +965,32 @@ class TestRunPlanAuditCallsReview:
             tmp_path, audit_session="sess-audit-001", audit=True
         )
         config = ZingConfig()
-        mock_review = AsyncMock()
+        mock_review = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
-                    return_value=(REAUDIT_RESPONSE, "sess-001"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review.run_plan_review",
-                    mock_review,
-                ),
-            ):
-                await run_plan_audit(
-                    "test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                    reaudit_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
+                return_value=(REAUDIT_RESPONSE, "sess-001"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.run_plan_review",
+                mock_review,
+            ),
+        ):
+            run_plan_audit(
+                "test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+                reaudit_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
         mock_review.assert_called_once_with(
             zing_file="test-project.xml",
-            no_browser=True,
             skip_permissions=True,
             config=config,
             project_root=tmp_path,

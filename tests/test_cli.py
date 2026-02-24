@@ -250,7 +250,7 @@ class TestOrchestratorCommandDelegation:
         list(_COMMAND_MODULES.items()),
     )
     def test_command_delegates_to_module(self, cmd_name, run_func_path, tmp_path):
-        """Each command loads config, finds project root, and calls asyncio.run()."""
+        """Each command loads config, finds project root, and calls the run function."""
         # Create a fake .git dir so find_project_root() works
         (tmp_path / ".git").mkdir()
 
@@ -267,7 +267,7 @@ class TestOrchestratorCommandDelegation:
         ):
             result = runner.invoke(cli, [cmd_name])
 
-        # The stub raises NotImplementedError which asyncio.run propagates
+        # The stub raises NotImplementedError which propagates
         assert result.exit_code == 1
         mock_config.assert_called_once_with(tmp_path)
         mock_run.assert_called_once()

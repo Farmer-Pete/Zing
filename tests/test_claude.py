@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import jinja2
 import pytest
@@ -28,45 +27,40 @@ from zing_ai.orchestrator.xml_parser import ValidationError
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_process(
+def _make_mock_completed_process(
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    returncode: int = 0,
+) -> MagicMock:
+    """Create a mock subprocess.CompletedProcess."""
+    result = MagicMock()
+    result.stdout = stdout
+    result.stderr = stderr
+    result.returncode = returncode
+    return result
+
+
+def _make_mock_popen(
     stdout_lines: list[bytes] | None = None,
     stderr: bytes = b"",
     returncode: int = 0,
-) -> AsyncMock:
-    """Create a mock asyncio subprocess with configurable stdout/stderr."""
-    proc = AsyncMock()
+) -> MagicMock:
+    """Create a mock subprocess.Popen with configurable stdout/stderr."""
+    proc = MagicMock()
     proc.returncode = returncode
 
     if stdout_lines is not None:
-        stdout_mock = AsyncMock()
-        stdout_mock.read = AsyncMock(return_value=b"".join(stdout_lines))
-
-        # Make it async-iterable for `async for line in proc.stdout`
-        async def _stdout_iter():  # type: ignore[return]
-            for line in stdout_lines:
-                yield line
-
-        stdout_mock.__aiter__ = lambda self: _stdout_iter()
-        proc.stdout = stdout_mock
+        proc.stdout = iter(stdout_lines)
     else:
-        proc.stdout = None
+        proc.stdout = iter([])
 
-    stderr_mock = AsyncMock()
-    stderr_mock.read = AsyncMock(return_value=stderr)
+    stderr_mock = MagicMock()
+    stderr_mock.read.return_value = stderr
     proc.stderr = stderr_mock
 
-    # communicate() returns (stdout, stderr)
-    stdout_bytes = b"".join(stdout_lines) if stdout_lines else b""
-    proc.communicate = AsyncMock(return_value=(stdout_bytes, stderr))
-
-    proc.wait = AsyncMock(return_value=returncode)
+    proc.wait.return_value = returncode
 
     return proc
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -231,49 +225,44 @@ class TestExtractSessionId:
 
 
 class TestInvokeClaude:
-    """Tests for the async streaming invoke_claude function."""
+    """Tests for the sync streaming invoke_claude function."""
 
     def test_yields_stdout_lines(self) -> None:
-        async def _test() -> list[str]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"line 1\n", b"line 2\n"],
-                stderr=b"Session: sess-001\n",
-            )
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"line 1\n", b"line 2\n"],
+            stderr=b"Session: sess-001\n",
+        )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-                config = ZingConfig()
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
 
-                lines: list[str] = []
-                async for line in invoke_claude(
-                    "hello", call_type=CallType.BUILD, config=config
-                ):
-                    lines.append(line)
+            lines: list[str] = []
+            for line in invoke_claude(
+                "hello", call_type=CallType.BUILD, config=config
+            ):
+                lines.append(line)
 
-            return lines
-
-        assert _run(_test()) == ["line 1\n", "line 2\n"]
+        assert lines == ["line 1\n", "line 2\n"]
 
     def test_passes_correct_command(self) -> None:
-        async def _test() -> list[object]:
-            mock_proc = _make_mock_process(stdout_lines=[], stderr=b"")
+        mock_proc = _make_mock_popen(stdout_lines=[], stderr=b"")
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-                config = ZingConfig()
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
 
-                async for _ in invoke_claude(
-                    "test prompt", call_type=CallType.INVESTIGATE, config=config
-                ):
-                    pass
+            for _ in invoke_claude(
+                "test prompt", call_type=CallType.INVESTIGATE, config=config
+            ):
+                pass
 
-                return list(mock_exec.call_args[0])
+            cmd = mock_popen.call_args[0][0]
 
-        cmd = _run(_test())
         assert cmd[0] == "claude"
         assert "--print" in cmd
         assert "--model" in cmd
@@ -281,50 +270,46 @@ class TestInvokeClaude:
         assert "test prompt" in cmd
 
     def test_skip_permissions(self) -> None:
-        async def _test() -> list[object]:
-            mock_proc = _make_mock_process(stdout_lines=[], stderr=b"")
+        mock_proc = _make_mock_popen(stdout_lines=[], stderr=b"")
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-                config = ZingConfig()
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
 
-                async for _ in invoke_claude(
-                    "test",
-                    call_type=CallType.BUILD,
-                    config=config,
-                    skip_permissions=True,
-                ):
-                    pass
+            for _ in invoke_claude(
+                "test",
+                call_type=CallType.BUILD,
+                config=config,
+                skip_permissions=True,
+            ):
+                pass
 
-                return list(mock_exec.call_args[0])
+            cmd = mock_popen.call_args[0][0]
 
-        cmd = _run(_test())
         assert "--dangerously-skip-permissions" in cmd
         assert "--allowedTools" not in cmd
 
     def test_resume_session(self) -> None:
-        async def _test() -> list[object]:
-            mock_proc = _make_mock_process(stdout_lines=[], stderr=b"")
+        mock_proc = _make_mock_popen(stdout_lines=[], stderr=b"")
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-                config = ZingConfig()
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
 
-                async for _ in invoke_claude(
-                    "continue",
-                    call_type=CallType.BUILD,
-                    config=config,
-                    resume_session="sess-xyz",
-                ):
-                    pass
+            for _ in invoke_claude(
+                "continue",
+                call_type=CallType.BUILD,
+                config=config,
+                resume_session="sess-xyz",
+            ):
+                pass
 
-                return list(mock_exec.call_args[0])
+            cmd = mock_popen.call_args[0][0]
 
-        cmd = _run(_test())
         assert "--resume" in cmd
         idx = cmd.index("--resume")
         assert cmd[idx + 1] == "sess-xyz"
@@ -339,102 +324,92 @@ class TestInvokeClaudeFull:
     """Tests for the convenience invoke_claude_full wrapper."""
 
     def test_returns_full_output(self) -> None:
-        async def _test() -> tuple[str, str]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"Hello ", b"world\n"],
-                stderr=b"",
+        mock_result = _make_mock_completed_process(
+            stdout=b"Hello world\n",
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
+
+            output, session_id = invoke_claude_full(
+                "test", call_type=CallType.BUILD, config=ZingConfig()
             )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                return await invoke_claude_full(
-                    "test", call_type=CallType.BUILD, config=ZingConfig()
-                )
-
-        output, session_id = _run(_test())
         assert output == "Hello world\n"
 
     def test_returns_session_id_from_stderr(self) -> None:
-        async def _test() -> tuple[str, str]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"output\n"],
-                stderr=b"Session: sess-abc-123\n",
+        mock_result = _make_mock_completed_process(
+            stdout=b"output\n",
+            stderr=b"Session: sess-abc-123\n",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
+
+            output, session_id = invoke_claude_full(
+                "test", call_type=CallType.BUILD, config=ZingConfig()
             )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                return await invoke_claude_full(
-                    "test", call_type=CallType.BUILD, config=ZingConfig()
-                )
-
-        output, session_id = _run(_test())
         assert session_id == "sess-abc-123"
 
     def test_returns_session_id_from_stdout(self) -> None:
-        async def _test() -> tuple[str, str]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"Session: sess-in-stdout\nother output\n"],
-                stderr=b"",
+        mock_result = _make_mock_completed_process(
+            stdout=b"Session: sess-in-stdout\nother output\n",
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
+
+            output, session_id = invoke_claude_full(
+                "test", call_type=CallType.BUILD, config=ZingConfig()
             )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                return await invoke_claude_full(
-                    "test", call_type=CallType.BUILD, config=ZingConfig()
-                )
-
-        output, session_id = _run(_test())
         assert session_id == "sess-in-stdout"
 
     def test_empty_session_id_when_not_present(self) -> None:
-        async def _test() -> tuple[str, str]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"just output\n"],
-                stderr=b"no session here\n",
+        mock_result = _make_mock_completed_process(
+            stdout=b"just output\n",
+            stderr=b"no session here\n",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
+
+            output, session_id = invoke_claude_full(
+                "test", call_type=CallType.BUILD, config=ZingConfig()
             )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                return await invoke_claude_full(
-                    "test", call_type=CallType.BUILD, config=ZingConfig()
-                )
-
-        output, session_id = _run(_test())
         assert session_id == ""
 
     def test_passes_kwargs_to_build_command(self) -> None:
-        async def _test() -> list[object]:
-            mock_proc = _make_mock_process(stdout_lines=[], stderr=b"")
+        mock_result = _make_mock_completed_process(stdout=b"", stderr=b"")
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
 
-                await invoke_claude_full(
-                    "test",
-                    call_type=CallType.AUDIT,
-                    config=ZingConfig(),
-                    skip_permissions=True,
-                    system_prompt="be helpful",
-                    resume_session="sess-999",
-                )
+            invoke_claude_full(
+                "test",
+                call_type=CallType.AUDIT,
+                config=ZingConfig(),
+                skip_permissions=True,
+                system_prompt="be helpful",
+                resume_session="sess-999",
+            )
 
-                return list(mock_exec.call_args[0])
+            cmd = mock_run.call_args[0][0]
 
-        cmd = _run(_test())
         assert "--dangerously-skip-permissions" in cmd
         assert "--allowedTools" not in cmd
         assert "--system-prompt" in cmd
@@ -452,174 +427,159 @@ class TestInvokeClaudeValidated:
     """Tests for the retry-on-validation invoke_claude_validated wrapper."""
 
     def test_returns_on_first_success(self) -> None:
-        async def _test() -> str:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"valid output\n"],
-                stderr=b"Session: sess-001\n",
+        mock_result = _make_mock_completed_process(
+            stdout=b"valid output\n",
+            stderr=b"Session: sess-001\n",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
+
+            result = invoke_claude_validated(
+                "test",
+                validator=lambda x: x.strip().upper(),
+                retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
             )
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                return await invoke_claude_validated(
-                    "test",
-                    validator=lambda x: x.strip().upper(),
-                    retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
-                    call_type=CallType.BUILD,
-                    config=ZingConfig(),
-                )
-
-        assert _run(_test()) == "VALID OUTPUT"
+        assert result == "VALID OUTPUT"
 
     def test_retries_on_validation_error(self) -> None:
-        async def _test() -> tuple[str, int]:
-            mock_proc_bad = _make_mock_process(
-                stdout_lines=[b"bad output\n"],
-                stderr=b"Session: sess-001\n",
+        mock_result_bad = _make_mock_completed_process(
+            stdout=b"bad output\n",
+            stderr=b"Session: sess-001\n",
+        )
+        mock_result_good = _make_mock_completed_process(
+            stdout=b"good output\n",
+            stderr=b"Session: sess-002\n",
+        )
+
+        def validator(text: str) -> str:
+            if "bad" in text:
+                raise ValidationError("output was bad")
+            return text.strip()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [mock_result_bad, mock_result_good]
+
+            result = invoke_claude_validated(
+                "test",
+                validator=validator,
+                retry_prompt_template=jinja2.Template(
+                    "Fix this error: {{ error }}"
+                ),
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
             )
-            mock_proc_good = _make_mock_process(
-                stdout_lines=[b"good output\n"],
-                stderr=b"Session: sess-002\n",
-            )
 
-            def validator(text: str) -> str:
-                if "bad" in text:
-                    raise ValidationError("output was bad")
-                return text.strip()
-
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.side_effect = [mock_proc_bad, mock_proc_good]
-
-                result = await invoke_claude_validated(
-                    "test",
-                    validator=validator,
-                    retry_prompt_template=jinja2.Template(
-                        "Fix this error: {{ error }}"
-                    ),
-                    call_type=CallType.BUILD,
-                    config=ZingConfig(),
-                )
-
-                return result, mock_exec.call_count
-
-        result, call_count = _run(_test())
         assert result == "good output"
-        assert call_count == 2
+        assert mock_run.call_count == 2
 
     def test_raises_after_max_retries(self) -> None:
-        async def _test() -> int:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"always bad\n"],
-                stderr=b"Session: sess-001\n",
-            )
+        mock_result = _make_mock_completed_process(
+            stdout=b"always bad\n",
+            stderr=b"Session: sess-001\n",
+        )
 
-            def validator(text: str) -> str:
-                raise ValidationError("still bad")
+        def validator(text: str) -> str:
+            raise ValidationError("still bad")
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
 
-                with pytest.raises(ValidationError, match="still bad"):
-                    await invoke_claude_validated(
-                        "test",
-                        validator=validator,
-                        retry_prompt_template=jinja2.Template("Retry: {{ error }}"),
-                        max_retries=3,
-                        call_type=CallType.BUILD,
-                        config=ZingConfig(),
-                    )
-
-                return mock_exec.call_count
-
-        # 1 initial call + 2 retry calls = 3 total
-        assert _run(_test()) == 3
-
-    def test_calls_on_retry_callback(self) -> None:
-        async def _test() -> tuple[str, AsyncMock]:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"bad\n"],
-                stderr=b"Session: sess-001\n",
-            )
-            mock_proc_good = _make_mock_process(
-                stdout_lines=[b"good\n"],
-                stderr=b"Session: sess-002\n",
-            )
-
-            call_count = 0
-
-            def validator(text: str) -> str:
-                nonlocal call_count
-                call_count += 1
-                if call_count <= 1:
-                    raise ValidationError("bad output")
-                return text.strip()
-
-            on_retry = AsyncMock()
-
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.side_effect = [mock_proc, mock_proc_good]
-
-                result = await invoke_claude_validated(
+            with pytest.raises(ValidationError, match="still bad"):
+                invoke_claude_validated(
                     "test",
                     validator=validator,
-                    retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
-                    on_retry=on_retry,
+                    retry_prompt_template=jinja2.Template("Retry: {{ error }}"),
+                    max_retries=3,
                     call_type=CallType.BUILD,
                     config=ZingConfig(),
                 )
 
-            return result, on_retry
+        # 1 initial call + 2 retry calls = 3 total
+        assert mock_run.call_count == 3
 
-        result, on_retry = _run(_test())
+    def test_calls_on_retry_callback(self) -> None:
+        mock_result_bad = _make_mock_completed_process(
+            stdout=b"bad\n",
+            stderr=b"Session: sess-001\n",
+        )
+        mock_result_good = _make_mock_completed_process(
+            stdout=b"good\n",
+            stderr=b"Session: sess-002\n",
+        )
+
+        call_count = 0
+
+        def validator(text: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                raise ValidationError("bad output")
+            return text.strip()
+
+        on_retry = MagicMock()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [mock_result_bad, mock_result_good]
+
+            result = invoke_claude_validated(
+                "test",
+                validator=validator,
+                retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
+                on_retry=on_retry,
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
+            )
+
         assert result == "good"
         on_retry.assert_called_once_with(1, "bad output")
 
     def test_retry_uses_resume_session(self) -> None:
         """The retry call should pass --resume with the session ID from the first call."""
+        mock_result_bad = _make_mock_completed_process(
+            stdout=b"bad\n",
+            stderr=b"Session: sess-original\n",
+        )
+        mock_result_good = _make_mock_completed_process(
+            stdout=b"good\n",
+            stderr=b"Session: sess-retry\n",
+        )
 
-        async def _test() -> list[list[object]]:
-            mock_proc_bad = _make_mock_process(
-                stdout_lines=[b"bad\n"],
-                stderr=b"Session: sess-original\n",
+        call_count = 0
+
+        def validator(text: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                raise ValidationError("bad")
+            return text.strip()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [mock_result_bad, mock_result_good]
+
+            invoke_claude_validated(
+                "test",
+                validator=validator,
+                retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
             )
-            mock_proc_good = _make_mock_process(
-                stdout_lines=[b"good\n"],
-                stderr=b"Session: sess-retry\n",
-            )
 
-            call_count = 0
+            call_cmds = [call[0][0] for call in mock_run.call_args_list]
 
-            def validator(text: str) -> str:
-                nonlocal call_count
-                call_count += 1
-                if call_count <= 1:
-                    raise ValidationError("bad")
-                return text.strip()
-
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.side_effect = [mock_proc_bad, mock_proc_good]
-
-                await invoke_claude_validated(
-                    "test",
-                    validator=validator,
-                    retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
-                    call_type=CallType.BUILD,
-                    config=ZingConfig(),
-                )
-
-                return [list(call[0]) for call in mock_exec.call_args_list]
-
-        call_cmds = _run(_test())
         # Second call should have --resume flag with the session from first call
         second_call_cmd = call_cmds[1]
         assert "--resume" in second_call_cmd
@@ -628,44 +588,41 @@ class TestInvokeClaudeValidated:
 
     def test_retry_prompt_rendered_with_error(self) -> None:
         """The retry prompt should be rendered with the error message."""
+        mock_result_bad = _make_mock_completed_process(
+            stdout=b"bad\n",
+            stderr=b"Session: sess-001\n",
+        )
+        mock_result_good = _make_mock_completed_process(
+            stdout=b"good\n",
+            stderr=b"Session: sess-002\n",
+        )
 
-        async def _test() -> list[list[object]]:
-            mock_proc_bad = _make_mock_process(
-                stdout_lines=[b"bad\n"],
-                stderr=b"Session: sess-001\n",
+        call_count = 0
+
+        def validator(text: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                raise ValidationError("missing <plan> element")
+            return text.strip()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [mock_result_bad, mock_result_good]
+
+            invoke_claude_validated(
+                "test",
+                validator=validator,
+                retry_prompt_template=jinja2.Template(
+                    "Your output had an error: {{ error }}. Please fix it."
+                ),
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
             )
-            mock_proc_good = _make_mock_process(
-                stdout_lines=[b"good\n"],
-                stderr=b"Session: sess-002\n",
-            )
 
-            call_count = 0
+            call_cmds = [call[0][0] for call in mock_run.call_args_list]
 
-            def validator(text: str) -> str:
-                nonlocal call_count
-                call_count += 1
-                if call_count <= 1:
-                    raise ValidationError("missing <plan> element")
-                return text.strip()
-
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.side_effect = [mock_proc_bad, mock_proc_good]
-
-                await invoke_claude_validated(
-                    "test",
-                    validator=validator,
-                    retry_prompt_template=jinja2.Template(
-                        "Your output had an error: {{ error }}. Please fix it."
-                    ),
-                    call_type=CallType.BUILD,
-                    config=ZingConfig(),
-                )
-
-                return [list(call[0]) for call in mock_exec.call_args_list]
-
-        call_cmds = _run(_test())
         second_call_cmd = call_cmds[1]
         prompt_idx = second_call_cmd.index("--prompt")
         retry_prompt = second_call_cmd[prompt_idx + 1]
@@ -674,70 +631,64 @@ class TestInvokeClaudeValidated:
 
     def test_max_retries_one(self) -> None:
         """With max_retries=1, should fail immediately on first validation error."""
+        mock_result = _make_mock_completed_process(
+            stdout=b"bad\n",
+            stderr=b"Session: sess-001\n",
+        )
 
-        async def _test() -> int:
-            mock_proc = _make_mock_process(
-                stdout_lines=[b"bad\n"],
-                stderr=b"Session: sess-001\n",
-            )
+        def validator(text: str) -> str:
+            raise ValidationError("always fails")
 
-            def validator(text: str) -> str:
-                raise ValidationError("always fails")
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = mock_result
 
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.return_value = mock_proc
-
-                with pytest.raises(ValidationError, match="always fails"):
-                    await invoke_claude_validated(
-                        "test",
-                        validator=validator,
-                        retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
-                        max_retries=1,
-                        call_type=CallType.BUILD,
-                        config=ZingConfig(),
-                    )
-
-                return mock_exec.call_count
-
-        # Only one call — no retries with max_retries=1
-        assert _run(_test()) == 1
-
-    def test_no_on_retry_callback(self) -> None:
-        """When on_retry is None, retries still work without callback."""
-
-        async def _test() -> str:
-            mock_proc_bad = _make_mock_process(
-                stdout_lines=[b"bad\n"],
-                stderr=b"Session: sess-001\n",
-            )
-            mock_proc_good = _make_mock_process(
-                stdout_lines=[b"good\n"],
-                stderr=b"Session: sess-002\n",
-            )
-
-            call_count = 0
-
-            def validator(text: str) -> str:
-                nonlocal call_count
-                call_count += 1
-                if call_count <= 1:
-                    raise ValidationError("bad")
-                return text.strip()
-
-            with patch(
-                "zing_ai.orchestrator.claude.asyncio.create_subprocess_exec"
-            ) as mock_exec:
-                mock_exec.side_effect = [mock_proc_bad, mock_proc_good]
-
-                return await invoke_claude_validated(
+            with pytest.raises(ValidationError, match="always fails"):
+                invoke_claude_validated(
                     "test",
                     validator=validator,
                     retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
-                    on_retry=None,
+                    max_retries=1,
                     call_type=CallType.BUILD,
                     config=ZingConfig(),
                 )
 
-        assert _run(_test()) == "good"
+        # Only one call — no retries with max_retries=1
+        assert mock_run.call_count == 1
+
+    def test_no_on_retry_callback(self) -> None:
+        """When on_retry is None, retries still work without callback."""
+        mock_result_bad = _make_mock_completed_process(
+            stdout=b"bad\n",
+            stderr=b"Session: sess-001\n",
+        )
+        mock_result_good = _make_mock_completed_process(
+            stdout=b"good\n",
+            stderr=b"Session: sess-002\n",
+        )
+
+        call_count = 0
+
+        def validator(text: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                raise ValidationError("bad")
+            return text.strip()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [mock_result_bad, mock_result_good]
+
+            result = invoke_claude_validated(
+                "test",
+                validator=validator,
+                retry_prompt_template=jinja2.Template("Fix: {{ error }}"),
+                on_retry=None,
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
+            )
+
+        assert result == "good"

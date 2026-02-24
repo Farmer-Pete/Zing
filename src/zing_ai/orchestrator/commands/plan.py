@@ -17,9 +17,9 @@ saved session and merges updated steps/interactions.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,9 +29,6 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
-from zing_ai.orchestrator.web.app import (
-    start_server_background as _start_web_server_background,
-)
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
     parse_interactions_response,
@@ -157,7 +154,7 @@ def _parse_identification_response(text: str) -> list[InvestigationArea]:
 # ---------------------------------------------------------------------------
 
 
-async def _invoke_flesh_out_with_session(
+def _invoke_flesh_out_with_session(
     prompt: str,
     *,
     call_type: CallType,
@@ -194,7 +191,7 @@ async def _invoke_flesh_out_with_session(
     ValidationError
         If validation fails after all retries.
     """
-    output, session_id = await claude.invoke_claude_full(
+    output, session_id = claude.invoke_claude_full(
         prompt,
         call_type=call_type,
         config=config,
@@ -216,7 +213,7 @@ async def _invoke_flesh_out_with_session(
                 raise
 
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
-            output, session_id = await claude.invoke_claude_full(
+            output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 call_type=call_type,
                 config=config,
@@ -233,7 +230,7 @@ async def _invoke_flesh_out_with_session(
 # ---------------------------------------------------------------------------
 
 
-async def _invoke_replan_with_session(
+def _invoke_replan_with_session(
     prompt: str,
     *,
     call_type: CallType,
@@ -252,7 +249,7 @@ async def _invoke_replan_with_session(
     tuple[Plan, Interaction | None, str]
         ``(updated_plan, new_interactions_or_none, session_id)``
     """
-    output, session_id = await claude.invoke_claude_full(
+    output, session_id = claude.invoke_claude_full(
         prompt,
         call_type=call_type,
         config=config,
@@ -283,7 +280,7 @@ async def _invoke_replan_with_session(
                 raise
 
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
-            output, session_id = await claude.invoke_claude_full(
+            output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 call_type=call_type,
                 config=config,
@@ -300,7 +297,7 @@ async def _invoke_replan_with_session(
 # ---------------------------------------------------------------------------
 
 
-async def run_plan(
+def run_plan(
     *,
     zing_file: str | None,
     skip_permissions: bool,
@@ -332,7 +329,7 @@ async def run_plan(
     logger.info("Planning with zing file: %s", zing_path)
 
     if replan_changes is not None:
-        await _run_replan(
+        _run_replan(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -340,7 +337,7 @@ async def run_plan(
             replan_changes=replan_changes,
         )
     else:
-        await _run_first_plan(
+        _run_first_plan(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -350,7 +347,7 @@ async def run_plan(
     # Flow into plan audit
     from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
 
-    await run_plan_audit(
+    run_plan_audit(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,
@@ -363,7 +360,7 @@ async def run_plan(
 # ---------------------------------------------------------------------------
 
 
-async def _run_first_plan(
+def _run_first_plan(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -382,7 +379,7 @@ async def _run_first_plan(
     logger.info("Phase 1: Identification")
     identify_prompt = render_prompt("plan_identify.md.j2", zing_content=zing_content)
 
-    identify_output, _identify_session = await claude.invoke_claude_full(
+    identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
         call_type=CallType.INVESTIGATE,
         config=config,
@@ -411,13 +408,13 @@ async def _run_first_plan(
 
     distilled: dict[Path, str] = {}
     if file_paths:
-        distilled = await distill_files(file_paths, project_root=project_root)
+        distilled = distill_files(file_paths, project_root=project_root)
         logger.info("Distilled %d files", len(distilled))
 
     # --- Phase 3: Investigation (parallel) ---
     logger.info("Phase 3: Investigation (parallel)")
 
-    async def _investigate_area(area: InvestigationArea) -> Interaction:
+    def _investigate_area(area: InvestigationArea) -> Interaction:
         """Run investigation for a single area."""
         # Build distilled code context for this area's files
         area_distilled: dict[str, str] = {}
@@ -436,7 +433,7 @@ async def _run_first_plan(
             mcp_mandate="Use the MCP tools available to you to investigate the codebase.",
         )
 
-        interaction = await claude.invoke_claude_validated(
+        interaction = claude.invoke_claude_validated(
             investigate_prompt,
             validator=parse_interactions_response,
             retry_prompt_template=_RETRY_TEMPLATE,
@@ -448,9 +445,10 @@ async def _run_first_plan(
         logger.info("Area '%s' produced %d choice sets", area.name, len(interaction.choice_sets))
         return interaction
 
-    investigation_results: list[Interaction] = await asyncio.gather(
-        *(_investigate_area(area) for area in areas)
-    )
+    with ThreadPoolExecutor() as executor:
+        investigation_results: list[Interaction] = list(
+            executor.map(_investigate_area, areas)
+        )
 
     # Merge all interactions into one
     all_choice_sets = []
@@ -478,7 +476,7 @@ async def _run_first_plan(
         recommended_choices=recommended_choices,
     )
 
-    plan, session_id = await _invoke_flesh_out_with_session(
+    plan, session_id = _invoke_flesh_out_with_session(
         flesh_out_prompt,
         call_type=CallType.PLAN,
         config=config,
@@ -512,7 +510,7 @@ async def _run_first_plan(
 # ---------------------------------------------------------------------------
 
 
-async def _run_replan(
+def _run_replan(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -541,7 +539,7 @@ async def _run_replan(
     )
 
     # Invoke Claude with session resumption
-    updated_plan, new_interactions, session_id = await _invoke_replan_with_session(
+    updated_plan, new_interactions, session_id = _invoke_replan_with_session(
         replan_prompt,
         call_type=CallType.PLAN,
         config=config,

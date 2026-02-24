@@ -1,15 +1,15 @@
 """Claude CLI subprocess wrapper.
 
-Provides async helpers for invoking ``claude --print`` as subprocesses,
+Provides sync helpers for invoking ``claude --print`` as subprocesses,
 collecting output, and retrying on validation failures.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+import subprocess
+from collections.abc import Callable, Iterator
 
 import jinja2
 
@@ -62,7 +62,7 @@ def _build_command(
     return cmd
 
 
-async def invoke_claude(
+def invoke_claude(
     prompt: str,
     *,
     call_type: CallType,
@@ -70,8 +70,8 @@ async def invoke_claude(
     skip_permissions: bool = False,
     system_prompt: str | None = None,
     resume_session: str | None = None,
-) -> AsyncIterator[str]:
-    """Invoke ``claude --print`` as an async subprocess and yield stdout lines.
+) -> Iterator[str]:
+    """Invoke ``claude --print`` as a subprocess and yield stdout lines.
 
     Parameters
     ----------
@@ -106,23 +106,23 @@ async def invoke_claude(
 
     logger.debug("Running command: %s", cmd)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
     assert proc.stdout is not None  # guaranteed by PIPE
 
-    async for raw_line in proc.stdout:
+    for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace")
         yield line
 
     # Wait for the process to finish and capture stderr for session ID
-    await proc.wait()
+    proc.wait()
 
     if proc.stderr is not None:
-        stderr_data = await proc.stderr.read()
+        stderr_data = proc.stderr.read()
         stderr_text = stderr_data.decode("utf-8", errors="replace")
         if stderr_text:
             logger.debug("Claude stderr: %s", stderr_text)
@@ -137,7 +137,7 @@ def _extract_session_id(text: str) -> str:
     return match.group(1) if match else ""
 
 
-async def invoke_claude_full(
+def invoke_claude_full(
     prompt: str,
     **kwargs: object,
 ) -> tuple[str, str]:
@@ -149,16 +149,13 @@ async def invoke_claude_full(
 
     logger.debug("Running command (full): %s", cmd)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
     )
 
-    stdout_data, stderr_data = await proc.communicate()
-
-    full_output = stdout_data.decode("utf-8", errors="replace")
-    stderr_text = stderr_data.decode("utf-8", errors="replace")
+    full_output = result.stdout.decode("utf-8", errors="replace")
+    stderr_text = result.stderr.decode("utf-8", errors="replace")
 
     if stderr_text:
         logger.debug("Claude stderr: %s", stderr_text)
@@ -171,13 +168,13 @@ async def invoke_claude_full(
     return full_output, session_id
 
 
-async def invoke_claude_validated[T](
+def invoke_claude_validated[T](
     prompt: str,
     validator: Callable[[str], T],
     retry_prompt_template: jinja2.Template,
     *,
     max_retries: int = 3,
-    on_retry: Callable[[int, str], Awaitable[None]] | None = None,
+    on_retry: Callable[[int, str], None] | None = None,
     **kwargs: object,
 ) -> T:
     """Invoke Claude, validate the output, and retry on :class:`ValidationError`.
@@ -196,8 +193,8 @@ async def invoke_claude_validated[T](
     max_retries:
         Maximum number of retry attempts (default 3).
     on_retry:
-        Optional async callback invoked as ``on_retry(attempt, error_message)``
-        before each retry (e.g. to send SSE progress updates).
+        Optional sync callback invoked as ``on_retry(attempt, error_message)``
+        before each retry (e.g. to send progress updates).
     **kwargs:
         Forwarded to :func:`invoke_claude_full`.
 
@@ -211,7 +208,7 @@ async def invoke_claude_validated[T](
     ValidationError
         If validation still fails after *max_retries* attempts.
     """
-    output, session_id = await invoke_claude_full(prompt, **kwargs)
+    output, session_id = invoke_claude_full(prompt, **kwargs)
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -229,12 +226,12 @@ async def invoke_claude_validated[T](
                 raise
 
             if on_retry is not None:
-                await on_retry(attempt, error_message)
+                on_retry(attempt, error_message)
 
             retry_prompt = retry_prompt_template.render(error=error_message)
 
             # Resume the session so Claude has context of its previous response
-            output, session_id = await invoke_claude_full(
+            output, session_id = invoke_claude_full(
                 retry_prompt,
                 **{**kwargs, "resume_session": session_id},  # type: ignore[arg-type]
             )

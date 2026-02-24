@@ -84,7 +84,7 @@ def _to_kebab_case(text: str) -> str:
     return text
 
 
-async def run_new(
+def run_new(
     *,
     zing_file: str | None,
     skip_permissions: bool,
@@ -121,7 +121,7 @@ async def run_new(
     # 3. Invoke Claude interactively to collect requirements
     #    This is an interactive session — Claude talks to the user via the terminal.
     #    We use invoke_claude_full() which collects all output.
-    markdown, _session_id = await claude.invoke_claude_full(
+    markdown, _session_id = claude.invoke_claude_full(
         prompt,
         call_type=CallType.INVESTIGATE,
         config=config,
@@ -149,7 +149,7 @@ async def run_new(
     # 6. Flow into planning
     from zing_ai.orchestrator.commands.plan import run_plan
 
-    await run_plan(
+    run_plan(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,

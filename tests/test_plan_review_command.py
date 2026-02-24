@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from zing_ai.orchestrator.commands.plan_review import (
     ReviewState,
     _compute_changes,
-    _start_review_server,
     run_plan_review,
 )
 from zing_ai.orchestrator.config import ZingConfig
@@ -30,11 +28,6 @@ from zing_ai.orchestrator.xml_parser import write_zing_file
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 def _make_choice_sets() -> list[ChoiceSet]:
@@ -261,34 +254,30 @@ class TestRunPlanReviewApproval:
         """Approve with no changes -> writes approved=True to zing file."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
-        mock_build = AsyncMock()
+        mock_build = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             # Simulate user approving immediately (no changes)
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_build",
-                    mock_build,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                mock_build,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Verify approved=True in the zing file
         tree = ET.parse(zing_path)
@@ -302,85 +291,72 @@ class TestRunPlanReviewApproval:
         """Approved plan calls _call_build with correct arguments."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
-        mock_build = AsyncMock()
+        mock_build = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_build",
-                    mock_build,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                mock_build,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
 
         call_kwargs = mock_build.call_args.kwargs
         assert call_kwargs["zing_path"] == zing_path
-        assert call_kwargs["no_browser"] is True
         assert call_kwargs["skip_permissions"] is True
         assert call_kwargs["config"] is config
         assert call_kwargs["project_root"] == tmp_path
 
-    def test_web_server_started_with_review_state(self, tmp_path: Path) -> None:
-        """The web server should be started with ReviewState on app.state."""
+    def test_review_server_started_with_review_state(self, tmp_path: Path) -> None:
+        """The review server should be started with ReviewState."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
         server_calls: list[dict] = []
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             server_calls.append({
                 "zing_file_path": zing_file_path,
                 "review_state": review_state,
-                "port": port,
-                "no_browser": no_browser,
             })
             # Approve immediately
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_build",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                MagicMock(),
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         assert len(server_calls) == 1
         assert server_calls[0]["zing_file_path"] == zing_path
-        assert server_calls[0]["port"] == config.port
-        assert server_calls[0]["no_browser"] is True
         assert isinstance(server_calls[0]["review_state"], ReviewState)
         # Review state should have the choice sets from the zing file
         assert len(server_calls[0]["review_state"].choice_sets) == 2
@@ -398,35 +374,31 @@ class TestRunPlanReviewModifications:
         """Modifying choices -> calls _call_replan with change diff."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
-        mock_replan = AsyncMock()
+        mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             # Simulate user changing first choice from PostgreSQL to MongoDB
             review_state.user_selections[0] = 1
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_replan",
-                    mock_replan,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                mock_replan,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         mock_replan.assert_called_once()
         call_kwargs = mock_replan.call_args.kwargs
@@ -440,35 +412,31 @@ class TestRunPlanReviewModifications:
         """Deleting a choice set -> calls _call_replan with deleted diff."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
-        mock_replan = AsyncMock()
+        mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             # Simulate user deleting the second choice set
             review_state.user_selections[1] = None
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_replan",
-                    mock_replan,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                mock_replan,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         mock_replan.assert_called_once()
         call_kwargs = mock_replan.call_args.kwargs
@@ -482,32 +450,28 @@ class TestRunPlanReviewModifications:
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             review_state.user_selections[0] = 1
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_replan",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                MagicMock(),
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # The zing file should NOT have approved=True (modifications go through replan)
         tree = ET.parse(zing_path)
@@ -518,38 +482,33 @@ class TestRunPlanReviewModifications:
         """Verify _call_replan receives all expected arguments."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
-        mock_replan = AsyncMock()
+        mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state, *, port, no_browser):
+        def mock_start_server(zing_file_path, review_state):
             review_state.user_selections[0] = 2  # Select SQLite
             review_state.approved = True
             review_state.decision_event.set()
             return MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=mock_start_server,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_replan",
-                    mock_replan,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=mock_start_server,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                mock_replan,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
 
         call_kwargs = mock_replan.call_args.kwargs
         assert call_kwargs["zing_path"] == zing_path
-        assert call_kwargs["no_browser"] is True
         assert call_kwargs["skip_permissions"] is True
         assert call_kwargs["config"] is config
         assert call_kwargs["project_root"] == tmp_path
@@ -569,24 +528,20 @@ class TestRunPlanReviewNoChoices:
         """When no choices exist, the plan is auto-approved."""
         zing_path = _make_zing_file_no_choices(tmp_path)
         config = ZingConfig()
-        mock_build = AsyncMock()
+        mock_build = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_build",
-                    mock_build,
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                mock_build,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Verify approved=True in the zing file
         tree = ET.parse(zing_path)
@@ -597,218 +552,24 @@ class TestRunPlanReviewNoChoices:
         mock_build.assert_called_once()
 
     def test_no_choices_does_not_start_server(self, tmp_path: Path) -> None:
-        """When no choices exist, the web server should not be started."""
+        """When no choices exist, the review server should not be started."""
         _make_zing_file_no_choices(tmp_path)
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                    side_effect=AssertionError("Server should not be started"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_review._call_build",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan_review(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        # Should not raise -- server start should never be called
-        _run(_test())
-
-
-# ---------------------------------------------------------------------------
-# _start_review_server tests
-# ---------------------------------------------------------------------------
-
-
-class TestStartReviewServer:
-    """Tests for the review server startup."""
-
-    def test_attaches_review_state_to_app(self) -> None:
-        """Verify that review state is stored on app.state.review."""
-        review_state = ReviewState(choice_sets=_make_choice_sets())
-        captured_app = None
-
-        def mock_start_server(app, *, port, no_browser):
-            nonlocal captured_app
-            captured_app = app
-
         with (
             patch(
-                "zing_ai.orchestrator.web.app.create_app",
-            ) as mock_create,
+                "zing_ai.orchestrator.commands.plan_review._start_review_server",
+                side_effect=AssertionError("Server should not be started"),
+            ),
             patch(
-                "zing_ai.orchestrator.web.app.start_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                MagicMock(),
             ),
         ):
-            mock_app = MagicMock()
-            mock_create.return_value = mock_app
-
-            _start_review_server(
-                Path("test.xml"),
-                review_state,
-                port=8741,
-                no_browser=True,
+            # Should not raise -- server start should never be called
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
             )
-
-            # Wait briefly for the thread to start
-            import time
-            time.sleep(0.1)
-
-        # The app should have had review state assigned
-        assert mock_app.state.review is review_state
-
-
-# ---------------------------------------------------------------------------
-# Route integration tests (routes use app.state.review)
-# ---------------------------------------------------------------------------
-
-
-class TestReviewRouteIntegration:
-    """Tests that routes correctly interact with ReviewState via app.state."""
-
-    def _make_app_with_review(self, choice_sets=None):
-        """Create a FastAPI app with a ReviewState attached."""
-        from zing_ai.orchestrator.web.app import create_app
-
-        app = create_app(zing_file=None)
-        if choice_sets is None:
-            choice_sets = _make_choice_sets()
-        app.state.review = ReviewState(choice_sets=choice_sets)
-        return app
-
-    @pytest.mark.anyio()
-    async def test_review_page_shows_choices(self) -> None:
-        """GET /review should render the choice sets from ReviewState."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/review")
-        assert response.status_code == 200
-        assert "Which database?" in response.text
-        assert "Which framework?" in response.text
-
-    @pytest.mark.anyio()
-    async def test_review_update_stores_selection(self) -> None:
-        """POST /review/update should store the user's selection."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/review/update",
-                json={"choice_set_index": 0, "selected_choice_index": 1},
-            )
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-        assert app.state.review.user_selections[0] == 1
-
-    @pytest.mark.anyio()
-    async def test_review_update_stores_deletion(self) -> None:
-        """POST /review/update with null should store a deletion."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/review/update",
-                json={"choice_set_index": 1, "selected_choice_index": None},
-            )
-        assert response.status_code == 200
-        assert app.state.review.user_selections[1] is None
-
-    @pytest.mark.anyio()
-    async def test_review_approve_sets_event(self) -> None:
-        """POST /review/approve should set the decision event."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/review/approve")
-        assert response.status_code == 200
-        assert app.state.review.approved is True
-        assert app.state.review.decision_event.is_set()
-
-    @pytest.mark.anyio()
-    async def test_review_approve_returns_build_when_no_modifications(self) -> None:
-        """POST /review/approve with no changes returns next_stage=build."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/review/approve")
-        assert response.json()["next_stage"] == "build"
-
-    @pytest.mark.anyio()
-    async def test_review_approve_returns_replan_when_modifications(self) -> None:
-        """POST /review/approve after modifications returns next_stage=replan."""
-        from httpx import ASGITransport, AsyncClient
-
-        app = self._make_app_with_review()
-        # Simulate a modification before approving
-        app.state.review.user_selections[0] = 1
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/review/approve")
-        assert response.json()["next_stage"] == "replan"
-
-    @pytest.mark.anyio()
-    async def test_review_page_without_review_state(self) -> None:
-        """GET /review without ReviewState should render empty choices."""
-        from httpx import ASGITransport, AsyncClient
-
-        from zing_ai.orchestrator.web.app import create_app
-
-        app = create_app(zing_file=None)
-        # No review state attached
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/review")
-        assert response.status_code == 200
-        assert "No choices to review" in response.text
-
-    @pytest.mark.anyio()
-    async def test_review_update_without_review_state(self) -> None:
-        """POST /review/update without ReviewState should still return ok."""
-        from httpx import ASGITransport, AsyncClient
-
-        from zing_ai.orchestrator.web.app import create_app
-
-        app = create_app(zing_file=None)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/review/update",
-                json={"choice_set_index": 0, "selected_choice_index": 1},
-            )
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
-
-    @pytest.mark.anyio()
-    async def test_review_approve_without_review_state(self) -> None:
-        """POST /review/approve without ReviewState should still return ok."""
-        from httpx import ASGITransport, AsyncClient
-
-        from zing_ai.orchestrator.web.app import create_app
-
-        app = create_app(zing_file=None)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/review/approve")
-        assert response.status_code == 200
-        assert response.json()["ok"] is True

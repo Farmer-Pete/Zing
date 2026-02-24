@@ -8,9 +8,9 @@ re-audit -> review loop.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,8 +47,8 @@ class ReviewState:
 
     #: Event signalled when the user has made their final decision
     #: (either approve or modify-and-submit).  Uses ``threading.Event``
-    #: (not ``asyncio.Event``) because it is set from the uvicorn daemon
-    #: thread and waited on from the main asyncio thread.
+    #: because it is set from the uvicorn daemon thread and waited on
+    #: from the main thread.
     decision_event: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -131,13 +131,8 @@ def _compute_changes(
 def _start_review_server(
     zing_file_path: Path | None,
     review_state: ReviewState,
-    *,
-    port: int,
-) -> threading.Thread:
-    """Start the FastAPI web server with review state in a background thread.
-
-    The review state is attached to ``app.state.review`` so the route
-    handlers can access it.
+) -> None:
+    """Start the review UI for the user to approve or modify choices.
 
     Parameters
     ----------
@@ -145,27 +140,11 @@ def _start_review_server(
         Path to the zing XML file.
     review_state:
         Shared mutable state for the review session.
-    port:
-        Port to listen on.
-
-    Returns
-    -------
-    threading.Thread
-        The daemon thread running the server.
     """
-    from zing_ai.orchestrator.web.app import create_app, start_server
-
-    app = create_app(zing_file=zing_file_path)
-    app.state.review = review_state
-
-    thread = threading.Thread(
-        target=start_server,
-        args=(app,),
-        kwargs={"port": port},
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    # TODO: Replace with Textual TUI in a later step.
+    # For now this is a placeholder -- the TUI will present choices
+    # and set review_state.approved / review_state.decision_event.
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +152,7 @@ def _start_review_server(
 # ---------------------------------------------------------------------------
 
 
-async def run_plan_review(
+def run_plan_review(
     *,
     zing_file: str | None,
     skip_permissions: bool,
@@ -220,7 +199,7 @@ async def run_plan_review(
         # Nothing to review -- approve and proceed to build
         doc.approved = True
         write_zing_file(zing_path, doc)
-        await _call_build(
+        _call_build(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -231,11 +210,10 @@ async def run_plan_review(
     # Build shared review state
     review = ReviewState(choice_sets=choice_sets)
 
-    # Start the web server with review state
+    # Start the review UI with review state
     _start_review_server(
         zing_path,
         review,
-        port=config.port,
     )
 
     logger.info(
@@ -245,9 +223,9 @@ async def run_plan_review(
 
     # Wait for the user to approve or modify.  ``decision_event`` is a
     # threading.Event (set from the uvicorn daemon thread), so we poll it
-    # from the async loop to avoid blocking.
+    # from the main thread.
     while not review.decision_event.is_set():
-        await asyncio.sleep(0.2)
+        time.sleep(0.2)
 
     if review.approved and not review.has_modifications:
         # --- Approval path: no changes ---
@@ -255,7 +233,7 @@ async def run_plan_review(
         doc.approved = True
         write_zing_file(zing_path, doc)
 
-        await _call_build(
+        _call_build(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -278,7 +256,7 @@ async def run_plan_review(
                     change["user_selected"],
                 )
 
-        await _call_replan(
+        _call_replan(
             zing_path=zing_path,
             skip_permissions=skip_permissions,
             config=config,
@@ -292,7 +270,7 @@ async def run_plan_review(
 # ---------------------------------------------------------------------------
 
 
-async def _call_build(
+def _call_build(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -302,7 +280,7 @@ async def _call_build(
     """Call ``run_build`` to execute the approved plan."""
     from zing_ai.orchestrator.commands.build import run_build
 
-    await run_build(
+    run_build(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,
@@ -310,7 +288,7 @@ async def _call_build(
     )
 
 
-async def _call_replan(
+def _call_replan(
     *,
     zing_path: Path,
     skip_permissions: bool,
@@ -321,7 +299,7 @@ async def _call_replan(
     """Call ``run_plan`` with ``replan_changes`` to re-enter the plan loop."""
     from zing_ai.orchestrator.commands.plan import run_plan
 
-    await run_plan(
+    run_plan(
         zing_file=zing_path.name,
         skip_permissions=skip_permissions,
         config=config,

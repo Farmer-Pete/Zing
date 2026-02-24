@@ -1,14 +1,15 @@
 """Aid CLI distiller wrapper with SHA256 hash-based caching.
 
-Provides async helpers for invoking the ``aid`` CLI to distill files,
+Provides sync helpers for invoking the ``aid`` CLI to distill files,
 with a file-content-hash-based cache to avoid redundant distillations.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-async def distill_file(
+def distill_file(
     file_path: Path, *, project_root: Path, timeout: float = 60,
 ) -> str | None:
     """Distill a single file using the ``aid`` CLI, with caching.
@@ -44,7 +45,7 @@ async def distill_file(
     Computes the SHA256 hash of the file content and checks for a cached
     result in ``<project_root>/.zing/.cache/<hash>.txt``.  If cached,
     returns the cached content.  Otherwise, invokes ``aid distill_file``
-    as an async subprocess, caches the result, and returns it.
+    as a subprocess, caches the result, and returns it.
 
     Parameters
     ----------
@@ -72,47 +73,41 @@ async def distill_file(
     # Cache miss — invoke aid CLI
     logger.debug("Cache miss for %s (hash=%s), invoking aid", file_path, file_hash)
 
-    proc = await asyncio.create_subprocess_exec(
-        "aid",
-        "distill_file",
-        str(file_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
     try:
-        stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        result = subprocess.run(
+            ["aid", "distill_file", str(file_path)],
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
         logger.warning("aid distill_file timed out for %s after %.0fs", file_path, timeout)
         return None
 
-    if proc.returncode != 0:
-        stderr_text = stderr_data.decode("utf-8", errors="replace")
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
         logger.warning(
             "aid distill_file failed for %s (returncode=%d): %s",
             file_path,
-            proc.returncode,
+            result.returncode,
             stderr_text.strip(),
         )
         return None
 
-    if stderr_data:
-        stderr_text = stderr_data.decode("utf-8", errors="replace")
+    if result.stderr:
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
         logger.debug("aid stderr: %s", stderr_text)
 
-    result = stdout_data.decode("utf-8", errors="replace")
+    output = result.stdout.decode("utf-8", errors="replace")
 
     # Cache the result
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(result, encoding="utf-8")
+    cache_file.write_text(output, encoding="utf-8")
     logger.debug("Cached result for %s at %s", file_path, cache_file)
 
-    return result
+    return output
 
 
-async def distill_files(
+def distill_files(
     file_paths: list[Path],
     *,
     project_root: Path,
@@ -131,8 +126,10 @@ async def distill_files(
     dict[Path, str]
         Mapping of each file path to its distilled content.
     """
-    results = await asyncio.gather(
-        *(distill_file(fp, project_root=project_root) for fp in file_paths)
-    )
+    def _distill_one(fp: Path) -> tuple[Path, str | None]:
+        return fp, distill_file(fp, project_root=project_root)
 
-    return {fp: r for fp, r in zip(file_paths, results, strict=True) if r is not None}
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(_distill_one, file_paths))
+
+    return {fp: r for fp, r in results if r is not None}

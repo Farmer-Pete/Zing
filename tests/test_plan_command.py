@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,11 +31,6 @@ from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _run(coro):  # type: ignore[no-untyped-def]
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
 
 
 def _make_zing_file(tmp_path: Path, *, stage: str = "new", content: str = "# Test Project\n\nA test project.") -> Path:
@@ -308,59 +302,52 @@ class TestInvokeFleshOutWithSession:
     """Tests for the flesh-out helper that returns session ID."""
 
     def test_returns_plan_and_session_id(self) -> None:
-        async def _test() -> tuple[Plan, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                return_value=(FLESH_OUT_RESPONSE, "sess-flesh-001"),
-            ):
-                return await _invoke_flesh_out_with_session(
-                    "test prompt",
-                    call_type=CallType.PLAN,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+            return_value=(FLESH_OUT_RESPONSE, "sess-flesh-001"),
+        ):
+            plan, session_id = _invoke_flesh_out_with_session(
+                "test prompt",
+                call_type=CallType.PLAN,
+                config=ZingConfig(),
+                skip_permissions=False,
+            )
 
-        plan, session_id = _run(_test())
         assert session_id == "sess-flesh-001"
         assert len(plan.stages) == 2
         assert plan.stages[0].label == "Data layer"
 
     def test_retries_on_validation_error(self) -> None:
-        async def _test() -> tuple[Plan, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                side_effect=[
-                    ("invalid output", "sess-001"),
-                    (FLESH_OUT_RESPONSE, "sess-002"),
-                ],
-            ):
-                return await _invoke_flesh_out_with_session(
-                    "test prompt",
-                    call_type=CallType.PLAN,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+            side_effect=[
+                ("invalid output", "sess-001"),
+                (FLESH_OUT_RESPONSE, "sess-002"),
+            ],
+        ):
+            plan, session_id = _invoke_flesh_out_with_session(
+                "test prompt",
+                call_type=CallType.PLAN,
+                config=ZingConfig(),
+                skip_permissions=False,
+            )
 
-        plan, session_id = _run(_test())
         assert session_id == "sess-002"
         assert len(plan.stages) == 2
 
     def test_raises_after_max_retries(self) -> None:
-        async def _test() -> None:
-            with patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                return_value=("always invalid", "sess-001"),
-            ):
-                await _invoke_flesh_out_with_session(
+        with patch(
+            "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+            return_value=("always invalid", "sess-001"),
+        ):
+            with pytest.raises(ValidationError):
+                _invoke_flesh_out_with_session(
                     "test prompt",
                     call_type=CallType.PLAN,
                     config=ZingConfig(),
                     skip_permissions=False,
                     max_retries=2,
                 )
-
-        with pytest.raises(ValidationError):
-            _run(_test())
 
 
 # ---------------------------------------------------------------------------
@@ -372,40 +359,36 @@ class TestInvokeReplanWithSession:
     """Tests for the re-plan helper."""
 
     def test_returns_plan_without_new_interactions(self) -> None:
-        async def _test() -> tuple[Plan, Interaction | None, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                return_value=(REPLAN_RESPONSE, "sess-replan-001"),
-            ):
-                return await _invoke_replan_with_session(
-                    "replan prompt",
-                    call_type=CallType.PLAN,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    resume_session="sess-orig",
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+            return_value=(REPLAN_RESPONSE, "sess-replan-001"),
+        ):
+            plan, interactions, session_id = _invoke_replan_with_session(
+                "replan prompt",
+                call_type=CallType.PLAN,
+                config=ZingConfig(),
+                skip_permissions=False,
+                resume_session="sess-orig",
+            )
 
-        plan, interactions, session_id = _run(_test())
         assert session_id == "sess-replan-001"
         assert len(plan.stages) == 1
         assert plan.stages[0].steps[0].label == "Set up Tortoise ORM"
         assert interactions is None
 
     def test_returns_plan_with_new_interactions(self) -> None:
-        async def _test() -> tuple[Plan, Interaction | None, str]:
-            with patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                return_value=(REPLAN_RESPONSE_WITH_NEW_INTERACTIONS, "sess-replan-002"),
-            ):
-                return await _invoke_replan_with_session(
-                    "replan prompt",
-                    call_type=CallType.PLAN,
-                    config=ZingConfig(),
-                    skip_permissions=False,
-                    resume_session="sess-orig",
-                )
+        with patch(
+            "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+            return_value=(REPLAN_RESPONSE_WITH_NEW_INTERACTIONS, "sess-replan-002"),
+        ):
+            plan, interactions, session_id = _invoke_replan_with_session(
+                "replan prompt",
+                call_type=CallType.PLAN,
+                config=ZingConfig(),
+                skip_permissions=False,
+                resume_session="sess-orig",
+            )
 
-        plan, interactions, session_id = _run(_test())
         assert len(plan.stages) == 1
         assert interactions is not None
         assert len(interactions.choice_sets) == 1
@@ -424,77 +407,69 @@ class TestRunPlanFirstRun:
         """Happy path: identification -> distillation -> investigation -> flesh out -> assembly."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
-        mock_plan_audit = AsyncMock()
+        mock_plan_audit = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        # Phase 1: Identification
-                        (IDENTIFY_RESPONSE, "sess-id-001"),
-                        # Phase 4: Flesh out
-                        (FLESH_OUT_RESPONSE, "sess-flesh-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    side_effect=[
-                        # Phase 3: Investigation (3 areas from IDENTIFY_RESPONSE)
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Which ORM?",
-                                explanation="Choose an ORM.",
-                                choices=[
-                                    Choice(label="SQLAlchemy", description="Full ORM", recommended=True),
-                                    Choice(label="Raw SQL", description="No ORM", recommended=False),
-                                ],
-                            ),
-                        ]),
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Which framework?",
-                                explanation="Choose a framework.",
-                                choices=[
-                                    Choice(label="FastAPI", description="Modern async", recommended=True),
-                                    Choice(label="Flask", description="Classic", recommended=False),
-                                ],
-                            ),
-                        ]),
-                        Interaction(choice_sets=[
-                            ChoiceSet(
-                                message="Which UI lib?",
-                                explanation="Choose a UI library.",
-                                choices=[
-                                    Choice(label="React", description="Component-based", recommended=True),
-                                    Choice(label="Vue", description="Progressive", recommended=False),
-                                ],
-                            ),
-                        ]),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    mock_plan_audit,
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    # Phase 1: Identification
+                    (IDENTIFY_RESPONSE, "sess-id-001"),
+                    # Phase 4: Flesh out
+                    (FLESH_OUT_RESPONSE, "sess-flesh-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                side_effect=[
+                    # Phase 3: Investigation (3 areas from IDENTIFY_RESPONSE)
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Which ORM?",
+                            explanation="Choose an ORM.",
+                            choices=[
+                                Choice(label="SQLAlchemy", description="Full ORM", recommended=True),
+                                Choice(label="Raw SQL", description="No ORM", recommended=False),
+                            ],
+                        ),
+                    ]),
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Which framework?",
+                            explanation="Choose a framework.",
+                            choices=[
+                                Choice(label="FastAPI", description="Modern async", recommended=True),
+                                Choice(label="Flask", description="Classic", recommended=False),
+                            ],
+                        ),
+                    ]),
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Which UI lib?",
+                            explanation="Choose a UI library.",
+                            choices=[
+                                Choice(label="React", description="Component-based", recommended=True),
+                                Choice(label="Vue", description="Progressive", recommended=False),
+                            ],
+                        ),
+                    ]),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                mock_plan_audit,
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # Verify the zing file was written
         assert zing_path.is_file()
@@ -523,16 +498,13 @@ class TestRunPlanFirstRun:
         mock_plan_audit.assert_called_once()
 
     def test_investigation_runs_in_parallel(self, tmp_path: Path) -> None:
-        """Verify that investigation calls are made concurrently."""
+        """Verify that investigation calls are made concurrently via ThreadPoolExecutor."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
         call_order: list[str] = []
 
-        async def mock_validate(prompt, validator, retry_prompt_template, **kwargs):
-            area_match = "Area:" in prompt
+        def mock_validate(prompt, validator, retry_prompt_template, **kwargs):
             call_order.append("investigate")
-            # Simulate some async work
-            await asyncio.sleep(0.01)
             return Interaction(choice_sets=[
                 ChoiceSet(
                     message="Test question?",
@@ -544,41 +516,33 @@ class TestRunPlanFirstRun:
                 ),
             ])
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        (IDENTIFY_RESPONSE, "sess-id-001"),
-                        (FLESH_OUT_RESPONSE, "sess-flesh-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    side_effect=mock_validate,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    (IDENTIFY_RESPONSE, "sess-id-001"),
+                    (FLESH_OUT_RESPONSE, "sess-flesh-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                side_effect=mock_validate,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # 3 investigation calls (one per area in IDENTIFY_RESPONSE)
         assert call_order.count("investigate") == 3
@@ -597,54 +561,46 @@ class TestRunPlanFirstRun:
 
         distill_calls: list[list[Path]] = []
 
-        async def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp}" for fp in file_paths}
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        (IDENTIFY_RESPONSE, "sess-id-001"),
-                        (FLESH_OUT_RESPONSE, "sess-flesh-001"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    side_effect=mock_distill,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    (IDENTIFY_RESPONSE, "sess-id-001"),
+                    (FLESH_OUT_RESPONSE, "sess-flesh-001"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                side_effect=mock_distill,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # distill_files should be called once with all unique files
         assert len(distill_calls) == 1
@@ -658,171 +614,91 @@ class TestRunPlanFirstRun:
 
         claude_full_calls: list[dict] = []
 
-        async def mock_full(prompt, **kwargs):
+        def mock_full(prompt, **kwargs):
             claude_full_calls.append(kwargs)
             if not claude_full_calls[0:1] or len(claude_full_calls) == 1:
                 return (IDENTIFY_RESPONSE, "sess-001")
             return (FLESH_OUT_RESPONSE, "sess-002")
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=mock_full,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=mock_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
 
         # All claude.invoke_claude_full calls should have skip_permissions=True
         for call_kwargs in claude_full_calls:
             assert call_kwargs.get("skip_permissions") is True
-
-    def test_web_server_started_in_background(self, tmp_path: Path) -> None:
-        """The web server should be started in a background thread."""
-        zing_path = _make_zing_file(tmp_path)
-        config = ZingConfig()
-
-        web_server_calls: list[dict] = []
-
-        def mock_start_web(zing_file_path, *, port, no_browser):
-            web_server_calls.append({
-                "zing_file_path": zing_file_path,
-                "port": port,
-                "no_browser": no_browser,
-            })
-            return MagicMock()
-
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        (IDENTIFY_RESPONSE, "sess-001"),
-                        (FLESH_OUT_RESPONSE, "sess-002"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    side_effect=mock_start_web,
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
-
-        assert len(web_server_calls) == 1
-        assert web_server_calls[0]["no_browser"] is True
-        assert web_server_calls[0]["port"] == config.port
 
     def test_plan_session_saved_in_zing_file(self, tmp_path: Path) -> None:
         """The plan session ID from flesh out should be saved."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        (IDENTIFY_RESPONSE, "sess-id-001"),
-                        (FLESH_OUT_RESPONSE, "sess-flesh-saved"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    (IDENTIFY_RESPONSE, "sess-id-001"),
+                    (FLESH_OUT_RESPONSE, "sess-flesh-saved"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -841,7 +717,7 @@ class TestRunPlanReplan:
         """Re-plan reads session, resumes Claude, and writes updated file."""
         zing_path = _make_zing_file_with_plan(tmp_path, plan_session="sess-orig-001")
         config = ZingConfig()
-        mock_plan_audit = AsyncMock()
+        mock_plan_audit = MagicMock()
 
         changes = [
             {
@@ -851,31 +727,27 @@ class TestRunPlanReplan:
             },
         ]
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    return_value=(REPLAN_RESPONSE, "sess-replan-001"),
-                ) as mock_full,
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    mock_plan_audit,
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    replan_changes=changes,
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(REPLAN_RESPONSE, "sess-replan-001"),
+            ) as mock_full,
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                mock_plan_audit,
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                replan_changes=changes,
+            )
 
-                # Verify Claude was called with session resumption
-                call_kwargs = mock_full.call_args.kwargs
-                assert call_kwargs["resume_session"] == "sess-orig-001"
-
-        _run(_test())
+            # Verify Claude was called with session resumption
+            call_kwargs = mock_full.call_args.kwargs
+            assert call_kwargs["resume_session"] == "sess-orig-001"
 
         # Verify updated zing file
         tree = ET.parse(zing_path)
@@ -898,31 +770,27 @@ class TestRunPlanReplan:
         zing_path = _make_zing_file_with_plan(tmp_path, plan_session="sess-orig-002")
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    return_value=(REPLAN_RESPONSE_WITH_NEW_INTERACTIONS, "sess-replan-002"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    replan_changes=[{
-                        "choice_set_message": "Which database?",
-                        "original_recommended": "PostgreSQL",
-                        "user_selected": "MongoDB",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(REPLAN_RESPONSE_WITH_NEW_INTERACTIONS, "sess-replan-002"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                replan_changes=[{
+                    "choice_set_message": "Which database?",
+                    "original_recommended": "PostgreSQL",
+                    "user_selected": "MongoDB",
+                }],
+            )
 
         # Parse the updated zing file
         tree = ET.parse(zing_path)
@@ -939,31 +807,27 @@ class TestRunPlanReplan:
         zing_path = _make_zing_file_with_plan(tmp_path, plan_session="sess-old")
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    return_value=(REPLAN_RESPONSE, "sess-new"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    replan_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(REPLAN_RESPONSE, "sess-new"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                replan_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
         tree = ET.parse(zing_path)
         root = tree.getroot()
@@ -992,35 +856,31 @@ class TestRunPlanReplan:
 
         config = ZingConfig()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    return_value=(REPLAN_RESPONSE, "sess-new"),
-                ) as mock_full,
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    AsyncMock(),
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                    replan_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(REPLAN_RESPONSE, "sess-new"),
+            ) as mock_full,
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                MagicMock(),
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+                replan_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
-                # Should still call with empty resume_session
-                call_kwargs = mock_full.call_args.kwargs
-                assert call_kwargs["resume_session"] == ""
-
-        _run(_test())
+            # Should still call with empty resume_session
+            call_kwargs = mock_full.call_args.kwargs
+            assert call_kwargs["resume_session"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1034,56 +894,47 @@ class TestRunPlanCallsAudit:
     def test_first_run_calls_audit(self, tmp_path: Path) -> None:
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
-        mock_audit = AsyncMock()
+        mock_audit = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    side_effect=[
-                        (IDENTIFY_RESPONSE, "sess-001"),
-                        (FLESH_OUT_RESPONSE, "sess-002"),
-                    ],
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                    return_value=Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan.distill_files",
-                    return_value={},
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan._start_web_server_background",
-                    return_value=MagicMock(),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    mock_audit,
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=False,
-                    config=config,
-                    project_root=tmp_path,
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    (IDENTIFY_RESPONSE, "sess-001"),
+                    (FLESH_OUT_RESPONSE, "sess-002"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
+                return_value=Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Q?",
+                        explanation="E.",
+                        choices=[
+                            Choice(label="A", description="D", recommended=True),
+                            Choice(label="B", description="D", recommended=False),
+                        ],
+                    ),
+                ]),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                mock_audit,
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
         mock_audit.assert_called_once_with(
             zing_file="test-project.xml",
-            no_browser=True,
             skip_permissions=False,
             config=config,
             project_root=tmp_path,
@@ -1092,37 +943,32 @@ class TestRunPlanCallsAudit:
     def test_replan_calls_audit(self, tmp_path: Path) -> None:
         zing_path = _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
-        mock_audit = AsyncMock()
+        mock_audit = MagicMock()
 
-        async def _test() -> None:
-            with (
-                patch(
-                    "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                    return_value=(REPLAN_RESPONSE, "sess-001"),
-                ),
-                patch(
-                    "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
-                    mock_audit,
-                ),
-            ):
-                await run_plan(
-                    zing_file="test-project.xml",
-                    no_browser=True,
-                    skip_permissions=True,
-                    config=config,
-                    project_root=tmp_path,
-                    replan_changes=[{
-                        "choice_set_message": "Q",
-                        "original_recommended": "A",
-                        "user_selected": "B",
-                    }],
-                )
-
-        _run(_test())
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                return_value=(REPLAN_RESPONSE, "sess-001"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
+                mock_audit,
+            ),
+        ):
+            run_plan(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+                replan_changes=[{
+                    "choice_set_message": "Q",
+                    "original_recommended": "A",
+                    "user_selected": "B",
+                }],
+            )
 
         mock_audit.assert_called_once_with(
             zing_file="test-project.xml",
-            no_browser=True,
             skip_permissions=True,
             config=config,
             project_root=tmp_path,
