@@ -87,7 +87,6 @@ def _to_kebab_case(text: str) -> str:
 async def run_new(
     *,
     zing_file: str | None,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -103,8 +102,6 @@ async def run_new(
     zing_file:
         Optional zing file name (unused for ``new``, reserved for interface
         consistency).
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all Claude
         calls.
@@ -154,7 +151,6 @@ async def run_new(
 
     await run_plan(
         zing_file=zing_path.name,
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,

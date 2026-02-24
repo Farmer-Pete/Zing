@@ -43,7 +43,6 @@ MCP_MANDATE = (
 async def run_build(
     *,
     zing_file: str | None,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -64,8 +63,6 @@ async def run_build(
     ----------
     zing_file:
         Optional zing file name to build from.
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all Claude
         calls.
@@ -90,13 +87,6 @@ async def run_build(
         return
 
     zing_overview = doc.content or ""
-
-    # Start web server with build UI
-    _start_web_server_background(
-        zing_path,
-        port=config.port,
-        no_browser=no_browser,
-    )
 
     # Iterate through stages and steps in order
     step_number = 0
@@ -181,7 +171,6 @@ async def run_build(
 
     await run_build_audit(
         zing_file=zing_path.name,
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,

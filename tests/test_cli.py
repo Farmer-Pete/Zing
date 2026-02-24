@@ -226,13 +226,6 @@ class TestOrchestratorCommandHelp:
         assert "ZING_FILE" in result.output or "zing_file" in result.output.lower()
 
     @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
-    def test_help_shows_no_browser_flag(self, cmd_name):
-        runner = CliRunner()
-        result = runner.invoke(cli, [cmd_name, "--help"])
-        assert result.exit_code == 0
-        assert "--no-browser" in result.output
-
-    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
     def test_help_shows_skip_permissions_flag(self, cmd_name):
         runner = CliRunner()
         result = runner.invoke(cli, [cmd_name, "--help"])
@@ -282,7 +275,6 @@ class TestOrchestratorCommandDelegation:
         # Verify keyword arguments passed to the run function
         call_kwargs = mock_run.call_args.kwargs
         assert call_kwargs["zing_file"] is None
-        assert call_kwargs["no_browser"] is False
         assert call_kwargs["skip_permissions"] is False
         assert call_kwargs["config"] == mock_config.return_value
         assert call_kwargs["project_root"] == tmp_path
@@ -305,25 +297,6 @@ class TestOrchestratorCommandDelegation:
 
         assert result.exit_code == 1
         assert mock_run.call_args.kwargs["zing_file"] == "my-feature.xml"
-
-    @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
-    def test_command_passes_no_browser_flag(self, cmd_name, tmp_path):
-        (tmp_path / ".git").mkdir()
-        run_func_path = self._COMMAND_MODULES[cmd_name]
-
-        runner = CliRunner()
-        with (
-            patch(run_func_path, side_effect=NotImplementedError("stub")) as mock_run,
-            patch(
-                "zing_ai.orchestrator.project.find_project_root",
-                return_value=tmp_path,
-            ),
-            patch("zing_ai.orchestrator.config.load_config"),
-        ):
-            result = runner.invoke(cli, [cmd_name, "--no-browser"])
-
-        assert result.exit_code == 1
-        assert mock_run.call_args.kwargs["no_browser"] is True
 
     @pytest.mark.parametrize("cmd_name", ORCHESTRATOR_COMMANDS)
     def test_command_passes_skip_permissions_flag(self, cmd_name, tmp_path):

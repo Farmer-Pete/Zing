@@ -133,7 +133,6 @@ def _start_review_server(
     review_state: ReviewState,
     *,
     port: int,
-    no_browser: bool,
 ) -> threading.Thread:
     """Start the FastAPI web server with review state in a background thread.
 
@@ -148,8 +147,6 @@ def _start_review_server(
         Shared mutable state for the review session.
     port:
         Port to listen on.
-    no_browser:
-        If ``True``, do not open the browser.
 
     Returns
     -------
@@ -164,7 +161,7 @@ def _start_review_server(
     thread = threading.Thread(
         target=start_server,
         args=(app,),
-        kwargs={"port": port, "no_browser": no_browser},
+        kwargs={"port": port},
         daemon=True,
     )
     thread.start()
@@ -179,15 +176,14 @@ def _start_review_server(
 async def run_plan_review(
     *,
     zing_file: str | None,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
 ) -> None:
     """Run the ``plan-review`` orchestrator command.
 
-    Starts the web UI, loads choices from the zing document, and waits
-    for the user to either approve the plan or modify choices.
+    Loads choices from the zing document and waits for the user to
+    either approve the plan or modify choices.
 
     **Approval (no changes):**
         Sets ``approved=True`` on the document and calls ``run_build()``.
@@ -201,8 +197,6 @@ async def run_plan_review(
     ----------
     zing_file:
         Optional zing file name to review.
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all Claude
         calls.
@@ -228,7 +222,6 @@ async def run_plan_review(
         write_zing_file(zing_path, doc)
         await _call_build(
             zing_path=zing_path,
-            no_browser=no_browser,
             skip_permissions=skip_permissions,
             config=config,
             project_root=project_root,
@@ -243,7 +236,6 @@ async def run_plan_review(
         zing_path,
         review,
         port=config.port,
-        no_browser=no_browser,
     )
 
     logger.info(
@@ -265,7 +257,6 @@ async def run_plan_review(
 
         await _call_build(
             zing_path=zing_path,
-            no_browser=no_browser,
             skip_permissions=skip_permissions,
             config=config,
             project_root=project_root,
@@ -289,7 +280,6 @@ async def run_plan_review(
 
         await _call_replan(
             zing_path=zing_path,
-            no_browser=no_browser,
             skip_permissions=skip_permissions,
             config=config,
             project_root=project_root,
@@ -305,7 +295,6 @@ async def run_plan_review(
 async def _call_build(
     *,
     zing_path: Path,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -315,7 +304,6 @@ async def _call_build(
 
     await run_build(
         zing_file=zing_path.name,
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,
@@ -325,7 +313,6 @@ async def _call_build(
 async def _call_replan(
     *,
     zing_path: Path,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -336,7 +323,6 @@ async def _call_replan(
 
     await run_plan(
         zing_file=zing_path.name,
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,

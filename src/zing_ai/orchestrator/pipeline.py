@@ -24,7 +24,6 @@ async def run_pipeline(
     start_stage: str,
     zing_file: str | None,
     *,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -44,8 +43,6 @@ async def run_pipeline(
     zing_file:
         Optional zing file name (inside ``.zing/``).  Required for all
         stages except ``"new"``.
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all
         Claude calls.
@@ -69,7 +66,6 @@ async def run_pipeline(
 
     # Keyword arguments shared by every command.
     common_kwargs = dict(
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,

@@ -303,7 +303,6 @@ async def _invoke_replan_with_session(
 async def run_plan(
     *,
     zing_file: str | None,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -315,8 +314,6 @@ async def run_plan(
     ----------
     zing_file:
         Zing file name (inside ``.zing/``).
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all Claude
         calls.
@@ -337,7 +334,6 @@ async def run_plan(
     if replan_changes is not None:
         await _run_replan(
             zing_path=zing_path,
-            no_browser=no_browser,
             skip_permissions=skip_permissions,
             config=config,
             project_root=project_root,
@@ -346,7 +342,6 @@ async def run_plan(
     else:
         await _run_first_plan(
             zing_path=zing_path,
-            no_browser=no_browser,
             skip_permissions=skip_permissions,
             config=config,
             project_root=project_root,
@@ -357,7 +352,6 @@ async def run_plan(
 
     await run_plan_audit(
         zing_file=zing_path.name,
-        no_browser=no_browser,
         skip_permissions=skip_permissions,
         config=config,
         project_root=project_root,
@@ -372,7 +366,6 @@ async def run_plan(
 async def _run_first_plan(
     *,
     zing_path: Path,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -384,13 +377,6 @@ async def _run_first_plan(
     # Read the zing document for the project specification content
     doc = parse_zing_file(zing_path)
     zing_content = doc.content or ""
-
-    # Start web server in background
-    _start_web_server_background(
-        zing_path,
-        port=config.port,
-        no_browser=no_browser,
-    )
 
     # --- Phase 1: Identification ---
     logger.info("Phase 1: Identification")
@@ -529,7 +515,6 @@ async def _run_first_plan(
 async def _run_replan(
     *,
     zing_path: Path,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,

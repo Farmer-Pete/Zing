@@ -195,7 +195,6 @@ def collect_plan_files(doc_path: Path) -> list[str]:
 async def run_build_audit(
     *,
     zing_file: str | None,
-    no_browser: bool,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
@@ -210,8 +209,6 @@ async def run_build_audit(
     ----------
     zing_file:
         Optional zing file name to audit.
-    no_browser:
-        If ``True``, do not open the browser automatically.
     skip_permissions:
         If ``True``, pass ``--dangerously-skip-permissions`` to all Claude
         calls.
@@ -236,7 +233,6 @@ async def run_build_audit(
         _start_web_server_background(
             zing_path,
             port=config.port,
-            no_browser=no_browser,
             finding_groups=[],
         )
         return
@@ -337,6 +333,5 @@ async def run_build_audit(
     _start_web_server_background(
         zing_path,
         port=config.port,
-        no_browser=no_browser,
         finding_groups=finding_groups,
     )
