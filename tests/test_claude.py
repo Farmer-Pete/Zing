@@ -76,8 +76,8 @@ class TestBuildCommand:
         cmd = _build_command("hello", call_type=CallType.BUILD, config=config)
         assert cmd[0] == "claude"
         assert cmd[1] == "--print"
-        assert "--prompt" in cmd
-        assert cmd[cmd.index("--prompt") + 1] == "hello"
+        assert "--" in cmd
+        assert cmd[-1] == "hello"
 
     def test_model_flag_from_config(self) -> None:
         config = ZingConfig()
@@ -104,8 +104,8 @@ class TestBuildCommand:
         cmd = _build_command("test", call_type=CallType.BUILD, config=config)
         assert "--allowedTools" in cmd
         idx = cmd.index("--allowedTools")
-        # Everything between --allowedTools and the next flag (--prompt) is a tool name
-        prompt_idx = cmd.index("--prompt")
+        # Everything between --allowedTools and the -- separator is a tool name
+        prompt_idx = cmd.index("--")
         tools_in_cmd = cmd[idx + 1 : prompt_idx]
         expected = get_allowed_tools(config, CallType.BUILD)
         assert tools_in_cmd == expected
@@ -116,8 +116,8 @@ class TestBuildCommand:
         cmd = _build_command("test", call_type=CallType.INVESTIGATE, config=config)
         assert "--allowedTools" in cmd
         idx = cmd.index("--allowedTools")
-        prompt_idx = cmd.index("--prompt")
-        tools_in_cmd = cmd[idx + 1 : prompt_idx]
+        separator_idx = cmd.index("--")
+        tools_in_cmd = cmd[idx + 1 : separator_idx]
         assert tools_in_cmd == list(DEFAULT_MCP_TOOLS)
 
     def test_allowed_tools_merged_correctly(self) -> None:
@@ -126,8 +126,8 @@ class TestBuildCommand:
         config.extra_tools[CallType.AUDIT] = ["Read", "Grep"]
         cmd = _build_command("test", call_type=CallType.AUDIT, config=config)
         idx = cmd.index("--allowedTools")
-        prompt_idx = cmd.index("--prompt")
-        tools_in_cmd = cmd[idx + 1 : prompt_idx]
+        separator_idx = cmd.index("--")
+        tools_in_cmd = cmd[idx + 1 : separator_idx]
         assert tools_in_cmd == ["mcp__custom__*", "Read", "Grep"]
 
     def test_skip_permissions_flag(self) -> None:
@@ -185,14 +185,15 @@ class TestBuildCommand:
         assert "--resume" not in cmd
 
     def test_all_call_types_produce_valid_command(self) -> None:
-        """Every call type should produce a command with claude, --print, --model, --prompt."""
+        """Every call type should produce a command with claude, --print, --model, -- separator."""
         config = ZingConfig()
         for ct in CallType:
             cmd = _build_command("test", call_type=ct, config=config)
             assert cmd[0] == "claude"
             assert "--print" in cmd
             assert "--model" in cmd
-            assert "--prompt" in cmd
+            assert "--" in cmd
+            assert cmd[-1] == "test"
             assert "--allowedTools" in cmd
 
 
@@ -266,8 +267,8 @@ class TestInvokeClaude:
         assert cmd[0] == "claude"
         assert "--print" in cmd
         assert "--model" in cmd
-        assert "--prompt" in cmd
-        assert "test prompt" in cmd
+        assert "--" in cmd
+        assert cmd[-1] == "test prompt"
 
     def test_skip_permissions(self) -> None:
         mock_proc = _make_mock_popen(stdout_lines=[], stderr=b"")
@@ -624,8 +625,8 @@ class TestInvokeClaudeValidated:
             call_cmds = [call[0][0] for call in mock_run.call_args_list]
 
         second_call_cmd = call_cmds[1]
-        prompt_idx = second_call_cmd.index("--prompt")
-        retry_prompt = second_call_cmd[prompt_idx + 1]
+        separator_idx = second_call_cmd.index("--")
+        retry_prompt = second_call_cmd[separator_idx + 1]
         assert "missing <plan> element" in retry_prompt
         assert "Please fix it." in retry_prompt
 

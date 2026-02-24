@@ -57,7 +57,7 @@ def _build_command(
         cmd.extend(["--resume", resume_session])
 
     # The prompt itself
-    cmd.extend(["--prompt", prompt])
+    cmd.extend(["--", prompt])
 
     return cmd
 
