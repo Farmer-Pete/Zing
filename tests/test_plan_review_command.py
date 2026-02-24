@@ -8,11 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from zing_ai.orchestrator.commands.plan_review import (
-    ReviewState,
-    _compute_changes,
-    run_plan_review,
-)
+from zing_ai.orchestrator.commands.plan_review import run_plan_review
 from zing_ai.orchestrator.config import ZingConfig
 from zing_ai.orchestrator.models import (
     Choice,
@@ -23,6 +19,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.tui.results import ReviewResult
 from zing_ai.orchestrator.xml_parser import write_zing_file
 
 # ---------------------------------------------------------------------------
@@ -114,132 +111,20 @@ def _make_zing_file_no_choices(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# ReviewState tests
+# ReviewState removed
 # ---------------------------------------------------------------------------
 
 
-class TestReviewState:
-    """Tests for the ReviewState dataclass."""
+class TestReviewStateRemoved:
+    """Verify that the legacy ReviewState class has been removed."""
 
-    def test_default_has_no_modifications(self) -> None:
-        state = ReviewState(choice_sets=_make_choice_sets())
-        assert state.has_modifications is False
+    def test_review_state_not_importable(self) -> None:
+        """ReviewState should no longer be exported from plan_review."""
+        import zing_ai.orchestrator.commands.plan_review as mod
 
-    def test_selecting_recommended_is_not_a_modification(self) -> None:
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={0: 0},  # Index 0 is recommended for first choice set
+        assert not hasattr(mod, "ReviewState"), (
+            "ReviewState should be removed from plan_review module"
         )
-        assert state.has_modifications is False
-
-    def test_selecting_non_recommended_is_a_modification(self) -> None:
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={0: 1},  # Index 1 is MongoDB (not recommended)
-        )
-        assert state.has_modifications is True
-
-    def test_deletion_is_a_modification(self) -> None:
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={0: None},  # None means deleted
-        )
-        assert state.has_modifications is True
-
-    def test_empty_selections_no_modification(self) -> None:
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={},
-        )
-        assert state.has_modifications is False
-
-    def test_multiple_selections_mixed(self) -> None:
-        """One recommended, one non-recommended -> has modifications."""
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={0: 0, 1: 1},  # 0: recommended, 1: non-recommended
-        )
-        assert state.has_modifications is True
-
-    def test_all_recommended_no_modification(self) -> None:
-        """All selections are recommended -> no modifications."""
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={0: 0, 1: 0},  # Both recommended indices
-        )
-        assert state.has_modifications is False
-
-    def test_decision_event_initially_not_set(self) -> None:
-        state = ReviewState(choice_sets=_make_choice_sets())
-        assert not state.decision_event.is_set()
-
-    def test_out_of_range_selection_no_modification(self) -> None:
-        """Selections referencing out-of-range indices are not modifications."""
-        state = ReviewState(
-            choice_sets=_make_choice_sets(),
-            user_selections={99: 0},  # choice_set index 99 doesn't exist
-        )
-        assert state.has_modifications is False
-
-
-# ---------------------------------------------------------------------------
-# _compute_changes tests
-# ---------------------------------------------------------------------------
-
-
-class TestComputeChanges:
-    """Tests for the change diff computation."""
-
-    def test_no_selections_no_changes(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {})
-        assert changes == []
-
-    def test_recommended_selection_no_change(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {0: 0})
-        assert changes == []
-
-    def test_non_recommended_selection_produces_change(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {0: 1})
-        assert len(changes) == 1
-        assert changes[0]["choice_set_message"] == "Which database?"
-        assert changes[0]["original_recommended"] == "PostgreSQL"
-        assert changes[0]["user_selected"] == "MongoDB"
-        assert "deleted" not in changes[0]
-
-    def test_deletion_produces_change(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {0: None})
-        assert len(changes) == 1
-        assert changes[0]["choice_set_message"] == "Which database?"
-        assert changes[0]["original_recommended"] == "PostgreSQL"
-        assert changes[0]["deleted"] is True
-
-    def test_multiple_changes(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {0: 1, 1: None})
-        assert len(changes) == 2
-        # Changes should be sorted by index
-        assert changes[0]["choice_set_message"] == "Which database?"
-        assert changes[0]["user_selected"] == "MongoDB"
-        assert changes[1]["choice_set_message"] == "Which framework?"
-        assert changes[1]["deleted"] is True
-
-    def test_out_of_range_index_ignored(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {99: 1})
-        assert changes == []
-
-    def test_negative_index_ignored(self) -> None:
-        changes = _compute_changes(_make_choice_sets(), {-1: 0})
-        assert changes == []
-
-    def test_third_choice_selection(self) -> None:
-        """Selecting the third choice (SQLite) in the first set."""
-        changes = _compute_changes(_make_choice_sets(), {0: 2})
-        assert len(changes) == 1
-        assert changes[0]["user_selected"] == "SQLite"
-
-    def test_out_of_range_choice_index_ignored(self) -> None:
-        """Out-of-range choice index within a valid set is ignored."""
-        changes = _compute_changes(_make_choice_sets(), {0: 99})
-        assert changes == []
 
 
 # ---------------------------------------------------------------------------
@@ -256,16 +141,10 @@ class TestRunPlanReviewApproval:
         config = ZingConfig()
         mock_build = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state):
-            # Simulate user approving immediately (no changes)
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
-
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="approve", changes=[]),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -293,15 +172,10 @@ class TestRunPlanReviewApproval:
         config = ZingConfig()
         mock_build = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state):
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
-
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="approve", changes=[]),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -321,27 +195,19 @@ class TestRunPlanReviewApproval:
         assert call_kwargs["config"] is config
         assert call_kwargs["project_root"] == tmp_path
 
-    def test_review_server_started_with_review_state(self, tmp_path: Path) -> None:
-        """The review server should be started with ReviewState."""
-        zing_path = _make_zing_file_with_choices(tmp_path)
+    def test_run_with_screen_called_with_plan_review_screen(self, tmp_path: Path) -> None:
+        """ZingApp.run_with_screen should be called with a PlanReviewScreen."""
+        _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
-        server_calls: list[dict] = []
-
-        def mock_start_server(zing_file_path, review_state):
-            server_calls.append({
-                "zing_file_path": zing_file_path,
-                "review_state": review_state,
-            })
-            # Approve immediately
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
+        mock_run = MagicMock(
+            return_value=ReviewResult(action="approve", changes=[]),
+        )
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                mock_run,
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -355,38 +221,35 @@ class TestRunPlanReviewApproval:
                 project_root=tmp_path,
             )
 
-        assert len(server_calls) == 1
-        assert server_calls[0]["zing_file_path"] == zing_path
-        assert isinstance(server_calls[0]["review_state"], ReviewState)
-        # Review state should have the choice sets from the zing file
-        assert len(server_calls[0]["review_state"].choice_sets) == 2
+        mock_run.assert_called_once()
+        from zing_ai.orchestrator.tui.screens.plan_review import PlanReviewScreen
+
+        screen_arg = mock_run.call_args.args[0]
+        assert isinstance(screen_arg, PlanReviewScreen)
 
 
 # ---------------------------------------------------------------------------
-# run_plan_review modification tests
+# run_plan_review replan tests
 # ---------------------------------------------------------------------------
 
 
-class TestRunPlanReviewModifications:
-    """Tests for the modification flow (user changes choices)."""
+class TestRunPlanReviewReplan:
+    """Tests for the replan flow (user modifies choices)."""
 
-    def test_modification_calls_replan(self, tmp_path: Path) -> None:
-        """Modifying choices -> calls _call_replan with change diff."""
+    def test_replan_calls_replan_with_changes(self, tmp_path: Path) -> None:
+        """Replan action -> calls _call_replan with the changes from ReviewResult."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state):
-            # Simulate user changing first choice from PostgreSQL to MongoDB
-            review_state.user_selections[0] = 1
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
+        changes = [
+            {"choice_id": "card-0", "new_selection": 1},
+        ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="replan", changes=changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -402,29 +265,22 @@ class TestRunPlanReviewModifications:
 
         mock_replan.assert_called_once()
         call_kwargs = mock_replan.call_args.kwargs
-        changes = call_kwargs["replan_changes"]
-        assert len(changes) == 1
-        assert changes[0]["choice_set_message"] == "Which database?"
-        assert changes[0]["original_recommended"] == "PostgreSQL"
-        assert changes[0]["user_selected"] == "MongoDB"
+        assert call_kwargs["replan_changes"] == changes
 
-    def test_deletion_calls_replan(self, tmp_path: Path) -> None:
-        """Deleting a choice set -> calls _call_replan with deleted diff."""
+    def test_replan_with_deletion(self, tmp_path: Path) -> None:
+        """Replan with a deletion -> calls _call_replan with deleted change."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state):
-            # Simulate user deleting the second choice set
-            review_state.user_selections[1] = None
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
+        changes = [
+            {"choice_id": "card-1", "new_selection": None},
+        ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="replan", changes=changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -440,26 +296,23 @@ class TestRunPlanReviewModifications:
 
         mock_replan.assert_called_once()
         call_kwargs = mock_replan.call_args.kwargs
-        changes = call_kwargs["replan_changes"]
-        assert len(changes) == 1
-        assert changes[0]["choice_set_message"] == "Which framework?"
-        assert changes[0]["deleted"] is True
+        changes_result = call_kwargs["replan_changes"]
+        assert len(changes_result) == 1
+        assert changes_result[0]["new_selection"] is None
 
-    def test_modification_does_not_set_approved(self, tmp_path: Path) -> None:
-        """Modifying choices should NOT set approved=True in the zing file."""
+    def test_replan_does_not_set_approved(self, tmp_path: Path) -> None:
+        """Replan should NOT set approved=True in the zing file."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
-        def mock_start_server(zing_file_path, review_state):
-            review_state.user_selections[0] = 1
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
+        changes = [
+            {"choice_id": "card-0", "new_selection": 1},
+        ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="replan", changes=changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -484,16 +337,14 @@ class TestRunPlanReviewModifications:
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        def mock_start_server(zing_file_path, review_state):
-            review_state.user_selections[0] = 2  # Select SQLite
-            review_state.approved = True
-            review_state.decision_event.set()
-            return MagicMock()
+        changes = [
+            {"choice_id": "card-0", "new_selection": 2},
+        ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=mock_start_server,
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="replan", changes=changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -513,7 +364,37 @@ class TestRunPlanReviewModifications:
         assert call_kwargs["config"] is config
         assert call_kwargs["project_root"] == tmp_path
         assert len(call_kwargs["replan_changes"]) == 1
-        assert call_kwargs["replan_changes"][0]["user_selected"] == "SQLite"
+
+    def test_replan_with_multiple_changes(self, tmp_path: Path) -> None:
+        """Multiple changes in ReviewResult are all passed through."""
+        _make_zing_file_with_choices(tmp_path)
+        config = ZingConfig()
+        mock_replan = MagicMock()
+
+        changes = [
+            {"choice_id": "card-0", "new_selection": 1},
+            {"choice_id": "card-1", "new_selection": None},
+        ]
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=ReviewResult(action="replan", changes=changes),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                mock_replan,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        call_kwargs = mock_replan.call_args.kwargs
+        assert len(call_kwargs["replan_changes"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -551,25 +432,70 @@ class TestRunPlanReviewNoChoices:
         # Verify build was called
         mock_build.assert_called_once()
 
-    def test_no_choices_does_not_start_server(self, tmp_path: Path) -> None:
-        """When no choices exist, the review server should not be started."""
+    def test_no_choices_does_not_launch_tui(self, tmp_path: Path) -> None:
+        """When no choices exist, the TUI should not be launched."""
         _make_zing_file_no_choices(tmp_path)
         config = ZingConfig()
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review._start_review_server",
-                side_effect=AssertionError("Server should not be started"),
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                side_effect=AssertionError("TUI should not be launched"),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
                 MagicMock(),
             ),
         ):
-            # Should not raise -- server start should never be called
+            # Should not raise -- TUI should never be launched
             run_plan_review(
                 zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
             )
+
+
+# ---------------------------------------------------------------------------
+# run_plan_review cancellation tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlanReviewCancellation:
+    """Tests for when the user cancels (closes the TUI without deciding)."""
+
+    def test_none_result_no_action(self, tmp_path: Path) -> None:
+        """When run_with_screen returns None, no build or replan is called."""
+        zing_path = _make_zing_file_with_choices(tmp_path)
+        config = ZingConfig()
+        mock_build = MagicMock()
+        mock_replan = MagicMock()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
+                return_value=None,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_build",
+                mock_build,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan_review._call_replan",
+                mock_replan,
+            ),
+        ):
+            run_plan_review(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        mock_build.assert_not_called()
+        mock_replan.assert_not_called()
+
+        # Verify zing file was NOT modified
+        tree = ET.parse(zing_path)
+        root = tree.getroot()
+        assert root.get("approved") == "false"

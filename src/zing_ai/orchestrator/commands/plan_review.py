@@ -1,6 +1,6 @@
 """Orchestrator ``plan-review`` command -- review and approve a plan.
 
-Shows the plan's choices to the user in the web UI.  The user can approve
+Shows the plan's choices to the user in the TUI.  The user can approve
 (no changes), modify choices (switch recommended option), or delete choice
 sets.  Approval triggers the build; modifications trigger the re-plan ->
 re-audit -> review loop.
@@ -9,142 +9,17 @@ re-audit -> review loop.
 from __future__ import annotations
 
 import logging
-import threading
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from zing_ai.orchestrator import project
 from zing_ai.orchestrator.config import ZingConfig
 from zing_ai.orchestrator.models import ChoiceSet
+from zing_ai.orchestrator.tui.app import ZingApp
+from zing_ai.orchestrator.tui.results import ReviewResult
+from zing_ai.orchestrator.tui.screens.plan_review import PlanReviewScreen
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Review state shared between the command and routes
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ReviewState:
-    """Mutable state shared between ``run_plan_review`` and the route handlers.
-
-    Stored on ``app.state.review`` so route handlers can read/update
-    choices and signal the review decision.
-    """
-
-    #: Current choice sets (mutable -- routes modify selections and deletions).
-    choice_sets: list[ChoiceSet] = field(default_factory=list)
-
-    #: Tracks user selections per choice-set index.
-    #: Maps choice_set_index -> selected_choice_index (or ``None`` for deleted).
-    user_selections: dict[int, int | None] = field(default_factory=dict)
-
-    #: Set to ``True`` when the user clicks "Approve & Build".
-    approved: bool = False
-
-    #: Event signalled when the user has made their final decision
-    #: (either approve or modify-and-submit).  Uses ``threading.Event``
-    #: because it is set from the uvicorn daemon thread and waited on
-    #: from the main thread.
-    decision_event: threading.Event = field(default_factory=threading.Event)
-
-    @property
-    def has_modifications(self) -> bool:
-        """Return ``True`` if the user has changed any choices from recommended."""
-        for cs_idx, sel_idx in self.user_selections.items():
-            if sel_idx is None:
-                # Deletion is always a modification
-                return True
-            if 0 <= cs_idx < len(self.choice_sets):
-                cs = self.choice_sets[cs_idx]
-                if 0 <= sel_idx < len(cs.choices) and not cs.choices[sel_idx].recommended:
-                    return True
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Diff computation
-# ---------------------------------------------------------------------------
-
-
-def _compute_changes(
-    original_choice_sets: list[ChoiceSet],
-    user_selections: dict[int, int | None],
-) -> list[dict]:
-    """Compute a diff of user modifications against the original recommendations.
-
-    Parameters
-    ----------
-    original_choice_sets:
-        The choice sets as loaded from the zing document (before any user edits).
-    user_selections:
-        Maps ``choice_set_index`` -> ``selected_choice_index`` (or ``None``
-        for deleted choice sets).
-
-    Returns
-    -------
-    list[dict]
-        Each dict has keys: ``choice_set_message``, ``original_recommended``,
-        ``user_selected``, and optionally ``deleted: True``.  Matches the
-        format expected by ``plan_replan.md.j2`` and ``plan_reaudit.md.j2``.
-    """
-    changes: list[dict] = []
-
-    for cs_idx, sel_idx in sorted(user_selections.items()):
-        if cs_idx < 0 or cs_idx >= len(original_choice_sets):
-            continue
-
-        cs = original_choice_sets[cs_idx]
-        recommended = next((c for c in cs.choices if c.recommended), None)
-        recommended_label = recommended.label if recommended else "N/A"
-
-        if sel_idx is None:
-            # User deleted this choice set
-            changes.append({
-                "choice_set_message": cs.message,
-                "original_recommended": recommended_label,
-                "user_selected": recommended_label,
-                "deleted": True,
-            })
-        else:
-            if 0 <= sel_idx < len(cs.choices):
-                selected = cs.choices[sel_idx]
-                if not selected.recommended:
-                    # User switched from recommended to a different choice
-                    changes.append({
-                        "choice_set_message": cs.message,
-                        "original_recommended": recommended_label,
-                        "user_selected": selected.label,
-                    })
-
-    return changes
-
-
-# ---------------------------------------------------------------------------
-# Web server with review state
-# ---------------------------------------------------------------------------
-
-
-def _start_review_server(
-    zing_file_path: Path | None,
-    review_state: ReviewState,
-) -> None:
-    """Start the review UI for the user to approve or modify choices.
-
-    Parameters
-    ----------
-    zing_file_path:
-        Path to the zing XML file.
-    review_state:
-        Shared mutable state for the review session.
-    """
-    # TODO: Replace with Textual TUI in a later step.
-    # For now this is a placeholder -- the TUI will present choices
-    # and set review_state.approved / review_state.decision_event.
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -161,14 +36,14 @@ def run_plan_review(
 ) -> None:
     """Run the ``plan-review`` orchestrator command.
 
-    Loads choices from the zing document and waits for the user to
-    either approve the plan or modify choices.
+    Loads choices from the zing document and presents them to the user
+    via the TUI.  The user can either approve the plan or modify choices.
 
     **Approval (no changes):**
         Sets ``approved=True`` on the document and calls ``run_build()``.
 
     **Modifications:**
-        Computes a diff of changed choices and calls
+        Extracts the change list from the review result and calls
         ``run_plan(replan_changes=changes)`` to re-enter the
         plan -> audit -> review loop.
 
@@ -207,27 +82,15 @@ def run_plan_review(
         )
         return
 
-    # Build shared review state
-    review = ReviewState(choice_sets=choice_sets)
-
-    # Start the review UI with review state
-    _start_review_server(
-        zing_path,
-        review,
-    )
-
+    # Launch the TUI review screen and block until the user decides
     logger.info(
-        "Waiting for user decision (%d choice sets to review)...",
+        "Launching review TUI (%d choice sets to review)...",
         len(choice_sets),
     )
+    screen = PlanReviewScreen(choice_sets)
+    result: ReviewResult | None = ZingApp.run_with_screen(screen)
 
-    # Wait for the user to approve or modify.  ``decision_event`` is a
-    # threading.Event (set from the uvicorn daemon thread), so we poll it
-    # from the main thread.
-    while not review.decision_event.is_set():
-        time.sleep(0.2)
-
-    if review.approved and not review.has_modifications:
+    if result is not None and result.action == "approve":
         # --- Approval path: no changes ---
         logger.info("Plan approved (no changes)")
         doc.approved = True
@@ -239,21 +102,20 @@ def run_plan_review(
             config=config,
             project_root=project_root,
         )
-    else:
-        # --- Modification path: compute diff and re-plan ---
-        changes = _compute_changes(choice_sets, review.user_selections)
+    elif result is not None and result.action == "replan":
+        # --- Modification path: extract changes and re-plan ---
+        changes = result.changes
         logger.info("Plan modifications detected (%d changes)", len(changes))
         for change in changes:
-            if change.get("deleted"):
+            if change.get("new_selection") is None:
                 logger.debug(
-                    "  Deleted: %s", change["choice_set_message"]
+                    "  Deleted: %s", change.get("choice_id", "unknown")
                 )
             else:
                 logger.debug(
-                    "  Changed: %s — %s -> %s",
-                    change["choice_set_message"],
-                    change["original_recommended"],
-                    change["user_selected"],
+                    "  Changed: %s -> selection %s",
+                    change.get("choice_id", "unknown"),
+                    change.get("new_selection"),
                 )
 
         _call_replan(
@@ -263,6 +125,9 @@ def run_plan_review(
             project_root=project_root,
             replan_changes=changes,
         )
+    else:
+        # User closed the TUI without making a decision
+        logger.warning("Review cancelled -- no action taken")
 
 
 # ---------------------------------------------------------------------------
