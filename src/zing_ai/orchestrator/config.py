@@ -42,7 +42,7 @@ DEFAULT_MODELS: dict[CallType, str] = {
 }
 
 _KNOWN_TOP_LEVEL_KEYS = {"settings", "permissions"}
-_KNOWN_SETTINGS_KEYS = {"subprocess_timeout", "port"}
+_KNOWN_SETTINGS_KEYS = {"subprocess_timeout"}
 _KNOWN_PERMISSIONS_KEYS = {
     "mcp_tools",
     CallType.INVESTIGATE,
@@ -65,7 +65,6 @@ class ZingConfig:
         default_factory=lambda: dict(DEFAULT_MODELS)
     )
     subprocess_timeout: int = 300
-    port: int = 8741
 
 
 def load_config(project_root: Path) -> ZingConfig:
@@ -95,8 +94,6 @@ def load_config(project_root: Path) -> ZingConfig:
             logger.warning("Unrecognized key in [settings]: %s", key)
     if "subprocess_timeout" in settings:
         config.subprocess_timeout = int(settings["subprocess_timeout"])
-    if "port" in settings:
-        config.port = int(settings["port"])
 
     # --- [permissions] ---
     permissions = raw.get("permissions", {})

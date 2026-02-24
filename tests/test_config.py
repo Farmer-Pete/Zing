@@ -54,10 +54,6 @@ class TestZingConfigDefaults:
         config = ZingConfig()
         assert config.subprocess_timeout == 300
 
-    def test_default_port(self) -> None:
-        config = ZingConfig()
-        assert config.port == 8741
-
     def test_defaults_are_independent_copies(self) -> None:
         """Mutating one config must not affect another."""
         a = ZingConfig()
@@ -78,7 +74,6 @@ class TestLoadConfigNoFile:
         assert config.extra_tools == DEFAULT_EXTRA_TOOLS
         assert config.models == DEFAULT_MODELS
         assert config.subprocess_timeout == 300
-        assert config.port == 8741
 
 
 class TestLoadConfigCustom:
@@ -87,7 +82,6 @@ class TestLoadConfigCustom:
     FULL_TOML = """\
 [settings]
 subprocess_timeout = 600
-port = 9000
 
 [permissions]
 mcp_tools = ["mcp__custom__*"]
@@ -113,7 +107,6 @@ model = "sonnet"
         (tmp_path / ".zing.toml").write_text(self.FULL_TOML)
         config = load_config(tmp_path)
         assert config.subprocess_timeout == 600
-        assert config.port == 9000
 
     def test_mcp_tools_overridden(self, tmp_path: Path) -> None:
         (tmp_path / ".zing.toml").write_text(self.FULL_TOML)
@@ -155,7 +148,6 @@ model = "haiku"
         assert config.models[CallType.INVESTIGATE] == DEFAULT_MODELS[CallType.INVESTIGATE]
         assert config.mcp_tools == DEFAULT_MCP_TOOLS
         assert config.subprocess_timeout == 300
-        assert config.port == 8741
 
 
 class TestLoadConfigWarnings:
