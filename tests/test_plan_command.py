@@ -13,6 +13,7 @@ from zing_ai.orchestrator.commands.plan import (
     _invoke_flesh_out_with_session,
     _invoke_replan_with_session,
     _parse_identification_response,
+    _run_investigation_tui,
     run_plan,
 )
 from zing_ai.orchestrator.config import CallType, ZingConfig
@@ -25,6 +26,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.tui.results import ProgressResult
 from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 
 
@@ -400,11 +402,55 @@ class TestInvokeReplanWithSession:
 # ---------------------------------------------------------------------------
 
 
+def _make_investigation_result(
+    interactions: list[Interaction],
+) -> tuple[ProgressResult, list[Interaction]]:
+    """Build a mock return value for ``_run_investigation_tui``."""
+    outputs = {f"investigate-{i}": "mock output" for i in range(len(interactions))}
+    statuses = {f"investigate-{i}": "success" for i in range(len(interactions))}
+    return ProgressResult(outputs=outputs, statuses=statuses), interactions
+
+
+# Three interactions matching the three areas in IDENTIFY_RESPONSE.
+_THREE_AREA_INTERACTIONS = [
+    Interaction(choice_sets=[
+        ChoiceSet(
+            message="Which ORM?",
+            explanation="Choose an ORM.",
+            choices=[
+                Choice(label="SQLAlchemy", description="Full ORM", recommended=True),
+                Choice(label="Raw SQL", description="No ORM", recommended=False),
+            ],
+        ),
+    ]),
+    Interaction(choice_sets=[
+        ChoiceSet(
+            message="Which framework?",
+            explanation="Choose a framework.",
+            choices=[
+                Choice(label="FastAPI", description="Modern async", recommended=True),
+                Choice(label="Flask", description="Classic", recommended=False),
+            ],
+        ),
+    ]),
+    Interaction(choice_sets=[
+        ChoiceSet(
+            message="Which UI lib?",
+            explanation="Choose a UI library.",
+            choices=[
+                Choice(label="React", description="Component-based", recommended=True),
+                Choice(label="Vue", description="Progressive", recommended=False),
+            ],
+        ),
+    ]),
+]
+
+
 class TestRunPlanFirstRun:
     """Tests for the first-run planning pipeline."""
 
     def test_full_first_run_pipeline(self, tmp_path: Path) -> None:
-        """Happy path: identification -> distillation -> investigation -> flesh out -> assembly."""
+        """Happy path: identification -> distillation -> investigation (TUI) -> flesh out -> assembly."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
         mock_plan_audit = MagicMock()
@@ -420,41 +466,9 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                side_effect=[
-                    # Phase 3: Investigation (3 areas from IDENTIFY_RESPONSE)
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Which ORM?",
-                            explanation="Choose an ORM.",
-                            choices=[
-                                Choice(label="SQLAlchemy", description="Full ORM", recommended=True),
-                                Choice(label="Raw SQL", description="No ORM", recommended=False),
-                            ],
-                        ),
-                    ]),
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Which framework?",
-                            explanation="Choose a framework.",
-                            choices=[
-                                Choice(label="FastAPI", description="Modern async", recommended=True),
-                                Choice(label="Flask", description="Classic", recommended=False),
-                            ],
-                        ),
-                    ]),
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Which UI lib?",
-                            explanation="Choose a UI library.",
-                            choices=[
-                                Choice(label="React", description="Component-based", recommended=True),
-                                Choice(label="Vue", description="Progressive", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ],
-            ),
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=_make_investigation_result(_THREE_AREA_INTERACTIONS),
+            ) as mock_tui,
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
                 return_value={},
@@ -497,24 +511,29 @@ class TestRunPlanFirstRun:
         # Verify plan_audit was called
         mock_plan_audit.assert_called_once()
 
-    def test_investigation_runs_in_parallel(self, tmp_path: Path) -> None:
-        """Verify that investigation calls are made concurrently via ThreadPoolExecutor."""
+        # Verify the TUI investigation was invoked with area prompts
+        mock_tui.assert_called_once()
+
+    def test_investigation_dispatches_claude_calls_via_tui(self, tmp_path: Path) -> None:
+        """Verify that _run_investigation_tui is called with correct area prompts."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
-        call_order: list[str] = []
+        captured_kwargs: dict = {}
 
-        def mock_validate(prompt, validator, retry_prompt_template, **kwargs):
-            call_order.append("investigate")
-            return Interaction(choice_sets=[
-                ChoiceSet(
-                    message="Test question?",
-                    explanation="Test explanation.",
-                    choices=[
-                        Choice(label="A", description="Option A", recommended=True),
-                        Choice(label="B", description="Option B", recommended=False),
-                    ],
-                ),
-            ])
+        def mock_investigation_tui(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _make_investigation_result([
+                Interaction(choice_sets=[
+                    ChoiceSet(
+                        message="Test question?",
+                        explanation="Test explanation.",
+                        choices=[
+                            Choice(label="A", description="Option A", recommended=True),
+                            Choice(label="B", description="Option B", recommended=False),
+                        ],
+                    ),
+                ]),
+            ] * 3)  # 3 areas from IDENTIFY_RESPONSE
 
         with (
             patch(
@@ -525,8 +544,8 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                side_effect=mock_validate,
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                side_effect=mock_investigation_tui,
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -544,8 +563,16 @@ class TestRunPlanFirstRun:
                 project_root=tmp_path,
             )
 
-        # 3 investigation calls (one per area in IDENTIFY_RESPONSE)
-        assert call_order.count("investigate") == 3
+        # Verify area_prompts were passed with 3 areas
+        area_prompts = captured_kwargs["area_prompts"]
+        assert len(area_prompts) == 3
+        # Each element is (InvestigationArea, prompt_string)
+        assert area_prompts[0][0].name == "Data model"
+        assert area_prompts[1][0].name == "API layer"
+        assert area_prompts[2][0].name == "Frontend"
+        # Verify config and skip_permissions are forwarded
+        assert captured_kwargs["config"] is config
+        assert captured_kwargs["skip_permissions"] is False
 
     def test_distills_unique_files_across_areas(self, tmp_path: Path) -> None:
         """Files mentioned in multiple areas should only be distilled once."""
@@ -574,17 +601,19 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                return_value=Interaction(choice_sets=[
-                    ChoiceSet(
-                        message="Q?",
-                        explanation="E.",
-                        choices=[
-                            Choice(label="A", description="D", recommended=True),
-                            Choice(label="B", description="D", recommended=False),
-                        ],
-                    ),
-                ]),
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=_make_investigation_result([
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Q?",
+                            explanation="E.",
+                            choices=[
+                                Choice(label="A", description="D", recommended=True),
+                                Choice(label="B", description="D", recommended=False),
+                            ],
+                        ),
+                    ]),
+                ] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -608,7 +637,7 @@ class TestRunPlanFirstRun:
         assert len(distilled_paths) == 5  # 5 unique files
 
     def test_skip_permissions_forwarded(self, tmp_path: Path) -> None:
-        """skip_permissions flag is passed through to Claude calls."""
+        """skip_permissions flag is passed through to Claude and TUI calls."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
 
@@ -620,14 +649,12 @@ class TestRunPlanFirstRun:
                 return (IDENTIFY_RESPONSE, "sess-001")
             return (FLESH_OUT_RESPONSE, "sess-002")
 
-        with (
-            patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
-                side_effect=mock_full,
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                return_value=Interaction(choice_sets=[
+        tui_kwargs_captured: dict = {}
+
+        def mock_tui(**kwargs):
+            tui_kwargs_captured.update(kwargs)
+            return _make_investigation_result([
+                Interaction(choice_sets=[
                     ChoiceSet(
                         message="Q?",
                         explanation="E.",
@@ -637,6 +664,16 @@ class TestRunPlanFirstRun:
                         ],
                     ),
                 ]),
+            ] * 3)
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=mock_full,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                side_effect=mock_tui,
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -658,6 +695,9 @@ class TestRunPlanFirstRun:
         for call_kwargs in claude_full_calls:
             assert call_kwargs.get("skip_permissions") is True
 
+        # TUI investigation should also receive skip_permissions=True
+        assert tui_kwargs_captured["skip_permissions"] is True
+
     def test_plan_session_saved_in_zing_file(self, tmp_path: Path) -> None:
         """The plan session ID from flesh out should be saved."""
         zing_path = _make_zing_file(tmp_path)
@@ -672,17 +712,19 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                return_value=Interaction(choice_sets=[
-                    ChoiceSet(
-                        message="Q?",
-                        explanation="E.",
-                        choices=[
-                            Choice(label="A", description="D", recommended=True),
-                            Choice(label="B", description="D", recommended=False),
-                        ],
-                    ),
-                ]),
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=_make_investigation_result([
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Q?",
+                            explanation="E.",
+                            choices=[
+                                Choice(label="A", description="D", recommended=True),
+                                Choice(label="B", description="D", recommended=False),
+                            ],
+                        ),
+                    ]),
+                ] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -905,17 +947,19 @@ class TestRunPlanCallsAudit:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_validated",
-                return_value=Interaction(choice_sets=[
-                    ChoiceSet(
-                        message="Q?",
-                        explanation="E.",
-                        choices=[
-                            Choice(label="A", description="D", recommended=True),
-                            Choice(label="B", description="D", recommended=False),
-                        ],
-                    ),
-                ]),
+                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
+                return_value=_make_investigation_result([
+                    Interaction(choice_sets=[
+                        ChoiceSet(
+                            message="Q?",
+                            explanation="E.",
+                            choices=[
+                                Choice(label="A", description="D", recommended=True),
+                                Choice(label="B", description="D", recommended=False),
+                            ],
+                        ),
+                    ]),
+                ] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
