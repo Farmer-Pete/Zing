@@ -170,6 +170,7 @@ def _invoke_flesh_out_with_session(
     skip_permissions: bool,
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
+    zing_dir: Path | None = None,
 ) -> tuple[Plan, str]:
     """Invoke Claude for the flesh-out phase and return ``(plan, session_id)``.
 
@@ -205,6 +206,7 @@ def _invoke_flesh_out_with_session(
     output, session_id = claude.invoke_claude_full(
         prompt,
         on_output=on_output,
+        zing_dir=zing_dir,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -228,6 +230,7 @@ def _invoke_flesh_out_with_session(
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 on_output=on_output,
+                zing_dir=zing_dir,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -252,6 +255,7 @@ def _invoke_replan_with_session(
     resume_session: str,
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
+    zing_dir: Path | None = None,
 ) -> tuple[Plan, Interaction | None, str]:
     """Invoke Claude for the re-plan phase (session resumption).
 
@@ -266,6 +270,7 @@ def _invoke_replan_with_session(
     output, session_id = claude.invoke_claude_full(
         prompt,
         on_output=on_output,
+        zing_dir=zing_dir,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -296,6 +301,7 @@ def _invoke_replan_with_session(
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 on_output=on_output,
+                zing_dir=zing_dir,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -515,9 +521,12 @@ def _run_first_plan(
     logger.info("Phase 1: Identification")
     identify_prompt = render_prompt("plan_identify.md.j2", zing_content=zing_content)
 
+    zing_dir = project.ensure_zing_dir(project_root)
+
     identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
         on_output=print_line,
+        zing_dir=zing_dir,
         call_type=CallType.INVESTIGATE,
         config=config,
         skip_permissions=skip_permissions,
@@ -613,6 +622,7 @@ def _run_first_plan(
         config=config,
         skip_permissions=skip_permissions,
         on_output=print_line,
+        zing_dir=zing_dir,
     )
     logger.info(
         "Flesh out produced plan with %d stages, session_id=%s",
@@ -663,6 +673,8 @@ def _run_replan(
     if not plan_session:
         logger.warning("No plan-session found in zing file; running re-plan without resume")
 
+    zing_dir = project.ensure_zing_dir(project_root)
+
     # Render the re-plan prompt
     replan_prompt = render_prompt(
         "plan_replan.md.j2",
@@ -678,6 +690,7 @@ def _run_replan(
         skip_permissions=skip_permissions,
         resume_session=plan_session or "",
         on_output=print_line,
+        zing_dir=zing_dir,
     )
 
     logger.info(

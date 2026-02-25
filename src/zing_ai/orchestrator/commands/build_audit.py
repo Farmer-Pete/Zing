@@ -261,6 +261,8 @@ def run_build_audit(
     }
     logger.info("Distilled %d files", len(distilled_files))
 
+    zing_dir = project.ensure_zing_dir(project_root)
+
     # --- Step 3: Group files via Claude ---
     logger.info("Build-audit Step 3: Grouping files via Claude")
     group_prompt = render_prompt(
@@ -274,6 +276,7 @@ def run_build_audit(
         validator=parse_audit_response,
         retry_prompt_template=_RETRY_TEMPLATE,
         on_output=print_line,
+        zing_dir=zing_dir,
         call_type=CallType.AUDIT,
         config=config,
         skip_permissions=skip_permissions,
@@ -302,6 +305,7 @@ def run_build_audit(
         distilled_files=distilled_files,
         config=config,
         skip_permissions=skip_permissions,
+        zing_dir=zing_dir,
     )
 
     # --- Parse and collect findings ---
@@ -350,6 +354,7 @@ def _run_review_tui(
     distilled_files: dict[str, str],
     config: ZingConfig,
     skip_permissions: bool,
+    zing_dir: Path | None = None,
 ) -> tuple[ProgressResult, list[str]]:
     """Run parallel review Claude calls inside a ProgressScreen.
 
@@ -411,6 +416,7 @@ def _run_review_tui(
             output, _session_id = claude.invoke_claude_full(
                 review_prompt,
                 on_output=lambda line: screen.append_output(group_id, line),
+                zing_dir=zing_dir,
                 call_type=CallType.AUDIT,
                 config=config,
                 skip_permissions=skip_permissions,

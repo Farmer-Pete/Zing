@@ -70,6 +70,7 @@ def _invoke_update_with_session(
     skip_permissions: bool,
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
+    zing_dir: Path | None = None,
 ) -> tuple[object, str]:
     """Invoke Claude for the document-update phase and return ``(plan, session_id)``.
 
@@ -105,6 +106,7 @@ def _invoke_update_with_session(
     output, session_id = claude.invoke_claude_full(
         prompt,
         on_output=on_output,
+        zing_dir=zing_dir,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -128,6 +130,7 @@ def _invoke_update_with_session(
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 on_output=on_output,
+                zing_dir=zing_dir,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -152,6 +155,7 @@ def _invoke_reaudit_with_session(
     resume_session: str,
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
+    zing_dir: Path | None = None,
 ) -> tuple[object, Interaction | None, str]:
     """Invoke Claude for the re-audit phase (session resumption).
 
@@ -166,6 +170,7 @@ def _invoke_reaudit_with_session(
     output, session_id = claude.invoke_claude_full(
         prompt,
         on_output=on_output,
+        zing_dir=zing_dir,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -196,6 +201,7 @@ def _invoke_reaudit_with_session(
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
                 on_output=on_output,
+                zing_dir=zing_dir,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -411,6 +417,8 @@ def _run_first_audit(
     doc = parse_zing_file(zing_path)
     zing_content = doc.content or ""
 
+    zing_dir = project.ensure_zing_dir(project_root)
+
     # --- Phase 1: Identification ---
     logger.info("Audit Phase 1: Identification")
     identify_prompt = render_prompt("plan_audit_identify.md.j2", zing_content=zing_content)
@@ -418,6 +426,7 @@ def _run_first_audit(
     identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
         on_output=print_line,
+        zing_dir=zing_dir,
         call_type=CallType.AUDIT,
         config=config,
         skip_permissions=skip_permissions,
@@ -510,6 +519,7 @@ def _run_first_audit(
         config=config,
         skip_permissions=skip_permissions,
         on_output=print_line,
+        zing_dir=zing_dir,
     )
     logger.info(
         "Document update produced plan with %d stages, audit_session_id=%s",
@@ -571,6 +581,8 @@ def _run_reaudit(
     if not audit_session:
         logger.warning("No audit-session found in zing file; running re-audit without resume")
 
+    zing_dir = project.ensure_zing_dir(project_root)
+
     # Render the re-audit prompt
     reaudit_prompt = render_prompt(
         "plan_reaudit.md.j2",
@@ -586,6 +598,7 @@ def _run_reaudit(
         skip_permissions=skip_permissions,
         resume_session=audit_session or "",
         on_output=print_line,
+        zing_dir=zing_dir,
     )
 
     logger.info(
