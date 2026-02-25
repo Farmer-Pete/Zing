@@ -6,8 +6,10 @@ collecting output, and retrying on validation failures.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
+import signal
 import subprocess
 from collections.abc import Callable, Iterator
 
@@ -139,23 +141,77 @@ def _extract_session_id(text: str) -> str:
 
 def invoke_claude_full(
     prompt: str,
+    *,
+    on_output: Callable[[str], None] | None = None,
     **kwargs: object,
 ) -> tuple[str, str]:
     """Convenience wrapper that collects all output and returns ``(full_output, session_id)``.
 
     Accepts the same keyword arguments as :func:`invoke_claude`.
+
+    Parameters
+    ----------
+    on_output:
+        Optional callback invoked with each line of stdout as it arrives.
+        Useful for streaming output to a terminal or TUI widget.
+    **kwargs:
+        Forwarded to :func:`_build_command`.
     """
     cmd = _build_command(prompt, **kwargs)  # type: ignore[arg-type]
 
     logger.debug("Running command (full): %s", cmd)
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
-    full_output = result.stdout.decode("utf-8", errors="replace")
-    stderr_text = result.stderr.decode("utf-8", errors="replace")
+    # Install a SIGINT handler that terminates the child process.
+    # signal.signal() raises ValueError when called from a non-main thread
+    # (e.g. Textual TUI worker threads), so we guard with try/except.
+    original_handler: signal.Handlers | None = None
+    try:
+        def _sigint_handler(signum: int, frame: object) -> None:
+            proc.terminate()
+
+        original_handler = signal.signal(signal.SIGINT, _sigint_handler)
+    except ValueError:
+        pass  # Not in main thread — skip SIGINT handling
+
+    interrupted = False
+    try:
+        assert proc.stdout is not None  # guaranteed by PIPE
+
+        lines: list[str] = []
+        for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace")
+            lines.append(line)
+            if on_output is not None:
+                on_output(line)
+
+        proc.wait()
+    except KeyboardInterrupt:
+        interrupted = True
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        # Restore original SIGINT handler
+        if original_handler is not None:
+            with contextlib.suppress(ValueError):
+                signal.signal(signal.SIGINT, original_handler)
+
+    if interrupted:
+        raise KeyboardInterrupt
+
+    full_output = "".join(lines)
+
+    assert proc.stderr is not None  # guaranteed by PIPE
+    stderr_text = proc.stderr.read().decode("utf-8", errors="replace")
 
     if stderr_text:
         logger.debug("Claude stderr: %s", stderr_text)
@@ -166,6 +222,11 @@ def invoke_claude_full(
         session_id = _extract_session_id(full_output)
 
     return full_output, session_id
+
+
+def print_line(line: str) -> None:
+    """Print a line to stdout (no extra newline). Convenience ``on_output`` callback."""
+    print(line, end="", flush=True)
 
 
 def invoke_claude_validated[T](

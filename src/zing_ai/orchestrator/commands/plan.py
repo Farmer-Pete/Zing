@@ -23,12 +23,14 @@ import contextlib
 import logging
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import jinja2
 
 from zing_ai.orchestrator import claude, project
+from zing_ai.orchestrator.claude import print_line
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
@@ -166,6 +168,7 @@ def _invoke_flesh_out_with_session(
     call_type: CallType,
     config: ZingConfig,
     skip_permissions: bool,
+    on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
 ) -> tuple[Plan, str]:
     """Invoke Claude for the flesh-out phase and return ``(plan, session_id)``.
@@ -184,6 +187,8 @@ def _invoke_flesh_out_with_session(
         Zing configuration.
     skip_permissions:
         Whether to skip permission checks.
+    on_output:
+        Optional callback for streaming output lines.
     max_retries:
         Maximum validation retry attempts.
 
@@ -199,6 +204,7 @@ def _invoke_flesh_out_with_session(
     """
     output, session_id = claude.invoke_claude_full(
         prompt,
+        on_output=on_output,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -221,6 +227,7 @@ def _invoke_flesh_out_with_session(
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
+                on_output=on_output,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -243,6 +250,7 @@ def _invoke_replan_with_session(
     config: ZingConfig,
     skip_permissions: bool,
     resume_session: str,
+    on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
 ) -> tuple[Plan, Interaction | None, str]:
     """Invoke Claude for the re-plan phase (session resumption).
@@ -257,6 +265,7 @@ def _invoke_replan_with_session(
     """
     output, session_id = claude.invoke_claude_full(
         prompt,
+        on_output=on_output,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -286,6 +295,7 @@ def _invoke_replan_with_session(
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
+                on_output=on_output,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -412,6 +422,7 @@ def _run_investigation_tui(
                 prompt,
                 validator=parse_interactions_response,
                 retry_prompt_template=_RETRY_TEMPLATE,
+                on_output=lambda line, _id=area_id: screen.append_output(_id, line),
                 call_type=CallType.INVESTIGATE,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -506,6 +517,7 @@ def _run_first_plan(
 
     identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
+        on_output=print_line,
         call_type=CallType.INVESTIGATE,
         config=config,
         skip_permissions=skip_permissions,
@@ -600,6 +612,7 @@ def _run_first_plan(
         call_type=CallType.PLAN,
         config=config,
         skip_permissions=skip_permissions,
+        on_output=print_line,
     )
     logger.info(
         "Flesh out produced plan with %d stages, session_id=%s",
@@ -664,6 +677,7 @@ def _run_replan(
         config=config,
         skip_permissions=skip_permissions,
         resume_session=plan_session or "",
+        on_output=print_line,
     )
 
     logger.info(

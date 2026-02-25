@@ -13,6 +13,7 @@ from zing_ai.orchestrator.claude import (
     invoke_claude,
     invoke_claude_full,
     invoke_claude_validated,
+    print_line,
 )
 from zing_ai.orchestrator.config import (
     DEFAULT_MCP_TOOLS,
@@ -25,19 +26,6 @@ from zing_ai.orchestrator.xml_parser import ValidationError
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_mock_completed_process(
-    stdout: bytes = b"",
-    stderr: bytes = b"",
-    returncode: int = 0,
-) -> MagicMock:
-    """Create a mock subprocess.CompletedProcess."""
-    result = MagicMock()
-    result.stdout = stdout
-    result.stderr = stderr
-    result.returncode = returncode
-    return result
 
 
 def _make_mock_popen(
@@ -325,15 +313,15 @@ class TestInvokeClaudeFull:
     """Tests for the convenience invoke_claude_full wrapper."""
 
     def test_returns_full_output(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"Hello world\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"Hello world\n"],
             stderr=b"",
         )
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             output, session_id = invoke_claude_full(
                 "test", call_type=CallType.BUILD, config=ZingConfig()
@@ -342,15 +330,15 @@ class TestInvokeClaudeFull:
         assert output == "Hello world\n"
 
     def test_returns_session_id_from_stderr(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"output\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"output\n"],
             stderr=b"Session: sess-abc-123\n",
         )
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             output, session_id = invoke_claude_full(
                 "test", call_type=CallType.BUILD, config=ZingConfig()
@@ -359,15 +347,15 @@ class TestInvokeClaudeFull:
         assert session_id == "sess-abc-123"
 
     def test_returns_session_id_from_stdout(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"Session: sess-in-stdout\nother output\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"Session: sess-in-stdout\n", b"other output\n"],
             stderr=b"",
         )
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             output, session_id = invoke_claude_full(
                 "test", call_type=CallType.BUILD, config=ZingConfig()
@@ -376,15 +364,15 @@ class TestInvokeClaudeFull:
         assert session_id == "sess-in-stdout"
 
     def test_empty_session_id_when_not_present(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"just output\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"just output\n"],
             stderr=b"no session here\n",
         )
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             output, session_id = invoke_claude_full(
                 "test", call_type=CallType.BUILD, config=ZingConfig()
@@ -393,12 +381,12 @@ class TestInvokeClaudeFull:
         assert session_id == ""
 
     def test_passes_kwargs_to_build_command(self) -> None:
-        mock_result = _make_mock_completed_process(stdout=b"", stderr=b"")
+        mock_proc = _make_mock_popen(stdout_lines=[], stderr=b"")
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             invoke_claude_full(
                 "test",
@@ -409,7 +397,7 @@ class TestInvokeClaudeFull:
                 resume_session="sess-999",
             )
 
-            cmd = mock_run.call_args[0][0]
+            cmd = mock_popen.call_args[0][0]
 
         assert "--dangerously-skip-permissions" in cmd
         assert "--allowedTools" not in cmd
@@ -417,6 +405,104 @@ class TestInvokeClaudeFull:
         assert "--resume" in cmd
         idx = cmd.index("--resume")
         assert cmd[idx + 1] == "sess-999"
+
+    def test_on_output_callback_called_per_line(self) -> None:
+        """The on_output callback should be called once per stdout line."""
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"line 1\n", b"line 2\n", b"line 3\n"],
+            stderr=b"",
+        )
+
+        callback = MagicMock()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+
+            output, _ = invoke_claude_full(
+                "test",
+                on_output=callback,
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
+            )
+
+        assert callback.call_count == 3
+        callback.assert_any_call("line 1\n")
+        callback.assert_any_call("line 2\n")
+        callback.assert_any_call("line 3\n")
+        assert output == "line 1\nline 2\nline 3\n"
+
+    def test_on_output_none_still_collects(self) -> None:
+        """When on_output is None, output is still accumulated silently."""
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"hello\n", b"world\n"],
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+
+            output, _ = invoke_claude_full(
+                "test",
+                on_output=None,
+                call_type=CallType.BUILD,
+                config=ZingConfig(),
+            )
+
+        assert output == "hello\nworld\n"
+
+    def test_sigint_terminates_child_and_reraises(self) -> None:
+        """SIGINT handler should terminate the child and re-raise KeyboardInterrupt."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.wait.return_value = 0
+
+        stderr_mock = MagicMock()
+        stderr_mock.read.return_value = b""
+        mock_proc.stderr = stderr_mock
+
+        # Make stdout iteration raise KeyboardInterrupt on the second line
+        def _stdout_iter():
+            yield b"line 1\n"
+            raise KeyboardInterrupt
+
+        mock_proc.stdout = _stdout_iter()
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
+
+            with pytest.raises(KeyboardInterrupt):
+                invoke_claude_full(
+                    "test",
+                    call_type=CallType.BUILD,
+                    config=ZingConfig(),
+                )
+
+        mock_proc.terminate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# print_line tests
+# ---------------------------------------------------------------------------
+
+
+class TestPrintLine:
+    """Tests for the print_line convenience callback."""
+
+    def test_prints_without_extra_newline(self, capsys: pytest.CaptureFixture[str]) -> None:
+        print_line("hello world\n")
+        captured = capsys.readouterr()
+        assert captured.out == "hello world\n"
+
+    def test_prints_partial_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        print_line("partial")
+        captured = capsys.readouterr()
+        assert captured.out == "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -428,15 +514,15 @@ class TestInvokeClaudeValidated:
     """Tests for the retry-on-validation invoke_claude_validated wrapper."""
 
     def test_returns_on_first_success(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"valid output\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"valid output\n"],
             stderr=b"Session: sess-001\n",
         )
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             result = invoke_claude_validated(
                 "test",
@@ -449,12 +535,12 @@ class TestInvokeClaudeValidated:
         assert result == "VALID OUTPUT"
 
     def test_retries_on_validation_error(self) -> None:
-        mock_result_bad = _make_mock_completed_process(
-            stdout=b"bad output\n",
+        mock_proc_bad = _make_mock_popen(
+            stdout_lines=[b"bad output\n"],
             stderr=b"Session: sess-001\n",
         )
-        mock_result_good = _make_mock_completed_process(
-            stdout=b"good output\n",
+        mock_proc_good = _make_mock_popen(
+            stdout_lines=[b"good output\n"],
             stderr=b"Session: sess-002\n",
         )
 
@@ -464,9 +550,9 @@ class TestInvokeClaudeValidated:
             return text.strip()
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.side_effect = [mock_result_bad, mock_result_good]
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = [mock_proc_bad, mock_proc_good]
 
             result = invoke_claude_validated(
                 "test",
@@ -479,21 +565,24 @@ class TestInvokeClaudeValidated:
             )
 
         assert result == "good output"
-        assert mock_run.call_count == 2
+        assert mock_popen.call_count == 2
 
     def test_raises_after_max_retries(self) -> None:
-        mock_result = _make_mock_completed_process(
-            stdout=b"always bad\n",
-            stderr=b"Session: sess-001\n",
-        )
+        mock_procs = [
+            _make_mock_popen(
+                stdout_lines=[b"always bad\n"],
+                stderr=b"Session: sess-001\n",
+            )
+            for _ in range(3)
+        ]
 
         def validator(text: str) -> str:
             raise ValidationError("still bad")
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = mock_procs
 
             with pytest.raises(ValidationError, match="still bad"):
                 invoke_claude_validated(
@@ -506,15 +595,15 @@ class TestInvokeClaudeValidated:
                 )
 
         # 1 initial call + 2 retry calls = 3 total
-        assert mock_run.call_count == 3
+        assert mock_popen.call_count == 3
 
     def test_calls_on_retry_callback(self) -> None:
-        mock_result_bad = _make_mock_completed_process(
-            stdout=b"bad\n",
+        mock_proc_bad = _make_mock_popen(
+            stdout_lines=[b"bad\n"],
             stderr=b"Session: sess-001\n",
         )
-        mock_result_good = _make_mock_completed_process(
-            stdout=b"good\n",
+        mock_proc_good = _make_mock_popen(
+            stdout_lines=[b"good\n"],
             stderr=b"Session: sess-002\n",
         )
 
@@ -530,9 +619,9 @@ class TestInvokeClaudeValidated:
         on_retry = MagicMock()
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.side_effect = [mock_result_bad, mock_result_good]
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = [mock_proc_bad, mock_proc_good]
 
             result = invoke_claude_validated(
                 "test",
@@ -548,12 +637,12 @@ class TestInvokeClaudeValidated:
 
     def test_retry_uses_resume_session(self) -> None:
         """The retry call should pass --resume with the session ID from the first call."""
-        mock_result_bad = _make_mock_completed_process(
-            stdout=b"bad\n",
+        mock_proc_bad = _make_mock_popen(
+            stdout_lines=[b"bad\n"],
             stderr=b"Session: sess-original\n",
         )
-        mock_result_good = _make_mock_completed_process(
-            stdout=b"good\n",
+        mock_proc_good = _make_mock_popen(
+            stdout_lines=[b"good\n"],
             stderr=b"Session: sess-retry\n",
         )
 
@@ -567,9 +656,9 @@ class TestInvokeClaudeValidated:
             return text.strip()
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.side_effect = [mock_result_bad, mock_result_good]
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = [mock_proc_bad, mock_proc_good]
 
             invoke_claude_validated(
                 "test",
@@ -579,7 +668,7 @@ class TestInvokeClaudeValidated:
                 config=ZingConfig(),
             )
 
-            call_cmds = [call[0][0] for call in mock_run.call_args_list]
+            call_cmds = [call[0][0] for call in mock_popen.call_args_list]
 
         # Second call should have --resume flag with the session from first call
         second_call_cmd = call_cmds[1]
@@ -589,12 +678,12 @@ class TestInvokeClaudeValidated:
 
     def test_retry_prompt_rendered_with_error(self) -> None:
         """The retry prompt should be rendered with the error message."""
-        mock_result_bad = _make_mock_completed_process(
-            stdout=b"bad\n",
+        mock_proc_bad = _make_mock_popen(
+            stdout_lines=[b"bad\n"],
             stderr=b"Session: sess-001\n",
         )
-        mock_result_good = _make_mock_completed_process(
-            stdout=b"good\n",
+        mock_proc_good = _make_mock_popen(
+            stdout_lines=[b"good\n"],
             stderr=b"Session: sess-002\n",
         )
 
@@ -608,9 +697,9 @@ class TestInvokeClaudeValidated:
             return text.strip()
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.side_effect = [mock_result_bad, mock_result_good]
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = [mock_proc_bad, mock_proc_good]
 
             invoke_claude_validated(
                 "test",
@@ -622,7 +711,7 @@ class TestInvokeClaudeValidated:
                 config=ZingConfig(),
             )
 
-            call_cmds = [call[0][0] for call in mock_run.call_args_list]
+            call_cmds = [call[0][0] for call in mock_popen.call_args_list]
 
         second_call_cmd = call_cmds[1]
         separator_idx = second_call_cmd.index("--")
@@ -632,8 +721,8 @@ class TestInvokeClaudeValidated:
 
     def test_max_retries_one(self) -> None:
         """With max_retries=1, should fail immediately on first validation error."""
-        mock_result = _make_mock_completed_process(
-            stdout=b"bad\n",
+        mock_proc = _make_mock_popen(
+            stdout_lines=[b"bad\n"],
             stderr=b"Session: sess-001\n",
         )
 
@@ -641,9 +730,9 @@ class TestInvokeClaudeValidated:
             raise ValidationError("always fails")
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.return_value = mock_result
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.return_value = mock_proc
 
             with pytest.raises(ValidationError, match="always fails"):
                 invoke_claude_validated(
@@ -656,16 +745,16 @@ class TestInvokeClaudeValidated:
                 )
 
         # Only one call — no retries with max_retries=1
-        assert mock_run.call_count == 1
+        assert mock_popen.call_count == 1
 
     def test_no_on_retry_callback(self) -> None:
         """When on_retry is None, retries still work without callback."""
-        mock_result_bad = _make_mock_completed_process(
-            stdout=b"bad\n",
+        mock_proc_bad = _make_mock_popen(
+            stdout_lines=[b"bad\n"],
             stderr=b"Session: sess-001\n",
         )
-        mock_result_good = _make_mock_completed_process(
-            stdout=b"good\n",
+        mock_proc_good = _make_mock_popen(
+            stdout_lines=[b"good\n"],
             stderr=b"Session: sess-002\n",
         )
 
@@ -679,9 +768,9 @@ class TestInvokeClaudeValidated:
             return text.strip()
 
         with patch(
-            "zing_ai.orchestrator.claude.subprocess.run"
-        ) as mock_run:
-            mock_run.side_effect = [mock_result_bad, mock_result_good]
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen:
+            mock_popen.side_effect = [mock_proc_bad, mock_proc_good]
 
             result = invoke_claude_validated(
                 "test",

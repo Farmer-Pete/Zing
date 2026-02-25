@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import jinja2
 
 from zing_ai.orchestrator import claude, project
+from zing_ai.orchestrator.claude import print_line
 from zing_ai.orchestrator.config import CallType, ZingConfig
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import AuditGroup
@@ -272,6 +273,7 @@ def run_build_audit(
         group_prompt,
         validator=parse_audit_response,
         retry_prompt_template=_RETRY_TEMPLATE,
+        on_output=print_line,
         call_type=CallType.AUDIT,
         config=config,
         skip_permissions=skip_permissions,
@@ -408,6 +410,7 @@ def _run_review_tui(
 
             output, _session_id = claude.invoke_claude_full(
                 review_prompt,
+                on_output=lambda line: screen.append_output(group_id, line),
                 call_type=CallType.AUDIT,
                 config=config,
                 skip_permissions=skip_permissions,

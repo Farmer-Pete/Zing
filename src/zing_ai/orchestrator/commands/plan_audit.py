@@ -20,11 +20,13 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import jinja2
 
 from zing_ai.orchestrator import claude, project
+from zing_ai.orchestrator.claude import print_line
 
 # Re-use the identification parser from plan (same format)
 from zing_ai.orchestrator.commands.plan import (
@@ -66,6 +68,7 @@ def _invoke_update_with_session(
     call_type: CallType,
     config: ZingConfig,
     skip_permissions: bool,
+    on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
 ) -> tuple[object, str]:
     """Invoke Claude for the document-update phase and return ``(plan, session_id)``.
@@ -84,6 +87,8 @@ def _invoke_update_with_session(
         Zing configuration.
     skip_permissions:
         Whether to skip permission checks.
+    on_output:
+        Optional callback for streaming output lines.
     max_retries:
         Maximum validation retry attempts.
 
@@ -99,6 +104,7 @@ def _invoke_update_with_session(
     """
     output, session_id = claude.invoke_claude_full(
         prompt,
+        on_output=on_output,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -121,6 +127,7 @@ def _invoke_update_with_session(
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
+                on_output=on_output,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -143,6 +150,7 @@ def _invoke_reaudit_with_session(
     config: ZingConfig,
     skip_permissions: bool,
     resume_session: str,
+    on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
 ) -> tuple[object, Interaction | None, str]:
     """Invoke Claude for the re-audit phase (session resumption).
@@ -157,6 +165,7 @@ def _invoke_reaudit_with_session(
     """
     output, session_id = claude.invoke_claude_full(
         prompt,
+        on_output=on_output,
         call_type=call_type,
         config=config,
         skip_permissions=skip_permissions,
@@ -186,6 +195,7 @@ def _invoke_reaudit_with_session(
             retry_prompt = _RETRY_TEMPLATE.render(error=str(exc))
             output, session_id = claude.invoke_claude_full(
                 retry_prompt,
+                on_output=on_output,
                 call_type=call_type,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -312,6 +322,7 @@ def _run_investigation_tui(
                 prompt,
                 validator=parse_interactions_response,
                 retry_prompt_template=_RETRY_TEMPLATE,
+                on_output=lambda line, _id=area_id: screen.append_output(_id, line),
                 call_type=CallType.AUDIT,
                 config=config,
                 skip_permissions=skip_permissions,
@@ -406,6 +417,7 @@ def _run_first_audit(
 
     identify_output, _identify_session = claude.invoke_claude_full(
         identify_prompt,
+        on_output=print_line,
         call_type=CallType.AUDIT,
         config=config,
         skip_permissions=skip_permissions,
@@ -497,6 +509,7 @@ def _run_first_audit(
         call_type=CallType.AUDIT,
         config=config,
         skip_permissions=skip_permissions,
+        on_output=print_line,
     )
     logger.info(
         "Document update produced plan with %d stages, audit_session_id=%s",
@@ -572,6 +585,7 @@ def _run_reaudit(
         config=config,
         skip_permissions=skip_permissions,
         resume_session=audit_session or "",
+        on_output=print_line,
     )
 
     logger.info(
