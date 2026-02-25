@@ -11,6 +11,7 @@ Handles two related but distinct XML formats:
 
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -25,6 +26,8 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ValidationError
@@ -56,9 +59,17 @@ def parse_zing_file(path: Path) -> ZingDocument:
         ET.ParseError: If the file is not well-formed XML.
         FileNotFoundError: If *path* does not exist.
     """
+    logger.debug("Parsing zing file: %s", path)
     tree = ET.parse(path)
     root = tree.getroot()
-    return _zing_element_to_document(root)
+    doc = _zing_element_to_document(root)
+    logger.debug(
+        "Parsed zing file: stage=%s, has_plan=%s, has_interactions=%s",
+        doc.stage,
+        doc.plan is not None,
+        doc.interactions is not None,
+    )
+    return doc
 
 
 def write_zing_file(path: Path, doc: ZingDocument) -> None:
@@ -67,6 +78,7 @@ def write_zing_file(path: Path, doc: ZingDocument) -> None:
     The output uses the zing on-disk XML format which differs slightly from
     the internal model XML.
     """
+    logger.debug("Writing zing file: %s (stage=%s)", path, doc.stage)
     root = _document_to_zing_element(doc)
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
@@ -89,13 +101,17 @@ def parse_interactions_response(text: str) -> Interaction:
         ValidationError: If the XML is missing, malformed, or fails business
             rules (e.g. no recommended choice in a choice set).
     """
+    logger.debug("Parsing interactions response, input length=%d", len(text))
     fragment = _extract_xml_fragment(text, "zing:interactions")
+    logger.debug("Extracted interactions fragment, length=%d", len(fragment))
     try:
         elem = ET.fromstring(fragment)
     except ET.ParseError as exc:
         raise ValidationError(f"Malformed XML in zing:interactions: {exc}") from exc
 
-    return _parse_claude_interactions(elem)
+    result = _parse_claude_interactions(elem)
+    logger.debug("Parsed %d choice set(s) from interactions response", len(result.choice_sets))
+    return result
 
 
 def parse_steps_response(text: str) -> Plan:
@@ -106,13 +122,17 @@ def parse_steps_response(text: str) -> Plan:
     Raises:
         ValidationError: If the XML is missing or malformed.
     """
+    logger.debug("Parsing steps response, input length=%d", len(text))
     fragment = _extract_xml_fragment(text, "zing:steps")
+    logger.debug("Extracted steps fragment, length=%d", len(fragment))
     try:
         elem = ET.fromstring(fragment)
     except ET.ParseError as exc:
         raise ValidationError(f"Malformed XML in zing:steps: {exc}") from exc
 
-    return _parse_claude_steps(elem)
+    result = _parse_claude_steps(elem)
+    logger.debug("Parsed %d stage(s) from steps response", len(result.stages))
+    return result
 
 
 def parse_audit_response(text: str) -> list[AuditGroup]:
@@ -123,13 +143,17 @@ def parse_audit_response(text: str) -> list[AuditGroup]:
     Raises:
         ValidationError: If the XML is missing or malformed.
     """
+    logger.debug("Parsing audit response, input length=%d", len(text))
     fragment = _extract_xml_fragment(text, "zing:audit")
+    logger.debug("Extracted audit fragment, length=%d", len(fragment))
     try:
         elem = ET.fromstring(fragment)
     except ET.ParseError as exc:
         raise ValidationError(f"Malformed XML in zing:audit: {exc}") from exc
 
-    return _parse_claude_audit(elem)
+    result = _parse_claude_audit(elem)
+    logger.debug("Parsed %d group(s) from audit response", len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +166,10 @@ def _zing_element_to_document(root: ET.Element) -> ZingDocument:
     stage = root.get("stage", "")
     audit = root.get("audit", "false").lower() == "true"
     approved = root.get("approved", "false").lower() == "true"
+    logger.debug(
+        "Parsing <zing> element: stage=%s, audit=%s, approved=%s",
+        stage, audit, approved,
+    )
     plan_session = root.get("plan-session")
     audit_session = root.get("audit-session")
 
@@ -150,6 +178,7 @@ def _zing_element_to_document(root: ET.Element) -> ZingDocument:
     content_elem = root.find("content")
     if content_elem is not None:
         content = content_elem.text
+        logger.debug("Found <content> sub-element")
 
     # Plan — on-disk format matches the model's <plan><stage><step> structure,
     # except that <files> contains a newline-delimited string rather than
@@ -157,6 +186,7 @@ def _zing_element_to_document(root: ET.Element) -> ZingDocument:
     plan: Plan | None = None
     plan_elem = root.find("plan")
     if plan_elem is not None:
+        logger.debug("Found <plan> sub-element")
         plan = _parse_zing_plan(plan_elem)
 
     # Interactions — on-disk uses <interactions><choices message="..."> rather
@@ -164,6 +194,7 @@ def _zing_element_to_document(root: ET.Element) -> ZingDocument:
     interactions: Interaction | None = None
     inter_elem = root.find("interactions")
     if inter_elem is not None:
+        logger.debug("Found <interactions> sub-element")
         interactions = _parse_zing_interactions(inter_elem)
 
     return ZingDocument(
@@ -187,6 +218,7 @@ def _parse_zing_plan(plan_elem: ET.Element) -> Plan:
         for step_elem in stage_elem.findall("step"):
             steps.append(_parse_zing_step(step_elem))
         stages.append(Stage(label=label, steps=steps))
+    logger.debug("Parsed plan with %d stage(s)", len(stages))
     return Plan(stages=stages)
 
 
@@ -198,6 +230,7 @@ def _parse_zing_step(step_elem: ET.Element) -> Step:
     """
     label = step_elem.get("label", "")
     done = step_elem.get("done", "false").lower() == "true"
+    logger.debug("Parsing step: label=%s, done=%s", label, done)
 
     instructions = ""
     inst_elem = step_elem.find("instructions")
@@ -210,6 +243,7 @@ def _parse_zing_step(step_elem: ET.Element) -> Step:
         raw = files_elem.text or ""
         files = [f.strip() for f in raw.strip().splitlines() if f.strip()]
 
+    logger.debug("Step '%s' references %d file(s)", label, len(files))
     return Step(label=label, instructions=instructions, files=files, done=done)
 
 
@@ -251,6 +285,7 @@ def _parse_zing_interactions(inter_elem: ET.Element) -> Interaction:
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
 
+    logger.debug("Parsed zing interactions with %d choice set(s)", len(choice_sets))
     return Interaction(choice_sets=choice_sets)
 
 
@@ -329,6 +364,7 @@ def _extract_xml_fragment(text: str, tag: str) -> str:
 
     Raises :class:`ValidationError` if the tag is not found.
     """
+    logger.debug("Searching for <%s> fragment", tag)
     escaped = re.escape(tag)
     pattern = re.compile(rf"(<{escaped}[\s>].*?</{escaped}>)", re.DOTALL)
     match = pattern.search(text)
@@ -339,6 +375,7 @@ def _extract_xml_fragment(text: str, tag: str) -> str:
     # Strip the "zing:" pseudo-namespace prefix so ElementTree can parse it.
     if ":" in tag:
         _, local = tag.split(":", 1)
+        logger.debug("Stripping zing: prefix from <%s>", tag)
         fragment = fragment.replace(f"<{tag}", f"<{local}", 1)
         fragment = fragment.replace(f"</{tag}>", f"</{local}>", 1)
 
@@ -385,6 +422,11 @@ def _parse_claude_interactions(elem: ET.Element) -> Interaction:
                 f"ChoiceSet must have exactly one recommended choice, got {recommended_count}"
             )
 
+        logger.debug(
+            "Claude choice set: %d choice(s), %d recommended",
+            len(choices), recommended_count,
+        )
+
         try:
             choice_sets.append(
                 ChoiceSet(message=message, explanation=explanation, choices=choices)
@@ -395,6 +437,7 @@ def _parse_claude_interactions(elem: ET.Element) -> Interaction:
     if not choice_sets:
         raise ValidationError("zing:interactions must contain at least one choices element")
 
+    logger.debug("Parsed Claude interactions with %d choice set(s)", len(choice_sets))
     return Interaction(choice_sets=choice_sets)
 
 
@@ -436,11 +479,13 @@ def _parse_claude_steps(elem: ET.Element) -> Plan:
             steps.append(
                 Step(label=step_label, instructions=instructions, files=files, done=False)
             )
+        logger.debug("Claude stage '%s': %d step(s)", label, len(steps))
         stages.append(Stage(label=label, steps=steps))
 
     if not stages:
         raise ValidationError("zing:steps must contain at least one stage")
 
+    logger.debug("Parsed Claude steps: %d stage(s)", len(stages))
     return Plan(stages=stages)
 
 
@@ -460,9 +505,11 @@ def _parse_claude_audit(elem: ET.Element) -> list[AuditGroup]:
     for group_elem in elem.findall("group"):
         raw = group_elem.text or ""
         files = [f.strip() for f in raw.strip().splitlines() if f.strip()]
+        logger.debug("Claude audit group: %d file(s)", len(files))
         groups.append(AuditGroup(files=files))
 
     if not groups:
         raise ValidationError("zing:audit must contain at least one group")
 
+    logger.debug("Parsed Claude audit: %d group(s)", len(groups))
     return groups

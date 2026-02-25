@@ -10,6 +10,7 @@ Named ``FindingGroupPanel`` to avoid collision with the existing
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
@@ -17,6 +18,8 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Label
+
+logger = logging.getLogger(__name__)
 
 # ── Data types ───────────────────────────────────────────────────────────────
 
@@ -185,6 +188,10 @@ class FindingGroupPanel(Widget):
         super().__init__(name=name, id=id, classes=classes)
         self._severity = severity
         self._findings: list[FindingData] = list(findings or [])
+        logger.debug(
+            "FindingGroupPanel created: severity=%s, %d finding(s)",
+            severity, len(self._findings),
+        )
 
         # Apply severity-colored border
         color = _SEVERITY_COLORS.get(severity.lower(), "#6B7280")
@@ -208,6 +215,10 @@ class FindingGroupPanel(Widget):
 
     def on__finding_row_action(self, event: _FindingRow.Action) -> None:
         """Translate internal _FindingRow.Action to public FindingAction."""
+        logger.debug(
+            "Finding row action: index=%d, action=%s",
+            event.finding_index, event.action,
+        )
         self.post_message(
             self.FindingAction(
                 severity=self._severity,

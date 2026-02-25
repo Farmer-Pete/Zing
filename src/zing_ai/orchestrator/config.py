@@ -74,11 +74,14 @@ def load_config(project_root: Path) -> ZingConfig:
     Warns on unrecognised keys.
     """
     config_path = project_root / ".zing.toml"
+    logger.debug("Loading config from %s", config_path)
     if not config_path.is_file():
+        logger.debug("No .zing.toml found, using defaults")
         return ZingConfig()
 
     with config_path.open("rb") as f:
         raw = tomllib.load(f)
+    logger.debug("Loaded .zing.toml with top-level keys: %s", list(raw.keys()))
 
     # Warn on unrecognised top-level keys
     for key in raw:
@@ -115,14 +118,27 @@ def load_config(project_root: Path) -> ZingConfig:
         if "model" in section:
             config.models[ct] = str(section["model"])
 
+    logger.debug(
+        "Config loaded: mcp_tools=%d, subprocess_timeout=%d",
+        len(config.mcp_tools), config.subprocess_timeout,
+    )
+    for ct in CallType:
+        logger.debug(
+            "Config [%s]: model=%s, extra_tools=%s",
+            ct, config.models[ct], config.extra_tools[ct],
+        )
     return config
 
 
 def get_allowed_tools(config: ZingConfig, call_type: CallType) -> list[str]:
     """Combine ``config.mcp_tools`` and ``config.extra_tools[call_type]`` into a flat list."""
-    return config.mcp_tools + config.extra_tools[call_type]
+    result = config.mcp_tools + config.extra_tools[call_type]
+    logger.debug("Allowed tools for %s: %d tool(s)", call_type, len(result))
+    return result
 
 
 def get_model(config: ZingConfig, call_type: CallType) -> str:
     """Return the model configured for *call_type*."""
-    return config.models[call_type]
+    model = config.models[call_type]
+    logger.debug("Model for %s: %s", call_type, model)
+    return model

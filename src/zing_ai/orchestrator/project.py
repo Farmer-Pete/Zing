@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import click
+
+logger = logging.getLogger(__name__)
 
 
 def find_project_root() -> Path:
@@ -17,8 +20,10 @@ def find_project_root() -> Path:
         click.UsageError: If no ``.git/`` directory is found in any ancestor.
     """
     current = Path.cwd().resolve()
+    logger.debug("Searching for project root from %s", current)
     while True:
         if (current / ".git").is_dir():
+            logger.debug("Found project root: %s", current)
             return current
         parent = current.parent
         if parent == current:
@@ -32,6 +37,7 @@ def find_project_root() -> Path:
 def ensure_zing_dir(root: Path) -> Path:
     """Create ``.zing/`` under *root* if it doesn't exist and return its path."""
     zing_dir = root / ".zing"
+    logger.debug("Ensuring .zing directory exists: %s", zing_dir)
     zing_dir.mkdir(exist_ok=True)
     return zing_dir
 
@@ -39,9 +45,13 @@ def ensure_zing_dir(root: Path) -> Path:
 def list_zing_files(root: Path) -> list[Path]:
     """Return all ``.xml`` files inside ``<root>/.zing/``."""
     zing_dir = root / ".zing"
+    logger.debug("Listing zing files in %s", zing_dir)
     if not zing_dir.is_dir():
+        logger.debug("No .zing directory found")
         return []
-    return sorted(zing_dir.glob("*.xml"))
+    result = sorted(zing_dir.glob("*.xml"))
+    logger.debug("Found %d zing file(s)", len(result))
+    return result
 
 
 def resolve_zing_file(arg: str | None, root: Path) -> Path:
@@ -56,11 +66,13 @@ def resolve_zing_file(arg: str | None, root: Path) -> Path:
             no zing files to choose from.
     """
     zing_dir = root / ".zing"
+    logger.debug("Resolving zing file: arg=%s, root=%s", arg, root)
 
     if arg is not None:
         resolved = zing_dir / arg
         if not resolved.is_file():
             raise click.UsageError(f"Zing file not found: {resolved}")
+        logger.debug("Resolved explicit zing file: %s", resolved)
         return resolved
 
     # No arg provided -- interactive selection
@@ -71,6 +83,7 @@ def resolve_zing_file(arg: str | None, root: Path) -> Path:
         )
 
     if len(files) == 1:
+        logger.debug("Auto-selected single zing file: %s", files[0])
         return files[0]
 
     click.echo("Available zing files:")
@@ -81,4 +94,6 @@ def resolve_zing_file(arg: str | None, root: Path) -> Path:
         "Select a file",
         type=click.IntRange(1, len(files)),
     )
-    return files[choice - 1]
+    selected = files[choice - 1]
+    logger.debug("User selected zing file: %s", selected)
+    return selected

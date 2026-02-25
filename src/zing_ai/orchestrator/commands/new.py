@@ -55,7 +55,7 @@ def run_new(
     # 3. Invoke Claude interactively with inherited stdio
     #    The user talks to Claude directly in the terminal.
     subprocess.run(
-        ["claude", "--system-prompt", system_prompt],
+        ["claude", "--system-prompt", system_prompt, "Greet the user"],
         stdin=sys.stdin,
         stdout=sys.stdout,
         stderr=sys.stderr,

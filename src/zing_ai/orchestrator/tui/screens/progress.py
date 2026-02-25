@@ -7,6 +7,8 @@ the ``RichLog`` to show that subprocess's captured output.
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import RichLog
@@ -17,6 +19,8 @@ from zing_ai.orchestrator.tui.widgets.subprocess_list import (
     SubprocessEntry,
     SubprocessList,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressScreen(Screen[ProgressResult]):
@@ -74,6 +78,7 @@ class ProgressScreen(Screen[ProgressResult]):
             id: Unique identifier for the subprocess.
             label: Human-readable label displayed in the sidebar.
         """
+        logger.debug("Adding subprocess: id=%s, label=%s", id, label)
         index = len(self._id_to_index)
         self._id_to_index[id] = index
         self._id_to_label[id] = label
@@ -99,6 +104,7 @@ class ProgressScreen(Screen[ProgressResult]):
             status: New status string (``"pending"``, ``"running"``,
                     ``"success"``, ``"warning"``, or ``"failed"``).
         """
+        logger.debug("Updating subprocess status: id=%s, status=%s", id, status)
         if id not in self._id_to_index:
             return
         self._statuses[id] = status
@@ -130,6 +136,7 @@ class ProgressScreen(Screen[ProgressResult]):
         :class:`ProgressResult` containing all captured output and
         final statuses.
         """
+        logger.debug("Marking all %d subprocess(es) complete", len(self._id_to_index))
         notify("Zing", "All subprocesses complete.")
         result = ProgressResult(
             outputs={sid: "\n".join(lines) for sid, lines in self._buffers.items()},

@@ -11,6 +11,8 @@ for every finding.
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -23,6 +25,8 @@ from zing_ai.orchestrator.tui.widgets.finding_group import (
     FindingData,
     FindingGroupPanel,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AuditScreen(Screen[AuditResult]):
@@ -72,6 +76,11 @@ class AuditScreen(Screen[AuditResult]):
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
         self._finding_groups = finding_groups
+        total_findings = sum(len(g.findings) for g in finding_groups)
+        logger.debug(
+            "AuditScreen created: %d group(s), %d total finding(s)",
+            len(finding_groups), total_findings,
+        )
 
         # Map (severity, finding_index) -> action string.
         # Pre-populate with "skip" as the default so every finding
@@ -123,6 +132,10 @@ class AuditScreen(Screen[AuditResult]):
         self, event: FindingGroupPanel.FindingAction
     ) -> None:
         """Record the user's action choice for a finding."""
+        logger.debug(
+            "Finding action: severity=%s, index=%d, action=%s",
+            event.severity, event.finding_index, event.action,
+        )
         key = (event.severity.lower(), event.finding_index)
         self._decisions[key] = event.action
         self._update_footer_status()
@@ -142,6 +155,13 @@ class AuditScreen(Screen[AuditResult]):
 
     def _do_submit(self) -> None:
         """Build an AuditResult from recorded decisions and dismiss."""
+        fix_count = sum(1 for a in self._decisions.values() if a == "fix")
+        skip_count = sum(1 for a in self._decisions.values() if a == "skip")
+        discuss_count = sum(1 for a in self._decisions.values() if a == "discuss")
+        logger.debug(
+            "Submitting audit decisions: %d fix, %d skip, %d discuss",
+            fix_count, skip_count, discuss_count,
+        )
         decisions: list[dict] = []
         for (severity, finding_index), action in sorted(
             self._decisions.items(), key=lambda kv: kv[0][1]

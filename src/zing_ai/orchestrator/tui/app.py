@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ from textual.screen import Screen
 from textual.theme import Theme
 
 from zing_ai.orchestrator.tui.notifications import notify as _notify
+
+logger = logging.getLogger(__name__)
 
 # The zing theme, registered on every ZingApp instance.
 ZING_THEME = Theme(
@@ -44,17 +47,24 @@ class ZingApp(App[Any]):
         super().__init__()
         self._pending_screen: Screen[Any] | None = screen_to_push
         self._screen_result: Any = None
+        logger.debug(
+            "ZingApp created, pending screen: %s",
+            type(screen_to_push).__name__ if screen_to_push else None,
+        )
 
     def on_mount(self) -> None:
         """Register zing theme and push the pending screen if one was set."""
+        logger.debug("Registering zing theme")
         self.register_theme(ZING_THEME)
         self.theme = "zing"
 
         if self._pending_screen is not None:
+            logger.debug("Pushing pending screen: %s", type(self._pending_screen).__name__)
             self.push_screen(self._pending_screen, callback=self._on_screen_dismiss)
 
     def _on_screen_dismiss(self, result: Any) -> None:
         """Callback invoked when the pushed screen calls ``self.dismiss(result)``."""
+        logger.debug("Screen dismissed with result type: %s", type(result).__name__)
         self._screen_result = result
         self.exit()
 
@@ -71,8 +81,10 @@ class ZingApp(App[Any]):
         Returns:
             Whatever value the screen passed to ``self.dismiss(result)``.
         """
+        logger.debug("run_with_screen: launching %s", type(screen).__name__)
         app = cls(screen_to_push=screen)
         app.run()
+        logger.debug("run_with_screen: finished, result type=%s", type(app._screen_result).__name__)
         return app._screen_result
 
     def notify_user(self, title: str, body: str) -> None:

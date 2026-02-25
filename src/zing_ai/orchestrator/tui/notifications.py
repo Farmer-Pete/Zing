@@ -14,14 +14,17 @@ def notify(title: str, body: str) -> None:
     any reason, the error is logged at DEBUG level and execution
     continues.
     """
+    logger.debug("Sending notification: title=%s", title)
     # Terminal bell
     sys.stderr.write("\a")
     sys.stderr.flush()
+    logger.debug("Terminal bell sent")
 
     # Desktop notification via plyer
     try:
         from plyer import notification
 
         notification.notify(title=title, message=body)
+        logger.debug("plyer notification sent successfully")
     except Exception:
         logger.debug("plyer notification failed", exc_info=True)

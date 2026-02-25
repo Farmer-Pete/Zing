@@ -7,6 +7,8 @@ the ``RichLog`` and the ``StepTracker`` highlights the active step.
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import RichLog
@@ -19,6 +21,8 @@ from zing_ai.orchestrator.tui.widgets.step_tracker import (
     StepTracker,
     TrackerStep,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BuildScreen(Screen[BuildResult]):
@@ -54,6 +58,11 @@ class BuildScreen(Screen[BuildResult]):
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
         self._stages = stages
+        total_steps = sum(len(s.steps) for s in stages)
+        logger.debug(
+            "BuildScreen created: %d stage(s), %d total step(s)",
+            len(stages), total_steps,
+        )
         # Build a flat list of tracker steps and a mapping from
         # (stage_idx, step_idx) -> flat index.
         self._tracker_steps: list[TrackerStep] = []
@@ -87,6 +96,7 @@ class BuildScreen(Screen[BuildResult]):
             stage_idx: Zero-based index of the stage.
             step_idx: Zero-based index of the step within the stage.
         """
+        logger.debug("Starting step: stage_idx=%d, step_idx=%d", stage_idx, step_idx)
         flat_idx = self._flat_index.get((stage_idx, step_idx))
         if flat_idx is None:
             return
@@ -119,6 +129,10 @@ class BuildScreen(Screen[BuildResult]):
             step_idx: Zero-based index of the step within the stage.
             success: Whether the step completed successfully.
         """
+        logger.debug(
+            "Completing step: stage_idx=%d, step_idx=%d, success=%s",
+            stage_idx, step_idx, success,
+        )
         flat_idx = self._flat_index.get((stage_idx, step_idx))
         if flat_idx is None:
             return
@@ -138,6 +152,10 @@ class BuildScreen(Screen[BuildResult]):
         Called by the command module when all steps are complete (or a
         step has failed).
         """
+        logger.debug(
+            "Build finished: %d completed, failed=%s",
+            len(self._completed), self._failed is not None,
+        )
         result = BuildResult(
             completed_steps=list(self._completed),
             failed_step=self._failed,

@@ -9,12 +9,16 @@ Emits :class:`ChoiceCard.Modified` and :class:`ChoiceCard.Deleted` messages.
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Button, Label, Markdown, RadioButton, RadioSet
+
+logger = logging.getLogger(__name__)
 
 
 class ChoiceCard(Widget, can_focus=True):
@@ -102,6 +106,10 @@ class ChoiceCard(Widget, can_focus=True):
         self._recommended_index = recommended_index
         self._card_id = card_id
         self.add_class("choice-card")
+        logger.debug(
+            "ChoiceCard created: card_id=%s, %d choice(s), recommended=%d",
+            card_id, len(choices), recommended_index,
+        )
 
     # ── Compose ───────────────────────────────────────────────────────
 
@@ -134,6 +142,10 @@ class ChoiceCard(Widget, can_focus=True):
         """Track whether current selection differs from recommended."""
         selected_index = event.radio_set.pressed_index
         self.is_modified = selected_index != self._recommended_index
+        logger.debug(
+            "ChoiceCard radio changed: card_id=%s, selected=%d, is_modified=%s",
+            self._card_id, selected_index, self.is_modified,
+        )
 
         if self.is_modified:
             self.add_class("choice-card--modified")

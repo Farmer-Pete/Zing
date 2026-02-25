@@ -78,6 +78,7 @@ def run_build(
 
     # Load the zing document and update stage to "build"
     doc = parse_zing_file(zing_path)
+    logger.debug("Loaded document at stage '%s'", doc.stage)
     doc.stage = "build"
     write_zing_file(zing_path, doc)
 
@@ -127,6 +128,10 @@ def run_build(
                     for f in step.files
                     if (project_root / f).is_file()
                 ]
+                logger.debug(
+                    "Step '%s': %d referenced files, %d exist on disk",
+                    step.label, len(step.files), len(file_paths),
+                )
 
                 distilled: dict[Path, str] = {}
                 if file_paths:
@@ -153,7 +158,10 @@ def run_build(
                     mcp_mandate=MCP_MANDATE,
                 )
 
+                logger.debug("Prompt size: %d chars", len(prompt))
+
                 # 3. Invoke Claude via streaming, sending output to the TUI
+                logger.debug("Invoking Claude for step '%s'", step.label)
                 try:
                     for line in claude.invoke_claude(
                         prompt,
@@ -168,6 +176,7 @@ def run_build(
 
                     # Re-read the document to avoid overwriting concurrent
                     # changes, then update just the step status and write back.
+                    logger.debug("Re-reading zing file to update step status")
                     fresh_doc = parse_zing_file(zing_path)
                     if fresh_doc.plan is not None:
                         _update_step_done(fresh_doc, stage.label, step.label)
@@ -216,6 +225,7 @@ def _update_step_done(doc: ZingDocument, stage_label: str, step_label: str) -> N
     step_label:
         The label of the step to mark as done.
     """
+    logger.debug("Marking step done: stage=%s, step=%s", stage_label, step_label)
     if doc.plan is None:
         return
     for stage in doc.plan.stages:
@@ -224,3 +234,4 @@ def _update_step_done(doc: ZingDocument, stage_label: str, step_label: str) -> N
                 if step.label == step_label:
                     step.done = True
                     return
+    logger.debug("Step not found for update: stage=%s, step=%s", stage_label, step_label)

@@ -13,6 +13,8 @@ Key bindings:
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
@@ -22,6 +24,8 @@ from textual.widgets import Button, Footer, Static
 from zing_ai.orchestrator.models import ChoiceSet
 from zing_ai.orchestrator.tui.results import ReviewResult
 from zing_ai.orchestrator.tui.widgets.choice_card import ChoiceCard
+
+logger = logging.getLogger(__name__)
 
 
 class PlanReviewScreen(Screen[ReviewResult]):
@@ -77,6 +81,7 @@ class PlanReviewScreen(Screen[ReviewResult]):
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
         self._choice_sets = choice_sets
+        logger.debug("PlanReviewScreen created: %d choice set(s)", len(choice_sets))
         # Track which cards have been modified or deleted
         # Maps card_id -> new selected index (int) or None if deleted
         self._modifications: dict[str, int | None] = {}
@@ -123,6 +128,10 @@ class PlanReviewScreen(Screen[ReviewResult]):
 
     def on_choice_card_modified(self, event: ChoiceCard.Modified) -> None:
         """Track when a card's selection changes from recommended."""
+        logger.debug(
+            "Card modified: card_id=%s, selected=%d, is_modified=%s",
+            event.card_id, event.selected_index, event.is_modified,
+        )
         if event.is_modified:
             self._modifications[event.card_id] = event.selected_index
         else:
@@ -131,6 +140,7 @@ class PlanReviewScreen(Screen[ReviewResult]):
 
     def on_choice_card_deleted(self, event: ChoiceCard.Deleted) -> None:
         """Remove a card from the display and mark as deleted."""
+        logger.debug("Card deleted: card_id=%s", event.card_id)
         self._perform_delete(event.card_id)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -179,6 +189,10 @@ class PlanReviewScreen(Screen[ReviewResult]):
     def _do_approve(self) -> None:
         """Build the ReviewResult and dismiss."""
         has_changes = bool(self._modifications) or bool(self._deleted_ids)
+        logger.debug(
+            "Approving plan: has_changes=%s, modifications=%d, deletions=%d",
+            has_changes, len(self._modifications), len(self._deleted_ids),
+        )
 
         if not has_changes:
             self.dismiss(ReviewResult(action="approve", changes=[]))

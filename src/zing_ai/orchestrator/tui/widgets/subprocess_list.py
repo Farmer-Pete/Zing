@@ -6,11 +6,14 @@ Arrow keys navigate items; selection changes emit :class:`SubprocessList.Selecte
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.widgets import Label, ListItem, ListView
+
+logger = logging.getLogger(__name__)
 
 # ── Subprocess entry data ────────────────────────────────────────────────────
 
@@ -119,6 +122,7 @@ class SubprocessList(ListView):
 
     def set_entries(self, entries: list[SubprocessEntry]) -> None:
         """Replace all entries and re-render."""
+        logger.debug("Setting %d subprocess entries", len(entries))
         self._entries = list(entries)
         self.clear()
         for entry in self._entries:
@@ -126,6 +130,7 @@ class SubprocessList(ListView):
 
     def update_entry(self, index: int, status: str) -> None:
         """Update the status of an existing entry by index."""
+        logger.debug("Updating entry %d: status=%s", index, status)
         if 0 <= index < len(self._entries):
             self._entries[index].status = status
             # Re-mount the item

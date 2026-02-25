@@ -5,12 +5,15 @@ Each step shows a status icon and label, with the active step highlighted.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 
 from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Static
+
+logger = logging.getLogger(__name__)
 
 
 class StepStatus(Enum):
@@ -94,6 +97,7 @@ class StepTracker(Widget):
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
         self._steps: list[TrackerStep] = list(steps or [])
+        logger.debug("StepTracker created: %d step(s)", len(self._steps))
 
     def compose(self) -> ComposeResult:
         for i, step in enumerate(self._steps):
@@ -113,6 +117,8 @@ class StepTracker(Widget):
     def update_step(self, index: int, status: StepStatus) -> None:
         """Update the status of a step and re-render."""
         if 0 <= index < len(self._steps):
+            old_status = self._steps[index].status
+            logger.debug("Step %d: %s -> %s", index, old_status.value, status.value)
             self._steps[index].status = status
             self._rebuild()
 
@@ -129,6 +135,7 @@ class StepTracker(Widget):
 
     def set_steps(self, steps: list[TrackerStep]) -> None:
         """Replace all steps and re-render."""
+        logger.debug("Replacing steps: %d new step(s)", len(steps))
         self._steps = list(steps)
         self._rebuild()
 
