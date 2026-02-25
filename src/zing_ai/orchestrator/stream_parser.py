@@ -12,6 +12,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Well-known tool input keys worth displaying, ordered by priority.
+# For any tool_use block, the first matching key becomes the detail text.
+_TOOL_DETAIL_KEYS: tuple[str, ...] = (
+    "command",           # Bash
+    "file_path",         # Read/Write/Edit
+    "relative_path",     # Serena tools
+    "pattern",           # Glob/Grep/search_for_pattern
+    "description",       # Task
+    "name_path_pattern", # Serena find_symbol
+    "memory_name",       # Serena read_memory
+    "query",             # Query-style tools
+)
+
+_MAX_DETAIL_LEN = 80
+
 
 def parse_event(line: str) -> dict | None:
     """Parse a single JSONL line into an event dict.
@@ -91,6 +106,27 @@ def format_event(event: dict) -> str | None:
     return None
 
 
+def _format_tool_use(block: dict) -> str:
+    """Format a tool_use content block for concise terminal display.
+
+    Scans :data:`_TOOL_DETAIL_KEYS` for the first matching input key and
+    appends its value in parentheses.  Long values are truncated and
+    newlines are collapsed to spaces.
+    """
+    name = block.get("name", "unknown")
+    tool_input = block.get("input") or {}
+
+    for key in _TOOL_DETAIL_KEYS:
+        value = tool_input.get(key)
+        if value is not None and isinstance(value, str) and value:
+            text = value.replace("\n", " ").strip()
+            if len(text) > _MAX_DETAIL_LEN:
+                text = text[:_MAX_DETAIL_LEN] + "..."
+            return f"Tool: {name} ({text})\n"
+
+    return f"Tool: {name}\n"
+
+
 def _format_assistant_event(event: dict) -> str | None:
     """Format an assistant-type event."""
     message = event.get("message", {})
@@ -104,8 +140,7 @@ def _format_assistant_event(event: dict) -> str | None:
             if text:
                 parts.append(text)
         elif block_type == "tool_use":
-            name = block.get("name", "unknown")
-            parts.append(f"Tool: {name}\n")
+            parts.append(_format_tool_use(block))
         # thinking blocks are silently skipped
 
     if not parts:

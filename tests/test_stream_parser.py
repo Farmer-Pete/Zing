@@ -99,6 +99,76 @@ class TestFormatEvent:
         result = format_event(event)
         assert result == "Analyzing... Tool: Grep\n"
 
+    def test_tool_use_with_command(self) -> None:
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}}],
+            },
+        }
+        assert format_event(event) == "Tool: Bash (ls -la)\n"
+
+    def test_tool_use_with_file_path(self) -> None:
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/path/to/file.py"}},
+                ],
+            },
+        }
+        assert format_event(event) == "Tool: Read (/path/to/file.py)\n"
+
+    def test_tool_use_truncates_long_value(self) -> None:
+        long_cmd = "x" * 100
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": long_cmd}},
+                ],
+            },
+        }
+        result = format_event(event)
+        assert result is not None
+        assert result.endswith("...)\n")
+        assert "x" * 80 in result
+
+    def test_tool_use_newlines_collapsed(self) -> None:
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "echo\nhello"}},
+                ],
+            },
+        }
+        assert format_event(event) == "Tool: Bash (echo hello)\n"
+
+    def test_tool_use_unknown_keys_no_detail(self) -> None:
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Custom", "input": {"foo": "bar"}}],
+            },
+        }
+        assert format_event(event) == "Tool: Custom\n"
+
+    def test_tool_use_priority_command_over_description(self) -> None:
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "ls", "description": "List files"},
+                    },
+                ],
+            },
+        }
+        assert format_event(event) == "Tool: Bash (ls)\n"
+
     def test_assistant_empty_content(self) -> None:
         event = {"type": "assistant", "message": {"content": []}}
         assert format_event(event) is None
