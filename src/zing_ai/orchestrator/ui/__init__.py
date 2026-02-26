@@ -8,4 +8,4 @@ console = Console(stderr=True)
 # as they are created in subsequent steps:
 from .menus import audit_triage_menu, numbered_menu, plan_review_menu
 
-#   from .progress import ...
+from .progress import run_parallel_investigations, run_with_progress
