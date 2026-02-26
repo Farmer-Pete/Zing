@@ -21,7 +21,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.tui.results import AuditResult, ProgressResult
+from zing_ai.orchestrator.ui.types import AuditDecision, InvestigationResult
 from zing_ai.orchestrator.xml_parser import write_zing_file
 
 # ---------------------------------------------------------------------------
@@ -299,15 +299,15 @@ class TestCollectPlanFiles:
 
 
 class TestRunBuildAuditFullPipeline:
-    """Tests for the full build-audit pipeline with mocked TUI screens.
+    """Tests for the full build-audit pipeline with mocked UI.
 
-    Phase 1 is mocked via ``_run_review_tui`` returning a
-    ``ProgressResult`` and review outputs.  Phase 2 is mocked via
-    ``ZingApp.run_with_screen`` returning an ``AuditResult``.
+    Phase 1 is mocked via ``run_parallel_investigations`` returning an
+    ``InvestigationResult``.  Phase 2 is mocked via
+    ``audit_triage_menu`` returning ``list[AuditDecision]``.
     """
 
     def test_full_pipeline_with_findings(self, tmp_path: Path) -> None:
-        """Happy path: groups files, reviews via TUI, shows AuditScreen."""
+        """Happy path: groups files, reviews via investigations, triages via menu."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -317,8 +317,8 @@ class TestRunBuildAuditFullPipeline:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        # Phase 1 mock: _run_review_tui returns ProgressResult + review outputs
-        mock_progress_result = ProgressResult(
+        # Phase 1 mock: run_parallel_investigations returns InvestigationResult
+        mock_investigation_result = InvestigationResult(
             outputs={
                 "review-0": MOCK_REVIEW_WITH_FINDINGS,
                 "review-1": MOCK_REVIEW_SINGLE_FINDING,
@@ -327,13 +327,13 @@ class TestRunBuildAuditFullPipeline:
             statuses={"review-0": "success", "review-1": "success", "review-2": "success"},
         )
 
-        # Phase 2 mock: AuditScreen returns AuditResult with decisions
-        mock_audit_result = AuditResult(decisions=[
-            {"severity": "critical", "finding_index": 2, "action": "fix"},
-            {"severity": "high", "finding_index": 0, "action": "fix"},
-            {"severity": "medium", "finding_index": 1, "action": "skip"},
-            {"severity": "low", "finding_index": 3, "action": "skip"},
-        ])
+        # Phase 2 mock: audit_triage_menu returns list[AuditDecision]
+        mock_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=2, category="Security", severity="critical", title="Password comparison", action="fix"),
+            AuditDecision(finding_index=0, category="Logic Errors and Bugs", severity="high", title="Null check missing", action="fix"),
+            AuditDecision(finding_index=1, category="Error Handling", severity="medium", title="Exception swallowed", action="skip"),
+            AuditDecision(finding_index=3, category="Performance", severity="low", title="List comprehension", action="skip"),
+        ]
 
         with (
             patch(
@@ -345,15 +345,16 @@ class TestRunBuildAuditFullPipeline:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(
-                    mock_progress_result,
-                    [MOCK_REVIEW_WITH_FINDINGS, MOCK_REVIEW_SINGLE_FINDING, MOCK_REVIEW_NO_FINDINGS],
-                ),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation_result,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit_result,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=mock_decisions,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -367,8 +368,8 @@ class TestRunBuildAuditFullPipeline:
                 project_root=tmp_path,
             )
 
-    def test_phase1_returns_progress_result(self, tmp_path: Path) -> None:
-        """Phase 1 should call _run_review_tui and use its ProgressResult."""
+    def test_phase1_returns_investigation_result(self, tmp_path: Path) -> None:
+        """Phase 1 should call run_parallel_investigations and use its result."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -377,14 +378,13 @@ class TestRunBuildAuditFullPipeline:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(
+        mock_investigation = InvestigationResult(
             outputs={"review-0": MOCK_REVIEW_NO_FINDINGS},
             statuses={"review-0": "success"},
         )
-        mock_audit = AuditResult(decisions=[])
 
-        run_review_mock = MagicMock(
-            return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+        run_investigations_mock = MagicMock(
+            return_value=mock_investigation,
         )
 
         with (
@@ -393,12 +393,16 @@ class TestRunBuildAuditFullPipeline:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                run_review_mock,
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                run_investigations_mock,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -412,15 +416,15 @@ class TestRunBuildAuditFullPipeline:
                 project_root=tmp_path,
             )
 
-        # _run_review_tui should have been called exactly once
-        run_review_mock.assert_called_once()
-        call_kwargs = run_review_mock.call_args.kwargs
-        assert len(call_kwargs["audit_groups"]) == 1
-        assert call_kwargs["config"] is config
-        assert call_kwargs["skip_permissions"] is False
+        # run_parallel_investigations should have been called exactly once
+        run_investigations_mock.assert_called_once()
+        call_kwargs = run_investigations_mock.call_args.kwargs
+        assert len(call_kwargs["entries"]) == 1
+        assert call_kwargs["entries"][0]["id"] == "review-0"
+        assert callable(call_kwargs["run_fn"])
 
-    def test_phase2_audit_screen_receives_finding_groups(self, tmp_path: Path) -> None:
-        """Phase 2 should pass grouped findings to AuditScreen."""
+    def test_phase2_audit_triage_menu_receives_finding_groups(self, tmp_path: Path) -> None:
+        """Phase 2 should pass grouped findings to audit_triage_menu."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -429,22 +433,21 @@ class TestRunBuildAuditFullPipeline:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(
+        mock_investigation = InvestigationResult(
             outputs={"review-0": MOCK_REVIEW_WITH_FINDINGS},
             statuses={"review-0": "success"},
         )
-        mock_audit = AuditResult(decisions=[
-            {"severity": "critical", "finding_index": 2, "action": "fix"},
-            {"severity": "high", "finding_index": 0, "action": "skip"},
-            {"severity": "medium", "finding_index": 1, "action": "skip"},
-        ])
 
-        # Capture the AuditScreen passed to run_with_screen
-        run_with_screen_calls: list = []
+        # Capture the finding_groups passed to audit_triage_menu
+        triage_calls: list = []
 
-        def mock_run_with_screen(screen):
-            run_with_screen_calls.append(screen)
-            return mock_audit
+        def mock_triage(finding_groups):
+            triage_calls.append(finding_groups)
+            return [
+                AuditDecision(finding_index=2, category="Security", severity="critical", title="Password comparison", action="fix"),
+                AuditDecision(finding_index=0, category="Logic Errors and Bugs", severity="high", title="Null check", action="skip"),
+                AuditDecision(finding_index=1, category="Error Handling", severity="medium", title="Exception swallowed", action="skip"),
+            ]
 
         with (
             patch(
@@ -452,12 +455,16 @@ class TestRunBuildAuditFullPipeline:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_WITH_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                side_effect=mock_run_with_screen,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                side_effect=mock_triage,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -471,14 +478,10 @@ class TestRunBuildAuditFullPipeline:
                 project_root=tmp_path,
             )
 
-        # AuditScreen should have been called with finding groups
-        assert len(run_with_screen_calls) == 1
-        audit_screen = run_with_screen_calls[0]
-        # Access the internal finding groups
-        from zing_ai.orchestrator.tui.screens.audit import AuditScreen as AuditScreenCls
-        assert isinstance(audit_screen, AuditScreenCls)
-        # The screen should have received finding groups covering 3 findings
-        finding_groups = audit_screen._finding_groups
+        # audit_triage_menu should have been called with finding groups
+        assert len(triage_calls) == 1
+        finding_groups = triage_calls[0]
+        # The finding groups should cover 3 findings
         total_findings = sum(len(g.findings) for g in finding_groups)
         assert total_findings == 3
         # Verify severity order: critical, high, medium
@@ -501,8 +504,7 @@ class TestRunBuildAuditFullPipeline:
             validated_kwargs.append(kwargs)
             return [AuditGroup(files=["src/auth.py"])]
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
-        mock_audit = AuditResult(decisions=[])
+        mock_investigation = InvestigationResult(outputs={}, statuses={})
 
         with (
             patch(
@@ -510,12 +512,16 @@ class TestRunBuildAuditFullPipeline:
                 side_effect=mock_validated,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -532,7 +538,7 @@ class TestRunBuildAuditFullPipeline:
         assert validated_kwargs[0]["call_type"] == CallType.AUDIT
 
     def test_skip_permissions_forwarded(self, tmp_path: Path) -> None:
-        """skip_permissions should be forwarded to grouping and review TUI."""
+        """skip_permissions should be forwarded to grouping call."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -547,13 +553,7 @@ class TestRunBuildAuditFullPipeline:
             validated_kwargs.append(kwargs)
             return [AuditGroup(files=["src/auth.py"])]
 
-        run_review_mock = MagicMock(
-            return_value=(
-                ProgressResult(outputs={}, statuses={}),
-                [MOCK_REVIEW_NO_FINDINGS],
-            ),
-        )
-        mock_audit = AuditResult(decisions=[])
+        mock_investigation = InvestigationResult(outputs={}, statuses={})
 
         with (
             patch(
@@ -561,12 +561,16 @@ class TestRunBuildAuditFullPipeline:
                 side_effect=mock_validated,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                run_review_mock,
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -582,8 +586,6 @@ class TestRunBuildAuditFullPipeline:
 
         # Grouping call should have skip_permissions=True
         assert validated_kwargs[0]["skip_permissions"] is True
-        # Review TUI call should also have skip_permissions=True
-        assert run_review_mock.call_args.kwargs["skip_permissions"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +594,7 @@ class TestRunBuildAuditFullPipeline:
 
 
 class TestRunBuildAuditFindingGrouping:
-    """Tests that findings are correctly grouped by severity before AuditScreen."""
+    """Tests that findings are correctly grouped by severity before audit_triage_menu."""
 
     def test_findings_grouped_by_severity(self, tmp_path: Path) -> None:
         """Findings from review outputs should be grouped by severity."""
@@ -604,14 +606,20 @@ class TestRunBuildAuditFindingGrouping:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
+        mock_investigation = InvestigationResult(
+            outputs={
+                "review-0": MOCK_REVIEW_WITH_FINDINGS,
+                "review-1": MOCK_REVIEW_SINGLE_FINDING,
+            },
+            statuses={"review-0": "success", "review-1": "success"},
+        )
 
-        # Capture the AuditScreen to inspect finding groups
-        audit_screen_args: list = []
+        # Capture the finding_groups passed to audit_triage_menu
+        triage_calls: list = []
 
-        def mock_run_with_screen(screen):
-            audit_screen_args.append(screen)
-            return AuditResult(decisions=[])
+        def mock_triage(finding_groups):
+            triage_calls.append(finding_groups)
+            return []
 
         with (
             patch(
@@ -622,15 +630,16 @@ class TestRunBuildAuditFindingGrouping:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(
-                    mock_progress,
-                    [MOCK_REVIEW_WITH_FINDINGS, MOCK_REVIEW_SINGLE_FINDING],
-                ),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                side_effect=mock_run_with_screen,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                side_effect=mock_triage,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -644,9 +653,8 @@ class TestRunBuildAuditFindingGrouping:
                 project_root=tmp_path,
             )
 
-        assert len(audit_screen_args) == 1
-        audit_screen = audit_screen_args[0]
-        finding_groups = audit_screen._finding_groups
+        assert len(triage_calls) == 1
+        finding_groups = triage_calls[0]
 
         # MOCK_REVIEW_WITH_FINDINGS has: 1 high, 1 medium, 1 critical
         # MOCK_REVIEW_SINGLE_FINDING has: 1 low
@@ -655,7 +663,7 @@ class TestRunBuildAuditFindingGrouping:
         assert severities == ["critical", "high", "medium", "low"]
 
     def test_no_findings_yields_empty_groups(self, tmp_path: Path) -> None:
-        """When all reviews produce NO_FINDINGS, AuditScreen gets empty groups."""
+        """When all reviews produce NO_FINDINGS, audit_triage_menu gets empty groups."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -664,13 +672,16 @@ class TestRunBuildAuditFindingGrouping:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
+        mock_investigation = InvestigationResult(
+            outputs={"review-0": MOCK_REVIEW_NO_FINDINGS},
+            statuses={"review-0": "success"},
+        )
 
-        audit_screen_args: list = []
+        triage_calls: list = []
 
-        def mock_run_with_screen(screen):
-            audit_screen_args.append(screen)
-            return AuditResult(decisions=[])
+        def mock_triage(finding_groups):
+            triage_calls.append(finding_groups)
+            return []
 
         with (
             patch(
@@ -678,12 +689,16 @@ class TestRunBuildAuditFindingGrouping:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                side_effect=mock_run_with_screen,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                side_effect=mock_triage,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -697,9 +712,8 @@ class TestRunBuildAuditFindingGrouping:
                 project_root=tmp_path,
             )
 
-        assert len(audit_screen_args) == 1
-        audit_screen = audit_screen_args[0]
-        assert audit_screen._finding_groups == []
+        assert len(triage_calls) == 1
+        assert triage_calls[0] == []
 
     def test_finding_indexes_unique_across_groups(self, tmp_path: Path) -> None:
         """Findings from different review outputs should have unique, sequential indexes."""
@@ -711,13 +725,19 @@ class TestRunBuildAuditFindingGrouping:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
+        mock_investigation = InvestigationResult(
+            outputs={
+                "review-0": MOCK_REVIEW_WITH_FINDINGS,
+                "review-1": MOCK_REVIEW_SINGLE_FINDING,
+            },
+            statuses={"review-0": "success", "review-1": "success"},
+        )
 
-        audit_screen_args: list = []
+        triage_calls: list = []
 
-        def mock_run_with_screen(screen):
-            audit_screen_args.append(screen)
-            return AuditResult(decisions=[])
+        def mock_triage(finding_groups):
+            triage_calls.append(finding_groups)
+            return []
 
         with (
             patch(
@@ -728,15 +748,16 @@ class TestRunBuildAuditFindingGrouping:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(
-                    mock_progress,
-                    [MOCK_REVIEW_WITH_FINDINGS, MOCK_REVIEW_SINGLE_FINDING],
-                ),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                side_effect=mock_run_with_screen,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                side_effect=mock_triage,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -750,10 +771,9 @@ class TestRunBuildAuditFindingGrouping:
                 project_root=tmp_path,
             )
 
-        assert len(audit_screen_args) == 1
-        audit_screen = audit_screen_args[0]
+        assert len(triage_calls) == 1
         all_indexes = []
-        for group in audit_screen._finding_groups:
+        for group in triage_calls[0]:
             for finding in group.findings:
                 all_indexes.append(finding.index)
         # 3 from MOCK_REVIEW_WITH_FINDINGS (0,1,2) + 1 from MOCK_REVIEW_SINGLE_FINDING (3)
@@ -767,10 +787,10 @@ class TestRunBuildAuditFindingGrouping:
 
 
 class TestRunBuildAuditActionDispatch:
-    """Tests that user decisions from AuditResult are processed correctly."""
+    """Tests that user decisions from audit_triage_menu are processed correctly."""
 
     def test_decisions_logged(self, tmp_path: Path) -> None:
-        """User decisions from AuditResult should be processed."""
+        """User decisions from audit_triage_menu should be processed."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -779,12 +799,15 @@ class TestRunBuildAuditActionDispatch:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
-        mock_audit = AuditResult(decisions=[
-            {"severity": "critical", "finding_index": 0, "action": "fix"},
-            {"severity": "high", "finding_index": 1, "action": "skip"},
-            {"severity": "medium", "finding_index": 2, "action": "discuss"},
-        ])
+        mock_investigation = InvestigationResult(
+            outputs={"review-0": MOCK_REVIEW_WITH_FINDINGS},
+            statuses={"review-0": "success"},
+        )
+        mock_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=0, category="Security", severity="critical", title="Issue A", action="fix"),
+            AuditDecision(finding_index=1, category="Logic", severity="high", title="Issue B", action="skip"),
+            AuditDecision(finding_index=2, category="Error Handling", severity="medium", title="Issue C", action="discuss"),
+        ]
 
         with (
             patch(
@@ -792,12 +815,16 @@ class TestRunBuildAuditActionDispatch:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_WITH_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=mock_decisions,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -813,7 +840,7 @@ class TestRunBuildAuditActionDispatch:
             )
 
     def test_empty_decisions_handled(self, tmp_path: Path) -> None:
-        """When AuditResult has no decisions, the command completes normally."""
+        """When audit_triage_menu returns no decisions, the command completes normally."""
         _make_zing_file_with_plan(tmp_path)
         config = ZingConfig()
 
@@ -822,8 +849,10 @@ class TestRunBuildAuditActionDispatch:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
-        mock_audit = AuditResult(decisions=[])
+        mock_investigation = InvestigationResult(
+            outputs={"review-0": MOCK_REVIEW_NO_FINDINGS},
+            statuses={"review-0": "success"},
+        )
 
         with (
             patch(
@@ -831,12 +860,16 @@ class TestRunBuildAuditActionDispatch:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -860,13 +893,15 @@ class TestRunBuildAuditActionDispatch:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(f"# {f}")
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
+        mock_investigation = InvestigationResult(
+            outputs={"review-0": MOCK_REVIEW_WITH_FINDINGS},
+            statuses={"review-0": "success"},
+        )
 
-        fix_decisions = [
-            {"severity": "critical", "finding_index": 0, "action": "fix"},
-            {"severity": "high", "finding_index": 1, "action": "fix"},
+        fix_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=0, category="Security", severity="critical", title="Issue A", action="fix"),
+            AuditDecision(finding_index=1, category="Logic", severity="high", title="Issue B", action="fix"),
         ]
-        mock_audit = AuditResult(decisions=fix_decisions)
 
         with (
             patch(
@@ -874,12 +909,16 @@ class TestRunBuildAuditActionDispatch:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_WITH_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=fix_decisions,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -908,24 +947,32 @@ class TestRunBuildAuditNoFiles:
         _make_zing_file_no_plan(tmp_path)
         config = ZingConfig()
 
-        run_build_audit(
-            zing_file="test-project.xml",
-            skip_permissions=False,
-            config=config,
-            project_root=tmp_path,
-        )
+        with patch(
+            "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+            return_value="aid",
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
     def test_no_files_in_plan_returns_early(self, tmp_path: Path) -> None:
         """When the plan has no file references, run_build_audit should return early."""
         _make_zing_file_no_files(tmp_path)
         config = ZingConfig()
 
-        run_build_audit(
-            zing_file="test-project.xml",
-            skip_permissions=False,
-            config=config,
-            project_root=tmp_path,
-        )
+        with patch(
+            "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+            return_value="aid",
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -949,12 +996,11 @@ class TestRunBuildAuditDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
-        mock_audit = AuditResult(decisions=[])
+        mock_investigation = InvestigationResult(outputs={}, statuses={})
 
         with (
             patch(
@@ -962,12 +1008,16 @@ class TestRunBuildAuditDistillation:
                 return_value=[AuditGroup(files=["src/auth.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
@@ -1010,12 +1060,11 @@ class TestRunBuildAuditDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
-        mock_progress = ProgressResult(outputs={}, statuses={})
-        mock_audit = AuditResult(decisions=[])
+        mock_investigation = InvestigationResult(outputs={}, statuses={})
 
         with (
             patch(
@@ -1023,12 +1072,16 @@ class TestRunBuildAuditDistillation:
                 return_value=[AuditGroup(files=["src/exists.py"])],
             ),
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(mock_progress, [MOCK_REVIEW_NO_FINDINGS]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
             ),
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=mock_audit,
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=[],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.distill_files",
