@@ -1,8 +1,8 @@
 """Orchestrator ``build`` command -- execute plan steps.
 
 Iterates through all stages and steps in the plan, distilling files,
-invoking Claude with the ``build_step.md.j2`` prompt, streaming output
-to a :class:`BuildScreen` TUI, and marking each step done upon completion.
+invoking Claude with the ``build_step.md.j2`` prompt, displaying progress
+via Rich, and marking each step done upon completion.
 
 After all steps are finished, delegates to :func:`run_build_audit`.
 """
@@ -10,15 +10,13 @@ After all steps are finished, delegates to :func:`run_build_audit`.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
 from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import ZingDocument
-from zing_ai.orchestrator.tui.app import ZingApp
-from zing_ai.orchestrator.tui.screens.build import BuildScreen
+from zing_ai.orchestrator.ui.progress import run_with_progress
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -54,11 +52,11 @@ def run_build(
 
     1. Distills all referenced files (using cache).
     2. Renders the ``build_step.md.j2`` prompt.
-    3. Invokes Claude via streaming, sending output to the TUI.
+    3. Invokes Claude via streaming.
     4. Marks the step as done and writes the updated zing document.
 
-    A :class:`BuildScreen` displays progress via the TUI.  After all
-    steps are complete, delegates to :func:`run_build_audit`.
+    A Rich Live spinner displays progress.  After all steps are
+    complete, delegates to :func:`run_build_audit`.
 
     Parameters
     ----------
@@ -96,114 +94,85 @@ def run_build(
     total_steps = sum(len(stage.steps) for stage in plan.stages)
     logger.info("Plan has %d total steps across %d stages", total_steps, len(plan.stages))
 
-    # Create the BuildScreen with the plan stages and launch via TUI.
-    screen = BuildScreen(plan.stages)
+    def _execute_step(stage_idx: int, step_idx: int) -> str:
+        """Execute a single build step, returning its output."""
+        stage = plan.stages[stage_idx]
+        step = stage.steps[step_idx]
 
-    def _build_worker() -> None:
-        """Worker thread that iterates through steps sequentially."""
-        step_number = 0
-        for stage_idx, stage in enumerate(plan.stages):
-            for step_idx, step in enumerate(stage.steps):
-                step_number += 1
+        # Skip completed steps
+        if step.done:
+            logger.info("Skipping completed step: %s", step.label)
+            return ""
 
-                # Skip completed steps
-                if step.done:
-                    logger.info(
-                        "Skipping completed step %d/%d: %s",
-                        step_number,
-                        total_steps,
-                        step.label,
-                    )
-                    continue
+        logger.info("Executing step: %s", step.label)
 
-                logger.info(
-                    "Executing step %d/%d: %s",
-                    step_number,
-                    total_steps,
-                    step.label,
-                )
+        # 1. Distill all referenced files
+        file_paths = [
+            project_root / f
+            for f in step.files
+            if (project_root / f).is_file()
+        ]
+        logger.debug(
+            "Step '%s': %d referenced files, %d exist on disk",
+            step.label, len(step.files), len(file_paths),
+        )
 
-                screen.start_step(stage_idx, step_idx)
+        distilled: dict[Path, str] = {}
+        if file_paths:
+            distilled = distill_files(file_paths, project_root=project_root, aid_path=aid_path)
+            logger.info(
+                "Distilled %d files for step '%s'",
+                len(distilled),
+                step.label,
+            )
 
-                # 1. Distill all referenced files
-                file_paths = [
-                    project_root / f
-                    for f in step.files
-                    if (project_root / f).is_file()
-                ]
-                logger.debug(
-                    "Step '%s': %d referenced files, %d exist on disk",
-                    step.label, len(step.files), len(file_paths),
-                )
+        # Convert Path keys to string keys for the template
+        distilled_files: dict[str, str] = {
+            str(fp.relative_to(project_root)): content
+            for fp, content in distilled.items()
+        }
 
-                distilled: dict[Path, str] = {}
-                if file_paths:
-                    distilled = distill_files(file_paths, project_root=project_root, aid_path=aid_path)
-                    logger.info(
-                        "Distilled %d files for step '%s'",
-                        len(distilled),
-                        step.label,
-                    )
+        # 2. Render the build_step prompt
+        prompt = render_prompt(
+            "build_step.md.j2",
+            zing_overview=zing_overview,
+            step_label=step.label,
+            step_instructions=step.instructions,
+            distilled_files=distilled_files,
+            mcp_mandate=MCP_MANDATE,
+        )
 
-                # Convert Path keys to string keys for the template
-                distilled_files: dict[str, str] = {
-                    str(fp.relative_to(project_root)): content
-                    for fp, content in distilled.items()
-                }
+        logger.debug("Prompt size: %d chars", len(prompt))
 
-                # 2. Render the build_step prompt
-                prompt = render_prompt(
-                    "build_step.md.j2",
-                    zing_overview=zing_overview,
-                    step_label=step.label,
-                    step_instructions=step.instructions,
-                    distilled_files=distilled_files,
-                    mcp_mandate=MCP_MANDATE,
-                )
+        # 3. Invoke Claude via streaming
+        logger.debug("Invoking Claude for step '%s'", step.label)
+        output_lines: list[str] = []
+        for line in claude.invoke_claude(
+            prompt,
+            call_type=CallType.BUILD,
+            config=config,
+            skip_permissions=skip_permissions,
+        ):
+            output_lines.append(line)
 
-                logger.debug("Prompt size: %d chars", len(prompt))
+        # 4. On completion, mark step as done
+        step.done = True
 
-                # 3. Invoke Claude via streaming, sending output to the TUI
-                logger.debug("Invoking Claude for step '%s'", step.label)
-                try:
-                    for line in claude.invoke_claude(
-                        prompt,
-                        call_type=CallType.BUILD,
-                        config=config,
-                        skip_permissions=skip_permissions,
-                    ):
-                        screen.append_output(line)
+        # Re-read the document to avoid overwriting concurrent
+        # changes, then update just the step status and write back.
+        logger.debug("Re-reading zing file to update step status")
+        fresh_doc = parse_zing_file(zing_path)
+        if fresh_doc.plan is not None:
+            _update_step_done(fresh_doc, stage.label, step.label)
+        write_zing_file(zing_path, fresh_doc)
 
-                    # 4. On completion, mark step as done
-                    step.done = True
+        logger.info("Step '%s' completed successfully", step.label)
+        return "".join(output_lines)
 
-                    # Re-read the document to avoid overwriting concurrent
-                    # changes, then update just the step status and write back.
-                    logger.debug("Re-reading zing file to update step status")
-                    fresh_doc = parse_zing_file(zing_path)
-                    if fresh_doc.plan is not None:
-                        _update_step_done(fresh_doc, stage.label, step.label)
-                    write_zing_file(zing_path, fresh_doc)
+    # Run all steps with Rich progress display.
+    run_with_progress("Building", plan.stages, _execute_step)
 
-                    screen.complete_step(stage_idx, step_idx, success=True)
-                    logger.info("Step '%s' completed successfully", step.label)
-
-                except Exception:
-                    logger.exception("Step '%s' failed", step.label)
-                    screen.complete_step(stage_idx, step_idx, success=False)
-                    screen.finish()
-                    return
-
-        logger.info("All build steps complete.")
-        screen.finish()
-
-    # Launch the worker as a daemon thread and run the TUI.
-    worker = threading.Thread(target=_build_worker, daemon=True)
-    worker.start()
-
-    ZingApp.run_with_screen(screen)
-
-    logger.info("Build TUI dismissed. Starting build audit.")
+    logger.info("Build complete. Starting build audit.")
 
     # After all steps done, call run_build_audit()
     from zing_ai.orchestrator.commands.build_audit import run_build_audit

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,7 +18,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.tui.results import BuildResult
+from zing_ai.orchestrator.ui.types import BuildProgress
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 
 # ---------------------------------------------------------------------------
@@ -151,30 +150,19 @@ def _mock_invoke_claude_gen(prompt, **kwargs):
     yield "Done.\n"
 
 
-def _mock_run_with_screen(screen):
-    """Mock ``ZingApp.run_with_screen`` that lets the worker thread finish.
+def _mock_run_with_progress(label, stages, execute_step):
+    """Mock ``run_with_progress`` that invokes *execute_step* for every step.
 
-    The build command starts a daemon worker thread *before* calling
-    ``run_with_screen``.  This mock waits for all daemon threads to
-    finish so assertions in the test can inspect side-effects produced
-    by the worker (e.g. zing file updates).
+    Iterates through all stages/steps just like the real implementation,
+    calling the supplied callback so that the build logic is exercised.
+    Returns a :class:`BuildProgress` with all steps marked completed.
     """
-    current = threading.current_thread()
-    for t in threading.enumerate():
-        if t is not current and t.daemon:
-            t.join(timeout=10)
-
-    return BuildResult(completed_steps=[], failed_step=None)
-
-
-def _make_mock_screen():
-    """Create a MagicMock that stands in for BuildScreen.
-
-    Methods like ``start_step``, ``append_output``, ``complete_step``,
-    and ``finish`` are simple no-ops, allowing the worker thread to run
-    without a real Textual app.
-    """
-    return MagicMock()
+    completed: list[tuple[int, int]] = []
+    for stage_idx, stage in enumerate(stages):
+        for step_idx in range(len(stage.steps)):
+            execute_step(stage_idx, step_idx)
+            completed.append((stage_idx, step_idx))
+    return BuildProgress(completed_steps=completed, failed_step=None)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +311,10 @@ class TestRunBuildFullPipeline:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -331,12 +323,8 @@ class TestRunBuildFullPipeline:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -373,6 +361,10 @@ class TestRunBuildFullPipeline:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -381,12 +373,8 @@ class TestRunBuildFullPipeline:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -430,6 +418,10 @@ class TestRunBuildSkipsCompletedSteps:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -438,12 +430,8 @@ class TestRunBuildSkipsCompletedSteps:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -475,6 +463,10 @@ class TestRunBuildSkipsCompletedSteps:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -483,12 +475,8 @@ class TestRunBuildSkipsCompletedSteps:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -540,7 +528,7 @@ class TestRunBuildDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
@@ -548,6 +536,10 @@ class TestRunBuildDistillation:
             yield "done\n"
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -557,12 +549,8 @@ class TestRunBuildDistillation:
                 side_effect=mock_distill,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -607,7 +595,7 @@ class TestRunBuildDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
@@ -615,6 +603,10 @@ class TestRunBuildDistillation:
             yield "done\n"
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -624,12 +616,8 @@ class TestRunBuildDistillation:
                 side_effect=mock_distill,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -665,7 +653,7 @@ class TestRunBuildDistillation:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {}
 
@@ -673,6 +661,10 @@ class TestRunBuildDistillation:
             yield "done\n"
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -682,12 +674,8 @@ class TestRunBuildDistillation:
                 side_effect=mock_distill,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -736,6 +724,10 @@ class TestRunBuildClaudeInvocation:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -744,12 +736,8 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -789,6 +777,10 @@ class TestRunBuildClaudeInvocation:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -797,12 +789,8 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -846,6 +834,10 @@ class TestRunBuildClaudeInvocation:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -854,12 +846,8 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -900,6 +888,10 @@ class TestRunBuildClaudeInvocation:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -908,12 +900,8 @@ class TestRunBuildClaudeInvocation:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -948,7 +936,7 @@ class TestRunBuildClaudeInvocation:
         (tmp_path / "src").mkdir(parents=True, exist_ok=True)
         (tmp_path / "src" / "a.py").write_text("# a")
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             return {fp: "def hello(): pass" for fp in file_paths}
 
         captured_prompts: list[str] = []
@@ -959,6 +947,10 @@ class TestRunBuildClaudeInvocation:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -967,12 +959,8 @@ class TestRunBuildClaudeInvocation:
                 side_effect=mock_distill,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1018,6 +1006,10 @@ class TestRunBuildDocumentUpdates:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -1026,12 +1018,8 @@ class TestRunBuildDocumentUpdates:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1079,6 +1067,10 @@ class TestRunBuildDocumentUpdates:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -1087,12 +1079,8 @@ class TestRunBuildDocumentUpdates:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1133,18 +1121,22 @@ class TestRunBuildNoPlan:
             invoke_calls.append({})
             yield "done\n"
 
-        mock_run = MagicMock(
-            side_effect=AssertionError("TUI should not be launched"),
+        mock_progress = MagicMock(
+            side_effect=AssertionError("run_with_progress should not be called"),
         )
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                mock_run,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                mock_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1160,8 +1152,8 @@ class TestRunBuildNoPlan:
 
         # No Claude calls should have been made
         assert len(invoke_calls) == 0
-        # TUI should not have been launched
-        mock_run.assert_not_called()
+        # run_with_progress should not have been called
+        mock_progress.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1185,10 @@ class TestRunBuildCallsAudit:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
             ),
@@ -1201,12 +1197,8 @@ class TestRunBuildCallsAudit:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=_make_mock_screen(),
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1229,15 +1221,15 @@ class TestRunBuildCallsAudit:
 
 
 # ---------------------------------------------------------------------------
-# run_build tests -- BuildScreen interaction
+# run_build tests -- run_with_progress interaction
 # ---------------------------------------------------------------------------
 
 
-class TestRunBuildScreenInteraction:
-    """Tests that run_build correctly interacts with the BuildScreen."""
+class TestRunBuildProgressInteraction:
+    """Tests that run_build correctly interacts with run_with_progress."""
 
-    def test_build_screen_created_with_plan_stages(self, tmp_path: Path) -> None:
-        """BuildScreen should be created with the plan stages."""
+    def test_run_with_progress_called_with_plan_stages(self, tmp_path: Path) -> None:
+        """run_with_progress should receive the plan stages."""
         plan = Plan(
             stages=[
                 Stage(
@@ -1251,23 +1243,25 @@ class TestRunBuildScreenInteraction:
         _make_zing_file_with_plan(tmp_path, plan=plan)
         config = ZingConfig()
 
-        captured_screen = None
+        captured_args: list[tuple] = []
 
-        def capturing_run_with_screen(screen):
-            nonlocal captured_screen
-            captured_screen = screen
-            current = threading.current_thread()
-            for t in threading.enumerate():
-                if t is not current and t.daemon:
-                    t.join(timeout=10)
-            return BuildResult(completed_steps=[], failed_step=None)
+        def capturing_run_with_progress(label, stages, execute_step):
+            captured_args.append((label, stages, execute_step))
+            completed: list[tuple[int, int]] = []
+            for stage_idx, stage in enumerate(stages):
+                for step_idx in range(len(stage.steps)):
+                    execute_step(stage_idx, step_idx)
+                    completed.append((stage_idx, step_idx))
+            return BuildProgress(completed_steps=completed, failed_step=None)
 
         def mock_invoke(prompt, **kwargs):
             yield "done\n"
 
-        mock_screen = _make_mock_screen()
-
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -1277,12 +1271,8 @@ class TestRunBuildScreenInteraction:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=mock_screen,
-            ) as mock_build_screen_cls,
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=capturing_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=capturing_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1296,15 +1286,15 @@ class TestRunBuildScreenInteraction:
                 project_root=tmp_path,
             )
 
-        # BuildScreen constructor should have been called with plan stages
-        mock_build_screen_cls.assert_called_once()
-        call_args = mock_build_screen_cls.call_args
-        stages_arg = call_args[0][0]
+        # run_with_progress should have been called once
+        assert len(captured_args) == 1
+        label, stages_arg, _ = captured_args[0]
+        assert label == "Building"
         assert len(stages_arg) == 1
         assert stages_arg[0].label == "S1"
 
-    def test_worker_streams_output_to_screen(self, tmp_path: Path) -> None:
-        """The worker thread should call screen methods for each step."""
+    def test_execute_step_returns_claude_output(self, tmp_path: Path) -> None:
+        """The execute_step callback should return Claude output as a string."""
         plan = Plan(
             stages=[
                 Stage(
@@ -1317,14 +1307,27 @@ class TestRunBuildScreenInteraction:
         )
         _make_zing_file_with_plan(tmp_path, plan=plan)
         config = ZingConfig()
+
+        step_outputs: list[str] = []
+
+        def capturing_run_with_progress(label, stages, execute_step):
+            completed: list[tuple[int, int]] = []
+            for stage_idx, stage in enumerate(stages):
+                for step_idx in range(len(stage.steps)):
+                    output = execute_step(stage_idx, step_idx)
+                    step_outputs.append(output)
+                    completed.append((stage_idx, step_idx))
+            return BuildProgress(completed_steps=completed, failed_step=None)
 
         def mock_invoke(prompt, **kwargs):
             yield "line 1\n"
             yield "line 2\n"
 
-        mock_screen = _make_mock_screen()
-
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -1334,12 +1337,8 @@ class TestRunBuildScreenInteraction:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=mock_screen,
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=capturing_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1353,22 +1352,11 @@ class TestRunBuildScreenInteraction:
                 project_root=tmp_path,
             )
 
-        # start_step should have been called for step (0, 0)
-        mock_screen.start_step.assert_called_once_with(0, 0)
+        assert len(step_outputs) == 1
+        assert step_outputs[0] == "line 1\nline 2\n"
 
-        # append_output should have been called for each line
-        assert mock_screen.append_output.call_count == 2
-        mock_screen.append_output.assert_any_call("line 1\n")
-        mock_screen.append_output.assert_any_call("line 2\n")
-
-        # complete_step should have been called with success=True
-        mock_screen.complete_step.assert_called_once_with(0, 0, success=True)
-
-        # finish should have been called
-        mock_screen.finish.assert_called_once()
-
-    def test_worker_calls_finish_after_all_steps(self, tmp_path: Path) -> None:
-        """screen.finish() should be called after all steps complete."""
+    def test_execute_step_called_for_all_steps(self, tmp_path: Path) -> None:
+        """execute_step should be called for every step in the plan."""
         plan = Plan(
             stages=[
                 Stage(
@@ -1383,12 +1371,25 @@ class TestRunBuildScreenInteraction:
         _make_zing_file_with_plan(tmp_path, plan=plan)
         config = ZingConfig()
 
+        executed_steps: list[tuple[int, int]] = []
+
+        def capturing_run_with_progress(label, stages, execute_step):
+            completed: list[tuple[int, int]] = []
+            for stage_idx, stage in enumerate(stages):
+                for step_idx in range(len(stage.steps)):
+                    execute_step(stage_idx, step_idx)
+                    executed_steps.append((stage_idx, step_idx))
+                    completed.append((stage_idx, step_idx))
+            return BuildProgress(completed_steps=completed, failed_step=None)
+
         def mock_invoke(prompt, **kwargs):
             yield "done\n"
 
-        mock_screen = _make_mock_screen()
-
         with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
                 side_effect=mock_invoke,
@@ -1398,12 +1399,8 @@ class TestRunBuildScreenInteraction:
                 return_value={},
             ),
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=mock_screen,
-            ),
-            patch(
-                "zing_ai.orchestrator.commands.build.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=capturing_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -1417,18 +1414,7 @@ class TestRunBuildScreenInteraction:
                 project_root=tmp_path,
             )
 
-        # start_step called for each step: (0, 0) and (0, 1)
-        assert mock_screen.start_step.call_count == 2
-        mock_screen.start_step.assert_any_call(0, 0)
-        mock_screen.start_step.assert_any_call(0, 1)
-
-        # complete_step called for each step
-        assert mock_screen.complete_step.call_count == 2
-        mock_screen.complete_step.assert_any_call(0, 0, success=True)
-        mock_screen.complete_step.assert_any_call(0, 1, success=True)
-
-        # finish called once at the end
-        mock_screen.finish.assert_called_once()
+        assert executed_steps == [(0, 0), (0, 1)]
 
 
 # ---------------------------------------------------------------------------
