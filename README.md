@@ -91,6 +91,16 @@ Once a PR is open, Zing can review it the way a senior developer would — on Gi
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
+### Recommended MCP Servers
+
+Zing works best when your AI coding assistant has the following MCP servers installed and configured:
+
+- **[Serena](https://github.com/oraios/serena)** — Semantic code tools via LSP for token-efficient code exploration and precise symbol-level editing
+- **[AI Distiller](https://github.com/janreges/ai-distiller)** — Compact code structure extraction and specialized analysis (security audits, bug hunting, refactoring)
+- **[CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)** — Code graph analysis for understanding call chains, detecting dead code, and architectural queries
+
+These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
+
 ### Install from PyPI
 
 ```
