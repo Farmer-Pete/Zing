@@ -13,7 +13,6 @@ from zing_ai.orchestrator.commands.plan import (
     _invoke_flesh_out_with_session,
     _invoke_replan_with_session,
     _parse_identification_response,
-    _run_investigation_tui,
     run_plan,
 )
 from zing_ai.orchestrator.config import CallType, ZingConfig
@@ -26,7 +25,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.tui.results import ProgressResult
+from zing_ai.orchestrator.ui.types import InvestigationResult
 from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 
 
@@ -403,46 +402,43 @@ class TestInvokeReplanWithSession:
 
 
 def _make_investigation_result(
-    interactions: list[Interaction],
-) -> tuple[ProgressResult, list[Interaction]]:
-    """Build a mock return value for ``_run_investigation_tui``."""
-    outputs = {f"investigate-{i}": "mock output" for i in range(len(interactions))}
-    statuses = {f"investigate-{i}": "success" for i in range(len(interactions))}
-    return ProgressResult(outputs=outputs, statuses=statuses), interactions
+    xml_outputs: list[str],
+) -> InvestigationResult:
+    """Build a mock return value for ``run_parallel_investigations``."""
+    outputs = {f"investigate-{i}": xml for i, xml in enumerate(xml_outputs)}
+    statuses = {f"investigate-{i}": "success" for i in range(len(xml_outputs))}
+    return InvestigationResult(outputs=outputs, statuses=statuses)
 
 
-# Three interactions matching the three areas in IDENTIFY_RESPONSE.
-_THREE_AREA_INTERACTIONS = [
-    Interaction(choice_sets=[
-        ChoiceSet(
-            message="Which ORM?",
-            explanation="Choose an ORM.",
-            choices=[
-                Choice(label="SQLAlchemy", description="Full ORM", recommended=True),
-                Choice(label="Raw SQL", description="No ORM", recommended=False),
-            ],
-        ),
-    ]),
-    Interaction(choice_sets=[
-        ChoiceSet(
-            message="Which framework?",
-            explanation="Choose a framework.",
-            choices=[
-                Choice(label="FastAPI", description="Modern async", recommended=True),
-                Choice(label="Flask", description="Classic", recommended=False),
-            ],
-        ),
-    ]),
-    Interaction(choice_sets=[
-        ChoiceSet(
-            message="Which UI lib?",
-            explanation="Choose a UI library.",
-            choices=[
-                Choice(label="React", description="Component-based", recommended=True),
-                Choice(label="Vue", description="Progressive", recommended=False),
-            ],
-        ),
-    ]),
+# Three XML investigation outputs matching the three areas in IDENTIFY_RESPONSE.
+_THREE_AREA_XML_OUTPUTS = [
+    """\
+<zing:interactions>
+  <choices message="Which ORM?">
+    <explanation format="markdown">Choose an ORM.</explanation>
+    <choice label="SQLAlchemy" description="Full ORM" recommended="true" />
+    <choice label="Raw SQL" description="No ORM" recommended="false" />
+  </choices>
+</zing:interactions>
+""",
+    """\
+<zing:interactions>
+  <choices message="Which framework?">
+    <explanation format="markdown">Choose a framework.</explanation>
+    <choice label="FastAPI" description="Modern async" recommended="true" />
+    <choice label="Flask" description="Classic" recommended="false" />
+  </choices>
+</zing:interactions>
+""",
+    """\
+<zing:interactions>
+  <choices message="Which UI lib?">
+    <explanation format="markdown">Choose a UI library.</explanation>
+    <choice label="React" description="Component-based" recommended="true" />
+    <choice label="Vue" description="Progressive" recommended="false" />
+  </choices>
+</zing:interactions>
+""",
 ]
 
 
@@ -450,12 +446,16 @@ class TestRunPlanFirstRun:
     """Tests for the first-run planning pipeline."""
 
     def test_full_first_run_pipeline(self, tmp_path: Path) -> None:
-        """Happy path: identification -> distillation -> investigation (TUI) -> flesh out -> assembly."""
+        """Happy path: identification -> distillation -> investigation -> flesh out -> assembly."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
         mock_plan_audit = MagicMock()
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=[
@@ -466,9 +466,9 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                return_value=_make_investigation_result(_THREE_AREA_INTERACTIONS),
-            ) as mock_tui,
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result(_THREE_AREA_XML_OUTPUTS),
+            ) as mock_investigations,
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
                 return_value={},
@@ -511,31 +511,24 @@ class TestRunPlanFirstRun:
         # Verify plan_audit was called
         mock_plan_audit.assert_called_once()
 
-        # Verify the TUI investigation was invoked with area prompts
-        mock_tui.assert_called_once()
+        # Verify run_parallel_investigations was invoked
+        mock_investigations.assert_called_once()
 
-    def test_investigation_dispatches_claude_calls_via_tui(self, tmp_path: Path) -> None:
-        """Verify that _run_investigation_tui is called with correct area prompts."""
+    def test_investigation_dispatches_via_run_parallel(self, tmp_path: Path) -> None:
+        """Verify that run_parallel_investigations is called with correct entries."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
-        captured_kwargs: dict = {}
+        captured_args: list = []
 
-        def mock_investigation_tui(**kwargs):
-            captured_kwargs.update(kwargs)
-            return _make_investigation_result([
-                Interaction(choice_sets=[
-                    ChoiceSet(
-                        message="Test question?",
-                        explanation="Test explanation.",
-                        choices=[
-                            Choice(label="A", description="Option A", recommended=True),
-                            Choice(label="B", description="Option B", recommended=False),
-                        ],
-                    ),
-                ]),
-            ] * 3)  # 3 areas from IDENTIFY_RESPONSE
+        def mock_run_parallel(entries, run_fn):
+            captured_args.append(entries)
+            return _make_investigation_result([INVESTIGATE_RESPONSE] * 3)
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=[
@@ -544,8 +537,8 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                side_effect=mock_investigation_tui,
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                side_effect=mock_run_parallel,
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -563,16 +556,13 @@ class TestRunPlanFirstRun:
                 project_root=tmp_path,
             )
 
-        # Verify area_prompts were passed with 3 areas
-        area_prompts = captured_kwargs["area_prompts"]
-        assert len(area_prompts) == 3
-        # Each element is (InvestigationArea, prompt_string)
-        assert area_prompts[0][0].name == "Data model"
-        assert area_prompts[1][0].name == "API layer"
-        assert area_prompts[2][0].name == "Frontend"
-        # Verify config and skip_permissions are forwarded
-        assert captured_kwargs["config"] is config
-        assert captured_kwargs["skip_permissions"] is False
+        # Verify entries were passed with 3 areas
+        entries = captured_args[0]
+        assert len(entries) == 3
+        # Each entry is an InvestigationEntry with id and label
+        assert entries[0]["label"] == "Investigate: Data model"
+        assert entries[1]["label"] == "Investigate: API layer"
+        assert entries[2]["label"] == "Investigate: Frontend"
 
     def test_distills_unique_files_across_areas(self, tmp_path: Path) -> None:
         """Files mentioned in multiple areas should only be distilled once."""
@@ -588,11 +578,15 @@ class TestRunPlanFirstRun:
 
         distill_calls: list[list[Path]] = []
 
-        def mock_distill(file_paths, *, project_root):
+        def mock_distill(file_paths, *, project_root, aid_path="aid"):
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp}" for fp in file_paths}
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=[
@@ -601,19 +595,8 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                return_value=_make_investigation_result([
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ] * 3),
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result([INVESTIGATE_RESPONSE] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -637,7 +620,7 @@ class TestRunPlanFirstRun:
         assert len(distilled_paths) == 5  # 5 unique files
 
     def test_skip_permissions_forwarded(self, tmp_path: Path) -> None:
-        """skip_permissions flag is passed through to Claude and TUI calls."""
+        """skip_permissions flag is passed through to Claude calls."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
 
@@ -645,35 +628,22 @@ class TestRunPlanFirstRun:
 
         def mock_full(prompt, **kwargs):
             claude_full_calls.append(kwargs)
-            if not claude_full_calls[0:1] or len(claude_full_calls) == 1:
+            if len(claude_full_calls) == 1:
                 return (IDENTIFY_RESPONSE, "sess-001")
             return (FLESH_OUT_RESPONSE, "sess-002")
 
-        tui_kwargs_captured: dict = {}
-
-        def mock_tui(**kwargs):
-            tui_kwargs_captured.update(kwargs)
-            return _make_investigation_result([
-                Interaction(choice_sets=[
-                    ChoiceSet(
-                        message="Q?",
-                        explanation="E.",
-                        choices=[
-                            Choice(label="A", description="D", recommended=True),
-                            Choice(label="B", description="D", recommended=False),
-                        ],
-                    ),
-                ]),
-            ] * 3)
-
         with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=mock_full,
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                side_effect=mock_tui,
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result([INVESTIGATE_RESPONSE] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -695,15 +665,16 @@ class TestRunPlanFirstRun:
         for call_kwargs in claude_full_calls:
             assert call_kwargs.get("skip_permissions") is True
 
-        # TUI investigation should also receive skip_permissions=True
-        assert tui_kwargs_captured["skip_permissions"] is True
-
     def test_plan_session_saved_in_zing_file(self, tmp_path: Path) -> None:
         """The plan session ID from flesh out should be saved."""
         zing_path = _make_zing_file(tmp_path)
         config = ZingConfig()
 
         with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
             patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=[
@@ -712,19 +683,8 @@ class TestRunPlanFirstRun:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                return_value=_make_investigation_result([
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ] * 3),
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result([INVESTIGATE_RESPONSE] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
@@ -940,6 +900,10 @@ class TestRunPlanCallsAudit:
 
         with (
             patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 side_effect=[
                     (IDENTIFY_RESPONSE, "sess-001"),
@@ -947,19 +911,8 @@ class TestRunPlanCallsAudit:
                 ],
             ),
             patch(
-                "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                return_value=_make_investigation_result([
-                    Interaction(choice_sets=[
-                        ChoiceSet(
-                            message="Q?",
-                            explanation="E.",
-                            choices=[
-                                Choice(label="A", description="D", recommended=True),
-                                Choice(label="B", description="D", recommended=False),
-                            ],
-                        ),
-                    ]),
-                ] * 3),
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result([INVESTIGATE_RESPONSE] * 3),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
