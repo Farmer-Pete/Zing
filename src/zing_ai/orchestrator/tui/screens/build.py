@@ -100,11 +100,13 @@ class BuildScreen(Screen[BuildResult]):
         flat_idx = self._flat_index.get((stage_idx, step_idx))
         if flat_idx is None:
             return
+        self._log_lines.clear()
+        if not self.is_mounted:
+            return
         tracker = self.query_one("#step-tracker", StepTracker)
         tracker.update_step(flat_idx, StepStatus.ACTIVE)
         log_view = self.query_one("#log-view", RichLog)
         log_view.clear()
-        self._log_lines.clear()
 
     def append_output(self, line: str) -> None:
         """Append a line of output to the log viewer.
@@ -113,6 +115,8 @@ class BuildScreen(Screen[BuildResult]):
             line: The text line to write to the :class:`RichLog`.
         """
         self._log_lines.append(line)
+        if not self.is_mounted:
+            return
         log_view = self.query_one("#log-view", RichLog)
         log_view.write(line)
 
@@ -136,14 +140,18 @@ class BuildScreen(Screen[BuildResult]):
         flat_idx = self._flat_index.get((stage_idx, step_idx))
         if flat_idx is None:
             return
+        if success:
+            self._completed.append((stage_idx, step_idx))
+        else:
+            self._failed = (stage_idx, step_idx)
+        if not self.is_mounted:
+            return
         tracker = self.query_one("#step-tracker", StepTracker)
         if success:
             tracker.update_step(flat_idx, StepStatus.COMPLETE)
-            self._completed.append((stage_idx, step_idx))
             notify("Zing", f"Step completed: {self._tracker_steps[flat_idx].label}")
         else:
             tracker.update_step(flat_idx, StepStatus.FAILED)
-            self._failed = (stage_idx, step_idx)
             notify("Zing", f"Step failed: {self._tracker_steps[flat_idx].label}")
 
     def finish(self) -> None:

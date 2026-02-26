@@ -15,6 +15,7 @@ from zing_ai.orchestrator.config import (
     get_allowed_tools,
     get_model,
     load_config,
+    resolve_aid_path,
 )
 
 
@@ -54,6 +55,10 @@ class TestZingConfigDefaults:
         config = ZingConfig()
         assert config.subprocess_timeout == 300
 
+    def test_default_aid_path(self) -> None:
+        config = ZingConfig()
+        assert config.aid_path == "aid"
+
     def test_defaults_are_independent_copies(self) -> None:
         """Mutating one config must not affect another."""
         a = ZingConfig()
@@ -82,6 +87,7 @@ class TestLoadConfigCustom:
     FULL_TOML = """\
 [settings]
 subprocess_timeout = 600
+aid_path = "/usr/local/bin/aid"
 
 [permissions]
 mcp_tools = ["mcp__custom__*"]
@@ -107,6 +113,11 @@ model = "sonnet"
         (tmp_path / ".zing.toml").write_text(self.FULL_TOML)
         config = load_config(tmp_path)
         assert config.subprocess_timeout == 600
+
+    def test_aid_path_parsed(self, tmp_path: Path) -> None:
+        (tmp_path / ".zing.toml").write_text(self.FULL_TOML)
+        config = load_config(tmp_path)
+        assert config.aid_path == "/usr/local/bin/aid"
 
     def test_mcp_tools_overridden(self, tmp_path: Path) -> None:
         (tmp_path / ".zing.toml").write_text(self.FULL_TOML)
@@ -276,3 +287,67 @@ class TestInvalidCallType:
         config = ZingConfig()
         with pytest.raises(KeyError):
             get_model(config, "nonexistent")  # type: ignore[arg-type]
+
+
+class TestResolveAidPath:
+    """Tests for resolve_aid_path validation and resolution."""
+
+    def test_explicit_absolute_path_exists(self, tmp_path: Path) -> None:
+        aid_bin = tmp_path / "aid"
+        aid_bin.write_text("#!/bin/sh\n")
+        config = ZingConfig(aid_path=str(aid_bin))
+        assert resolve_aid_path(config) == str(aid_bin)
+
+    def test_tilde_path_expanded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        aid_bin = fake_home / "bin" / "aid"
+        aid_bin.parent.mkdir()
+        aid_bin.write_text("#!/bin/sh\n")
+        monkeypatch.setenv("HOME", str(fake_home))
+        config = ZingConfig(aid_path="~/bin/aid")
+        result = resolve_aid_path(config)
+        assert result == str(aid_bin)
+        assert "~" not in result
+
+    def test_explicit_absolute_path_missing(self) -> None:
+        config = ZingConfig(aid_path="/nonexistent/path/to/aid")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            resolve_aid_path(config)
+
+    def test_explicit_relative_path_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        aid_bin = tmp_path / "bin" / "aid"
+        aid_bin.parent.mkdir()
+        aid_bin.write_text("#!/bin/sh\n")
+        config = ZingConfig(aid_path="bin/aid")
+        assert resolve_aid_path(config) == "bin/aid"
+
+    def test_explicit_relative_path_missing(self) -> None:
+        config = ZingConfig(aid_path="./no/such/aid")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            resolve_aid_path(config)
+
+    def test_bare_name_found_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+        config = ZingConfig(aid_path="aid")
+        assert resolve_aid_path(config) == "aid"
+
+    def test_bare_name_not_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        config = ZingConfig(aid_path="aid")
+        with pytest.raises(FileNotFoundError, match="not found on PATH"):
+            resolve_aid_path(config)
+
+    def test_default_aid_on_path_no_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No .zing.toml and aid is on PATH — should work."""
+        monkeypatch.setattr("shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+        config = load_config(tmp_path)
+        assert resolve_aid_path(config) == "aid"
+
+    def test_default_aid_not_on_path_no_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No .zing.toml and aid is NOT on PATH — should raise."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        config = load_config(tmp_path)
+        with pytest.raises(FileNotFoundError, match="not found on PATH"):
+            resolve_aid_path(config)

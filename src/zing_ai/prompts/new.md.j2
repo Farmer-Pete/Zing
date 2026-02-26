@@ -56,3 +56,23 @@ Rules for the output:
 - Do not add your own suggestions, recommendations, or analysis.
 - Do not add sections the user didn't provide information for.
 - Do not wrap the final markdown in a code fence -- return it as raw markdown.
+
+## Saving the Requirements File
+
+After compiling the markdown requirements document, you MUST write it to disk as an XML file in the `.zing/` directory. This is critical -- the Zing tool depends on this file to continue.
+
+Use this exact XML format:
+
+```xml
+<?xml version='1.0' encoding='utf-8'?>
+<zing stage="new" audit="false" approved="false">
+  <content>
+YOUR COMPILED MARKDOWN GOES HERE
+  </content>
+</zing>
+```
+
+- Name the file based on the project name in kebab-case. For example, if the project is called "My Cool App", write the file to `.zing/my-cool-app.xml`.
+- The `<content>` element must contain the full markdown requirements document (the output described above).
+- Do NOT escape the markdown inside `<content>` -- write it as raw text.
+- After writing the file, tell the user the name of the file you created and instruct them to type `/exit` to quit Claude so that Zing can continue with the planning phase.

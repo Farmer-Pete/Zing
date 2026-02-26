@@ -31,7 +31,7 @@ import jinja2
 
 from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.claude import print_line
-from zing_ai.orchestrator.config import CallType, ZingConfig
+from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import AuditGroup
 from zing_ai.orchestrator.xml_parser import parse_audit_response, parse_zing_file
@@ -227,6 +227,9 @@ def run_build_audit(
     project_root:
         Path to the project root directory.
     """
+    # Resolve the aid binary path (fail fast if missing)
+    aid_path = resolve_aid_path(config)
+
     # Resolve the zing file
     zing_path = project.resolve_zing_file(zing_file, project_root)
     logger.info("Running build-audit with zing file: %s", zing_path)
@@ -253,7 +256,7 @@ def run_build_audit(
     logger.info("Build-audit Step 2: Distilling %d files", len(plan_file_paths))
     distilled: dict[Path, str] = {}
     if plan_file_paths:
-        distilled = distill_files(plan_file_paths, project_root=project_root)
+        distilled = distill_files(plan_file_paths, project_root=project_root, aid_path=aid_path)
 
     # Convert to string-keyed dict for templates
     distilled_files: dict[str, str] = {

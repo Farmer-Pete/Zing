@@ -57,6 +57,29 @@ class BuildScreenApp(App[BuildResult | None]):
 # ── Tests ───────────────────────────────────────────────────────────────
 
 
+class TestBuildScreenBeforeMount:
+    """Methods called on an unmounted BuildScreen must not crash."""
+
+    def test_start_step_before_mount_no_crash(self):
+        screen = BuildScreen(_make_stages())
+        screen.start_step(0, 0)
+
+    def test_append_output_before_mount_no_crash(self):
+        screen = BuildScreen(_make_stages())
+        screen.append_output("hello")
+        assert screen._log_lines == ["hello"]
+
+    def test_complete_step_before_mount_no_crash(self):
+        screen = BuildScreen(_make_stages())
+        screen.complete_step(0, 0, success=True)
+        assert (0, 0) in screen._completed
+
+    def test_complete_step_failure_before_mount_no_crash(self):
+        screen = BuildScreen(_make_stages())
+        screen.complete_step(0, 0, success=False)
+        assert screen._failed == (0, 0)
+
+
 class TestBuildScreenRender:
     """BuildScreen should compose with StepTracker and RichLog."""
 

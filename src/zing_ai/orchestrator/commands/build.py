@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 
 from zing_ai.orchestrator import claude, project
-from zing_ai.orchestrator.config import CallType, ZingConfig
+from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import ZingDocument
 from zing_ai.orchestrator.tui.app import ZingApp
@@ -72,6 +72,9 @@ def run_build(
     project_root:
         Path to the project root directory.
     """
+    # Resolve the aid binary path (fail fast if missing)
+    aid_path = resolve_aid_path(config)
+
     # Resolve the zing file
     zing_path = project.resolve_zing_file(zing_file, project_root)
     logger.info("Building with zing file: %s", zing_path)
@@ -135,7 +138,7 @@ def run_build(
 
                 distilled: dict[Path, str] = {}
                 if file_paths:
-                    distilled = distill_files(file_paths, project_root=project_root)
+                    distilled = distill_files(file_paths, project_root=project_root, aid_path=aid_path)
                     logger.info(
                         "Distilled %d files for step '%s'",
                         len(distilled),

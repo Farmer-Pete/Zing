@@ -47,6 +47,42 @@ class TestProgressScreenRender:
             assert log_view is not None
 
 
+class TestAddSubprocessBeforeMount:
+    """add_subprocess called before the screen is mounted (the real usage pattern)."""
+
+    @pytest.mark.asyncio
+    async def test_add_subprocess_before_mount_no_crash(self):
+        """Calling add_subprocess on an unmounted screen must not raise."""
+        screen = ProgressScreen()
+        screen.add_subprocess("proc-1", "Build frontend")
+        assert screen._id_to_index == {"proc-1": 0}
+
+    @pytest.mark.asyncio
+    async def test_pre_mount_entries_appear_after_mount(self):
+        """Entries added before mount should be flushed to the widget on mount."""
+
+        class PrePopulatedApp(App[ProgressResult | None]):
+            """Adds subprocesses to the screen *before* pushing it."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.progress_screen = ProgressScreen()
+                self.progress_screen.add_subprocess("proc-1", "Build frontend")
+                self.progress_screen.add_subprocess("proc-2", "Build backend")
+
+            def on_mount(self) -> None:
+                self.push_screen(self.progress_screen)
+
+        app = PrePopulatedApp()
+        async with app.run_test() as pilot:
+            screen = app.screen
+            assert isinstance(screen, ProgressScreen)
+            await pilot.pause()
+
+            sp_list = screen.query_one("#sp-list", SubprocessList)
+            assert len(list(sp_list.children)) == 2
+
+
 class TestAddSubprocess:
     """add_subprocess should add entries to the SubprocessList."""
 

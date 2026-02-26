@@ -156,7 +156,7 @@ class TestDistillFileCacheMiss:
 
         assert result == "distilled output"
         mock_run.assert_called_once_with(
-            ["aid", "distill_file", str(source)],
+            ["aid", str(source), "--stdout"],
             capture_output=True,
             timeout=60,
         )
@@ -258,7 +258,7 @@ class TestDistillFiles:
         f2 = _write_file(tmp_path / "b.py", "b = 2")
 
         def mock_run(cmd, *, capture_output=True, timeout=60):
-            file_arg = cmd[2]
+            file_arg = cmd[1]
             if str(f1) == file_arg:
                 return _make_mock_completed_process(stdout=b"distilled a")
             return _make_mock_completed_process(stdout=b"distilled b")

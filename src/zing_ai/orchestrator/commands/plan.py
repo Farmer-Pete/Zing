@@ -31,7 +31,7 @@ import jinja2
 
 from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.claude import print_line
-from zing_ai.orchestrator.config import CallType, ZingConfig
+from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
 from zing_ai.orchestrator.tui.app import ZingApp
@@ -513,6 +513,9 @@ def _run_first_plan(
 
     Phases: identification -> distillation -> investigation -> flesh out -> assembly.
     """
+    # Resolve the aid binary path (fail fast if missing)
+    aid_path = resolve_aid_path(config)
+
     # Read the zing document for the project specification content
     doc = parse_zing_file(zing_path)
     zing_content = doc.content or ""
@@ -554,7 +557,7 @@ def _run_first_plan(
 
     distilled: dict[Path, str] = {}
     if file_paths:
-        distilled = distill_files(file_paths, project_root=project_root)
+        distilled = distill_files(file_paths, project_root=project_root, aid_path=aid_path)
         logger.info("Distilled %d files", len(distilled))
 
     # --- Phase 3: Investigation (parallel, via TUI) ---

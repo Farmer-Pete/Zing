@@ -71,6 +71,20 @@ class ProgressScreen(Screen[ProgressResult]):
 
     # ── Public API ───────────────────────────────────────────────────────
 
+    def on_mount(self) -> None:
+        """Flush any subprocess entries added before the screen was mounted."""
+        if self._id_to_index:
+            self._sync_subprocess_list()
+
+    def _sync_subprocess_list(self) -> None:
+        """Rebuild the SubprocessList widget from internal state."""
+        sp_list = self.query_one("#sp-list", SubprocessList)
+        entries = [
+            SubprocessEntry(label=self._id_to_label[sid], status=self._statuses[sid])
+            for sid in self._id_to_index
+        ]
+        sp_list.set_entries(entries)
+
     def add_subprocess(self, id: str, label: str) -> None:
         """Add a new subprocess entry to the list.
 
@@ -85,12 +99,8 @@ class ProgressScreen(Screen[ProgressResult]):
         self._buffers[id] = []
         self._statuses[id] = "pending"
 
-        sp_list = self.query_one("#sp-list", SubprocessList)
-        entries = [
-            SubprocessEntry(label=self._id_to_label[sid], status=self._statuses[sid])
-            for sid in self._id_to_index
-        ]
-        sp_list.set_entries(entries)
+        if self.is_mounted:
+            self._sync_subprocess_list()
 
         # Auto-select the first subprocess added
         if self._selected_id is None:
@@ -108,6 +118,8 @@ class ProgressScreen(Screen[ProgressResult]):
         if id not in self._id_to_index:
             return
         self._statuses[id] = status
+        if not self.is_mounted:
+            return
         index = self._id_to_index[id]
         sp_list = self.query_one("#sp-list", SubprocessList)
         sp_list.update_entry(index, status)
@@ -125,7 +137,7 @@ class ProgressScreen(Screen[ProgressResult]):
         if id not in self._buffers:
             return
         self._buffers[id].append(line)
-        if id == self._selected_id:
+        if id == self._selected_id and self.is_mounted:
             log_view = self.query_one("#log-view", RichLog)
             log_view.write(line)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -42,7 +43,7 @@ DEFAULT_MODELS: dict[CallType, str] = {
 }
 
 _KNOWN_TOP_LEVEL_KEYS = {"settings", "permissions"}
-_KNOWN_SETTINGS_KEYS = {"subprocess_timeout"}
+_KNOWN_SETTINGS_KEYS = {"subprocess_timeout", "aid_path"}
 _KNOWN_PERMISSIONS_KEYS = {
     "mcp_tools",
     CallType.INVESTIGATE,
@@ -65,6 +66,7 @@ class ZingConfig:
         default_factory=lambda: dict(DEFAULT_MODELS)
     )
     subprocess_timeout: int = 300
+    aid_path: str = "aid"
 
 
 def load_config(project_root: Path) -> ZingConfig:
@@ -97,6 +99,8 @@ def load_config(project_root: Path) -> ZingConfig:
             logger.warning("Unrecognized key in [settings]: %s", key)
     if "subprocess_timeout" in settings:
         config.subprocess_timeout = int(settings["subprocess_timeout"])
+    if "aid_path" in settings:
+        config.aid_path = str(settings["aid_path"])
 
     # --- [permissions] ---
     permissions = raw.get("permissions", {})
@@ -142,3 +146,38 @@ def get_model(config: ZingConfig, call_type: CallType) -> str:
     model = config.models[call_type]
     logger.debug("Model for %s: %s", call_type, model)
     return model
+
+
+def resolve_aid_path(config: ZingConfig) -> str:
+    """Resolve and validate the ``aid`` binary path from *config*.
+
+    If ``config.aid_path`` is an absolute or relative path that exists on
+    disk, return it as-is.  Otherwise, look it up on ``$PATH`` via
+    :func:`shutil.which`.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the binary cannot be found.
+    """
+    path = Path(config.aid_path).expanduser()
+    # Explicit path (absolute or relative with separators) — check directly
+    if path.is_absolute() or "/" in config.aid_path:
+        if path.is_file():
+            logger.debug("aid binary found at explicit path: %s", path)
+            return str(path)
+        raise FileNotFoundError(
+            f"Configured aid_path '{config.aid_path}' does not exist. "
+            "Check the [settings] aid_path value in .zing.toml."
+        )
+
+    # Bare command name — look up on $PATH
+    resolved = shutil.which(config.aid_path)
+    if resolved is not None:
+        logger.debug("aid binary resolved via PATH: %s", resolved)
+        return config.aid_path
+    raise FileNotFoundError(
+        f"aid binary '{config.aid_path}' not found on PATH. "
+        "Either install aid or set [settings] aid_path in .zing.toml "
+        "to the full path of the aid binary."
+    )

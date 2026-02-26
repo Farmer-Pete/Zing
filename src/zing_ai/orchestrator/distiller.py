@@ -38,7 +38,7 @@ def _hash_file(path: Path) -> str:
 
 
 def distill_file(
-    file_path: Path, *, project_root: Path, timeout: float = 60,
+    file_path: Path, *, project_root: Path, aid_path: str = "aid", timeout: float = 60,
 ) -> str | None:
     """Distill a single file using the ``aid`` CLI, with caching.
 
@@ -53,6 +53,8 @@ def distill_file(
         Path to the file to distill.
     project_root:
         The project root directory (used to locate the cache).
+    aid_path:
+        Path or command name for the ``aid`` binary (default ``"aid"``).
     timeout:
         Maximum seconds to wait for the ``aid`` subprocess (default 60).
 
@@ -75,7 +77,7 @@ def distill_file(
 
     try:
         result = subprocess.run(
-            ["aid", "distill_file", str(file_path)],
+            [aid_path, str(file_path), "--stdout"],
             capture_output=True,
             timeout=timeout,
         )
@@ -111,6 +113,7 @@ def distill_files(
     file_paths: list[Path],
     *,
     project_root: Path,
+    aid_path: str = "aid",
 ) -> dict[Path, str]:
     """Distill multiple files concurrently using :func:`distill_file`.
 
@@ -120,6 +123,8 @@ def distill_files(
         List of file paths to distill.
     project_root:
         The project root directory (used to locate the cache).
+    aid_path:
+        Path or command name for the ``aid`` binary (default ``"aid"``).
 
     Returns
     -------
@@ -127,7 +132,7 @@ def distill_files(
         Mapping of each file path to its distilled content.
     """
     def _distill_one(fp: Path) -> tuple[Path, str | None]:
-        return fp, distill_file(fp, project_root=project_root)
+        return fp, distill_file(fp, project_root=project_root, aid_path=aid_path)
 
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(_distill_one, file_paths))

@@ -52,7 +52,7 @@ class TestRunNew:
             )
 
             mock_run.assert_called_once_with(
-                ["claude", "--system-prompt", "rendered system prompt"],
+                ["claude", "--system-prompt", "rendered system prompt", "Greet the user"],
                 stdin=sys.stdin,
                 stdout=sys.stdout,
                 stderr=sys.stderr,
@@ -120,7 +120,7 @@ class TestRunNew:
             mock_render.assert_called_once_with("new.md.j2")
             # The system prompt is the third element of the command list
             cmd_args = mock_run.call_args.args[0]
-            assert cmd_args == ["claude", "--system-prompt", "my custom system prompt"]
+            assert cmd_args == ["claude", "--system-prompt", "my custom system prompt", "Greet the user"]
 
     def test_ensures_zing_dir_exists(self, tmp_path: Path) -> None:
         """run_new creates .zing/ if it doesn't exist."""
