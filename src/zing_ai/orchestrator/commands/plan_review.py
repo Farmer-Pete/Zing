@@ -1,22 +1,21 @@
 """Orchestrator ``plan-review`` command -- review and approve a plan.
 
-Shows the plan's choices to the user in the TUI.  The user can approve
-(no changes), modify choices (switch recommended option), or delete choice
-sets.  Approval triggers the build; modifications trigger the re-plan ->
-re-audit -> review loop.
+Shows the plan's choices to the user via Rich inline menus.  The user can
+approve (no changes) or modify choices.  Approval triggers the build;
+modifications trigger the re-plan -> re-audit -> review loop.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Literal
 
 from zing_ai.orchestrator import project
 from zing_ai.orchestrator.config import ZingConfig
 from zing_ai.orchestrator.models import ChoiceSet
-from zing_ai.orchestrator.tui.app import ZingApp
-from zing_ai.orchestrator.tui.results import ReviewResult
-from zing_ai.orchestrator.tui.screens.plan_review import PlanReviewScreen
+from zing_ai.orchestrator.ui.menus import plan_review_menu
+from zing_ai.orchestrator.ui.types import ReviewChange
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 
 logger = logging.getLogger(__name__)
@@ -37,7 +36,8 @@ def run_plan_review(
     """Run the ``plan-review`` orchestrator command.
 
     Loads choices from the zing document and presents them to the user
-    via the TUI.  The user can either approve the plan or modify choices.
+    via Rich inline menus.  The user can either approve the plan or
+    modify choices.
 
     **Approval (no changes):**
         Sets ``approved=True`` on the document and calls ``run_build()``.
@@ -82,15 +82,16 @@ def run_plan_review(
         )
         return
 
-    # Launch the TUI review screen and block until the user decides
+    # Present choices via Rich inline menu
     logger.info(
-        "Launching review TUI (%d choice sets to review)...",
+        "Launching review menu (%d choice sets to review)...",
         len(choice_sets),
     )
-    screen = PlanReviewScreen(choice_sets)
-    result: ReviewResult | None = ZingApp.run_with_screen(screen)
+    action: Literal["approve", "replan"]
+    changes: list[ReviewChange]
+    action, changes = plan_review_menu(choice_sets)
 
-    if result is not None and result.action == "approve":
+    if action == "approve":
         # --- Approval path: no changes ---
         logger.info("Plan approved (no changes)")
         doc.approved = True
@@ -102,21 +103,15 @@ def run_plan_review(
             config=config,
             project_root=project_root,
         )
-    elif result is not None and result.action == "replan":
+    elif action == "replan":
         # --- Modification path: extract changes and re-plan ---
-        changes = result.changes
         logger.info("Plan modifications detected (%d changes)", len(changes))
         for change in changes:
-            if change.get("new_selection") is None:
-                logger.debug(
-                    "  Deleted: %s", change.get("choice_id", "unknown")
-                )
-            else:
-                logger.debug(
-                    "  Changed: %s -> selection %s",
-                    change.get("choice_id", "unknown"),
-                    change.get("new_selection"),
-                )
+            logger.debug(
+                "  Changed: %s -> selection %s",
+                change.get("choice_set_id", "unknown"),
+                change.get("selected_index"),
+            )
 
         _call_replan(
             zing_path=zing_path,
@@ -125,9 +120,6 @@ def run_plan_review(
             project_root=project_root,
             replan_changes=changes,
         )
-    else:
-        # User closed the TUI without making a decision
-        logger.warning("Review cancelled -- no action taken")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +151,7 @@ def _call_replan(
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,
-    replan_changes: list[dict],
+    replan_changes: list[ReviewChange],
 ) -> None:
     """Call ``run_plan`` with ``replan_changes`` to re-enter the plan loop."""
     from zing_ai.orchestrator.commands.plan import run_plan

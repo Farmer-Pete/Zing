@@ -19,7 +19,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.tui.results import ReviewResult
+from zing_ai.orchestrator.ui.types import ReviewChange
 from zing_ai.orchestrator.xml_parser import write_zing_file
 
 # ---------------------------------------------------------------------------
@@ -143,8 +143,8 @@ class TestRunPlanReviewApproval:
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="approve", changes=[]),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("approve", []),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -174,8 +174,8 @@ class TestRunPlanReviewApproval:
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="approve", changes=[]),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("approve", []),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -195,19 +195,17 @@ class TestRunPlanReviewApproval:
         assert call_kwargs["config"] is config
         assert call_kwargs["project_root"] == tmp_path
 
-    def test_run_with_screen_called_with_plan_review_screen(self, tmp_path: Path) -> None:
-        """ZingApp.run_with_screen should be called with a PlanReviewScreen."""
+    def test_plan_review_menu_called_with_choice_sets(self, tmp_path: Path) -> None:
+        """plan_review_menu should be called with the parsed choice sets."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
-        mock_run = MagicMock(
-            return_value=ReviewResult(action="approve", changes=[]),
-        )
+        mock_menu = MagicMock(return_value=("approve", []))
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                mock_run,
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                mock_menu,
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -221,11 +219,11 @@ class TestRunPlanReviewApproval:
                 project_root=tmp_path,
             )
 
-        mock_run.assert_called_once()
-        from zing_ai.orchestrator.tui.screens.plan_review import PlanReviewScreen
-
-        screen_arg = mock_run.call_args.args[0]
-        assert isinstance(screen_arg, PlanReviewScreen)
+        mock_menu.assert_called_once()
+        choice_sets_arg = mock_menu.call_args.args[0]
+        assert len(choice_sets_arg) == 2
+        assert choice_sets_arg[0].message == "Which database?"
+        assert choice_sets_arg[1].message == "Which framework?"
 
 
 # ---------------------------------------------------------------------------
@@ -237,19 +235,19 @@ class TestRunPlanReviewReplan:
     """Tests for the replan flow (user modifies choices)."""
 
     def test_replan_calls_replan_with_changes(self, tmp_path: Path) -> None:
-        """Replan action -> calls _call_replan with the changes from ReviewResult."""
+        """Replan action -> calls _call_replan with the changes from plan_review_menu."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        changes = [
-            {"choice_id": "card-0", "new_selection": 1},
+        changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which database?", selected_index=1),
         ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="replan", changes=changes),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("replan", changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -267,20 +265,20 @@ class TestRunPlanReviewReplan:
         call_kwargs = mock_replan.call_args.kwargs
         assert call_kwargs["replan_changes"] == changes
 
-    def test_replan_with_deletion(self, tmp_path: Path) -> None:
-        """Replan with a deletion -> calls _call_replan with deleted change."""
+    def test_replan_with_different_selection(self, tmp_path: Path) -> None:
+        """Replan with a different selection -> calls _call_replan with change."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        changes = [
-            {"choice_id": "card-1", "new_selection": None},
+        changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which framework?", selected_index=1),
         ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="replan", changes=changes),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("replan", changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -298,21 +296,21 @@ class TestRunPlanReviewReplan:
         call_kwargs = mock_replan.call_args.kwargs
         changes_result = call_kwargs["replan_changes"]
         assert len(changes_result) == 1
-        assert changes_result[0]["new_selection"] is None
+        assert changes_result[0]["selected_index"] == 1
 
     def test_replan_does_not_set_approved(self, tmp_path: Path) -> None:
         """Replan should NOT set approved=True in the zing file."""
         zing_path = _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
 
-        changes = [
-            {"choice_id": "card-0", "new_selection": 1},
+        changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which database?", selected_index=1),
         ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="replan", changes=changes),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("replan", changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -337,14 +335,14 @@ class TestRunPlanReviewReplan:
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        changes = [
-            {"choice_id": "card-0", "new_selection": 2},
+        changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which database?", selected_index=2),
         ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="replan", changes=changes),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("replan", changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -366,20 +364,20 @@ class TestRunPlanReviewReplan:
         assert len(call_kwargs["replan_changes"]) == 1
 
     def test_replan_with_multiple_changes(self, tmp_path: Path) -> None:
-        """Multiple changes in ReviewResult are all passed through."""
+        """Multiple changes from plan_review_menu are all passed through."""
         _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_replan = MagicMock()
 
-        changes = [
-            {"choice_id": "card-0", "new_selection": 1},
-            {"choice_id": "card-1", "new_selection": None},
+        changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which database?", selected_index=1),
+            ReviewChange(choice_set_id="Which framework?", selected_index=1),
         ]
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=ReviewResult(action="replan", changes=changes),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("replan", changes),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_replan",
@@ -432,22 +430,22 @@ class TestRunPlanReviewNoChoices:
         # Verify build was called
         mock_build.assert_called_once()
 
-    def test_no_choices_does_not_launch_tui(self, tmp_path: Path) -> None:
-        """When no choices exist, the TUI should not be launched."""
+    def test_no_choices_does_not_launch_menu(self, tmp_path: Path) -> None:
+        """When no choices exist, plan_review_menu should not be called."""
         _make_zing_file_no_choices(tmp_path)
         config = ZingConfig()
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                side_effect=AssertionError("TUI should not be launched"),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                side_effect=AssertionError("Menu should not be launched"),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
                 MagicMock(),
             ),
         ):
-            # Should not raise -- TUI should never be launched
+            # Should not raise -- menu should never be launched
             run_plan_review(
                 zing_file="test-project.xml",
                 skip_permissions=False,
@@ -457,24 +455,24 @@ class TestRunPlanReviewNoChoices:
 
 
 # ---------------------------------------------------------------------------
-# run_plan_review cancellation tests
+# run_plan_review approve-does-not-replan tests
 # ---------------------------------------------------------------------------
 
 
-class TestRunPlanReviewCancellation:
-    """Tests for when the user cancels (closes the TUI without deciding)."""
+class TestRunPlanReviewApproveDoesNotReplan:
+    """Tests that approval does not trigger replan."""
 
-    def test_none_result_no_action(self, tmp_path: Path) -> None:
-        """When run_with_screen returns None, no build or replan is called."""
-        zing_path = _make_zing_file_with_choices(tmp_path)
+    def test_approve_does_not_call_replan(self, tmp_path: Path) -> None:
+        """When plan_review_menu returns approve, _call_replan is not called."""
+        _make_zing_file_with_choices(tmp_path)
         config = ZingConfig()
         mock_build = MagicMock()
         mock_replan = MagicMock()
 
         with (
             patch(
-                "zing_ai.orchestrator.commands.plan_review.ZingApp.run_with_screen",
-                return_value=None,
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+                return_value=("approve", []),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
@@ -492,10 +490,5 @@ class TestRunPlanReviewCancellation:
                 project_root=tmp_path,
             )
 
-        mock_build.assert_not_called()
+        mock_build.assert_called_once()
         mock_replan.assert_not_called()
-
-        # Verify zing file was NOT modified
-        tree = ET.parse(zing_path)
-        root = tree.getroot()
-        assert root.get("approved") == "false"
