@@ -2,12 +2,13 @@
 
 These tests exercise the interaction between multiple modules working
 together.  External boundaries (Claude CLI subprocess, aid subprocess,
-TUI rendering) are mocked; everything else runs against real code with
+UI rendering) are mocked; everything else runs against real code with
 ``tmp_path`` for file-system state.
 
-The TUI is mocked by patching ``ZingApp.run_with_screen()`` to return
-pre-defined result objects (ProgressResult, ReviewResult, BuildResult,
-AuditResult) without rendering any UI.
+The UI is mocked by patching the Rich-based inline UI functions
+(``run_with_progress``, ``run_parallel_investigations``,
+``plan_review_menu``, ``audit_triage_menu``) to return pre-defined
+result objects without rendering any UI.
 """
 
 from __future__ import annotations
@@ -31,11 +32,11 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
-from zing_ai.orchestrator.tui.results import (
-    AuditResult,
-    BuildResult,
-    ProgressResult,
-    ReviewResult,
+from zing_ai.orchestrator.ui.types import (
+    AuditDecision,
+    BuildProgress,
+    InvestigationResult,
+    ReviewChange,
 )
 from zing_ai.orchestrator.xml_parser import (
     ValidationError,
@@ -114,12 +115,12 @@ def _make_zing_file(tmp_path: Path, *, stage: str = "new", with_plan: bool = Fal
     return zing_path
 
 
-def _make_progress_result(
+def _make_investigation_result(
     outputs: dict[str, str] | None = None,
     statuses: dict[str, str] | None = None,
-) -> ProgressResult:
-    """Build a ProgressResult with sensible defaults."""
-    return ProgressResult(
+) -> InvestigationResult:
+    """Build an InvestigationResult with sensible defaults."""
+    return InvestigationResult(
         outputs=outputs or {},
         statuses=statuses or {},
     )
@@ -127,33 +128,28 @@ def _make_progress_result(
 
 def _make_review_result(
     action: str = "approve",
-    changes: list[dict] | None = None,
-) -> ReviewResult:
-    """Build a ReviewResult with sensible defaults."""
-    return ReviewResult(
-        action=action,
-        changes=changes or [],
-    )
+    changes: list[ReviewChange] | None = None,
+) -> tuple[str, list[ReviewChange]]:
+    """Build a (action, changes) tuple for plan_review_menu."""
+    return (action, changes or [])
 
 
-def _make_build_result(
+def _make_build_progress(
     completed_steps: list[tuple[int, int]] | None = None,
     failed_step: tuple[int, int] | None = None,
-) -> BuildResult:
-    """Build a BuildResult with sensible defaults."""
-    return BuildResult(
+) -> BuildProgress:
+    """Build a BuildProgress with sensible defaults."""
+    return BuildProgress(
         completed_steps=completed_steps or [(0, 0)],
         failed_step=failed_step,
     )
 
 
-def _make_audit_result(
-    decisions: list[dict] | None = None,
-) -> AuditResult:
-    """Build an AuditResult with sensible defaults."""
-    return AuditResult(
-        decisions=decisions or [],
-    )
+def _make_audit_decisions(
+    decisions: list[AuditDecision] | None = None,
+) -> list[AuditDecision]:
+    """Build a list of AuditDecision with sensible defaults."""
+    return decisions or []
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +238,7 @@ class TestFullPipelineFlow:
     """Test the full pipeline flow: new -> plan -> plan-audit -> plan-review -> build -> build-audit.
 
     Each command calls the next, so we mock Claude at the subprocess level
-    and mock ZingApp.run_with_screen() to return pre-defined results.
+    and mock UI functions to return pre-defined results.
     The chain should complete through all stages.
     """
 
@@ -301,11 +297,11 @@ class TestFullPipelineFlow:
                 "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
                 return_value=(VALID_IDENTIFICATION_RESPONSE, "session-id1"),
             ),
-            # Mock the TUI investigation phase (returns ProgressResult + Interactions)
+            # Mock the investigation phase (returns InvestigationResult + Interactions)
             patch(
                 "zing_ai.orchestrator.commands.plan._run_investigation_tui",
                 return_value=(
-                    _make_progress_result(),
+                    _make_investigation_result(),
                     [_minimal_interaction()],
                 ),
             ),
@@ -318,6 +314,11 @@ class TestFullPipelineFlow:
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
                 return_value={},
+            ),
+            # Mock aid path resolution
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
             ),
             # Mock the next stage
             patch(
@@ -348,11 +349,11 @@ class TestFullPipelineFlow:
                 "zing_ai.orchestrator.commands.plan_audit.claude.invoke_claude_full",
                 return_value=(VALID_IDENTIFICATION_RESPONSE, "audit-session-1"),
             ),
-            # Mock the TUI investigation phase
+            # Mock the investigation phase
             patch(
                 "zing_ai.orchestrator.commands.plan_audit._run_investigation_tui",
                 return_value=(
-                    _make_progress_result(),
+                    _make_investigation_result(),
                     [_minimal_interaction()],
                 ),
             ),
@@ -365,6 +366,11 @@ class TestFullPipelineFlow:
             patch(
                 "zing_ai.orchestrator.commands.plan_audit.distill_files",
                 return_value={},
+            ),
+            # Mock aid path resolution
+            patch(
+                "zing_ai.orchestrator.commands.plan_audit.resolve_aid_path",
+                return_value="aid",
             ),
             # Mock the next stage
             patch(
@@ -386,12 +392,12 @@ class TestFullPipelineFlow:
         """run_plan_review with approval (no modifications) should chain into run_build."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
-        # Mock ZingApp.run_with_screen to return an "approve" ReviewResult
+        # Mock plan_review_menu to return an "approve" result
         approve_result = _make_review_result(action="approve", changes=[])
 
         with (
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
                 return_value=approve_result,
             ),
             patch(
@@ -422,15 +428,14 @@ class TestFullPipelineFlow:
         (tmp_path / "src" / "main.py").write_text("print('hello')")
         (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
 
-        import threading
-
-        def _mock_run_with_screen(screen):
-            """Wait for daemon worker threads, then return a BuildResult."""
-            # Give the worker thread a chance to run
-            for t in threading.enumerate():
-                if t.daemon and t.name != "MainThread":
-                    t.join(timeout=10)
-            return _make_build_result(completed_steps=[(0, 0)])
+        def _mock_run_with_progress(label, stages, execute_step):
+            """Iterate all steps, calling execute_step for each, then return BuildProgress."""
+            completed: list[tuple[int, int]] = []
+            for stage_idx, stage in enumerate(stages):
+                for step_idx in range(len(stage.steps)):
+                    execute_step(stage_idx, step_idx)
+                    completed.append((stage_idx, step_idx))
+            return BuildProgress(completed_steps=completed, failed_step=None)
 
         with (
             patch(
@@ -441,15 +446,14 @@ class TestFullPipelineFlow:
                 "zing_ai.orchestrator.commands.build.distill_files",
                 return_value={},
             ),
-            # Mock BuildScreen to be a simple MagicMock
             patch(
-                "zing_ai.orchestrator.commands.build.BuildScreen",
-                return_value=MagicMock(),
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
             ),
-            # Mock ZingApp.run_with_screen to let worker finish, then return BuildResult
+            # Mock run_with_progress to iterate steps and return BuildProgress
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                side_effect=_mock_run_with_screen,
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=_mock_run_with_progress,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build_audit.run_build_audit",
@@ -639,32 +643,30 @@ class TestRetryLogic:
 class TestPlanReviewReentry:
     """Test the plan-review re-entry loop.
 
-    When the user modifies choices during plan-review via the TUI, the
-    pipeline should re-enter the plan -> plan-audit -> plan-review loop
+    When the user modifies choices during plan-review via the inline menu,
+    the pipeline should re-enter the plan -> plan-audit -> plan-review loop
     with the changes.
 
-    ZingApp.run_with_screen() is mocked to return pre-built ReviewResult
-    objects that simulate user actions.
+    ``plan_review_menu()`` is mocked to return pre-built ``(action, changes)``
+    tuples that simulate user actions.
     """
 
     def test_modifications_trigger_replan(self, tmp_path: Path) -> None:
-        """When the TUI returns a ReviewResult with action='replan', _call_replan is invoked."""
+        """When plan_review_menu returns action='replan', _call_replan is invoked."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
         # Simulate user switching from FastAPI (recommended) to Flask
+        replan_changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which framework?", selected_index=1),
+        ]
         replan_result = _make_review_result(
             action="replan",
-            changes=[
-                {
-                    "choice_id": "choice-0",
-                    "new_selection": 1,
-                }
-            ],
+            changes=replan_changes,
         )
 
         with (
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
                 return_value=replan_result,
             ),
             patch(
@@ -685,26 +687,24 @@ class TestPlanReviewReentry:
             call_kwargs = mock_call_replan.call_args.kwargs
             changes = call_kwargs["replan_changes"]
             assert len(changes) == 1
-            assert changes[0]["new_selection"] == 1
+            assert changes[0]["selected_index"] == 1
 
     def test_deletion_triggers_replan(self, tmp_path: Path) -> None:
-        """When the TUI returns a change with new_selection=None, replan is triggered."""
+        """When plan_review_menu returns action='replan', replan is triggered."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
-        # Simulate user deleting a choice set (new_selection = None)
+        # Simulate user selecting a different option for a choice set
+        replan_changes: list[ReviewChange] = [
+            ReviewChange(choice_set_id="Which framework?", selected_index=0),
+        ]
         replan_result = _make_review_result(
             action="replan",
-            changes=[
-                {
-                    "choice_id": "choice-0",
-                    "new_selection": None,
-                }
-            ],
+            changes=replan_changes,
         )
 
         with (
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
                 return_value=replan_result,
             ),
             patch(
@@ -723,17 +723,17 @@ class TestPlanReviewReentry:
             mock_call_replan.assert_called_once()
             changes = mock_call_replan.call_args.kwargs["replan_changes"]
             assert len(changes) == 1
-            assert changes[0].get("new_selection") is None
+            assert changes[0]["selected_index"] == 0
 
     def test_no_modifications_goes_to_build(self, tmp_path: Path) -> None:
-        """When the TUI returns action='approve' with no changes, the pipeline proceeds to build."""
+        """When plan_review_menu returns action='approve' with no changes, the pipeline proceeds to build."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
         approve_result = _make_review_result(action="approve", changes=[])
 
         with (
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
                 return_value=approve_result,
             ),
             patch(
@@ -759,22 +759,29 @@ class TestPlanReviewReentry:
             doc = parse_zing_file(zing_path)
             assert doc.approved is True
 
-    def test_tui_cancelled_takes_no_action(self, tmp_path: Path) -> None:
-        """When the user closes the TUI without deciding, no action is taken."""
-        zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
+    def test_no_choices_auto_approves(self, tmp_path: Path) -> None:
+        """When the zing document has no choices, plan_review auto-approves without a menu."""
+        # Create a zing file with plan but no interactions
+        zing_dir = tmp_path / ".zing"
+        zing_dir.mkdir(parents=True, exist_ok=True)
+        doc = ZingDocument(
+            stage="plan",
+            content="# Test Project\n\nBuild a todo app.",
+            plan=_minimal_plan(),
+            interactions=None,
+            audit=False,
+            approved=False,
+        )
+        zing_path = zing_dir / "test-project.xml"
+        write_zing_file(zing_path, doc)
 
         with (
-            # Simulate TUI returning None (user closed without deciding)
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
-                return_value=None,
-            ),
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
+            ) as mock_menu,
             patch(
                 "zing_ai.orchestrator.commands.plan_review._call_build",
             ) as mock_call_build,
-            patch(
-                "zing_ai.orchestrator.commands.plan_review._call_replan",
-            ) as mock_call_replan,
         ):
             from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
@@ -785,8 +792,13 @@ class TestPlanReviewReentry:
                 project_root=tmp_path,
             )
 
-            mock_call_build.assert_not_called()
-            mock_call_replan.assert_not_called()
+            # Menu should NOT have been called (no choices to review)
+            mock_menu.assert_not_called()
+            # Build should have been called (auto-approve)
+            mock_call_build.assert_called_once()
+            # Verify approved
+            loaded = parse_zing_file(zing_path)
+            assert loaded.approved is True
 
     def test_replan_invokes_plan_with_changes(self, tmp_path: Path) -> None:
         """The _call_replan helper calls run_plan with replan_changes kwarg."""
@@ -959,24 +971,24 @@ class TestDistillerCaching:
 
 
 # ===================================================================
-# Test 5: TUI Screen Results Integration
+# Test 5: UI Function Results Integration
 # ===================================================================
 
 
-class TestTUIScreenResults:
-    """Test that TUI screen results are correctly handled by command modules.
+class TestUIFunctionResults:
+    """Test that UI function results are correctly handled by command modules.
 
-    Mocks ZingApp.run_with_screen() to return pre-defined result objects
+    Mocks Rich-based UI functions to return pre-defined result objects
     and verifies each command processes them correctly.
     """
 
-    def test_progress_result_from_plan_investigation(self, tmp_path: Path) -> None:
-        """_run_investigation_tui returns ProgressResult and parsed Interactions."""
+    def test_investigation_result_from_plan_investigation(self, tmp_path: Path) -> None:
+        """_run_investigation_tui returns InvestigationResult and parsed Interactions."""
         # This is covered at the unit test level; here we verify the
-        # integration works when mocked at the TUI layer.
+        # integration works when mocked at the UI layer.
         zing_path = _make_zing_file(tmp_path, stage="new")
 
-        progress_result = _make_progress_result(
+        investigation_result = _make_investigation_result(
             outputs={"investigate-0": "Choice set output"},
             statuses={"investigate-0": "success"},
         )
@@ -988,7 +1000,7 @@ class TestTUIScreenResults:
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan._run_investigation_tui",
-                return_value=(progress_result, [_minimal_interaction()]),
+                return_value=(investigation_result, [_minimal_interaction()]),
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan._invoke_flesh_out_with_session",
@@ -997,6 +1009,10 @@ class TestTUIScreenResults:
             patch(
                 "zing_ai.orchestrator.commands.plan.distill_files",
                 return_value={},
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
             ),
             patch(
                 "zing_ai.orchestrator.commands.plan_audit.run_plan_audit",
@@ -1019,14 +1035,14 @@ class TestTUIScreenResults:
             assert doc.interactions is not None
 
     def test_review_result_approve_writes_zing_file(self, tmp_path: Path) -> None:
-        """ReviewResult with action='approve' writes approved=True to zing file."""
+        """plan_review_menu returning ('approve', []) writes approved=True to zing file."""
         zing_path = _make_zing_file(tmp_path, stage="plan", with_plan=True)
 
         approve_result = _make_review_result(action="approve", changes=[])
 
         with (
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.commands.plan_review.plan_review_menu",
                 return_value=approve_result,
             ),
             patch(
@@ -1045,16 +1061,14 @@ class TestTUIScreenResults:
             doc = parse_zing_file(zing_path)
             assert doc.approved is True
 
-    def test_audit_result_processed_by_build_audit(self, tmp_path: Path) -> None:
-        """AuditResult decisions are processed by run_build_audit."""
+    def test_audit_decisions_processed_by_build_audit(self, tmp_path: Path) -> None:
+        """AuditDecision list from audit_triage_menu is processed by run_build_audit."""
         zing_path = _make_zing_file(tmp_path, stage="build", with_plan=True)
 
         # Create the files referenced in the plan
         (tmp_path / "src").mkdir(parents=True, exist_ok=True)
         (tmp_path / "src" / "main.py").write_text("print('hello')")
         (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
-
-        from zing_ai.orchestrator.commands.build_audit import Finding, FindingGroup
 
         mock_groups = [
             AuditGroup(files=["src/main.py"]),
@@ -1066,27 +1080,18 @@ class TestTUIScreenResults:
             "FINDING|Style|low|high|src/utils.py:1|Missing docstring\n"
         )
 
-        audit_decisions = _make_audit_result(
+        audit_decisions = _make_audit_decisions(
             decisions=[
-                {"finding_index": 0, "severity": "high", "action": "fix"},
-                {"finding_index": 1, "severity": "low", "action": "skip"},
+                AuditDecision(finding_index=0, category="Bug", severity="high", title="Missing error handling", action="fix"),
+                AuditDecision(finding_index=1, category="Style", severity="low", title="Missing docstring", action="skip"),
             ]
         )
 
-        # run_with_screen is called twice in build_audit:
-        # Phase 1: ProgressScreen -> ProgressResult
-        # Phase 2: AuditScreen -> AuditResult
-        run_with_screen_calls = [
-            _make_progress_result(),  # Phase 1
-            audit_decisions,          # Phase 2
-        ]
-        call_index = 0
-
-        def _mock_run_with_screen(screen):
-            nonlocal call_index
-            result = run_with_screen_calls[call_index]
-            call_index += 1
-            return result
+        # Phase 1: run_parallel_investigations returns InvestigationResult
+        mock_investigation_result = InvestigationResult(
+            outputs={"review-0": review_output, "review-1": review_output},
+            statuses={"review-0": "success", "review-1": "success"},
+        )
 
         with (
             patch(
@@ -1097,17 +1102,21 @@ class TestTUIScreenResults:
                 },
             ),
             patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
                 return_value=mock_groups,
             ),
-            # Mock _run_review_tui to return review outputs
+            # Phase 1: mock run_parallel_investigations
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(_make_progress_result(), [review_output]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation_result,
             ),
-            # Mock AuditScreen's ZingApp.run_with_screen call
+            # Phase 2: mock audit_triage_menu
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
                 return_value=audit_decisions,
             ),
         ):
@@ -1149,11 +1158,17 @@ class TestBuildAuditIntegration:
             "FINDING|Style|low|high|src/utils.py:1|Missing docstring\n"
         )
 
-        audit_decisions = _make_audit_result(
+        audit_decisions = _make_audit_decisions(
             decisions=[
-                {"finding_index": 0, "severity": "high", "action": "fix"},
-                {"finding_index": 1, "severity": "low", "action": "skip"},
+                AuditDecision(finding_index=0, category="Bug", severity="high", title="Missing error handling", action="fix"),
+                AuditDecision(finding_index=1, category="Style", severity="low", title="Missing docstring", action="skip"),
             ]
+        )
+
+        # Phase 1: run_parallel_investigations returns InvestigationResult
+        mock_investigation_result = InvestigationResult(
+            outputs={"review-0": review_output, "review-1": review_output},
+            statuses={"review-0": "success", "review-1": "success"},
         )
 
         with (
@@ -1165,17 +1180,21 @@ class TestBuildAuditIntegration:
                 },
             ),
             patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
                 "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
                 return_value=mock_groups,
             ),
-            # Mock Phase 1: _run_review_tui
+            # Phase 1: mock run_parallel_investigations
             patch(
-                "zing_ai.orchestrator.commands.build_audit._run_review_tui",
-                return_value=(_make_progress_result(), [review_output]),
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation_result,
             ),
-            # Mock Phase 2: AuditScreen TUI
+            # Phase 2: mock audit_triage_menu
             patch(
-                "zing_ai.orchestrator.tui.app.ZingApp.run_with_screen",
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
                 return_value=audit_decisions,
             ),
         ):
