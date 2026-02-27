@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from zing_ai.orchestrator import project
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -54,16 +56,32 @@ def run_new(
 
     # 3. Invoke Claude interactively with inherited stdio
     #    The user talks to Claude directly in the terminal.
-    subprocess.run(
-        ["claude", "--system-prompt", system_prompt, "Greet the user"],
-        stdin=sys.stdin,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-    )
-    logger.debug("Claude process exited")
+    start_time = time.time()
+    try:
+        result = subprocess.run(
+            ["claude", "--system-prompt", system_prompt, "Greet the user"],
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    except FileNotFoundError as exc:
+        raise PipelineError(
+            stage="new",
+            message="Could not find the 'claude' binary. Is it installed and on your PATH?",
+        ) from exc
+    logger.debug("Claude process exited with code %d", result.returncode)
+
+    if result.returncode != 0:
+        raise PipelineError(
+            stage="new",
+            message=f"Claude exited with code {result.returncode}",
+        )
 
     # 4. Scan .zing/ for the newest .xml file (by mtime)
-    xml_files = sorted(zing_dir.glob("*.xml"), key=lambda p: p.stat().st_mtime)
+    xml_files = sorted(
+        (p for p in zing_dir.glob("*.xml") if p.stat().st_mtime >= start_time),
+        key=lambda p: p.stat().st_mtime,
+    )
     if not xml_files:
         logger.error("No .xml file found in %s after Claude exited", zing_dir)
         print("No valid zing file was created. Please run `zing-ai new` again.")

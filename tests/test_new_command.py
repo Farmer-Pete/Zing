@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from zing_ai.orchestrator.commands.new import run_new
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
+
+_SUCCESSFUL_RESULT = CompletedProcess(args=[], returncode=0)
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +39,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ) as mock_run,
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -42,6 +48,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -68,6 +78,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ) as mock_run,
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -76,6 +87,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -100,6 +115,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ) as mock_run,
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -108,6 +124,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -130,9 +150,10 @@ class TestRunNew:
         # We need to create the xml file *after* .zing/ is created by run_new
         # but before the glob scan. We use a side_effect on subprocess.run
         # to create the file.
-        def create_xml_on_call(*args: object, **kwargs: object) -> None:
+        def create_xml_on_call(*args: object, **kwargs: object) -> CompletedProcess[bytes]:
             zing_dir = tmp_path / ".zing"
             (zing_dir / "new-project.xml").write_text("<zing/>")
+            return _SUCCESSFUL_RESULT
 
         with (
             patch(
@@ -146,6 +167,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -164,8 +189,6 @@ class TestRunNew:
         zing_dir.mkdir()
 
         # Create two xml files; the newer one should be picked
-        import time
-
         older = zing_dir / "old-project.xml"
         older.write_text("<zing/>")
         # Ensure mtime difference
@@ -178,6 +201,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -186,6 +210,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -210,6 +238,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -218,6 +247,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -246,6 +279,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -254,6 +288,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -278,6 +316,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -286,6 +325,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -314,6 +357,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -322,6 +366,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -345,6 +393,7 @@ class TestRunNew:
         with (
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
             ),
             patch(
                 "zing_ai.orchestrator.commands.new.render_prompt",
@@ -353,6 +402,10 @@ class TestRunNew:
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
                 MagicMock(),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
             ),
         ):
             run_new(
@@ -364,3 +417,104 @@ class TestRunNew:
 
         # Marker file should still exist
         assert (zing_dir / "existing.txt").read_text() == "marker"
+
+    def test_nonzero_return_code_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """A nonzero exit code from Claude raises PipelineError."""
+        config = self._make_config()
+        zing_dir = tmp_path / ".zing"
+        zing_dir.mkdir()
+
+        failed_result = CompletedProcess(args=[], returncode=1)
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=failed_result,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
+            ),
+            pytest.raises(PipelineError, match="Claude exited with code 1"),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+    def test_file_not_found_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """FileNotFoundError from missing Claude binary raises PipelineError with helpful message."""
+        config = self._make_config()
+        zing_dir = tmp_path / ".zing"
+        zing_dir.mkdir()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.subprocess.run",
+                side_effect=FileNotFoundError("No such file or directory: 'claude'"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
+            ),
+            pytest.raises(PipelineError, match="Could not find the 'claude' binary"),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+    def test_stale_xml_files_are_ignored(self, tmp_path: Path) -> None:
+        """Only XML files created after the subprocess call are considered."""
+        config = self._make_config()
+        zing_dir = tmp_path / ".zing"
+        zing_dir.mkdir()
+
+        # Create a stale XML file with an old mtime
+        stale_xml = zing_dir / "stale-project.xml"
+        stale_xml.write_text("<zing/>")
+
+        mock_run_plan = MagicMock()
+
+        # Set start_time to a value in the future so the stale file is filtered out
+        future_time = time.time() + 9999
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=_SUCCESSFUL_RESULT,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.render_prompt",
+                return_value="prompt",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_plan",
+                mock_run_plan,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=future_time,
+            ),
+        ):
+            run_new(
+                zing_file=None,
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        # Stale file should be filtered out, so run_plan is NOT called
+        mock_run_plan.assert_not_called()
