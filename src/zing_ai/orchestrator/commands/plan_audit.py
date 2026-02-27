@@ -274,7 +274,7 @@ def run_plan_audit(
     except ValidationError as exc:
         raise PipelineError(
             stage="plan-audit",
-            message=f"Audit update failed after max retries: {exc}",
+            message=f"Plan audit failed: {exc}",
         ) from exc
 
     # Flow into plan review

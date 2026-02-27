@@ -22,9 +22,4 @@ class PipelineError(Exception):
         self.stage = stage
         self.message = message
         super().__init__(f"[{stage}] {message}")
-        logger.warning(
-            "PipelineError in stage %r: %s (cause: %s)",
-            stage,
-            message,
-            self.__cause__,
-        )
+        logger.warning("PipelineError in stage %r: %s", stage, message)

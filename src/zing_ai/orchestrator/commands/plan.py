@@ -366,7 +366,7 @@ def run_plan(
     except ValidationError as exc:
         raise PipelineError(
             stage="plan",
-            message=f"Plan flesh-out failed after max retries: {exc}",
+            message=f"Plan generation failed: {exc}",
         ) from exc
 
     # Flow into plan audit

@@ -16,7 +16,6 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
 from pathlib import Path
 
 import jinja2

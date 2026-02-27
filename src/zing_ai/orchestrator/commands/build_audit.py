@@ -296,6 +296,7 @@ def run_build_audit(
     # --- Phase 1: Investigation via run_parallel_investigations ---
     # Deferred imports to avoid circular dependency (ui.menus imports
     # Finding/FindingGroup from this module).
+    from zing_ai.orchestrator.ui import console
     from zing_ai.orchestrator.ui.menus import audit_triage_menu
     from zing_ai.orchestrator.ui.progress import run_parallel_investigations
     from zing_ai.orchestrator.ui.types import AuditDecision, InvestigationEntry, InvestigationResult
@@ -422,10 +423,6 @@ def run_build_audit(
             lines.append(f"- **Location:** {location}")
             lines.append("")
         path.write_text("\n".join(lines))
-
-    from rich.console import Console
-
-    console = Console()
 
     if fix_decisions:
         fix_path = zing_dir / f"build-audit-fixes-{zing_file_stem}.md"
