@@ -7,12 +7,15 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from zing_ai.orchestrator.commands.build import (
     MCP_MANDATE,
     _update_step_done,
     run_build,
 )
 from zing_ai.orchestrator.config import CallType, ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import (
     Plan,
     Stage,
@@ -1433,6 +1436,115 @@ class TestRunBuildProgressInteraction:
             )
 
         assert executed_steps == [(0, 0), (0, 1)]
+
+
+# ---------------------------------------------------------------------------
+# Failed step handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunBuildFailedStep:
+    """Tests that run_build handles failed steps correctly."""
+
+    def test_failed_step_stop_here_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """When a step fails and user selects 'Stop here', PipelineError is raised."""
+        plan = Plan(
+            stages=[
+                Stage(
+                    label="S1",
+                    steps=[
+                        Step(label="Step A", instructions="Do A.", files=[], done=False),
+                    ],
+                ),
+            ]
+        )
+        _make_zing_file_with_plan(tmp_path, plan=plan)
+        config = ZingConfig()
+        mock_audit = MagicMock()
+
+        def failing_run_with_progress(label, stages, execute_step):
+            return BuildProgress(completed_steps=[], failed_step=(0, 0))
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=failing_run_with_progress,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.numbered_menu",
+                return_value=1,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+                mock_audit,
+            ),
+        ):
+            with pytest.raises(PipelineError) as exc_info:
+                run_build(
+                    zing_file="test-project.xml",
+                    skip_permissions=True,
+                    config=config,
+                    project_root=tmp_path,
+                )
+
+            assert exc_info.value.stage == "build"
+
+        mock_audit.assert_not_called()
+
+    def test_failed_step_continue_calls_audit(self, tmp_path: Path) -> None:
+        """When a step fails and user selects 'Continue to audit', audit is called."""
+        plan = Plan(
+            stages=[
+                Stage(
+                    label="S1",
+                    steps=[
+                        Step(label="Step A", instructions="Do A.", files=[], done=False),
+                    ],
+                ),
+            ]
+        )
+        _make_zing_file_with_plan(tmp_path, plan=plan)
+        config = ZingConfig()
+        mock_audit = MagicMock()
+
+        def failing_run_with_progress(label, stages, execute_step):
+            return BuildProgress(completed_steps=[], failed_step=(0, 0))
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.run_with_progress",
+                side_effect=failing_run_with_progress,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build.numbered_menu",
+                return_value=0,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.run_build_audit",
+                mock_audit,
+            ),
+        ):
+            run_build(
+                zing_file="test-project.xml",
+                skip_permissions=True,
+                config=config,
+                project_root=tmp_path,
+            )
+
+        mock_audit.assert_called_once_with(
+            zing_file="test-project.xml",
+            skip_permissions=True,
+            config=config,
+            project_root=tmp_path,
+        )
 
 
 # ---------------------------------------------------------------------------

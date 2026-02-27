@@ -15,8 +15,11 @@ from pathlib import Path
 from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import ZingDocument
+from zing_ai.orchestrator.ui.menus import numbered_menu
 from zing_ai.orchestrator.ui.progress import run_with_progress
+from zing_ai.orchestrator.ui.types import MenuOption
 from zing_ai.orchestrator.xml_parser import parse_zing_file, write_zing_file
 from zing_ai.prompts import render_prompt
 
@@ -171,7 +174,23 @@ def run_build(
         return "".join(output_lines)
 
     # Run all steps with Rich progress display.
-    run_with_progress("Building", plan.stages, _execute_step)
+    progress = run_with_progress("Building", plan.stages, _execute_step)
+
+    # Handle failed steps
+    if progress.failed_step is not None:
+        stage_idx, step_idx = progress.failed_step
+        stage_label = plan.stages[stage_idx].label
+        step_label = plan.stages[stage_idx].steps[step_idx].label
+        choice = numbered_menu(
+            title=f"Build step {stage_label}/{step_label} failed. What would you like to do?",
+            options=[
+                MenuOption(label="Continue to audit", description="Proceed to build-audit despite the failure"),
+                MenuOption(label="Stop here", description="Stop the pipeline and raise an error"),
+            ],
+        )
+        if choice == 1:
+            raise PipelineError(stage="build", message="Build step failed")
+        logger.warning("Continuing to audit despite failed build step %s/%s", stage_label, step_label)
 
     logger.info("Build complete. Starting build audit.")
 
