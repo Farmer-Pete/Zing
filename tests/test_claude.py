@@ -918,6 +918,8 @@ class TestInvokeClaudeFull:
         mock_proc.returncode = 0
         mock_proc.pid = 12345
         mock_proc.wait.return_value = 0
+        # poll() returns None to indicate process is still running
+        mock_proc.poll.return_value = None
 
         stderr_mock = MagicMock()
         stderr_mock.read.return_value = b""
@@ -971,6 +973,77 @@ class TestInvokeClaudeFull:
 
         _, kwargs = mock_popen.call_args
         assert kwargs.get("start_new_session") is True
+
+    def test_on_output_exception_cleans_up_subprocess_and_temp_file(
+        self, tmp_path: Path
+    ) -> None:
+        """When on_output raises, subprocess is terminated and temp file is cleaned up."""
+        zing_dir = tmp_path / ".zing"
+        zing_dir.mkdir()
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.pid = 12345
+        mock_proc.wait.return_value = 0
+        # poll() returns None to indicate process is still running
+        mock_proc.poll.return_value = None
+
+        stderr_mock = MagicMock()
+        stderr_mock.read.return_value = b""
+        stderr_mock.__iter__ = lambda self: iter([])
+        mock_proc.stderr = stderr_mock
+
+        mock_proc.stdout = iter([
+            _jsonl_line(_make_init_event()),
+            _jsonl_line(_make_text_event("line 1\n")),
+        ])
+
+        written_temp_path: Path | None = None
+        original_build_command = _build_command
+
+        def mock_build_command(prompt, **kw):
+            nonlocal written_temp_path
+            output_file = kw.get("output_file")
+            if output_file:
+                written_temp_path = Path(output_file)
+                written_temp_path.write_text("structured result")
+            return original_build_command(prompt, **kw)
+
+        def exploding_callback(text: str) -> None:
+            raise RuntimeError("callback error")
+
+        with (
+            patch(
+                "zing_ai.orchestrator.claude.subprocess.Popen"
+            ) as mock_popen,
+            patch(
+                "zing_ai.orchestrator.claude._build_command",
+                side_effect=mock_build_command,
+            ),
+            patch(
+                "zing_ai.orchestrator.claude.os.getpgid", return_value=12345
+            ),
+            patch(
+                "zing_ai.orchestrator.claude.os.killpg"
+            ) as mock_killpg,
+        ):
+            mock_popen.return_value = mock_proc
+
+            with pytest.raises(RuntimeError, match="callback error"):
+                invoke_claude_full(
+                    "test",
+                    on_output=exploding_callback,
+                    zing_dir=zing_dir,
+                    call_type=CallType.BUILD,
+                    config=ZingConfig(),
+                )
+
+        # Subprocess should have been terminated via SIGTERM
+        mock_killpg.assert_any_call(12345, signal.SIGTERM)
+
+        # Temp file should be cleaned up
+        assert written_temp_path is not None
+        assert not written_temp_path.exists()
 
 
 # ---------------------------------------------------------------------------

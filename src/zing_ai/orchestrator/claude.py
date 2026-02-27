@@ -287,6 +287,7 @@ def invoke_claude_full(
     except ValueError:
         pass  # Not in main thread -- skip SIGINT handling
 
+    exc_occurred = False
     try:
         assert proc.stdout is not None  # guaranteed by PIPE
 
@@ -336,22 +337,30 @@ def invoke_claude_full(
         stderr_thread.join(timeout=5)
     except KeyboardInterrupt:
         interrupted = True
-        _kill_process_group(proc, signal.SIGTERM)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(proc, signal.SIGKILL)
-            proc.wait()
+        exc_occurred = True
+    except BaseException:
+        exc_occurred = True
+        raise
     finally:
+        # Ensure subprocess is terminated on any exception
+        if proc.poll() is None:
+            _kill_process_group(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc, signal.SIGKILL)
+                proc.wait()
+
         # Restore original SIGINT handler
         if original_handler is not None:
             with contextlib.suppress(ValueError):
                 signal.signal(signal.SIGINT, original_handler)
 
-    if interrupted:
-        # Clean up temp file on interrupt
-        if temp_path is not None:
+        # Clean up temp file on any exception
+        if exc_occurred and temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+    if interrupted:
         raise KeyboardInterrupt
 
     # Collect the structured output
