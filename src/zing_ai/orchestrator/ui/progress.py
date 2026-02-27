@@ -177,28 +177,31 @@ def run_parallel_investigations(
     """
     outputs: dict[str, str] = {}
     statuses: dict[str, str] = {e["id"]: "pending" for e in entries}
-    print_lock = threading.Lock()
+    _lock = threading.Lock()
 
     def _worker(entry: InvestigationEntry) -> tuple[str, str]:
         eid = entry["id"]
-        statuses[eid] = "running"
+        with _lock:
+            statuses[eid] = "running"
         try:
             result = run_fn(eid)
             # Print interleaved output under the lock.
-            with print_lock:
+            with _lock:
                 for line in result.splitlines():
                     console.print(f"[dim][{eid}][/dim] {line}")
             return eid, result
         except Exception as exc:
-            with print_lock:
+            with _lock:
                 console.print(f"[dim][{eid}][/dim] [red]Error: {exc}[/red]")
             raise
 
     futures: dict[Future[tuple[str, str]], InvestigationEntry] = {}
 
     try:
+        with _lock:
+            snap = dict(statuses)
         with Live(
-            _build_investigation_table(entries, statuses),
+            _build_investigation_table(entries, snap),
             console=console,
             refresh_per_second=8,
         ) as live:
@@ -210,7 +213,9 @@ def run_parallel_investigations(
                 # Poll futures until all are done.
                 remaining = set(futures.keys())
                 while remaining:
-                    live.update(_build_investigation_table(entries, statuses))
+                    with _lock:
+                        snap = dict(statuses)
+                    live.update(_build_investigation_table(entries, snap))
                     done_this_round: set[Future[tuple[str, str]]] = set()
                     for future in remaining:
                         if future.done():
@@ -219,11 +224,13 @@ def run_parallel_investigations(
                             eid = entry["id"]
                             try:
                                 eid_result, output = future.result()
-                                outputs[eid] = output
-                                statuses[eid] = "success"
+                                with _lock:
+                                    outputs[eid] = output
+                                    statuses[eid] = "success"
                             except Exception as exc:
-                                outputs[eid] = str(exc)
-                                statuses[eid] = "failed"
+                                with _lock:
+                                    outputs[eid] = str(exc)
+                                    statuses[eid] = "failed"
                     remaining -= done_this_round
 
                     if remaining:
@@ -232,18 +239,21 @@ def run_parallel_investigations(
                         import time
                         time.sleep(0.05)
 
-                live.update(_build_investigation_table(entries, statuses))
+                with _lock:
+                    snap = dict(statuses)
+                live.update(_build_investigation_table(entries, snap))
 
     except KeyboardInterrupt:
         # Cancel any pending futures.
         for future in futures:
             future.cancel()
         # Mark any still-running entries.
-        for entry in entries:
-            eid = entry["id"]
-            if statuses[eid] == "running":
-                statuses[eid] = "failed"
-            if eid not in outputs:
-                outputs[eid] = ""
+        with _lock:
+            for entry in entries:
+                eid = entry["id"]
+                if statuses[eid] == "running":
+                    statuses[eid] = "failed"
+                if eid not in outputs:
+                    outputs[eid] = ""
 
     return InvestigationResult(outputs=outputs, statuses=statuses)

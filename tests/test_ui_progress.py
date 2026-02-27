@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from unittest.mock import MagicMock, patch
 
 from rich.console import Console
@@ -179,3 +180,21 @@ class TestRunParallelInvestigations:
 
         assert result.outputs == {}
         assert result.statuses == {}
+
+    @patch("zing_ai.orchestrator.ui.progress.console", new_callable=_fake_console)
+    def test_lock_acquired_during_worker(self, mock_console: Console) -> None:
+        """The internal _lock is acquired during worker execution."""
+        real_lock = threading.Lock()
+        mock_lock = MagicMock(wraps=real_lock)
+
+        entries: list[InvestigationEntry] = [
+            InvestigationEntry(id="l1", label="Lock test"),
+        ]
+
+        with patch("zing_ai.orchestrator.ui.progress.threading") as mock_threading:
+            mock_threading.Lock.return_value = mock_lock
+            result = run_parallel_investigations(entries, lambda eid: "ok")
+
+        assert result.statuses["l1"] == "success"
+        # The lock is used via `with _lock:` which calls __enter__/__exit__.
+        mock_lock.__enter__.assert_called()
