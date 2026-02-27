@@ -36,7 +36,7 @@ from zing_ai.orchestrator.commands.plan import (
 )
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
-from zing_ai.orchestrator.models import Interaction, ZingDocument
+from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
 from zing_ai.orchestrator.ui.progress import run_parallel_investigations
 from zing_ai.orchestrator.ui.types import InvestigationEntry, InvestigationResult
 from zing_ai.orchestrator.xml_parser import (
@@ -71,7 +71,7 @@ def _invoke_update_with_session(
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
     zing_dir: Path | None = None,
-) -> tuple[object, str]:
+) -> tuple[Plan, str]:
     """Invoke Claude for the document-update phase and return ``(plan, session_id)``.
 
     Unlike :func:`invoke_claude_validated`, this helper also captures and
@@ -156,7 +156,7 @@ def _invoke_reaudit_with_session(
     on_output: Callable[[str], None] | None = None,
     max_retries: int = 3,
     zing_dir: Path | None = None,
-) -> tuple[object, Interaction | None, str]:
+) -> tuple[Plan, Interaction | None, str]:
     """Invoke Claude for the re-audit phase (session resumption).
 
     The response may contain updated ``<zing:steps>`` and optionally new
@@ -218,8 +218,8 @@ def _invoke_reaudit_with_session(
 
 
 def run_plan_audit(
-    zing_file: str,
     *,
+    zing_file: str | None,
     skip_permissions: bool,
     config: ZingConfig,
     project_root: Path,

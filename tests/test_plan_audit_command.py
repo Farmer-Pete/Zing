@@ -398,7 +398,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -471,7 +471,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -514,7 +514,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -555,7 +555,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -596,7 +596,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -637,7 +637,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -688,7 +688,7 @@ class TestRunPlanAuditFirstRun:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -734,7 +734,7 @@ class TestRunPlanAuditReaudit:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -780,7 +780,7 @@ class TestRunPlanAuditReaudit:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -819,7 +819,7 @@ class TestRunPlanAuditReaudit:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -853,7 +853,7 @@ class TestRunPlanAuditReaudit:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -886,7 +886,7 @@ class TestRunPlanAuditReaudit:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -942,7 +942,7 @@ class TestRunPlanAuditCallsReview:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=False,
                 config=config,
                 project_root=tmp_path,
@@ -973,7 +973,7 @@ class TestRunPlanAuditCallsReview:
             ),
         ):
             run_plan_audit(
-                "test-project.xml",
+                zing_file="test-project.xml",
                 skip_permissions=True,
                 config=config,
                 project_root=tmp_path,
