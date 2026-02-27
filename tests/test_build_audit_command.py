@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from zing_ai.orchestrator.commands.build_audit import (
     Finding,
     FindingGroup,
@@ -21,8 +23,9 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.ui.types import AuditDecision, InvestigationResult
-from zing_ai.orchestrator.xml_parser import write_zing_file
+from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1098,3 +1101,48 @@ class TestRunBuildAuditDistillation:
         assert len(distill_calls) == 1
         assert len(distill_calls[0]) == 1
         assert distill_calls[0][0].name == "exists.py"
+
+
+# ---------------------------------------------------------------------------
+# run_build_audit PipelineError tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunBuildAuditPipelineError:
+    """Tests that run_build_audit raises PipelineError on failure paths."""
+
+    def test_validation_error_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """ValidationError from invoke_claude_validated should be converted to PipelineError."""
+        _make_zing_file_with_plan(tmp_path)
+        config = ZingConfig()
+
+        for f in ["src/auth.py", "src/models.py", "src/api.py", "tests/test_auth.py"]:
+            fp = tmp_path / f
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(f"# {f}")
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                side_effect=ValidationError("invalid audit grouping response"),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            with pytest.raises(PipelineError, match="build-audit") as exc_info:
+                run_build_audit(
+                    zing_file="test-project.xml",
+                    skip_permissions=False,
+                    config=config,
+                    project_root=tmp_path,
+                )
+
+            assert exc_info.value.stage == "build-audit"
+            assert exc_info.value.__cause__ is not None
+            assert isinstance(exc_info.value.__cause__, ValidationError)

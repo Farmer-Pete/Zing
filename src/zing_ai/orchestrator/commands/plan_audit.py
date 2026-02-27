@@ -36,6 +36,7 @@ from zing_ai.orchestrator.commands.plan import (
 )
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
 from zing_ai.orchestrator.ui.progress import run_parallel_investigations
 from zing_ai.orchestrator.ui.types import InvestigationEntry, InvestigationResult
@@ -245,24 +246,36 @@ def run_plan_audit(
         ``deleted``).
     """
     # Resolve the zing file
-    zing_path = project.resolve_zing_file(zing_file, project_root)
+    try:
+        zing_path = project.resolve_zing_file(zing_file, project_root)
+    except FileNotFoundError as exc:
+        raise PipelineError(
+            stage="plan-audit",
+            message=f"Zing file not found: {exc}",
+        ) from exc
     logger.info("Auditing with zing file: %s", zing_path)
 
-    if reaudit_changes is not None:
-        _run_reaudit(
-            zing_path=zing_path,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-            reaudit_changes=reaudit_changes,
-        )
-    else:
-        _run_first_audit(
-            zing_path=zing_path,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    try:
+        if reaudit_changes is not None:
+            _run_reaudit(
+                zing_path=zing_path,
+                skip_permissions=skip_permissions,
+                config=config,
+                project_root=project_root,
+                reaudit_changes=reaudit_changes,
+            )
+        else:
+            _run_first_audit(
+                zing_path=zing_path,
+                skip_permissions=skip_permissions,
+                config=config,
+                project_root=project_root,
+            )
+    except ValidationError as exc:
+        raise PipelineError(
+            stage="plan-audit",
+            message=f"Audit update failed after max retries: {exc}",
+        ) from exc
 
     # Flow into plan review
     from zing_ai.orchestrator.commands.plan_review import run_plan_review

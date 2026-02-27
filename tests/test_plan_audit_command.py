@@ -23,6 +23,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.ui.types import InvestigationResult
 from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 
@@ -990,3 +991,32 @@ class TestRunPlanAuditCallsReview:
             config=config,
             project_root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# run_plan_audit PipelineError tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlanAuditPipelineError:
+    """Tests that run_plan_audit raises PipelineError on failure paths."""
+
+    def test_file_not_found_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """FileNotFoundError from resolve_zing_file should be converted to PipelineError."""
+        config = ZingConfig()
+
+        with patch(
+            "zing_ai.orchestrator.commands.plan_audit.project.resolve_zing_file",
+            side_effect=FileNotFoundError("test-project.xml not found"),
+        ):
+            with pytest.raises(PipelineError, match="plan-audit") as exc_info:
+                run_plan_audit(
+                    zing_file="test-project.xml",
+                    skip_permissions=False,
+                    config=config,
+                    project_root=tmp_path,
+                )
+
+            assert exc_info.value.stage == "plan-audit"
+            assert exc_info.value.__cause__ is not None
+            assert isinstance(exc_info.value.__cause__, FileNotFoundError)

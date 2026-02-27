@@ -32,6 +32,7 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.claude import print_line
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import Interaction, Plan, ZingDocument
 from zing_ai.orchestrator.ui.progress import run_parallel_investigations
 from zing_ai.orchestrator.ui.types import InvestigationEntry, InvestigationResult
@@ -346,21 +347,27 @@ def run_plan(
     zing_path = project.resolve_zing_file(zing_file, project_root)
     logger.info("Planning with zing file: %s", zing_path)
 
-    if replan_changes is not None:
-        _run_replan(
-            zing_path=zing_path,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-            replan_changes=replan_changes,
-        )
-    else:
-        _run_first_plan(
-            zing_path=zing_path,
-            skip_permissions=skip_permissions,
-            config=config,
-            project_root=project_root,
-        )
+    try:
+        if replan_changes is not None:
+            _run_replan(
+                zing_path=zing_path,
+                skip_permissions=skip_permissions,
+                config=config,
+                project_root=project_root,
+                replan_changes=replan_changes,
+            )
+        else:
+            _run_first_plan(
+                zing_path=zing_path,
+                skip_permissions=skip_permissions,
+                config=config,
+                project_root=project_root,
+            )
+    except ValidationError as exc:
+        raise PipelineError(
+            stage="plan",
+            message=f"Plan flesh-out failed after max retries: {exc}",
+        ) from exc
 
     # Flow into plan audit
     from zing_ai.orchestrator.commands.plan_audit import run_plan_audit

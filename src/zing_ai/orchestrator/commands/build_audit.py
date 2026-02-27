@@ -29,8 +29,13 @@ from zing_ai.orchestrator import claude, project
 from zing_ai.orchestrator.claude import print_line
 from zing_ai.orchestrator.config import CallType, ZingConfig, resolve_aid_path
 from zing_ai.orchestrator.distiller import distill_files
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import AuditGroup
-from zing_ai.orchestrator.xml_parser import parse_audit_response, parse_zing_file
+from zing_ai.orchestrator.xml_parser import (
+    ValidationError,
+    parse_audit_response,
+    parse_zing_file,
+)
 from zing_ai.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -267,16 +272,22 @@ def run_build_audit(
         distilled_files=distilled_files,
     )
 
-    audit_groups: list[AuditGroup] = claude.invoke_claude_validated(
-        group_prompt,
-        validator=parse_audit_response,
-        retry_prompt_template=_RETRY_TEMPLATE,
-        on_output=print_line,
-        zing_dir=zing_dir,
-        call_type=CallType.AUDIT,
-        config=config,
-        skip_permissions=skip_permissions,
-    )
+    try:
+        audit_groups: list[AuditGroup] = claude.invoke_claude_validated(
+            group_prompt,
+            validator=parse_audit_response,
+            retry_prompt_template=_RETRY_TEMPLATE,
+            on_output=print_line,
+            zing_dir=zing_dir,
+            call_type=CallType.AUDIT,
+            config=config,
+            skip_permissions=skip_permissions,
+        )
+    except ValidationError as exc:
+        raise PipelineError(
+            stage="build-audit",
+            message=f"Audit grouping failed after max retries: {exc}",
+        ) from exc
 
     logger.info("Claude grouped files into %d audit groups", len(audit_groups))
     for i, group in enumerate(audit_groups):

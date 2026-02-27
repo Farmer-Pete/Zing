@@ -10,6 +10,7 @@ import pytest
 
 from zing_ai.orchestrator.commands.plan_review import run_plan_review
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import (
     Choice,
     ChoiceSet,
@@ -492,3 +493,32 @@ class TestRunPlanReviewApproveDoesNotReplan:
 
         mock_build.assert_called_once()
         mock_replan.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_plan_review PipelineError tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlanReviewPipelineError:
+    """Tests that run_plan_review raises PipelineError on failure paths."""
+
+    def test_file_not_found_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """FileNotFoundError from resolve_zing_file should be converted to PipelineError."""
+        config = ZingConfig()
+
+        with patch(
+            "zing_ai.orchestrator.commands.plan_review.project.resolve_zing_file",
+            side_effect=FileNotFoundError("test-project.xml not found"),
+        ):
+            with pytest.raises(PipelineError, match="plan-review") as exc_info:
+                run_plan_review(
+                    zing_file="test-project.xml",
+                    skip_permissions=False,
+                    config=config,
+                    project_root=tmp_path,
+                )
+
+            assert exc_info.value.stage == "plan-review"
+            assert exc_info.value.__cause__ is not None
+            assert isinstance(exc_info.value.__cause__, FileNotFoundError)

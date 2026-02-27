@@ -13,6 +13,7 @@ from typing import Literal
 
 from zing_ai.orchestrator import project
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.models import ChoiceSet
 from zing_ai.orchestrator.ui.menus import plan_review_menu
 from zing_ai.orchestrator.ui.types import ReviewChange
@@ -60,7 +61,13 @@ def run_plan_review(
         Path to the project root directory.
     """
     # Resolve the zing file
-    zing_path = project.resolve_zing_file(zing_file, project_root)
+    try:
+        zing_path = project.resolve_zing_file(zing_file, project_root)
+    except FileNotFoundError as exc:
+        raise PipelineError(
+            stage="plan-review",
+            message=f"Zing file not found: {exc}",
+        ) from exc
     logger.info("Reviewing plan: %s", zing_path)
 
     # Load the document and extract choices

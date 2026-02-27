@@ -25,6 +25,7 @@ from zing_ai.orchestrator.models import (
     Step,
     ZingDocument,
 )
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.ui.types import InvestigationResult
 from zing_ai.orchestrator.xml_parser import ValidationError, write_zing_file
 
@@ -970,3 +971,52 @@ class TestRunPlanCallsAudit:
             config=config,
             project_root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# run_plan PipelineError tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlanPipelineError:
+    """Tests that run_plan raises PipelineError on ValidationError."""
+
+    def test_validation_error_raises_pipeline_error(self, tmp_path: Path) -> None:
+        """ValidationError from flesh-out should be converted to PipelineError."""
+        _make_zing_file(tmp_path)
+        config = ZingConfig()
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.plan.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.claude.invoke_claude_full",
+                side_effect=[
+                    (IDENTIFY_RESPONSE, "sess-001"),
+                    ("always invalid", "sess-002"),
+                    ("always invalid", "sess-003"),
+                    ("always invalid", "sess-004"),
+                ],
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.run_parallel_investigations",
+                return_value=_make_investigation_result([INVESTIGATE_RESPONSE] * 3),
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.plan.distill_files",
+                return_value={},
+            ),
+        ):
+            with pytest.raises(PipelineError, match="plan") as exc_info:
+                run_plan(
+                    zing_file="test-project.xml",
+                    skip_permissions=False,
+                    config=config,
+                    project_root=tmp_path,
+                )
+
+            assert exc_info.value.stage == "plan"
+            assert exc_info.value.__cause__ is not None
+            assert isinstance(exc_info.value.__cause__, ValidationError)
