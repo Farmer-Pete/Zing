@@ -341,10 +341,11 @@ class TestInvokeClaude:
             config = ZingConfig()
 
             lines: list[str] = []
-            for line in invoke_claude(
+            with invoke_claude(
                 "hello", call_type=CallType.BUILD, config=config
-            ):
-                lines.append(line)
+            ) as line_iter:
+                for line in line_iter:
+                    lines.append(line)
 
         assert lines == ["line 1\n", "line 2\n"]
 
@@ -363,10 +364,11 @@ class TestInvokeClaude:
             config = ZingConfig()
 
             lines: list[str] = []
-            for line in invoke_claude(
+            with invoke_claude(
                 "hello", call_type=CallType.BUILD, config=config
-            ):
-                lines.append(line)
+            ) as line_iter:
+                for line in line_iter:
+                    lines.append(line)
 
         assert lines == ["Tool: Read\n"]
 
@@ -387,10 +389,11 @@ class TestInvokeClaude:
             config = ZingConfig()
 
             lines: list[str] = []
-            for line in invoke_claude(
+            with invoke_claude(
                 "hello", call_type=CallType.BUILD, config=config
-            ):
-                lines.append(line)
+            ) as line_iter:
+                for line in line_iter:
+                    lines.append(line)
 
         assert lines == ["visible"]
 
@@ -403,10 +406,11 @@ class TestInvokeClaude:
             mock_popen.return_value = mock_proc
             config = ZingConfig()
 
-            for _ in invoke_claude(
+            with invoke_claude(
                 "test prompt", call_type=CallType.INVESTIGATE, config=config
-            ):
-                pass
+            ) as line_iter:
+                for _ in line_iter:
+                    pass
 
             cmd = mock_popen.call_args[0][0]
 
@@ -427,13 +431,14 @@ class TestInvokeClaude:
             mock_popen.return_value = mock_proc
             config = ZingConfig()
 
-            for _ in invoke_claude(
+            with invoke_claude(
                 "test",
                 call_type=CallType.BUILD,
                 config=config,
                 skip_permissions=True,
-            ):
-                pass
+            ) as line_iter:
+                for _ in line_iter:
+                    pass
 
             cmd = mock_popen.call_args[0][0]
 
@@ -449,13 +454,14 @@ class TestInvokeClaude:
             mock_popen.return_value = mock_proc
             config = ZingConfig()
 
-            for _ in invoke_claude(
+            with invoke_claude(
                 "continue",
                 call_type=CallType.BUILD,
                 config=config,
                 resume_session="sess-xyz",
-            ):
-                pass
+            ) as line_iter:
+                for _ in line_iter:
+                    pass
 
             cmd = mock_popen.call_args[0][0]
 
@@ -473,13 +479,106 @@ class TestInvokeClaude:
             mock_popen.return_value = mock_proc
             config = ZingConfig()
 
-            for _ in invoke_claude(
+            with invoke_claude(
                 "test", call_type=CallType.BUILD, config=config
-            ):
-                pass
+            ) as line_iter:
+                for _ in line_iter:
+                    pass
 
         _, kwargs = mock_popen.call_args
         assert kwargs.get("start_new_session") is True
+
+    def test_context_manager_normal_completion(self) -> None:
+        """Normal completion yields all lines and cleans up the subprocess."""
+        mock_proc = _make_mock_popen(
+            stdout_lines=[
+                _jsonl_line(_make_text_event("a\n")),
+                _jsonl_line(_make_text_event("b\n")),
+                _jsonl_line(_make_text_event("c\n")),
+            ],
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen, patch(
+            "zing_ai.orchestrator.claude._kill_process_group"
+        ) as mock_kill:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
+
+            collected: list[str] = []
+            with invoke_claude(
+                "hello", call_type=CallType.BUILD, config=config
+            ) as line_iter:
+                for line in line_iter:
+                    collected.append(line)
+
+        assert collected == ["a\n", "b\n", "c\n"]
+        # Subprocess cleanup must happen even on normal exit
+        mock_kill.assert_any_call(mock_proc, signal.SIGTERM)
+        mock_proc.wait.assert_called()
+
+    def test_context_manager_early_break_kills_subprocess(self) -> None:
+        """Breaking out of the with block kills the subprocess."""
+        mock_proc = _make_mock_popen(
+            stdout_lines=[
+                _jsonl_line(_make_text_event("first\n")),
+                _jsonl_line(_make_text_event("second\n")),
+                _jsonl_line(_make_text_event("third\n")),
+            ],
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen, patch(
+            "zing_ai.orchestrator.claude._kill_process_group"
+        ) as mock_kill:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
+
+            collected: list[str] = []
+            with invoke_claude(
+                "hello", call_type=CallType.BUILD, config=config
+            ) as line_iter:
+                for line in line_iter:
+                    collected.append(line)
+                    break  # exit early after first line
+
+        # Only consumed the first line
+        assert collected == ["first\n"]
+        # Subprocess must still be killed
+        mock_kill.assert_any_call(mock_proc, signal.SIGTERM)
+        mock_proc.wait.assert_called()
+
+    def test_context_manager_exception_kills_subprocess(self) -> None:
+        """An exception inside the with block kills the subprocess."""
+        mock_proc = _make_mock_popen(
+            stdout_lines=[
+                _jsonl_line(_make_text_event("line\n")),
+            ],
+            stderr=b"",
+        )
+
+        with patch(
+            "zing_ai.orchestrator.claude.subprocess.Popen"
+        ) as mock_popen, patch(
+            "zing_ai.orchestrator.claude._kill_process_group"
+        ) as mock_kill:
+            mock_popen.return_value = mock_proc
+            config = ZingConfig()
+
+            with pytest.raises(RuntimeError, match="boom"):
+                with invoke_claude(
+                    "hello", call_type=CallType.BUILD, config=config
+                ) as line_iter:
+                    for line in line_iter:
+                        raise RuntimeError("boom")
+
+        # Subprocess must be killed even when an exception occurs
+        mock_kill.assert_any_call(mock_proc, signal.SIGTERM)
+        mock_proc.wait.assert_called()
 
 
 # ---------------------------------------------------------------------------

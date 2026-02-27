@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -143,11 +144,10 @@ def _make_zing_file_no_plan(tmp_path: Path) -> Path:
     return zing_path
 
 
+@contextlib.contextmanager
 def _mock_invoke_claude_gen(prompt, **kwargs):
-    """Mock invoke_claude that yields a few lines."""
-    yield "Line 1\n"
-    yield "Line 2\n"
-    yield "Done.\n"
+    """Mock invoke_claude context manager that yields a line iterator."""
+    yield iter(["Line 1\n", "Line 2\n", "Done.\n"])
 
 
 def _mock_run_with_progress(label, stages, execute_step):
@@ -305,9 +305,10 @@ class TestRunBuildFullPipeline:
 
         invoke_calls: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_calls.append({"prompt": prompt, **kwargs})
-            yield "Output line\n"
+            yield iter(["Output line\n"])
 
         with (
             patch(
@@ -356,8 +357,9 @@ class TestRunBuildFullPipeline:
         zing_path = _make_zing_file_with_plan(tmp_path, stage="plan")
         config = ZingConfig()
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -412,9 +414,10 @@ class TestRunBuildSkipsCompletedSteps:
 
         invoke_calls: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_calls.append({"prompt": prompt, **kwargs})
-            yield "Output\n"
+            yield iter(["Output\n"])
 
         with (
             patch(
@@ -457,9 +460,10 @@ class TestRunBuildSkipsCompletedSteps:
 
         invoke_calls: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_calls.append({"prompt": prompt, **kwargs})
-            yield "Output\n"
+            yield iter(["Output\n"])
 
         with (
             patch(
@@ -532,8 +536,9 @@ class TestRunBuildDistillation:
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -599,8 +604,9 @@ class TestRunBuildDistillation:
             distill_calls.append(file_paths)
             return {fp: f"distilled:{fp.name}" for fp in file_paths}
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -657,8 +663,9 @@ class TestRunBuildDistillation:
             distill_calls.append(file_paths)
             return {}
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -718,9 +725,10 @@ class TestRunBuildClaudeInvocation:
 
         invoke_kwargs_list: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_kwargs_list.append(kwargs)
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -771,9 +779,10 @@ class TestRunBuildClaudeInvocation:
 
         invoke_kwargs_list: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_kwargs_list.append(kwargs)
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -828,9 +837,10 @@ class TestRunBuildClaudeInvocation:
 
         captured_prompts: list[str] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             captured_prompts.append(prompt)
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -882,9 +892,10 @@ class TestRunBuildClaudeInvocation:
 
         captured_prompts: list[str] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             captured_prompts.append(prompt)
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -941,9 +952,10 @@ class TestRunBuildClaudeInvocation:
 
         captured_prompts: list[str] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             captured_prompts.append(prompt)
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -1001,8 +1013,9 @@ class TestRunBuildDocumentUpdates:
         zing_path = _make_zing_file_with_plan(tmp_path, plan=plan)
         config = ZingConfig()
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -1055,8 +1068,9 @@ class TestRunBuildDocumentUpdates:
 
         write_call_count = 0
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         original_write = write_zing_file
 
@@ -1117,9 +1131,10 @@ class TestRunBuildNoPlan:
 
         invoke_calls: list[dict] = []
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
             invoke_calls.append({})
-            yield "done\n"
+            yield iter(["done\n"])
 
         mock_progress = MagicMock(
             side_effect=AssertionError("run_with_progress should not be called"),
@@ -1180,8 +1195,9 @@ class TestRunBuildCallsAudit:
         config = ZingConfig()
         mock_audit = MagicMock()
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -1254,8 +1270,9 @@ class TestRunBuildProgressInteraction:
                     completed.append((stage_idx, step_idx))
             return BuildProgress(completed_steps=completed, failed_step=None)
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(
@@ -1319,9 +1336,9 @@ class TestRunBuildProgressInteraction:
                     completed.append((stage_idx, step_idx))
             return BuildProgress(completed_steps=completed, failed_step=None)
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "line 1\n"
-            yield "line 2\n"
+            yield iter(["line 1\n", "line 2\n"])
 
         with (
             patch(
@@ -1382,8 +1399,9 @@ class TestRunBuildProgressInteraction:
                     completed.append((stage_idx, step_idx))
             return BuildProgress(completed_steps=completed, failed_step=None)
 
+        @contextlib.contextmanager
         def mock_invoke(prompt, **kwargs):
-            yield "done\n"
+            yield iter(["done\n"])
 
         with (
             patch(

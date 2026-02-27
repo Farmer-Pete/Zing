@@ -16,6 +16,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 import jinja2
@@ -86,6 +87,7 @@ def _build_command(
     return cmd
 
 
+@contextlib.contextmanager
 def invoke_claude(
     prompt: str,
     *,
@@ -94,11 +96,17 @@ def invoke_claude(
     skip_permissions: bool = False,
     system_prompt: str | None = None,
     resume_session: str | None = None,
-) -> Iterator[str]:
-    """Invoke ``claude --print`` as a subprocess and yield formatted output.
+) -> Iterator[Iterator[str]]:
+    """Invoke ``claude --print`` as a subprocess, yielding a line iterator.
 
-    Parses JSONL events from stdout and yields human-readable formatted
-    strings for display.
+    Use as a context manager to ensure the subprocess is always cleaned up::
+
+        with invoke_claude("hello", call_type=..., config=...) as lines:
+            for line in lines:
+                print(line)
+
+    On exit (normal completion, ``break``, or exception) the subprocess is
+    sent SIGTERM.  If it does not exit within 5 seconds it is sent SIGKILL.
 
     Parameters
     ----------
@@ -119,8 +127,8 @@ def invoke_claude(
 
     Yields
     ------
-    str
-        Formatted human-readable output strings.
+    Iterator[str]
+        An iterator of formatted human-readable output strings.
     """
     cmd = _build_command(
         prompt,
@@ -155,28 +163,38 @@ def invoke_claude(
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
 
-    for raw_line in proc.stdout:
-        line = raw_line.decode("utf-8", errors="replace")
-        event = parse_event(line)
-        if event is None:
-            continue
-        formatted = format_event(event)
-        if formatted is not None:
-            yield formatted
+    def _iter_lines() -> Iterator[str]:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace")
+            event = parse_event(line)
+            if event is None:
+                continue
+            formatted = format_event(event)
+            if formatted is not None:
+                yield formatted
 
-    proc.wait()
-    stderr_thread.join(timeout=5)
+    try:
+        yield _iter_lines()
+    finally:
+        _kill_process_group(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc, signal.SIGKILL)
+            proc.wait()
+        stderr_thread.join(timeout=5)
 
-    stderr_text = "".join(stderr_lines)
-    if stderr_text:
-        if proc.returncode != 0:
-            logger.warning(
-                "Claude exited with code %d. stderr:\n%s",
-                proc.returncode,
-                stderr_text.rstrip(),
-            )
-        else:
-            logger.debug("Claude stderr: %s", stderr_text)
+        stderr_text = "".join(stderr_lines)
+        if stderr_text:
+            if proc.returncode != 0:
+                logger.warning(
+                    "Claude exited with code %d. stderr:\n%s",
+                    proc.returncode,
+                    stderr_text.rstrip(),
+                )
+            else:
+                logger.debug("Claude stderr: %s", stderr_text)
 
 
 def _extract_session_id(text: str) -> str:

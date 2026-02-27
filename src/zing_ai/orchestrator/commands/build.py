@@ -147,13 +147,14 @@ def run_build(
         # 3. Invoke Claude via streaming
         logger.debug("Invoking Claude for step '%s'", step.label)
         output_lines: list[str] = []
-        for line in claude.invoke_claude(
+        with claude.invoke_claude(
             prompt,
             call_type=CallType.BUILD,
             config=config,
             skip_permissions=skip_permissions,
-        ):
-            output_lines.append(line)
+        ) as lines:
+            for line in lines:
+                output_lines.append(line)
 
         # 4. On completion, mark step as done
         step.done = True
