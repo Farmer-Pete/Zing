@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 from zing_ai.orchestrator.pipeline import STAGES, run_pipeline
 
 
@@ -106,24 +108,23 @@ class TestDispatchPlanAudit:
         run_pipeline("plan-audit", **_make_kwargs(tmp_path))
 
         mock_run_plan_audit.assert_called_once()
-        # zing_file is passed as a positional arg for plan_audit
-        call_args = mock_run_plan_audit.call_args
-        assert call_args.args[0] == "test.xml"
-        assert call_args.kwargs["skip_permissions"] is True
-        assert call_args.kwargs["project_root"] == tmp_path
+        call_kwargs = mock_run_plan_audit.call_args.kwargs
+        assert call_kwargs["zing_file"] == "test.xml"
+        assert call_kwargs["skip_permissions"] is True
+        assert call_kwargs["project_root"] == tmp_path
 
     @patch("zing_ai.orchestrator.commands.plan_audit.run_plan_audit")
     def test_plan_audit_with_none_zing_file(
         self, mock_run_plan_audit: MagicMock, tmp_path: Path
     ) -> None:
-        """When zing_file is None, plan-audit receives empty string."""
+        """When zing_file is None, plan-audit receives None (no coercion)."""
         kwargs = _make_kwargs(tmp_path)
         kwargs["zing_file"] = None
         run_pipeline("plan-audit", **kwargs)
 
         mock_run_plan_audit.assert_called_once()
-        call_args = mock_run_plan_audit.call_args
-        assert call_args.args[0] == ""
+        call_kwargs = mock_run_plan_audit.call_args.kwargs
+        assert call_kwargs["zing_file"] is None
 
 
 class TestDispatchPlanReview:
@@ -201,3 +202,29 @@ class TestEdgeCases:
 
         mock_run_build.assert_called_once()
         assert mock_run_build.call_args.kwargs["config"] is custom_config
+
+
+# ---------------------------------------------------------------------------
+# PipelineError handling
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineErrorHandling:
+    """Verify ``run_pipeline`` catches ``PipelineError`` and logs at ERROR level."""
+
+    @patch("zing_ai.orchestrator.commands.plan.run_plan")
+    def test_pipeline_error_is_caught_and_logged(
+        self, mock_run_plan: MagicMock, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A PipelineError raised by a stage is caught and logged, not re-raised."""
+        mock_run_plan.side_effect = PipelineError(stage="plan", message="something broke")
+
+        # Should NOT raise — the error is caught internally.
+        with caplog.at_level(logging.ERROR, logger="zing_ai.orchestrator.pipeline"):
+            run_pipeline("plan", **_make_kwargs(tmp_path))
+
+        assert any(
+            "Pipeline failed at stage 'plan'" in record.message
+            and "something broke" in record.message
+            for record in caplog.records
+        )

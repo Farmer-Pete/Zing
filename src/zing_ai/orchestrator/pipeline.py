@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 from zing_ai.orchestrator.config import ZingConfig
+from zing_ai.orchestrator.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
@@ -76,39 +77,47 @@ def run_pipeline(
         project_root=project_root,
     )
 
-    if start_stage == "new":
-        from zing_ai.orchestrator.commands.new import run_new
+    try:
+        if start_stage == "new":
+            from zing_ai.orchestrator.commands.new import run_new
 
-        logger.debug("Dispatching to run_new")
-        run_new(zing_file=zing_file, **common_kwargs)
+            logger.debug("Dispatching to run_new")
+            run_new(zing_file=zing_file, **common_kwargs)
 
-    elif start_stage == "plan":
-        from zing_ai.orchestrator.commands.plan import run_plan
+        elif start_stage == "plan":
+            from zing_ai.orchestrator.commands.plan import run_plan
 
-        logger.debug("Dispatching to run_plan")
-        run_plan(zing_file=zing_file, **common_kwargs)
+            logger.debug("Dispatching to run_plan")
+            run_plan(zing_file=zing_file, **common_kwargs)
 
-    elif start_stage == "plan-audit":
-        from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
+        elif start_stage == "plan-audit":
+            from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
 
-        logger.debug("Dispatching to run_plan_audit")
-        # run_plan_audit takes zing_file as a positional str parameter.
-        run_plan_audit(zing_file or "", **common_kwargs)
+            logger.debug("Dispatching to run_plan_audit")
+            run_plan_audit(zing_file=zing_file, **common_kwargs)
 
-    elif start_stage == "plan-review":
-        from zing_ai.orchestrator.commands.plan_review import run_plan_review
+        elif start_stage == "plan-review":
+            from zing_ai.orchestrator.commands.plan_review import run_plan_review
 
-        logger.debug("Dispatching to run_plan_review")
-        run_plan_review(zing_file=zing_file, **common_kwargs)
+            logger.debug("Dispatching to run_plan_review")
+            run_plan_review(zing_file=zing_file, **common_kwargs)
 
-    elif start_stage == "build":
-        from zing_ai.orchestrator.commands.build import run_build
+        elif start_stage == "build":
+            from zing_ai.orchestrator.commands.build import run_build
 
-        logger.debug("Dispatching to run_build")
-        run_build(zing_file=zing_file, **common_kwargs)
+            logger.debug("Dispatching to run_build")
+            run_build(zing_file=zing_file, **common_kwargs)
 
-    elif start_stage == "build-audit":
-        from zing_ai.orchestrator.commands.build_audit import run_build_audit
+        elif start_stage == "build-audit":
+            from zing_ai.orchestrator.commands.build_audit import run_build_audit
 
-        logger.debug("Dispatching to run_build_audit")
-        run_build_audit(zing_file=zing_file, **common_kwargs)
+            logger.debug("Dispatching to run_build_audit")
+            run_build_audit(zing_file=zing_file, **common_kwargs)
+
+    except PipelineError as exc:
+        logger.error(
+            "Pipeline failed at stage %r: %s",
+            exc.stage,
+            exc.message,
+        )
+        return
