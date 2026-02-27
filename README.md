@@ -100,6 +100,8 @@ Zing works best when your AI coding assistant has the following MCP servers inst
 - **[CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)** — Code graph analysis for understanding call chains, detecting dead code, and architectural queries
 - **[Context7](https://github.com/upstash/context7)** — Up-to-date library documentation and code examples, so your assistant doesn't rely on stale training data
 
+It also benefits from having the **[GitHub CLI (`gh`)](https://cli.github.com/)** installed for creating pull requests, managing issues, and interacting with GitHub directly from the command line.
+
 These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
 
 ### Install from PyPI
