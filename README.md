@@ -98,6 +98,7 @@ Zing works best when your AI coding assistant has the following MCP servers inst
 - **[Serena](https://github.com/oraios/serena)** — Semantic code tools via LSP for token-efficient code exploration and precise symbol-level editing
 - **[AI Distiller](https://github.com/janreges/ai-distiller)** — Compact code structure extraction and specialized analysis (security audits, bug hunting, refactoring)
 - **[CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)** — Code graph analysis for understanding call chains, detecting dead code, and architectural queries
+- **[Context7](https://github.com/upstash/context7)** — Up-to-date library documentation and code examples, so your assistant doesn't rely on stale training data
 
 These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
 
