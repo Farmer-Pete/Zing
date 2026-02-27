@@ -104,11 +104,13 @@ It also benefits from having the **[GitHub CLI (`gh`)](https://cli.github.com/)*
 
 These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
 
+<!--
 ### Install from PyPI
 
 ```
 uv tool install zing-ai
 ```
+-->
 
 ### Install bleeding edge from GitHub
 
