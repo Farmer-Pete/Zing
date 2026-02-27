@@ -13,6 +13,8 @@ result objects without rendering any UI.
 
 from __future__ import annotations
 
+import contextlib
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -263,7 +265,13 @@ class TestFullPipelineFlow:
             # Mock the subprocess.run call (Claude interactive session)
             patch(
                 "zing_ai.orchestrator.commands.new.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0),
             ) as mock_subprocess,
+            # Mock time.time to return 0 so pre-created files pass the mtime filter
+            patch(
+                "zing_ai.orchestrator.commands.new.time.time",
+                return_value=0,
+            ),
             # Mock the next stage
             patch(
                 "zing_ai.orchestrator.commands.plan.run_plan",
@@ -380,7 +388,7 @@ class TestFullPipelineFlow:
             from zing_ai.orchestrator.commands.plan_audit import run_plan_audit
 
             run_plan_audit(
-                zing_path.name,
+                zing_file=zing_path.name,
                 skip_permissions=True,
                 config=_make_config(),
                 project_root=tmp_path,
@@ -437,10 +445,14 @@ class TestFullPipelineFlow:
                     completed.append((stage_idx, step_idx))
             return BuildProgress(completed_steps=completed, failed_step=None)
 
+        @contextlib.contextmanager
+        def _mock_invoke_claude(*args, **kwargs):
+            yield iter(["Build output line\n"])
+
         with (
             patch(
                 "zing_ai.orchestrator.commands.build.claude.invoke_claude",
-                return_value=iter(["Build output line\n"]),
+                side_effect=_mock_invoke_claude,
             ),
             patch(
                 "zing_ai.orchestrator.commands.build.distill_files",
