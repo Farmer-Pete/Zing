@@ -938,6 +938,146 @@ class TestRunBuildAuditActionDispatch:
 
 
 # ---------------------------------------------------------------------------
+# run_build_audit tests -- action file output
+# ---------------------------------------------------------------------------
+
+
+class TestRunBuildAuditActionFiles:
+    """Tests that triage decisions produce the correct markdown files."""
+
+    def _run_with_decisions(
+        self,
+        tmp_path: Path,
+        decisions: list[AuditDecision],
+        review_output: str = MOCK_REVIEW_WITH_FINDINGS,
+    ) -> None:
+        """Helper: run the full pipeline with the given mock decisions."""
+        _make_zing_file_with_plan(tmp_path)
+        config = ZingConfig()
+
+        for f in ["src/auth.py", "src/models.py", "src/api.py", "tests/test_auth.py"]:
+            fp = tmp_path / f
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(f"# {f}")
+
+        mock_investigation = InvestigationResult(
+            outputs={"review-0": review_output},
+            statuses={"review-0": "success"},
+        )
+
+        with (
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.claude.invoke_claude_validated",
+                return_value=[AuditGroup(files=["src/auth.py"])],
+            ),
+            patch(
+                "zing_ai.orchestrator.ui.progress.run_parallel_investigations",
+                return_value=mock_investigation,
+            ),
+            patch(
+                "zing_ai.orchestrator.ui.menus.audit_triage_menu",
+                return_value=decisions,
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.resolve_aid_path",
+                return_value="aid",
+            ),
+            patch(
+                "zing_ai.orchestrator.commands.build_audit.distill_files",
+                return_value={},
+            ),
+        ):
+            run_build_audit(
+                zing_file="test-project.xml",
+                skip_permissions=False,
+                config=config,
+                project_root=tmp_path,
+            )
+
+    def test_fix_findings_produce_markdown(self, tmp_path: Path) -> None:
+        """Decisions with action='fix' should produce a fixes markdown file."""
+        fix_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=0, category="Logic Errors and Bugs", severity="high", title="Null check missing", action="fix"),
+            AuditDecision(finding_index=2, category="Security", severity="critical", title="Password comparison", action="fix"),
+        ]
+        self._run_with_decisions(tmp_path, fix_decisions)
+
+        fix_path = tmp_path / ".zing" / "build-audit-fixes-test-project.md"
+        assert fix_path.is_file(), "Expected fixes markdown file to be created"
+
+        content = fix_path.read_text()
+        assert "# Build Audit Fixes" in content
+        assert "## Finding 1: Null check missing" in content
+        assert "## Finding 2: Password comparison" in content
+        assert "- **Category:** Logic Errors and Bugs" in content
+        assert "- **Category:** Security" in content
+        assert "- **Severity:** high" in content
+        assert "- **Severity:** critical" in content
+        # Confidence and location come from the Finding dataclass
+        assert "- **Confidence:** high" in content
+        assert "- **Location:** src/auth.py:42" in content
+        assert "- **Location:** src/auth.py:78" in content
+
+    def test_discuss_findings_produce_markdown(self, tmp_path: Path) -> None:
+        """Decisions with action='discuss' should produce a discuss markdown file."""
+        discuss_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=1, category="Error Handling", severity="medium", title="Exception swallowed", action="discuss"),
+        ]
+        self._run_with_decisions(tmp_path, discuss_decisions)
+
+        discuss_path = tmp_path / ".zing" / "build-audit-discuss-test-project.md"
+        assert discuss_path.is_file(), "Expected discuss markdown file to be created"
+
+        content = discuss_path.read_text()
+        assert "# Build Audit Discuss" in content
+        assert "## Finding 1: Exception swallowed" in content
+        assert "- **Category:** Error Handling" in content
+        assert "- **Severity:** medium" in content
+        assert "- **Confidence:** medium" in content
+        assert "- **Location:** src/auth.py:15" in content
+
+        # Fixes file should NOT exist
+        fix_path = tmp_path / ".zing" / "build-audit-fixes-test-project.md"
+        assert not fix_path.is_file(), "No fixes file should be created for discuss-only decisions"
+
+    def test_skip_findings_produce_no_file(self, tmp_path: Path) -> None:
+        """Decisions with action='skip' should not produce any markdown file."""
+        skip_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=0, category="Logic Errors and Bugs", severity="high", title="Null check missing", action="skip"),
+            AuditDecision(finding_index=1, category="Error Handling", severity="medium", title="Exception swallowed", action="skip"),
+        ]
+        self._run_with_decisions(tmp_path, skip_decisions)
+
+        fix_path = tmp_path / ".zing" / "build-audit-fixes-test-project.md"
+        discuss_path = tmp_path / ".zing" / "build-audit-discuss-test-project.md"
+        assert not fix_path.is_file(), "No fixes file should be created for skip decisions"
+        assert not discuss_path.is_file(), "No discuss file should be created for skip decisions"
+
+    def test_mixed_decisions_produce_correct_files(self, tmp_path: Path) -> None:
+        """Mixed fix/discuss/skip decisions should produce the correct files."""
+        mixed_decisions: list[AuditDecision] = [
+            AuditDecision(finding_index=0, category="Logic Errors and Bugs", severity="high", title="Null check missing", action="fix"),
+            AuditDecision(finding_index=1, category="Error Handling", severity="medium", title="Exception swallowed", action="discuss"),
+            AuditDecision(finding_index=2, category="Security", severity="critical", title="Password comparison", action="skip"),
+        ]
+        self._run_with_decisions(tmp_path, mixed_decisions)
+
+        # Fixes file should have 1 finding
+        fix_path = tmp_path / ".zing" / "build-audit-fixes-test-project.md"
+        assert fix_path.is_file()
+        fix_content = fix_path.read_text()
+        assert "## Finding 1: Null check missing" in fix_content
+        assert "Finding 2" not in fix_content  # Only one fix finding
+
+        # Discuss file should have 1 finding
+        discuss_path = tmp_path / ".zing" / "build-audit-discuss-test-project.md"
+        assert discuss_path.is_file()
+        discuss_content = discuss_path.read_text()
+        assert "## Finding 1: Exception swallowed" in discuss_content
+        assert "Finding 2" not in discuss_content  # Only one discuss finding
+
+
+# ---------------------------------------------------------------------------
 # run_build_audit tests -- no files to audit
 # ---------------------------------------------------------------------------
 

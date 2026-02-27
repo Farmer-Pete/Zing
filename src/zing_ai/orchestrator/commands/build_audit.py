@@ -391,4 +391,57 @@ def run_build_audit(
             action,
         )
 
+    # --- Write action files ---
+    # Build a lookup from finding index to Finding for confidence/location.
+    finding_by_index: dict[int, Finding] = {f.index: f for f in all_findings}
+
+    # Group decisions by action
+    fix_decisions = [d for d in decisions if d.get("action") == "fix"]
+    discuss_decisions = [d for d in decisions if d.get("action") == "discuss"]
+
+    zing_file_stem = zing_path.stem
+
+    def _write_findings_markdown(
+        path: Path,
+        title: str,
+        action_decisions: list[AuditDecision],
+    ) -> None:
+        """Write a markdown file with one heading per finding."""
+        lines: list[str] = [f"# {title}", ""]
+        for i, dec in enumerate(action_decisions, 1):
+            fidx = dec.get("finding_index", -1)
+            finding = finding_by_index.get(fidx)
+            confidence = finding.confidence if finding else "unknown"
+            location = finding.location if finding else "unknown"
+
+            lines.append(f"## Finding {i}: {dec.get('title', 'Untitled')}")
+            lines.append("")
+            lines.append(f"- **Category:** {dec.get('category', 'unknown')}")
+            lines.append(f"- **Severity:** {dec.get('severity', 'unknown')}")
+            lines.append(f"- **Confidence:** {confidence}")
+            lines.append(f"- **Location:** {location}")
+            lines.append("")
+        path.write_text("\n".join(lines))
+
+    from rich.console import Console
+
+    console = Console()
+
+    if fix_decisions:
+        fix_path = zing_dir / f"build-audit-fixes-{zing_file_stem}.md"
+        _write_findings_markdown(fix_path, "Build Audit Fixes", fix_decisions)
+        logger.info("Wrote %d fix findings to %s", len(fix_decisions), fix_path)
+        console.print(f"[green]Wrote {len(fix_decisions)} fix finding(s) to {fix_path.name}[/green]")
+
+    if discuss_decisions:
+        discuss_path = zing_dir / f"build-audit-discuss-{zing_file_stem}.md"
+        _write_findings_markdown(discuss_path, "Build Audit Discuss", discuss_decisions)
+        logger.info("Wrote %d discuss findings to %s", len(discuss_decisions), discuss_path)
+        console.print(f"[yellow]Wrote {len(discuss_decisions)} discuss finding(s) to {discuss_path.name}[/yellow]")
+
+    skip_count = len([d for d in decisions if d.get("action") == "skip"])
+    if skip_count:
+        logger.info("Skipped %d findings", skip_count)
+        console.print(f"[dim]Skipped {skip_count} finding(s)[/dim]")
+
 
