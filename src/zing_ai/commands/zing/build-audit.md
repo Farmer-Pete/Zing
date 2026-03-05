@@ -113,13 +113,13 @@ End your review summary with: "Zing! Review complete."
 After writing the review report, use AskUserQuestion to ask: "What next?"
 - Options:
   - "Create a PR" (description: "Create a GitHub PR from the current branch")
-  - "Fix the findings" (description: "Run /zing to plan and build fixes from the review report")
-  - "Discuss findings" (description: "Walk through each finding for a deeper conversation")
+  - "Fix with chat" (description: "Walk through each finding interactively — faster, fix as you go")
+  - "Build a plan to fix" (description: "Systematically plan and build a fix for each finding — slower but more thorough")
   - "I'm done" (description: "Stop here")
 
-If "Fix the findings": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`).
+If "Fix with chat": proceed to the `discuss_findings` step.
 
-If "Discuss findings": proceed to the `discuss_findings` step.
+If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`).
 
 If "Create a PR":
 1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
@@ -153,7 +153,7 @@ Then enter a conversational loop. The user drives the interaction using natural 
 
 After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
 
-After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Fix the findings", and "I'm done" (without the "Discuss findings" option again).
+After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Build a plan to fix", and "I'm done" (without the "Fix with chat" option again).
 </step>
 
 </process>
