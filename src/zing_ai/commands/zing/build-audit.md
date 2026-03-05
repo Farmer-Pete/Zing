@@ -37,7 +37,7 @@ Follow the `big_picture` step from the shared review reference.
 
 <step name="analyze_changes">
 
-Follow the `file_partitioning` step from the shared review reference to classify changed files into 4 agent groups.
+Follow the `diff_preparation` step from the shared review reference.
 
 Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies.
 </step>
