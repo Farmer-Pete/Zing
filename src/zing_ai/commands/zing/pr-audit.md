@@ -54,7 +54,7 @@ Follow the `big_picture` step from the shared review reference.
 
 <step name="analyze_changes">
 
-Follow the `file_partitioning` step from the shared review reference to classify changed files into 4 agent groups.
+Follow the `diff_preparation` step from the shared review reference.
 
 Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. In addition to the shared agent context, each agent also receives:
 - A note of which lines in each assigned file appear in the diff (so agents know which lines can receive line-level comments)
