@@ -425,7 +425,8 @@ End your summary with: "Zing! Audit complete."
 Then use AskUserQuestion to ask the user what they'd like to do next:
 - Option 1: "Start build" — invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited
 - Option 2: "Create Linear tickets" — invoke `Skill(skill: 'zing:plan-linear', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited
-- Option 3: "Not now" — end the session without invoking anything
+- Option 3: "View the plan" — open the file for viewing (run `open -a Typora "{file_path}"`, falling back to `open "{file_path}"` if Typora is not installed), then re-ask this same question
+- Option 4: "Not now" — end the session without invoking anything
 </step>
 
 </process>

@@ -93,7 +93,14 @@ After all questions are answered, update the zing document so it can be handed t
 
 1. All the original content, refined with the user's answers
 
-2. A **Relevant Files** section that lists every file in the codebase that is relevant to this plan, grouped by purpose:
+2. **Mermaid diagrams** where they help the reader understand the system or the changes. Use them when they genuinely add clarity — not for trivial plans. Good candidates include:
+   - **Sequence diagrams** for request flows, API interactions, or multi-step processes (e.g., how a user action flows through frontend → API → database → response)
+   - **Flowcharts** for decision logic, branching behavior, or state transitions (e.g., authentication flow, error handling paths)
+   - **Architecture/component diagrams** for showing how pieces connect or how new components fit into the existing system
+
+   Place diagrams near the content they illustrate. Use standard Mermaid syntax in fenced code blocks (` ```mermaid `).
+
+3. A **Relevant Files** section that lists every file in the codebase that is relevant to this plan, grouped by purpose:
    - **Files to modify** — existing files that will need changes, with a brief note on what changes
    - **Files to create** — new files that need to be written, with a brief note on their purpose
    - **Reference files** — existing files that should be read for context, conventions, or patterns to follow (e.g., "follow the same pattern as this file")
@@ -101,7 +108,7 @@ After all questions are answered, update the zing document so it can be handed t
 
    Use full relative paths from the project root for every file listed.
 
-3. An **Action Plan** section that breaks the entire zing spec down into concrete, actionable steps. Each step should be:
+4. An **Action Plan** section that breaks the entire zing spec down into concrete, actionable steps. Each step should be:
    - Small enough that a single person could complete it in one sitting
    - Ordered by dependency — earlier steps should not depend on later ones
    - Specific — name the exact files, functions, endpoints, models, etc.
@@ -109,7 +116,7 @@ After all questions are answered, update the zing document so it can be handed t
 
    Group steps into phases where it makes sense (e.g., "Phase 1: Data Model", "Phase 2: API Endpoints", "Phase 3: Frontend"). Number every step.
 
-4. A **Progress** section at the end of the document to track completion. Generate a checklist from the action plan with every step listed. Use this exact format:
+5. A **Progress** section at the end of the document to track completion. Generate a checklist from the action plan with every step listed. Use this exact format:
 
    ```
    ## Progress
@@ -127,6 +134,13 @@ After all questions are answered, update the zing document so it can be handed t
 After saving the updated document, print a brief summary of what was added (Relevant Files, Action Plan, Progress sections).
 
 End your summary with: "Zing! Plan complete — handing off to audit."
+
+Before chaining to audit, use AskUserQuestion to ask the user:
+- "View the plan in a markdown viewer before continuing?"
+  - "Yes, open it" — open the file for viewing (see instructions below), then proceed to chain to plan-audit
+  - "No, continue" — proceed directly to plan-audit
+
+**Opening the markdown file:** Run `open -a Typora "{file_path}"`. If Typora is not installed (the command fails), fall back to `open "{file_path}"` to use the system default handler.
 
 Then invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
 </step>
