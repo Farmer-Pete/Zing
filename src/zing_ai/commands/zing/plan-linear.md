@@ -52,6 +52,7 @@ Before creating anything in Linear, show the user a summary of what will be crea
 
 Use AskUserQuestion to confirm: "Create these in Linear?"
 - "Yes, create these" — proceed to the next step
+- "View the plan first" — open the file for viewing (run `open -a Typora "{file_path}"`, falling back to `open "{file_path}"` if Typora is not installed), then re-ask this same confirmation question
 - "Cancel" — stop and exit with "Cancelled — nothing was created in Linear."
 </step>
 
