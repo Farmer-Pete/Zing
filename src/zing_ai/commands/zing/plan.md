@@ -39,9 +39,9 @@ Here is the structure your response MUST follow:
 1. **Area 1** — description
 2. **Area 2** — description
 ..."]
-[Task tool call for area 1 with subagent_type: "codegen"]
-[Task tool call for area 2 with subagent_type: "codegen"]
-[Task tool call for area 3 with subagent_type: "codegen"]
+[Task tool call for area 1]
+[Task tool call for area 2]
+[Task tool call for area 3]
 ... all in the SAME response
 ```
 

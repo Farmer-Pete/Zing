@@ -82,7 +82,7 @@ This is the core execution loop. The parent agent owns the step loop but delegat
    - MCP-only code reading mandate: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
    - Storybook instructions: "If this step involves creating or modifying Storybook stories (*.stories.*), call the `mcp__storybook-mcp__get-storybook-story-instructions` tool BEFORE writing any story code to get the correct patterns and imports. After writing stories, use `mcp__storybook-mcp__preview-stories` to verify they render correctly."
 
-4. **Launch the Task subagent** using the `Task` tool with `subagent_type: "codegen"` and the constructed prompt. The subagent executes the step, logs its progress to the log file, verifies acceptance criteria, and returns a summary of what was done.
+4. **Launch the Task subagent** using the `Task` tool with `subagent_type: "general-purpose"` and the constructed prompt. The subagent executes the step, logs its progress to the log file, verifies acceptance criteria, and returns a summary of what was done.
 
 5. **After the subagent returns**, the parent:
    - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}`. Do NOT push to remote.
