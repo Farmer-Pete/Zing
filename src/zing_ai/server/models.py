@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 class Location(BaseModel):
@@ -172,6 +173,7 @@ class WorkflowStep(BaseModel):
     the sequence field provides ordering.
     """
 
+    step_id: str = Field(default_factory=lambda: uuid4().hex)
     step_name: str
     sequence: int
     findings: list[Finding] = Field(default_factory=list)
@@ -187,10 +189,24 @@ class Session(BaseModel):
 
     session_id: str
     title: str
-    zing_file: str
+    zing_file: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     state: SessionState = SessionState.PENDING
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @field_validator("zing_file", mode="before")
+    @classmethod
+    def _validate_zing_file(cls, v: str | None, info: ValidationInfo) -> str | None:
+        if v is None:
+            return None
+        # Only validate on creation, not when deserializing persisted sessions
+        context = info.context or {}
+        if not context.get("creating", False):
+            return v
+        if not os.path.isabs(v):
+            msg = f"zing_file must be an absolute path, got: {v}"
+            raise ValueError(msg)
+        return v
 
     @model_validator(mode="before")
     @classmethod

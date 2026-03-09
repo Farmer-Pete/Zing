@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from zing_ai.server.models import SessionState, UserResponse
+from zing_ai.server.models import SessionState, UserResponse, WorkflowStep
 from zing_ai.server.sessions import SessionManager
 
 _STEP = "review"
@@ -26,9 +26,9 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def _create_session_with_step(
         self, session_id: str = "s1", title: str = "Test", expected_agents: int = 1
-    ) -> None:
+    ) -> WorkflowStep:
         self.manager.create_session(session_id, title, "test.zing")
-        self.manager.start_step(session_id, _STEP, expected_agents)
+        return self.manager.start_step(session_id, _STEP, expected_agents)
 
     def test_create_session(self) -> None:
         """Creating a session sets initial state to PENDING with no steps."""
@@ -39,13 +39,14 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session.total_findings == 0
 
     def test_start_step(self) -> None:
-        """Starting a step adds it to the session."""
+        """Starting a step adds it to the session and returns a step_id."""
         self.manager.create_session("s1", "Test", "test.zing")
         step = self.manager.start_step("s1", "review", 2)
         assert step.step_name == "review"
         assert step.sequence == 0
         assert step.expected_agents == 2
         assert step.state == SessionState.PENDING
+        assert len(step.step_id) == 32  # uuid4().hex
 
         session = self.manager.get_session("s1")
         assert session is not None
@@ -53,11 +54,11 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_add_finding_text(self) -> None:
         """Adding a text finding appends it to the step."""
-        self._create_session_with_step()
-        finding = self.manager.add_finding("s1", {
+        step = self._create_session_with_step()
+        finding = self.manager.add_finding("s1", step.step_id, {
             "type": "text",
             "title": "What is the meaning of life?",
-        }, step_name=_STEP)
+        })
         assert finding.type == "text"
         session = self.manager.get_session("s1")
         assert session is not None
@@ -66,8 +67,8 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_add_finding_evaluation(self) -> None:
         """Adding an evaluation finding appends it to the step."""
-        self._create_session_with_step()
-        finding = self.manager.add_finding("s1", {
+        step = self._create_session_with_step()
+        finding = self.manager.add_finding("s1", step.step_id, {
             "type": "evaluation",
             "title": "Pass 1: Design Fundamentals",
             "criteria": [
@@ -79,7 +80,7 @@ class TestSessionLifecycle(unittest.TestCase):
             "warnings": [
                 {"name": "Future flexibility", "found": False},
             ],
-        }, step_name=_STEP)
+        })
         assert finding.type == "evaluation"
         session = self.manager.get_session("s1")
         assert session is not None
@@ -87,73 +88,61 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_add_finding_choice(self) -> None:
         """Adding a choice finding appends it to the step."""
-        self._create_session_with_step()
-        finding = self.manager.add_finding("s1", {
+        step = self._create_session_with_step()
+        finding = self.manager.add_finding("s1", step.step_id, {
             "type": "choice",
             "title": "Pick one",
             "options": [
                 {"label": "A", "description": "Option A"},
                 {"label": "B", "description": "Option B"},
             ],
-        }, step_name=_STEP)
+        })
         assert finding.type == "choice"
 
     def test_add_finding_triage(self) -> None:
         """Adding a triage finding appends it to the step."""
-        self._create_session_with_step()
-        finding = self.manager.add_finding("s1", {
+        step = self._create_session_with_step()
+        finding = self.manager.add_finding("s1", step.step_id, {
             "type": "triage",
             "title": "Unused import",
             "category": "style",
             "severity": "low",
             "confidence": "high",
-        }, step_name=_STEP)
+        })
         assert finding.type == "triage"
-
-    def test_add_finding_auto_creates_step(self) -> None:
-        """Adding a finding for a nonexistent step auto-creates it."""
-        self.manager.create_session("s1", "Test", "test.zing")
-        self.manager.add_finding("s1", {
-            "type": "text",
-            "title": "Auto step",
-        }, step_name="auto-step")
-        session = self.manager.get_session("s1")
-        assert session is not None
-        assert len(session.steps) == 1
-        assert session.steps[0].step_name == "auto-step"
 
     def test_full_lifecycle(self) -> None:
         """Full lifecycle: create → start step → add findings → agents complete → submit."""
-        self._create_session_with_step(expected_agents=2)
+        step = self._create_session_with_step(expected_agents=2)
 
-        self.manager.add_finding("s1", {
+        self.manager.add_finding("s1", step.step_id, {
             "type": "text",
             "title": "Is this correct?",
-        }, step_name=_STEP)
-        self.manager.add_finding("s1", {
+        })
+        self.manager.add_finding("s1", step.step_id, {
             "type": "triage",
             "title": "Bug found",
             "category": "correctness",
             "severity": "high",
             "confidence": "medium",
-        }, step_name=_STEP)
+        })
 
         # First agent completes — still pending
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.state == SessionState.PENDING
-        assert step.completed_agents == 1
+        updated = self.manager.mark_agent_complete(step.step_id)
+        assert updated.state == SessionState.PENDING
+        assert updated.completed_agents == 1
 
         # Second agent completes — now ready
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.state == SessionState.READY
-        assert step.completed_agents == 2
+        updated = self.manager.mark_agent_complete(step.step_id)
+        assert updated.state == SessionState.READY
+        assert updated.completed_agents == 2
 
         # Submit responses
         responses = [
             UserResponse(answer="Yes, it is correct"),
             UserResponse(action="accept"),
         ]
-        review = self.manager.submit_responses("s1", _STEP, responses)
+        review = self.manager.submit_responses("s1", step.step_id, responses)
         assert review.session_id == "s1"
         assert review.step_name == _STEP
         assert len(review.items) == 2
@@ -177,21 +166,21 @@ class TestConcurrentSessions(unittest.TestCase):
     def test_sessions_are_isolated(self) -> None:
         """Findings added to one session don't appear in another."""
         self.manager.create_session("s1", "Session 1", "a.zing")
-        self.manager.start_step("s1", _STEP, 1)
+        step1 = self.manager.start_step("s1", _STEP, 1)
         self.manager.create_session("s2", "Session 2", "b.zing")
-        self.manager.start_step("s2", _STEP, 1)
+        step2 = self.manager.start_step("s2", _STEP, 1)
 
-        self.manager.add_finding("s1", {
+        self.manager.add_finding("s1", step1.step_id, {
             "type": "text",
             "title": "Question for s1",
-        }, step_name=_STEP)
-        self.manager.add_finding("s2", {
+        })
+        self.manager.add_finding("s2", step2.step_id, {
             "type": "triage",
             "title": "Finding for s2",
             "category": "correctness",
             "severity": "high",
             "confidence": "high",
-        }, step_name=_STEP)
+        })
 
         s1 = self.manager.get_session("s1")
         s2 = self.manager.get_session("s2")
@@ -205,11 +194,11 @@ class TestConcurrentSessions(unittest.TestCase):
     def test_agent_completion_isolated(self) -> None:
         """Completing an agent in one session doesn't affect another."""
         self.manager.create_session("s1", "Session 1", "a.zing")
-        self.manager.start_step("s1", _STEP, 1)
+        step1 = self.manager.start_step("s1", _STEP, 1)
         self.manager.create_session("s2", "Session 2", "b.zing")
-        self.manager.start_step("s2", _STEP, 2)
+        step2 = self.manager.start_step("s2", _STEP, 2)
 
-        self.manager.mark_agent_complete("s1", _STEP)
+        self.manager.mark_agent_complete(step1.step_id)
         s1 = self.manager.get_session("s1")
         s2 = self.manager.get_session("s2")
         assert s1 is not None
@@ -239,6 +228,16 @@ class TestCleanup(unittest.TestCase):
         self.manager.cleanup_session("s1")
         assert self.manager.get_session("s1") is None
         assert not (self.data_dir / "s1.json").exists()
+
+    def test_cleanup_removes_step_index(self) -> None:
+        """Cleanup removes step_id entries from the index."""
+        self.manager.create_session("s1", "Test", "test.zing")
+        step = self.manager.start_step("s1", _STEP, 1)
+        step_id = step.step_id
+
+        self.manager.cleanup_session("s1")
+        with self.assertRaises(KeyError):
+            self.manager._get_step_by_id(step_id)
 
     def test_cleanup_nonexistent_session(self) -> None:
         """Cleaning up a nonexistent session does not raise."""
@@ -270,40 +269,75 @@ class TestAgentTracking(unittest.TestCase):
     def test_increments_correctly(self) -> None:
         """Each mark_agent_complete increments the count by one."""
         self.manager.create_session("s1", "Test", "test.zing")
-        self.manager.start_step("s1", _STEP, 3)
+        step = self.manager.start_step("s1", _STEP, 3)
 
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.completed_agents == 1
-        assert step.state == SessionState.PENDING
+        updated = self.manager.mark_agent_complete(step.step_id)
+        assert updated.completed_agents == 1
+        assert updated.state == SessionState.PENDING
 
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.completed_agents == 2
-        assert step.state == SessionState.PENDING
+        updated = self.manager.mark_agent_complete(step.step_id)
+        assert updated.completed_agents == 2
+        assert updated.state == SessionState.PENDING
 
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.completed_agents == 3
-        assert step.state == SessionState.READY
+        updated = self.manager.mark_agent_complete(step.step_id)
+        assert updated.completed_agents == 3
+        assert updated.state == SessionState.READY
 
-    def test_duplicate_agent_complete_beyond_expected(self) -> None:
-        """Extra mark_agent_complete calls beyond expected still work (idempotent READY)."""
+    def test_agent_complete_rejected_when_ready(self) -> None:
+        """mark_agent_complete raises ValueError once step is READY."""
         self.manager.create_session("s1", "Test", "test.zing")
-        self.manager.start_step("s1", _STEP, 1)
+        step = self.manager.start_step("s1", _STEP, 1)
 
-        self.manager.mark_agent_complete("s1", _STEP)
-        step = self.manager.mark_agent_complete("s1", _STEP)
-        assert step.completed_agents == 2
-        assert step.state == SessionState.READY
+        self.manager.mark_agent_complete(step.step_id)
+        with self.assertRaises(ValueError):
+            self.manager.mark_agent_complete(step.step_id)
 
     def test_invalid_session_id_raises(self) -> None:
         """Operations on a nonexistent session raise KeyError."""
         with self.assertRaises(KeyError):
-            self.manager.add_finding("nonexistent", {"type": "text", "title": "Q"}, step_name=_STEP)
+            self.manager.add_finding("s1", "nonexistent-uuid", {"type": "text", "title": "Q"})
 
         with self.assertRaises(KeyError):
-            self.manager.mark_agent_complete("nonexistent", _STEP)
+            self.manager.mark_agent_complete("nonexistent-uuid")
 
         with self.assertRaises(KeyError):
-            self.manager.submit_responses("nonexistent", _STEP, [])
+            self.manager.submit_responses("nonexistent", "nonexistent-step-id", [])
+
+    def test_add_finding_rejects_ready_step(self) -> None:
+        """Adding a finding to a READY step raises ValueError."""
+        self.manager.create_session("s1", "Test", "test.zing")
+        step = self.manager.start_step("s1", _STEP, 1)
+        self.manager.mark_agent_complete(step.step_id)
+
+        with self.assertRaises(ValueError):
+            self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Late"})
+
+    def test_add_finding_rejects_completed_step(self) -> None:
+        """Adding a finding to a COMPLETED step raises ValueError."""
+        self.manager.create_session("s1", "Test", "test.zing")
+        step = self.manager.start_step("s1", _STEP, 1)
+        self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q"})
+        self.manager.mark_agent_complete(step.step_id)
+        self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
+
+        with self.assertRaises(ValueError):
+            self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Too late"})
+
+    def test_add_finding_rejects_wrong_session(self) -> None:
+        """Adding a finding with a step_id from a different session raises ValueError."""
+        self.manager.create_session("s1", "Session 1", "test.zing")
+        step = self.manager.start_step("s1", _STEP, 1)
+        self.manager.create_session("s2", "Session 2", "test.zing")
+
+        with self.assertRaises(ValueError, msg="Step .* belongs to session 's1', not 's2'"):
+            self.manager.add_finding("s2", step.step_id, {"type": "text", "title": "Wrong session"})
+
+    def test_step_id_unique(self) -> None:
+        """Each start_step call generates a unique step_id."""
+        self.manager.create_session("s1", "Test", "test.zing")
+        step1 = self.manager.start_step("s1", "review", 1)
+        step2 = self.manager.start_step("s1", "review", 1)
+        assert step1.step_id != step2.step_id
 
 
 class TestPersistence(unittest.TestCase):
@@ -320,12 +354,12 @@ class TestPersistence(unittest.TestCase):
         """Sessions created by one manager are loaded by a new one."""
         mgr1 = SessionManager(data_dir=self.data_dir)
         mgr1.create_session("s1", "Persistent", "test.zing")
-        mgr1.start_step("s1", _STEP, 2)
-        mgr1.add_finding("s1", {
+        step = mgr1.start_step("s1", _STEP, 2)
+        mgr1.add_finding("s1", step.step_id, {
             "type": "text",
             "title": "Will this persist?",
-        }, step_name=_STEP)
-        mgr1.mark_agent_complete("s1", _STEP)
+        })
+        mgr1.mark_agent_complete(step.step_id)
 
         # Create a new manager pointing at the same data dir
         mgr2 = SessionManager(data_dir=self.data_dir)
@@ -336,6 +370,18 @@ class TestPersistence(unittest.TestCase):
         assert session.steps[0].completed_agents == 1
         assert session.steps[0].state == SessionState.PENDING
 
+    def test_step_id_survives_persistence(self) -> None:
+        """step_id index is rebuilt on reload."""
+        mgr1 = SessionManager(data_dir=self.data_dir)
+        mgr1.create_session("s1", "Test", "test.zing")
+        step = mgr1.start_step("s1", _STEP, 1)
+        step_id = step.step_id
+
+        mgr2 = SessionManager(data_dir=self.data_dir)
+        session, reloaded_step = mgr2._get_step_by_id(step_id)
+        assert reloaded_step.step_name == _STEP
+        assert reloaded_step.step_id == step_id
+
     def test_old_format_migration(self) -> None:
         """Old flat-findings format is migrated to workflow steps on load."""
         import json
@@ -343,7 +389,7 @@ class TestPersistence(unittest.TestCase):
         old_session = {
             "session_id": "old1",
             "title": "Legacy",
-            "zing_file": "test.zing",
+            "zing_file": None,
             "expected_agents": 2,
             "completed_agents": 1,
             "state": "pending",
@@ -377,25 +423,26 @@ class TestWorkflowStepLooping(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_duplicate_step_names(self) -> None:
-        """Starting the same step name twice creates two steps."""
+        """Starting the same step name twice creates two steps with different IDs."""
         self.manager.create_session("s1", "Test", "test.zing")
         step1 = self.manager.start_step("s1", "review", 1)
         step2 = self.manager.start_step("s1", "review", 1)
         assert step1.sequence == 0
         assert step2.sequence == 1
+        assert step1.step_id != step2.step_id
 
         session = self.manager.get_session("s1")
         assert session is not None
         assert len(session.steps) == 2
 
-    def test_findings_go_to_latest_step(self) -> None:
-        """Findings are added to the most recent step with the given name."""
+    def test_findings_go_to_correct_step_by_id(self) -> None:
+        """Findings are routed to the correct step via step_id."""
         self.manager.create_session("s1", "Test", "test.zing")
-        self.manager.start_step("s1", "review", 1)
-        self.manager.add_finding("s1", {"type": "text", "title": "First"}, step_name="review")
+        step1 = self.manager.start_step("s1", "review", 1)
+        self.manager.add_finding("s1", step1.step_id, {"type": "text", "title": "First"})
 
-        self.manager.start_step("s1", "review", 1)
-        self.manager.add_finding("s1", {"type": "text", "title": "Second"}, step_name="review")
+        step2 = self.manager.start_step("s1", "review", 1)
+        self.manager.add_finding("s1", step2.step_id, {"type": "text", "title": "Second"})
 
         session = self.manager.get_session("s1")
         assert session is not None
@@ -421,21 +468,21 @@ class TestWaitForReview(unittest.TestCase):
 
         async def _run() -> None:
             self.manager.create_session("s1", "Async Test", "test.zing")
-            self.manager.start_step("s1", _STEP, 1)
-            self.manager.add_finding("s1", {
+            step = self.manager.start_step("s1", _STEP, 1)
+            self.manager.add_finding("s1", step.step_id, {
                 "type": "text",
                 "title": "Async question",
-            }, step_name=_STEP)
-            self.manager.mark_agent_complete("s1", _STEP)
+            })
+            self.manager.mark_agent_complete(step.step_id)
 
             async def _submit_later() -> None:
                 await asyncio.sleep(0.05)
-                self.manager.submit_responses("s1", _STEP, [
+                self.manager.submit_responses("s1", step.step_id, [
                     UserResponse(answer="async answer"),
                 ])
 
             submit_task = asyncio.create_task(_submit_later())
-            review = await self.manager.wait_for_review("s1", _STEP)
+            review = await self.manager.wait_for_review("s1", step.step_id)
             await submit_task
 
             assert review.session_id == "s1"
@@ -450,16 +497,16 @@ class TestWaitForReview(unittest.TestCase):
 
         async def _run() -> None:
             self.manager.create_session("s1", "Test", "test.zing")
-            self.manager.start_step("s1", _STEP, 1)
-            self.manager.add_finding("s1", {
+            step = self.manager.start_step("s1", _STEP, 1)
+            self.manager.add_finding("s1", step.step_id, {
                 "type": "text",
                 "title": "Q",
-            }, step_name=_STEP)
-            self.manager.mark_agent_complete("s1", _STEP)
-            self.manager.submit_responses("s1", _STEP, [UserResponse(answer="A")])
+            })
+            self.manager.mark_agent_complete(step.step_id)
+            self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
 
             # Should return immediately since step is completed
-            review = await self.manager.wait_for_review("s1", _STEP)
+            review = await self.manager.wait_for_review("s1", step.step_id)
             assert review.step_name == _STEP
             assert len(review.items) == 1
 
