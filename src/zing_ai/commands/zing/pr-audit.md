@@ -22,6 +22,18 @@ gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 ```
 
 Store the PR number, head branch, base branch, title, and URL for later use.
+
+### Session setup
+
+After resolving the PR, check if the zing doc (if one was provided as an argument) has `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no zing doc, no frontmatter, or no `session` in the frontmatter, call `create_review()` to get a new session ID. If a zing doc exists, update its frontmatter to include `session: {session_id}` and save the file.
+
+The `create_review()` call requires:
+- `session_id`: a unique identifier (e.g., `"pr-audit-{number}-{timestamp}"`)
+- `title`: e.g., `"PR Review — #{number} {title}"`
+- `zing_file`: path to the zing doc if one exists, otherwise empty string
+- `expected_agents`: `6` (the number of review agents)
+
+This session ID and the server port will be passed to the shared review steps.
 </step>
 
 <step name="checkout_pr">
@@ -56,7 +68,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. In addition to the shared agent context, each agent also receives:
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. Pass the **session ID** and **server port** to each agent so they can POST findings to the review server. In addition to the shared agent context, each agent also receives:
 - A note of which lines in each assigned file appear in the diff (so agents know which lines can receive line-level comments)
 - PR-specific context: PR number `{number}`, head branch `{headRefName}`, base branch `{baseRefName}`
 </step>
@@ -77,12 +89,26 @@ Looked through everything — nothing jumped out at me. Changes look solid.
 Submit an approving review and exit.
 </step>
 
-<step name="walk_through_findings">
-Follow the `walk_through_findings` guidelines from the shared review reference.
+<step name="check_and_review">
+After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+- **Accepted findings**: Include in the report and submit as PR line-level comments.
+- **Dropped findings**: Exclude from the report and PR review entirely.
+- **Downgraded findings**: Include in the report and PR review with their adjusted severity.
+- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines from the shared review reference for discuss items only), then include in the report and PR review with a note that they were flagged for discussion.
+
+If no findings remain after triage (all dropped), say something like:
+```
+Looked through everything — nothing survived triage. Changes look solid.
+```
+Submit an approving review and exit.
 </step>
 
 <step name="write_report">
-After all findings have been walked through, compile the valid findings into a GitHub-flavored markdown file as a local record.
+Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file as a local record.
 
 First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
 
@@ -107,7 +133,7 @@ PR: {pr_url}
 
 `{file_path}:{line_number}` — **{severity}**, {confidence} confidence
 
-{Write the explanation the same way you explained it during the walkthrough — conversationally, with specific references to the code. Include a code snippet showing the problematic lines.}
+{Write the explanation conversationally, with specific references to the code. Include a code snippet showing the problematic lines. For downgraded findings, use the adjusted severity. For discuss findings, include a note: "(Flagged for discussion)".}
 
 ```{language}
 {relevant code snippet}
@@ -124,14 +150,14 @@ This file serves as a local record and can be passed to `/zing:plan` to plan fix
 </step>
 
 <step name="submit_review">
-After the report has been written, submit a GitHub PR review using the API.
+After the report has been written, submit a GitHub PR review using the API. Use the triaged `ReviewItem` list from the `check_and_review` step to build the review payload.
 
-**Determine your suggested review event:**
-- If any valid finding has severity `critical` or `high`: suggest `REQUEST_CHANGES`
-- If all valid findings are `medium` or `low`: suggest `COMMENT`
-- If zero valid findings: suggest `APPROVE`
+**Determine your suggested review event** based on the triaged findings (not dropped ones):
+- If any accepted or downgraded finding has severity `critical` or `high`: suggest `REQUEST_CHANGES`
+- If all remaining findings are `medium` or `low`: suggest `COMMENT`
+- If zero findings remain after triage: suggest `APPROVE`
 
-**Ask the user what action to take.** Use AskUserQuestion to present your suggestion and let the user decide. Show your reasoning (e.g. "Found 2 high-severity issues, so I'd suggest requesting changes") and offer all three options — APPROVE, COMMENT, REQUEST_CHANGES — with your suggestion marked as recommended. Use the event the user selects for the submission.
+**Ask the user what action to take.** Use AskUserQuestion to present your suggestion and let the user decide. Show your reasoning (e.g. "Found 2 high-severity issues after triage, so I'd suggest requesting changes") and offer all three options — APPROVE, COMMENT, REQUEST_CHANGES — with your suggestion marked as recommended. Use the event the user selects for the submission.
 
 **Get the latest commit SHA** for the PR (needed by the API):
 ```
@@ -144,7 +170,13 @@ gh pr view {number} --json headRefOid --jq '.headRefOid'
 
 If there are any findings that are NOT tied to a specific diff line (big-picture concerns, or findings on lines outside the diff that can't receive line-level comments), include them in the review body. Format each one clearly with the file path and line number, severity emoji, and explanation — just like you would for a line comment, but written inline in the body.
 
-**Build the line-level comments array.** For each valid finding that IS tied to a specific diff line, create a comment object:
+**Build the line-level comments array from triaged findings.** Process the `ReviewItem` list:
+- **Accepted findings**: Create a line-level comment with the original severity.
+- **Dropped findings**: Skip entirely — do not include in the review.
+- **Downgraded findings**: Create a line-level comment with the adjusted severity.
+- **Discuss findings**: Create a line-level comment with a note that this was flagged for discussion (e.g., prefix with "💬 Flagged for discussion: ").
+
+For each included finding that IS tied to a specific diff line, create a comment object:
 
 ```json
 {
@@ -167,7 +199,7 @@ For multi-line findings, use `start_line` and `line` to specify the range:
 The `line` value must be a line number in the **new version** of the file that falls within a diff hunk (a `+` line or unchanged context line shown in the diff). Lines that are only in the old version (`-` lines) cannot receive comments — in that case, comment on the nearest `+` or context line.
 
 **Format each comment body** to be a good PR comment:
-- Prefix with severity as an emoji: `🔴` critical, `🟠` high, `🟡` medium, `⚪` low
+- Prefix with severity as an emoji: `🔴` critical, `🟠` high, `🟡` medium, `⚪` low (use the adjusted severity for downgraded findings)
 - Write the explanation naturally, as you would in a real review
 - Include a short code suggestion if the fix is obvious (using GitHub's suggestion syntax if applicable):
   ````
@@ -236,7 +268,7 @@ End your review summary with: "Zing! Review complete."
 <anti_patterns>
 Follow the anti-patterns from the shared review reference, plus:
 - Do NOT place comments on lines that don't appear in the diff — the GitHub API will reject them
-- Do NOT submit a review without walking through findings with the user first
+- Do NOT submit a review without the user triaging findings in the batch review UI first
 </anti_patterns>
 
 <success_criteria>
@@ -250,10 +282,10 @@ Review is complete when:
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were presented in a sorted summary table
-- [ ] Each finding was walked through one at a time with the user
-- [ ] User validated or invalidated each finding
-- [ ] Valid findings were written to a markdown file in `.zing/` in GFM format
+- [ ] Findings were posted to the review server by subagents
+- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
+- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] PR review was submitted via GitHub API with line-level comments
 - [ ] Review body and comments do not mention Claude/Codex/OpenCode — only Zing attribution if any

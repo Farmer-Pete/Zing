@@ -25,6 +25,18 @@ Exit.
 If there is no diff (no changes), say something like:
 "This branch is identical to `{base}` — nothing to review yet."
 Exit.
+
+### Session setup
+
+After detecting the branch, check if the zing doc (if one was provided as an argument) has `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no zing doc, no frontmatter, or no `session` in the frontmatter, call `create_review()` to get a new session ID. If a zing doc exists, update its frontmatter to include `session: {session_id}` and save the file.
+
+The `create_review()` call requires:
+- `session_id`: a unique identifier (e.g., `"build-audit-{branch_name}-{timestamp}"`)
+- `title`: e.g., `"Code Review — {branch_name}"`
+- `zing_file`: path to the zing doc if one exists, otherwise empty string
+- `expected_agents`: `6` (the number of review agents)
+
+This session ID and the server port will be passed to the shared review steps.
 </step>
 
 <step name="read_changed_files">
@@ -39,7 +51,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies.
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **server port** to each agent so they can POST findings to the review server.
 </step>
 
 <step name="present_summary">
@@ -58,12 +70,26 @@ Looked through everything — nothing jumped out at me. Changes look solid.
 Write an empty findings report and exit.
 </step>
 
-<step name="walk_through_findings">
-Follow the `walk_through_findings` guidelines from the shared review reference.
+<step name="check_and_review">
+After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+- **Accepted findings**: Include in the report as-is.
+- **Dropped findings**: Exclude from the report entirely.
+- **Downgraded findings**: Include in the report with their adjusted severity.
+- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines from the shared review reference for discuss items only), then include in the report with a note that they were flagged for discussion.
+
+If no findings remain after triage (all dropped), say something like:
+```
+Looked through everything — nothing survived triage. Changes look solid.
+```
+Write an empty findings report and exit.
 </step>
 
 <step name="write_report">
-After all findings have been reviewed, compile the valid findings into a GitHub-flavored markdown file.
+Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
 First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
 
@@ -86,7 +112,7 @@ Reviewed on {YYYY-MM-DD} against `{base_branch}`. {count} files changed across {
 
 `{file_path}:{line_number}` — **{severity}**, {confidence} confidence
 
-{Write the explanation the same way you explained it during the walkthrough — conversationally, with specific references to the code. Include a code snippet showing the problematic lines.}
+{Write the explanation conversationally, with specific references to the code. Include a code snippet showing the problematic lines. For downgraded findings, use the adjusted severity. For discuss findings, include a note: "(Flagged for discussion)".}
 
 ```{language}
 {relevant code snippet}
@@ -119,7 +145,7 @@ After writing the review report, use AskUserQuestion to ask: "What next?"
 
 If "Fix with chat": proceed to the `discuss_findings` step.
 
-If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`).
+If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`). Do NOT embed the current session token in the new zing file — it gets its own session when `/zing:plan` picks it up.
 
 If "Create a PR":
 1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
@@ -172,10 +198,10 @@ Review is complete when:
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were presented in a sorted summary table
-- [ ] Each finding was walked through one at a time with the user
-- [ ] User validated or invalidated each finding
-- [ ] Valid findings were written to a markdown file in `.zing/` in GFM format
+- [ ] Findings were posted to the review server by subagents
+- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
+- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>
