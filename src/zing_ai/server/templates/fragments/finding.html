@@ -1,6 +1,7 @@
 {% if finding.type == "text" %}
 <div id="finding-{{ finding.id }}" class="finding">
-    <div class="finding-header">{{ finding.question }}</div>
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
     {% if finding.context %}
     <div class="finding-meta">{{ finding.context }}</div>
     {% endif %}
@@ -35,10 +36,10 @@
         Category: {{ finding.category }}
     </div>
     <div class="action-group">
-        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'accept'" type="button">Accept</button>
-        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'drop'" type="button">Drop</button>
-        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
-        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
+        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'accept'" data-on-click="$responses.{{ finding.id }} = 'accept'" type="button">Accept</button>
+        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'drop'" data-on-click="$responses.{{ finding.id }} = 'drop'" type="button">Drop</button>
+        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'downgrade'" data-on-click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
+        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'discuss'" data-on-click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
     </div>
 </div>
 {% endif %}

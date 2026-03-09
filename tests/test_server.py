@@ -80,7 +80,7 @@ class TestPostFindings(_ServerTestBase):
         self._create_session()
         resp = self.client.post(
             "/test-session/findings",
-            json={"type": "text", "question": "What is the main goal?"},
+            json={"type": "text", "title": "What is the main goal?"},
         )
         self.assertEqual(resp.status_code, 200)
 
@@ -104,7 +104,7 @@ class TestPostFindings(_ServerTestBase):
         """Posting a finding to a nonexistent session returns 404."""
         resp = self.client.post(
             "/no-such-session/findings",
-            json={"type": "text", "question": "Hello?"},
+            json={"type": "text", "title": "Hello?"},
         )
         self.assertEqual(resp.status_code, 404)
         body = resp.json()
@@ -163,7 +163,7 @@ class TestSubmit(_ServerTestBase):
         self._create_session(expected_agents=1)
         self.client.post(
             "/test-session/findings",
-            json={"type": "text", "question": "What is the goal?"},
+            json={"type": "text", "title": "What is the goal?"},
         )
         self.client.post("/test-session/agent-complete")
 
@@ -186,7 +186,7 @@ class TestSubmit(_ServerTestBase):
         # Add findings of each type
         r1 = self.client.post(
             "/test-session/findings",
-            json={"type": "text", "question": "What do you think?"},
+            json={"type": "text", "title": "What do you think?"},
         )
         r2 = self.client.post(
             "/test-session/findings",
@@ -295,7 +295,7 @@ class TestSSEStream(_ServerTestBase):
         # Add a finding and complete agent so the stream terminates
         resp_finding = self.client.post(
             "/test-session/findings",
-            json={"type": "text", "question": "Added after connect?"},
+            json={"type": "text", "title": "Added after connect?"},
         )
         finding_id = resp_finding.json()["finding_id"]
         self.client.post("/test-session/agent-complete")
@@ -304,14 +304,14 @@ class TestSSEStream(_ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         # The finding should appear in the stream by its ID
         self.assertIn(finding_id, resp.text)
-        self.assertIn("Added after connect?", resp.text)
+        self.assertIn("Added after connect?", resp.text)  # title appears in stream
 
     def test_stream_shows_submit_button_when_ready(self) -> None:
         """SSE stream sends submit button HTML when all agents complete."""
         self._create_session(expected_agents=1)
         self.client.post(
             "/test-session/findings",
-            json={"type": "text", "question": "Quick question"},
+            json={"type": "text", "title": "Quick question"},
         )
         self.client.post("/test-session/agent-complete")
 
@@ -357,7 +357,7 @@ class TestFindingFragment(unittest.TestCase):
 
     def test_text_finding_renders_textarea(self) -> None:
         """Text finding renders with a textarea and data-bind."""
-        finding = TextFinding(id="txt1", question="What do you think?")
+        finding = TextFinding(id="txt1", title="What do you think?", body="Some **markdown**")
         html = finding_fragment(finding)
         self.assertIn("finding-txt1", html)
         self.assertIn("<textarea", html)
@@ -366,9 +366,21 @@ class TestFindingFragment(unittest.TestCase):
 
     def test_text_finding_with_context(self) -> None:
         """Text finding renders context when provided."""
-        finding = TextFinding(id="txt2", question="Your thoughts?", context="Some context")
+        finding = TextFinding(id="txt2", title="Your thoughts?", context="Some context")
         html = finding_fragment(finding)
         self.assertIn("Some context", html)
+
+    def test_text_finding_with_markdown_body(self) -> None:
+        """Text finding with markdown body renders HTML in finding-body div."""
+        finding = TextFinding(
+            id="txt3",
+            title="Architecture review",
+            body="Using **bold** and `inline code` in the body.",
+        )
+        html = finding_fragment(finding)
+        self.assertIn("finding-body", html)
+        self.assertIn("<strong>bold</strong>", html)
+        self.assertIn("<code>inline code</code>", html)
 
     def test_choice_finding_renders_radio_buttons(self) -> None:
         """Choice finding renders radio buttons with data-bind for each option."""
@@ -470,7 +482,7 @@ class TestConcurrentSessions(_ServerTestBase):
 
         self.client.post(
             "/session-a/findings",
-            json={"type": "text", "question": "Question for A"},
+            json={"type": "text", "title": "Question for A"},
         )
         self.client.post(
             "/session-b/findings",
@@ -504,7 +516,7 @@ class TestHTMLEndpoints(_ServerTestBase):
         # Complete the second session so it gets a different status badge
         self.client.post(
             "/s2/findings",
-            json={"type": "text", "question": "How is it?"},
+            json={"type": "text", "title": "How is it?"},
         )
         self.client.post("/s2/agent-complete")
         resp = self.client.get("/dashboard")
@@ -580,7 +592,7 @@ class TestDashboardSSE(_ServerTestBase):
             )
             self.client.post(
                 "/sse-dash/findings",
-                json={"type": "text", "question": "Test?"},
+                json={"type": "text", "title": "Test?"},
             )
             self.client.post("/sse-dash/agent-complete")
             # The agent_complete notification should be in the queue
@@ -601,7 +613,7 @@ class TestDashboardSSE(_ServerTestBase):
             )
             self.client.post(
                 "/sse-sub/findings",
-                json={"type": "text", "question": "How?"},
+                json={"type": "text", "title": "How?"},
             )
             self.client.post("/sse-sub/agent-complete")
             # Drain the agent_complete event
@@ -703,7 +715,7 @@ class TestWaitForReview(_ServerTestBase):
 
         self.client.post(
             "/block-session/findings",
-            json={"type": "text", "question": "What do you think?"},
+            json={"type": "text", "title": "What do you think?"},
         )
         self.client.post("/block-session/agent-complete")
 

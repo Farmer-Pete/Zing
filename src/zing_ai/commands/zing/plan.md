@@ -78,7 +78,7 @@ Each subagent receives a prompt with:
 > ```bash
 > curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
 >   -H "Content-Type: application/json" \
->   -d '{"type":"text","question":"I see you'\''re using pattern X — should this follow the same pattern?","context":"Found in src/foo/bar.py"}'
+>   -d '{"type":"text","title":"Should this follow the existing pattern X?","body":"I see you'\''re using pattern X in `src/foo/bar.py`...","context":"Found in src/foo/bar.py"}'
 > ```
 > Check the HTTP status code on the last line of output:
 > - **200** = accepted, continue

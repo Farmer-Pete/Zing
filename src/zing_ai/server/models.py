@@ -22,7 +22,8 @@ class TextFinding(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     type: Literal["text"] = "text"
-    question: str
+    title: str
+    body: str = ""
     context: str | None = None
 
 
