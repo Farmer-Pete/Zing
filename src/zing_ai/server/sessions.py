@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ if not logger.handlers:
     logger.addHandler(_handler)
 
 _DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "zing-ai" / "sessions"
+_SAFE_SESSION_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
 
 class SessionManager:
@@ -49,8 +51,19 @@ class SessionManager:
         self._events: dict[str, asyncio.Event] = {}
         self._load_existing_sessions()
 
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        """Raise ValueError if session_id contains unsafe characters."""
+        if not _SAFE_SESSION_ID.match(session_id):
+            msg = (
+                f"Invalid session_id {session_id!r}: must contain only "
+                "alphanumeric characters, hyphens, and underscores"
+            )
+            raise ValueError(msg)
+
     def _session_path(self, session_id: str) -> Path:
         """Return the JSON file path for a session."""
+        self._validate_session_id(session_id)
         return self._data_dir / f"{session_id}.json"
 
     def _persist(self, session: Session) -> None:
@@ -91,6 +104,10 @@ class SessionManager:
         Returns:
             The newly created Session.
         """
+        self._validate_session_id(session_id)
+        if session_id in self._sessions:
+            msg = f"Session already exists: {session_id}"
+            raise ValueError(msg)
         session = Session(
             session_id=session_id,
             title=title,
@@ -172,6 +189,14 @@ class SessionManager:
             KeyError: If the session does not exist.
         """
         session = self._get_session_or_raise(session_id)
+
+        if len(responses) != len(session.findings):
+            msg = (
+                f"Expected {len(session.findings)} responses but got {len(responses)} "
+                f"for session {session_id}"
+            )
+            raise ValueError(msg)
+
         session.responses = responses
         session.state = SessionState.COMPLETED
         self._persist(session)
@@ -182,7 +207,7 @@ class SessionManager:
 
         items = [
             ReviewItem(finding=finding, response=response)
-            for finding, response in zip(session.findings, responses, strict=False)
+            for finding, response in zip(session.findings, responses, strict=True)
         ]
         logger.info("Session %s completed with %d responses", session_id, len(responses))
         return ReviewResponse(session_id=session_id, items=items)
@@ -208,7 +233,7 @@ class SessionManager:
         responses = session.responses or []
         items = [
             ReviewItem(finding=finding, response=response)
-            for finding, response in zip(session.findings, responses, strict=False)
+            for finding, response in zip(session.findings, responses, strict=True)
         ]
         return ReviewResponse(session_id=session_id, items=items)
 

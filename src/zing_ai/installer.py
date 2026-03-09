@@ -345,14 +345,21 @@ def _register_mcp_claude() -> None:
     if shutil.which("claude") is None:
         logger.warning(
             "claude CLI not found on PATH; skipping MCP server registration. "
-            "Run 'claude mcp add -s user zing-ai -- zing-ai mcp' manually."
+            "Run 'claude mcp add -s user -t http zing-ai "
+            "http://127.0.0.1:9876/mcp' manually."
         )
         return
 
     logger.info("Registering Zing MCP server for Claude Code")
     try:
         subprocess.run(
-            ["claude", "mcp", "add", "-s", "user", "zing-ai", "--", "zing-ai", "mcp"],
+            [
+                "claude", "mcp", "add",
+                "-s", "user",
+                "-t", "http",
+                "zing-ai",
+                "http://127.0.0.1:9876/mcp",
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -377,8 +384,8 @@ def _register_mcp_opencode() -> None:
 
     mcp_section = config.setdefault("mcp", {})
     mcp_section["zing-ai"] = {
-        "type": "local",
-        "command": ["zing-ai", "mcp"],
+        "type": "http",
+        "url": "http://127.0.0.1:9876/mcp",
     }
 
     config_path.parent.mkdir(parents=True, exist_ok=True)

@@ -42,9 +42,30 @@ class TestSessionLifecycle(unittest.TestCase):
         self.manager.create_session("s1", "Test", "test.zing", 1)
         finding = self.manager.add_finding("s1", {
             "type": "text",
-            "question": "What is the meaning of life?",
+            "title": "What is the meaning of life?",
         })
         assert finding.type == "text"
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert len(session.findings) == 1
+
+    def test_add_finding_evaluation(self) -> None:
+        """Adding an evaluation finding appends it to the session."""
+        self.manager.create_session("s1", "Test", "test.zing", 1)
+        finding = self.manager.add_finding("s1", {
+            "type": "evaluation",
+            "title": "Pass 1: Design Fundamentals",
+            "criteria": [
+                {"name": "Clarity", "rating": "strong", "justification": "Clear"},
+            ],
+            "litmus_tests": [
+                {"name": "Simplest thing?", "result": "Yes"},
+            ],
+            "warnings": [
+                {"name": "Future flexibility", "found": False},
+            ],
+        })
+        assert finding.type == "evaluation"
         session = self.manager.get_session("s1")
         assert session is not None
         assert len(session.findings) == 1
@@ -54,7 +75,7 @@ class TestSessionLifecycle(unittest.TestCase):
         self.manager.create_session("s1", "Test", "test.zing", 1)
         finding = self.manager.add_finding("s1", {
             "type": "choice",
-            "question": "Pick one",
+            "title": "Pick one",
             "options": [
                 {"label": "A", "description": "Option A"},
                 {"label": "B", "description": "Option B"},
@@ -67,7 +88,7 @@ class TestSessionLifecycle(unittest.TestCase):
         self.manager.create_session("s1", "Test", "test.zing", 1)
         finding = self.manager.add_finding("s1", {
             "type": "triage",
-            "description": "Unused import",
+            "title": "Unused import",
             "category": "style",
             "severity": "low",
             "confidence": "high",
@@ -80,12 +101,12 @@ class TestSessionLifecycle(unittest.TestCase):
 
         self.manager.add_finding("s1", {
             "type": "text",
-            "question": "Is this correct?",
+            "title": "Is this correct?",
         })
         self.manager.add_finding("s1", {
             "type": "triage",
-            "description": "Bug found",
-            "category": "logic",
+            "title": "Bug found",
+            "category": "correctness",
             "severity": "high",
             "confidence": "medium",
         })
@@ -132,12 +153,12 @@ class TestConcurrentSessions(unittest.TestCase):
 
         self.manager.add_finding("s1", {
             "type": "text",
-            "question": "Question for s1",
+            "title": "Question for s1",
         })
         self.manager.add_finding("s2", {
             "type": "triage",
-            "description": "Finding for s2",
-            "category": "bug",
+            "title": "Finding for s2",
+            "category": "correctness",
             "severity": "high",
             "confidence": "high",
         })
@@ -242,7 +263,7 @@ class TestAgentTracking(unittest.TestCase):
     def test_invalid_session_id_raises(self) -> None:
         """Operations on a nonexistent session raise KeyError."""
         with self.assertRaises(KeyError):
-            self.manager.add_finding("nonexistent", {"type": "text", "question": "Q"})
+            self.manager.add_finding("nonexistent", {"type": "text", "title": "Q"})
 
         with self.assertRaises(KeyError):
             self.manager.mark_agent_complete("nonexistent")
@@ -267,7 +288,7 @@ class TestPersistence(unittest.TestCase):
         mgr1.create_session("s1", "Persistent", "test.zing", 2)
         mgr1.add_finding("s1", {
             "type": "text",
-            "question": "Will this persist?",
+            "title": "Will this persist?",
         })
         mgr1.mark_agent_complete("s1")
 
@@ -299,7 +320,7 @@ class TestWaitForReview(unittest.TestCase):
             self.manager.create_session("s1", "Async Test", "test.zing", 1)
             self.manager.add_finding("s1", {
                 "type": "text",
-                "question": "Async question",
+                "title": "Async question",
             })
             self.manager.mark_agent_complete("s1")
 

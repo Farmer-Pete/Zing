@@ -8,15 +8,15 @@
 
 <div id="review-root"
      data-signals="{responses: {}}"
-     data-on-load="@get('/{{ session.session_id }}/stream')">
+     data-init="@get('/{{ session.session_id }}/stream')">
 
     <div id="findings-container">
     </div>
 
-    <div id="review-status" style="display: none;">
+    <div id="review-status">
     </div>
 
-    <div id="submit-section" style="display: none;">
+    <div id="submit-section">
     </div>
 </div>
 {% endblock %}

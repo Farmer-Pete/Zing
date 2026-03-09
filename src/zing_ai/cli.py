@@ -149,8 +149,9 @@ def mcp_cmd(port: int) -> None:
 
     from zing_ai.server.app import create_app
 
-    app = create_app()
+    app = create_app(port=port)
     click.echo(f"Starting Zing server on http://127.0.0.1:{port}")
+    click.echo(f"Dashboard: http://127.0.0.1:{port}/dashboard")
     uvicorn.run(app, host="127.0.0.1", port=port)
 
 

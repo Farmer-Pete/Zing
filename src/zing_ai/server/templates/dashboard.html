@@ -24,17 +24,12 @@
         </div>
         {% if s.state.value == "completed" %}
         <div style="margin-top: 0.5rem;">
-            <a href="/{{ s.session_id }}">View review</a> |
-            <form method="post" action="/sessions/{{ s.session_id }}/open-file" style="display: inline;">
-                <button class="open-btn" type="submit">Open zing file</button>
-            </form>
+            <a href="/{{ s.session_id }}">View review</a>
         </div>
         {% endif %}
         {% if s.state.value == "completed" %}
         <div style="margin-top: 0.25rem;">
-            <form method="post" action="/sessions/{{ s.session_id }}/cleanup" style="display: inline;">
-                <button class="cleanup-btn" type="submit">Cleanup</button>
-            </form>
+            <button class="cleanup-btn" type="button" data-on:click="@post('/sessions/{{ s.session_id }}/cleanup')">Cleanup</button>
         </div>
         {% endif %}
     </li>

@@ -41,10 +41,10 @@
         Category: {{ finding.category }}
     </div>
     <div class="action-group">
-        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'accept'" data-on-click="$responses.{{ finding.id }} = 'accept'" type="button">Accept</button>
-        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'drop'" data-on-click="$responses.{{ finding.id }} = 'drop'" type="button">Drop</button>
-        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'downgrade'" data-on-click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
-        <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'discuss'" data-on-click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
+        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'" type="button">Accept</button>
+        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'drop'" data-on:click="$responses.{{ finding.id }} = 'drop'" type="button">Drop</button>
+        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'downgrade'" data-on:click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
+        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'discuss'" data-on:click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
     </div>
     {% if finding.options %}
     <div class="triage-options">
@@ -57,5 +57,47 @@
         {% endfor %}
     </div>
     {% endif %}
+</div>
+{% elif finding.type == "evaluation" %}
+<div id="finding-{{ finding.id }}" class="finding evaluation-finding">
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    <table class="eval-table">
+        <thead><tr><th>Criterion</th><th>Rating</th><th>Justification</th></tr></thead>
+        <tbody>
+        {% for c in finding.criteria %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td><span class="badge badge-{{ c.rating }}">{{ c.rating }}</span></td>
+            <td>{{ c.justification }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if finding.litmus_tests %}
+    <table class="eval-table">
+        <thead><tr><th>Litmus Test</th><th>Result</th></tr></thead>
+        <tbody>
+        {% for lt in finding.litmus_tests %}
+        <tr><td>{{ lt.name }}</td><td>{{ lt.result }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if finding.warnings %}
+    <table class="eval-table">
+        <thead><tr><th>Warning Sign</th><th>Found?</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for w in finding.warnings %}
+        <tr>
+            <td>{{ w.name }}</td>
+            <td>{% if w.found %}<span class="badge badge-warn-yes">Yes</span>{% else %}No{% endif %}</td>
+            <td>{{ w.details }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    <div class="finding-meta">Informational — no response needed</div>
 </div>
 {% endif %}

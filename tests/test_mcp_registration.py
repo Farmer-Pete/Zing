@@ -22,7 +22,13 @@ def test_claude_calls_subprocess_with_correct_args() -> None:
         register_mcp_server("claude")
 
     mock_run.assert_called_once_with(
-        ["claude", "mcp", "add", "-s", "user", "zing-ai", "--", "zing-ai", "mcp"],
+        [
+            "claude", "mcp", "add",
+            "-s", "user",
+            "-t", "http",
+            "zing-ai",
+            "http://127.0.0.1:9876/mcp",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -77,8 +83,8 @@ def test_opencode_creates_config_with_correct_structure(tmp_path: Path) -> None:
         assert "mcp" in config
         assert "zing-ai" in config["mcp"]
         assert config["mcp"]["zing-ai"] == {
-            "type": "local",
-            "command": ["zing-ai", "mcp"],
+            "type": "http",
+            "url": "http://127.0.0.1:9876/mcp",
         }
 
 
@@ -107,8 +113,8 @@ def test_opencode_merges_into_existing_config(tmp_path: Path) -> None:
     assert config["mcp"]["other-server"] == {"type": "local", "command": ["other", "serve"]}
     # Zing MCP server added
     assert config["mcp"]["zing-ai"] == {
-        "type": "local",
-        "command": ["zing-ai", "mcp"],
+        "type": "http",
+        "url": "http://127.0.0.1:9876/mcp",
     }
 
 

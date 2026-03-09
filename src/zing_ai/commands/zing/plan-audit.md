@@ -136,15 +136,15 @@ Launching 4 evaluation passes in parallel...
 
 **Posting results to the review server:**
 
-First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+First, POST your evaluation as a structured `evaluation` item:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"text","title":"Pass 1: Design Fundamentals","body":"| Criterion | Rating | Justification |\n|---|---|---|\n| Clarity & Simplicity | {rating} | {justification} |\n| Fitness for Purpose | {rating} | {justification} |\n| YAGNI | {rating} | {justification} |\n| Maintainability | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| Simplest thing that could work? | {result} |\n| What requirement drives each component? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| \"Might need this someday\" justifications | {Yes/No} | {details} |\n| Only one approach considered | {Yes/No} | {details} |\n| Components for \"future flexibility\" | {Yes/No} | {details} |","context":"Informational — no response needed"}'
+  -d '{"type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":{true|false},"details":"{details}"},{"name":"Only one approach considered","found":{true|false},"details":"{details}"},{"name":"Components for future flexibility","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
@@ -202,15 +202,15 @@ curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 
 **Posting results to the review server:**
 
-First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+First, POST your evaluation as a structured `evaluation` item:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"text","title":"Pass 2: Robustness & Safety","body":"| Criterion | Rating | Justification |\n|---|---|---|\n| Correctness & Safety | {rating} | {justification} |\n| Operability | {rating} | {justification} |\n| TDD Readiness | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| What happens when this fails? | {result} |\n| How will we know it'\''s working? | {result} |\n| How do we test this? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| Only happy path described | {Yes/No} | {details} |\n| Data model is afterthought | {Yes/No} | {details} |\n| Deployment strategy deferred | {Yes/No} | {details} |\n| No test strategy | {Yes/No} | {details} |","context":"Informational — no response needed"}'
+  -d '{"type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":{true|false},"details":"{details}"},{"name":"Data model is afterthought","found":{true|false},"details":"{details}"},{"name":"Deployment strategy deferred","found":{true|false},"details":"{details}"},{"name":"No test strategy","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
@@ -274,15 +274,15 @@ curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 
 **Posting results to the review server:**
 
-First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+First, POST your evaluation as a structured `evaluation` item:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"text","title":"Pass 3: Plan as Executable Spec","body":"| Criterion | Rating | Justification |\n|---|---|---|\n| Specificity & Executability | {rating} | {justification} |\n| Step Atomicity | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| Could two people build different things from this plan? | {result} |\n| Can each step be completed, tested, and committed independently? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| Implementation over interfaces | {Yes/No} | {details} |\n| Steps missing acceptance criteria | {Yes/No} | {details} |\n| Vague or weasel words | {Yes/No} | {details} |\n| Unspecified tech choices | {Yes/No} | {details} |\n| Missing data models | {Yes/No} | {details} |\n| TBD/TODO markers | {Yes/No} | {details} |\n| Tests separated from implementation | {Yes/No} | {details} |\n| Steps that can'\''t be verified independently | {Yes/No} | {details} |\n| Scaffolding steps without behavior | {Yes/No} | {details} |","context":"Informational — no response needed"}'
+  -d '{"type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":{true|false},"details":"{details}"},{"name":"Steps missing acceptance criteria","found":{true|false},"details":"{details}"},{"name":"Vague or weasel words","found":{true|false},"details":"{details}"},{"name":"Unspecified tech choices","found":{true|false},"details":"{details}"},{"name":"Missing data models","found":{true|false},"details":"{details}"},{"name":"TBD/TODO markers","found":{true|false},"details":"{details}"},{"name":"Tests separated from implementation","found":{true|false},"details":"{details}"},{"name":"Steps that cannot be verified independently","found":{true|false},"details":"{details}"},{"name":"Scaffolding steps without behavior","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
@@ -322,15 +322,15 @@ curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 
 **Posting results to the review server:**
 
-First, POST your evaluation table as a `text` item so it appears as read-only reference in the review UI:
+First, POST your evaluation as a structured `evaluation` item:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"text","title":"Pass 4: Code Quality","body":"| Criterion | Rating | Justification |\n|---|---|---|\n| Code Quality & Idiomacy | {rating} | {justification} |","context":"Informational — no response needed"}'
+  -d '{"type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}'
 ```
 
-Then, for each issue found (criterion rated "Weak" or "Missing"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+Then, for each issue found (criterion rated "weak" or "missing"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \

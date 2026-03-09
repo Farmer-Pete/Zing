@@ -47,11 +47,43 @@ class Category(StrEnum):
     STYLE = "style"
 
 
+class Rating(StrEnum):
+    """Rating levels for plan evaluation criteria."""
+
+    STRONG = "strong"
+    ADEQUATE = "adequate"
+    WEAK = "weak"
+    MISSING = "missing"
+
+
 class ChoiceOption(BaseModel):
     """A single option in a multiple-choice finding."""
 
     label: str
     description: str
+
+
+class CriterionRating(BaseModel):
+    """A single criterion's evaluation result."""
+
+    name: str
+    rating: Rating
+    justification: str
+
+
+class LitmusTest(BaseModel):
+    """A single litmus test result."""
+
+    name: str
+    result: str
+
+
+class WarningSign(BaseModel):
+    """A single warning sign check result."""
+
+    name: str
+    found: bool
+    details: str = ""
 
 
 class TextFinding(BaseModel):
@@ -88,8 +120,20 @@ class TriageFinding(BaseModel):
     options: list[ChoiceOption] | None = None
 
 
+class EvaluationFinding(BaseModel):
+    """Informational evaluation pass: structured criteria, litmus tests, and warnings."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:8])
+    type: Literal["evaluation"] = "evaluation"
+    title: str
+    body: str = ""
+    criteria: list[CriterionRating]
+    litmus_tests: list[LitmusTest] = Field(default_factory=list)
+    warnings: list[WarningSign] = Field(default_factory=list)
+
+
 Finding = Annotated[
-    TextFinding | ChoiceFinding | TriageFinding,
+    TextFinding | ChoiceFinding | TriageFinding | EvaluationFinding,
     Field(discriminator="type"),
 ]
 

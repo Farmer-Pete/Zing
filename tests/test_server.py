@@ -13,14 +13,15 @@ from fastapi.testclient import TestClient
 from zing_ai.server.app import create_app
 from zing_ai.server.mcp_tools import configure, create_review, wait_for_review
 from zing_ai.server.models import (
-    Category,
     ChoiceFinding,
     ChoiceOption,
-    Confidence,
+    CriterionRating,
+    EvaluationFinding,
+    LitmusTest,
     Location,
-    Severity,
     TextFinding,
     TriageFinding,
+    WarningSign,
 )
 from zing_ai.server.routes import finding_fragment
 from zing_ai.server.sessions import SessionManager
@@ -115,6 +116,47 @@ class TestPostFindings(_ServerTestBase):
         body = resp.json()
         self.assertEqual(body["error"], "session_not_found")
         self.assertIn("no-such-session", body["message"])
+
+    def test_valid_evaluation_finding(self) -> None:
+        """A valid evaluation finding is accepted and stored."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "evaluation",
+                "title": "Pass 1: Design Fundamentals",
+                "criteria": [
+                    {"name": "Clarity", "rating": "strong", "justification": "Clear design"},
+                    {"name": "YAGNI", "rating": "weak", "justification": "Extra abstractions"},
+                ],
+                "litmus_tests": [
+                    {"name": "Simplest thing?", "result": "Could be simpler"},
+                ],
+                "warnings": [
+                    {"name": "Future flexibility", "found": True, "details": "Plugin system"},
+                ],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        self.assertEqual(len(session.findings), 1)
+        self.assertEqual(session.findings[0].type, "evaluation")
+
+    def test_evaluation_finding_rejects_invalid_rating(self) -> None:
+        """An evaluation finding with an invalid rating value returns 400."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "evaluation",
+                "title": "Pass 1",
+                "criteria": [
+                    {"name": "Clarity", "rating": "excellent", "justification": "Great"},
+                ],
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_malformed_finding_returns_400(self) -> None:
         """Posting invalid finding data returns 400 with field-level errors."""
@@ -242,6 +284,44 @@ class TestSubmit(_ServerTestBase):
         self.assertEqual(session.responses[0].answer, "Looks good")
         self.assertEqual(session.responses[1].action, "accept")
         self.assertEqual(session.responses[2].selected, "A")
+
+    def test_submit_with_evaluation_finding(self) -> None:
+        """Evaluation findings are auto-acknowledged with empty UserResponse."""
+        self._create_session(expected_agents=1)
+        self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "evaluation",
+                "title": "Pass 1",
+                "criteria": [
+                    {"name": "Clarity", "rating": "strong", "justification": "Good"},
+                ],
+            },
+        )
+        r2 = self.client.post(
+            "/test-session/findings",
+            json={"type": "text", "title": "Any thoughts?"},
+        )
+        self.client.post("/test-session/agent-complete")
+
+        text_id = r2.json()["finding_id"]
+
+        resp = self.client.post(
+            "/test-session/submit",
+            json={"responses": {text_id: "Looks good"}},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items_count"], 2)
+
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        assert session.responses is not None
+        # Evaluation finding gets empty response (auto-acknowledged)
+        self.assertIsNone(session.responses[0].answer)
+        self.assertIsNone(session.responses[0].action)
+        self.assertIsNone(session.responses[0].selected)
+        # Text finding gets user's answer
+        self.assertEqual(session.responses[1].answer, "Looks good")
 
     def test_submit_returns_400_for_invalid_responses(self) -> None:
         """Submitting non-list non-dict responses returns 400."""
@@ -432,6 +512,63 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("downgrade", html)
         self.assertIn("discuss", html)
         self.assertIn("data-class-selected=\"$responses.tri1 === 'accept'\"", html)
+
+
+    def test_evaluation_finding_renders_tables(self) -> None:
+        """Evaluation finding renders structured tables with badges."""
+        finding = EvaluationFinding(
+            id="eval1",
+            title="Pass 1: Design Fundamentals",
+            criteria=[
+                CriterionRating(name="Clarity", rating="strong", justification="Very clear"),
+                CriterionRating(name="YAGNI", rating="weak", justification="Over-engineered"),
+            ],
+            litmus_tests=[
+                LitmusTest(name="Simplest thing?", result="Could be simpler"),
+            ],
+            warnings=[
+                WarningSign(name="Future flexibility", found=True, details="Plugin system"),
+                WarningSign(name="Only one approach", found=False),
+            ],
+        )
+        html = finding_fragment(finding)
+        self.assertIn("finding-eval1", html)
+        self.assertIn("Pass 1: Design Fundamentals", html)
+        self.assertIn("eval-table", html)
+        # Criteria
+        self.assertIn("Clarity", html)
+        self.assertIn("badge-strong", html)
+        self.assertIn("Very clear", html)
+        self.assertIn("YAGNI", html)
+        self.assertIn("badge-weak", html)
+        # Litmus tests
+        self.assertIn("Simplest thing?", html)
+        self.assertIn("Could be simpler", html)
+        # Warnings
+        self.assertIn("Future flexibility", html)
+        self.assertIn("badge-warn-yes", html)
+        self.assertIn("Plugin system", html)
+        # Informational meta
+        self.assertIn("Informational", html)
+        # No input controls
+        self.assertNotIn("<textarea", html)
+        self.assertNotIn('type="radio"', html)
+
+    def test_evaluation_finding_without_optional_sections(self) -> None:
+        """Evaluation finding with only criteria renders no litmus/warning tables."""
+        finding = EvaluationFinding(
+            id="eval2",
+            title="Pass 4: Code Quality",
+            criteria=[
+                CriterionRating(name="Code Quality", rating="adequate", justification="Decent"),
+            ],
+        )
+        html = finding_fragment(finding)
+        self.assertIn("Code Quality", html)
+        self.assertIn("badge-adequate", html)
+        # Should not render litmus or warning tables
+        self.assertNotIn("Litmus Test", html)
+        self.assertNotIn("Warning Sign", html)
 
 
 class TestMarkdownFilter(unittest.TestCase):

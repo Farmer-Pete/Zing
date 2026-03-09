@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import subprocess
 from collections import defaultdict
 from typing import Any
 
@@ -80,7 +80,13 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
     if manager.get_session(session_id) is None:
         return _session_not_found(session_id)
 
-    body: dict[str, Any] = await request.json()
+    try:
+        body: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+        )
     adapter = TypeAdapter(Finding)
     try:
         adapter.validate_python(body)
@@ -102,7 +108,7 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
     _notify_sse_connections(session_id, "finding")
     logger.info("Finding added to session %s: %s", session_id, finding.type)
     return JSONResponse(
-        status_code=201,
+        status_code=200,
         content={"status": "ok", "finding_id": finding.id},
     )
 
@@ -147,7 +153,22 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
     if session is None:
         return _session_not_found(session_id)
 
-    body: dict[str, Any] = await request.json()
+    if session.state.value != "ready":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "invalid_state",
+                "message": f"Session '{session_id}' is in state '{session.state.value}', expected 'ready'",
+            },
+        )
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+        )
 
     # Check if this is a Datastar signal submission (has "responses" as a dict)
     # or a direct JSON API call (has "responses" as a list).
@@ -165,7 +186,13 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
             content={"error": "invalid_responses", "message": "responses must be a list or object"},
         )
 
-    review = manager.submit_responses(session_id, responses)
+    try:
+        review = manager.submit_responses(session_id, responses)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "response_count_mismatch", "message": str(exc)},
+        )
     _notify_sse_connections(session_id, "completed")
     _notify_dashboard_connections("review_submitted")
     logger.info("Session %s submitted with %d responses", session_id, len(responses))
@@ -204,6 +231,8 @@ def _map_signals_to_responses(
             if isinstance(value, str) and value in {a.value for a in ResponseAction}:
                 action = ResponseAction(value)
             responses.append(UserResponse(action=action))
+        elif finding.type == "evaluation":
+            responses.append(UserResponse())
         else:
             responses.append(UserResponse())
     return responses
@@ -247,7 +276,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 )
                 yield SSE.patch_elements(
                     '<div id="submit-section">'
-                    f'<button class="submit-btn" data-on-click="@post(\'/{session_id}/submit\')">'
+                    f'<button class="submit-btn" data-on:click="@post(\'/{session_id}/submit\')">'
                     "Submit Review</button></div>",
                 )
                 return
@@ -285,7 +314,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     yield SSE.patch_elements(
                         '<div id="submit-section">'
                         f'<button class="submit-btn" '
-                        f"data-on-click=\"@post('/{session_id}/submit')\">"
+                        f"data-on:click=\"@post('/{session_id}/submit')\">"
                         "Submit Review</button></div>",
                     )
                     return
@@ -363,25 +392,6 @@ async def post_cleanup(
     logger.info("Session %s cleaned up via dashboard", session_id)
     return JSONResponse(status_code=200, content={"status": "ok"})
 
-
-@router.post("/sessions/{session_id}/open-file", response_model=None)
-async def post_open_file(
-    session_id: str, request: Request,
-) -> JSONResponse:
-    """Open the zing file for a session in the default macOS application.
-
-    Args:
-        session_id: The session whose zing file to open.
-        request: The incoming request.
-    """
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
-    if session is None:
-        return _session_not_found(session_id)
-
-    subprocess.run(["open", session.zing_file])  # noqa: S603, S607
-    logger.info("Opened zing file for session %s: %s", session_id, session.zing_file)
-    return JSONResponse(status_code=200, content={"status": "ok"})
 
 
 @router.get("/{session_id}", response_model=None)
