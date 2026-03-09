@@ -96,11 +96,8 @@ async def submit_finding(session_id: str, step_id: str, finding: dict) -> dict:
     RuntimeError for state conflicts (e.g. submitting to a completed step).
     """
     sm = _get_session_manager()
-    try:
-        result = sm.add_finding(session_id, step_id, finding)
-        return {"status": "ok", "finding_id": result.id}
-    except (KeyError, ValueError, RuntimeError):
-        raise
+    result = sm.add_finding(session_id, step_id, finding)
+    return {"status": "ok", "finding_id": result.id}
 
 
 @mcp_server.tool()
@@ -108,11 +105,8 @@ async def mark_agent_complete(session_id: str, step_id: str) -> dict:
     """Signal that an agent has finished submitting findings for a step.
 
     Returns {"status": "ok", "step_state": "<state>"} on success.
-    Raises KeyError for unknown session/step, RuntimeError for state conflicts.
+    Raises KeyError for unknown session/step, ValueError for invalid state.
     """
     sm = _get_session_manager()
-    try:
-        step = sm.mark_agent_complete(session_id, step_id)
-        return {"status": "ok", "step_state": step.state.value}
-    except (KeyError, RuntimeError):
-        raise
+    step = sm.mark_agent_complete(session_id, step_id)
+    return {"status": "ok", "step_state": step.state.value}

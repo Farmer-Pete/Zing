@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 from collections import defaultdict
@@ -399,7 +400,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
     session = manager.get_session(session_id)
     if session is None:
         return SSE.patch_elements(
-            f'<div id="error">Session \'{session_id}\' not found</div>'
+            f'<div id="error">Session \'{html.escape(session_id)}\' not found</div>'
         )
 
     # Determine which step to stream (by step_id)
@@ -445,7 +446,8 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 )
                 yield SSE.patch_elements(
                     '<div id="submit-section">'
-                    f'<button class="submit-btn" data-on:click="@post(\'/{session_id}/submit\')">'
+                    f'<button class="submit-btn" '
+                    f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
                     "Submit Review</button></div>",
                 )
                 return
@@ -493,7 +495,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     yield SSE.patch_elements(
                         '<div id="submit-section">'
                         f'<button class="submit-btn" '
-                        f"data-on:click=\"@post('/{session_id}/submit')\">"
+                        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
                         "Submit Review</button></div>",
                     )
                     return

@@ -10,8 +10,8 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from zing_ai.server.models import (
@@ -363,7 +363,7 @@ class SessionManager:
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
             msg = (
-                f"Step '{step_id}' belongs to session '{_session_from_step.session_id}', "
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
                 f"not '{session_id}'"
             )
             raise ValueError(msg)
@@ -412,7 +412,8 @@ class SessionManager:
             The ReviewResponse once submitted.
 
         Raises:
-            KeyError: If the session or step does not exist.
+            KeyError: If the session or step does not exist, or was cleaned up
+                while waiting.
         """
         _session, step = self.get_step_by_id(step_id)
 
@@ -421,7 +422,7 @@ class SessionManager:
             if key not in self._events:
                 self._events[key] = asyncio.Event()
             await self._events[key].wait()
-            # Re-fetch after await in case step was updated
+            # Re-fetch after await — raises KeyError if session was cleaned up
             _session, step = self.get_step_by_id(step_id)
 
         responses = step.responses or []
@@ -449,7 +450,10 @@ class SessionManager:
         if session:
             for step in session.steps:
                 self._steps_by_id.pop(step.step_id, None)
-                self._events.pop(self._event_key(session_id, step.step_id), None)
+                key = self._event_key(session_id, step.step_id)
+                event = self._events.pop(key, None)
+                if event:
+                    event.set()  # unblock any wait_for_review callers
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()
