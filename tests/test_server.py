@@ -838,6 +838,14 @@ class TestCleanup(_ServerTestBase):
 class TestDashboardSSE(_ServerTestBase):
     """Tests for the dashboard SSE notification mechanism."""
 
+    @staticmethod
+    def _drain_queue(queue: asyncio.Queue[str]) -> list[str]:
+        """Drain all pending events from a queue and return them."""
+        events: list[str] = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        return events
+
     def test_dashboard_notified_on_agent_complete(self) -> None:
         """Dashboard SSE queues receive events when agent completes."""
         from zing_ai.server.routes import _dashboard_queues
@@ -848,6 +856,8 @@ class TestDashboardSSE(_ServerTestBase):
             self._create_session(
                 session_id="sse-dash", title="SSE Dashboard Test", expected_agents=1,
             )
+            # Drain observer events from session creation and step start
+            self._drain_queue(queue)
             self.client.post(
                 "/sse-dash/findings",
                 json={"step_id": self.step_id, "type": "text", "title": "Test?"},
@@ -874,8 +884,8 @@ class TestDashboardSSE(_ServerTestBase):
                 json={"step_id": self.step_id, "type": "text", "title": "How?"},
             )
             self.client.post("/sse-sub/agent-complete", json={"step_id": self.step_id})
-            # Drain the agent_complete event
-            queue.get_nowait()
+            # Drain all earlier events (created, step_started, agent_complete)
+            self._drain_queue(queue)
 
             self.client.post(
                 "/sse-sub/submit",
@@ -894,6 +904,8 @@ class TestDashboardSSE(_ServerTestBase):
         _dashboard_queues.append(queue)
         try:
             self._create_session(session_id="sse-clean", title="Cleanup Test")
+            # Drain observer events from session creation and step start
+            self._drain_queue(queue)
             self.client.post("/sessions/sse-clean/cleanup")
             event = queue.get_nowait()
             self.assertEqual(event, "cleaned_up")

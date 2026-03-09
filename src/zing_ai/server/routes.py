@@ -100,8 +100,6 @@ async def post_start_step(session_id: str, request: Request) -> JSONResponse:
 
     expected_agents = body.get("expected_agents", 0)
     step = manager.start_step(session_id, step_name, expected_agents)
-    _notify_sse_connections(session_id, "step_started")
-    _notify_dashboard_connections("step_started")
     return JSONResponse(
         status_code=200,
         content={
@@ -196,7 +194,6 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
             content={"error": "invalid_state", "message": str(exc)},
         )
 
-    _notify_sse_connections(session_id, "finding")
     logger.info("Finding added to session %s (step_id=%s): %s", session_id, step_id, finding.type)
     return JSONResponse(
         status_code=200,
@@ -242,9 +239,6 @@ async def post_agent_complete(session_id: str, request: Request) -> JSONResponse
             content={"error": "invalid_state", "message": str(exc)},
         )
 
-    if step.state.value == "ready":
-        _notify_sse_connections(session_id, "ready")
-        _notify_dashboard_connections("agent_complete")
     logger.info(
         "Agent complete for session %s (step_id=%s, %d/%d)",
         session_id,
@@ -340,8 +334,6 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "response_count_mismatch", "message": str(exc)},
         )
-    _notify_sse_connections(session_id, "completed")
-    _notify_dashboard_connections("review_submitted")
     logger.info(
         "Session %s step '%s' (id=%s) submitted with %d responses",
         session_id,
@@ -576,7 +568,6 @@ async def post_cleanup(
         return
 
     manager.cleanup_session(session_id)
-    _notify_dashboard_connections("cleaned_up")
     logger.info("Session %s cleaned up via dashboard", session_id)
     return SSE.redirect("/dashboard")
 
