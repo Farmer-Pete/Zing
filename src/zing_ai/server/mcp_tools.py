@@ -82,3 +82,37 @@ async def wait_for_review(session_id: str, step_name: str) -> dict:
     step = sm.get_latest_step(session_id, step_name)
     review_response = await sm.wait_for_review(session_id, step.step_id)
     return review_response.model_dump()
+
+
+@mcp_server.tool()
+async def submit_finding(session_id: str, step_id: str, finding: dict) -> dict:
+    """Submit a finding to a workflow step.
+
+    The finding dict must include a 'type' field ('text', 'choice', 'triage', or 'evaluation')
+    and the fields required by that type. See the Finding model for details.
+
+    Returns {"status": "ok", "finding_id": "<id>"} on success.
+    Raises ValueError for invalid finding data, KeyError for unknown session/step,
+    RuntimeError for state conflicts (e.g. submitting to a completed step).
+    """
+    sm = _get_session_manager()
+    try:
+        result = sm.add_finding(session_id, step_id, finding)
+        return {"status": "ok", "finding_id": result.id}
+    except (KeyError, ValueError, RuntimeError):
+        raise
+
+
+@mcp_server.tool()
+async def mark_agent_complete(session_id: str, step_id: str) -> dict:
+    """Signal that an agent has finished submitting findings for a step.
+
+    Returns {"status": "ok", "step_state": "<state>"} on success.
+    Raises KeyError for unknown session/step, RuntimeError for state conflicts.
+    """
+    sm = _get_session_manager()
+    try:
+        step = sm.mark_agent_complete(session_id, step_id)
+        return {"status": "ok", "step_state": step.state.value}
+    except (KeyError, RuntimeError):
+        raise
