@@ -65,9 +65,11 @@ You are now a senior technical design reviewer. Launch 4 parallel Task subagents
 
 After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
 
-After creating the session, call `start_step(session_id, "plan-evaluation", 4)` to initialize the workflow step for the 4 evaluation agents.
+The create_review() call requires: session_id (unique identifier), title (human-readable), zing_file (absolute path to the zing doc — resolve using the working directory before calling). Always resolve the zing file path to an absolute path before passing it to create_review().
 
-This session ID and step name (`"plan-evaluation"`) will be used by subagents to POST their findings to the review server.
+After creating the session, call `start_step(session_id, "plan-evaluation", 4)` to initialize the workflow step for the 4 evaluation agents. This returns a `step_id` — a unique identifier for this step.
+
+This session ID and step ID (from `start_step`) will be used by subagents to POST their findings to the review server.
 
 ### Preparing the agent prompts
 
@@ -143,28 +145,31 @@ First, POST your evaluation as a structured `evaluation` item:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":{true|false},"details":"{details}"},{"name":"Only one approach considered","found":{true|false},"details":"{details}"},{"name":"Components for future flexibility","found":{true|false},"details":"{details}"}]}'
+  -d '{"step_id":"STEP_ID","type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":{true|false},"details":"{details}"},{"name":"Only one approach considered","found":{true|false},"details":"{details}"},{"name":"Components for future flexibility","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with the improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"step_id":"STEP_ID","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
 - **200** = accepted, continue
 - **400** = fix your JSON and retry
-- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 After posting ALL items, signal completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 ---
@@ -211,28 +216,31 @@ First, POST your evaluation as a structured `evaluation` item:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":{true|false},"details":"{details}"},{"name":"Data model is afterthought","found":{true|false},"details":"{details}"},{"name":"Deployment strategy deferred","found":{true|false},"details":"{details}"},{"name":"No test strategy","found":{true|false},"details":"{details}"}]}'
+  -d '{"step_id":"STEP_ID","type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":{true|false},"details":"{details}"},{"name":"Data model is afterthought","found":{true|false},"details":"{details}"},{"name":"Deployment strategy deferred","found":{true|false},"details":"{details}"},{"name":"No test strategy","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with the improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"step_id":"STEP_ID","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
 - **200** = accepted, continue
 - **400** = fix your JSON and retry
-- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 After posting ALL items, signal completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 ---
@@ -285,28 +293,31 @@ First, POST your evaluation as a structured `evaluation` item:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":{true|false},"details":"{details}"},{"name":"Steps missing acceptance criteria","found":{true|false},"details":"{details}"},{"name":"Vague or weasel words","found":{true|false},"details":"{details}"},{"name":"Unspecified tech choices","found":{true|false},"details":"{details}"},{"name":"Missing data models","found":{true|false},"details":"{details}"},{"name":"TBD/TODO markers","found":{true|false},"details":"{details}"},{"name":"Tests separated from implementation","found":{true|false},"details":"{details}"},{"name":"Steps that cannot be verified independently","found":{true|false},"details":"{details}"},{"name":"Scaffolding steps without behavior","found":{true|false},"details":"{details}"}]}'
+  -d '{"step_id":"STEP_ID","type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":{true|false},"details":"{details}"},{"name":"Steps missing acceptance criteria","found":{true|false},"details":"{details}"},{"name":"Vague or weasel words","found":{true|false},"details":"{details}"},{"name":"Unspecified tech choices","found":{true|false},"details":"{details}"},{"name":"Missing data models","found":{true|false},"details":"{details}"},{"name":"TBD/TODO markers","found":{true|false},"details":"{details}"},{"name":"Tests separated from implementation","found":{true|false},"details":"{details}"},{"name":"Steps that cannot be verified independently","found":{true|false},"details":"{details}"},{"name":"Scaffolding steps without behavior","found":{true|false},"details":"{details}"}]}'
 ```
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), POST a `choice` item with the improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"step_id":"STEP_ID","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
 - **200** = accepted, continue
 - **400** = fix your JSON and retry
-- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 After posting ALL items, signal completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 ---
@@ -335,28 +346,31 @@ First, POST your evaluation as a structured `evaluation` item:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}'
+  -d '{"step_id":"STEP_ID","type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}'
 ```
 
-Then, for each issue found (criterion rated "weak" or "missing"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+Then, for each issue found (criterion rated "weak" or "missing"), POST a `choice` item with the improvement options plus "Skip":
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"step_id":"STEP_ID","type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
 - **200** = accepted, continue
 - **400** = fix your JSON and retry
-- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 After posting ALL items, signal completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 ---

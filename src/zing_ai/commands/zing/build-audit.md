@@ -33,11 +33,11 @@ After detecting the branch, check if the zing doc (if one was provided as an arg
 The `create_review()` call requires:
 - `session_id`: a unique identifier (e.g., `"build-audit-{branch_name}-{timestamp}"`)
 - `title`: e.g., `"Code Review — {branch_name}"`
-- `zing_file`: path to the zing doc if one exists, otherwise empty string
+- `zing_file`: absolute path to the zing doc if one exists (resolve to absolute first), otherwise omit the parameter
 
-After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents.
+After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents. This returns a `step_id` — a unique identifier for this step.
 
-This session ID, step name (`"code-review"`), and the server port will be passed to the shared review steps.
+This session ID, step ID (from `start_step`), and the server port will be passed to the shared review steps.
 </step>
 
 <step name="read_changed_files">

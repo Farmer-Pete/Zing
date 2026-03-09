@@ -62,11 +62,10 @@ After confirming scope with the user, call `create_review()` to get a new sessio
 The `create_review()` call requires:
 - `session_id`: a unique identifier (e.g., `"custom-audit-{scope_slug}-{timestamp}"`)
 - `title`: e.g., `"Code Audit — {user_description}"`
-- `zing_file`: empty string (custom audits don't use zing docs)
 
-After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents.
+After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents. This returns a `step_id` — a unique identifier for this step.
 
-This session ID, step name (`"code-review"`), and the server port will be passed to the review agents.
+This session ID, step ID (from `start_step`), and the server port will be passed to the review agents.
 </step>
 
 <step name="read_files">
@@ -175,22 +174,23 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+  -d '{"step_id":"STEP_ID","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
 ```
 
-The `step_name` field is **required** — the server will reject findings without it. Use the step name provided by the parent when dispatching agents.
+The `step_id` field is **required** — use the step_id returned by `start_step`. The server will reject findings without it, or if the step is already marked as ready/completed.
 
 The agent must check the HTTP status code printed on the last line of the response:
 - **200** = accepted, continue to next finding
 - **400** = malformed request — read the error details from the response body, fix the JSON, and retry
-- **404** = verify the session ID is correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 When the agent has finished posting all findings (or has no findings), it signals completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 If the agent has no findings, it should still signal agent-complete.

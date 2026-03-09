@@ -159,6 +159,8 @@ Where `{filename}` is the path relative to the current working directory (e.g., 
 
 Before chaining to the next skill, print an excited sentence containing "Zing!" with a lightning bolt-related emoji (e.g. ⚡). Vary the sentence each time — don't repeat the same one.
 
+Resolve the zing file path to an absolute path (using the current working directory) before passing it as the skill argument.
+
 Then invoke the `Skill` tool with skill name `zing:plan` and args set to the file path (e.g., `.zing/recipe-app.md`) to continue the pipeline.
 </step>
 

@@ -16,7 +16,11 @@ Before asking any questions, explore the codebase to understand the current stat
 
 After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
 
-This session ID will be used by subagents to POST their questions to the review server.
+The create_review() call requires: session_id (unique identifier), title (human-readable), zing_file (absolute path to the zing doc — resolve using the working directory before calling). Always resolve the zing file path to an absolute path before passing it to create_review().
+
+After obtaining the session ID, call `start_step(session_id, "planning-questions", {N})` where `{N}` is the number of subagents you will launch. This returns a `step_id` — a unique identifier for this step.
+
+This session ID and step ID (from `start_step`) will be used by subagents to POST their questions to the review server.
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
@@ -84,27 +88,30 @@ Each subagent receives a prompt with:
 > ```bash
 > curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
 >   -H "Content-Type: application/json" \
->   -d '{"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI'\''s route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}'
+>   -d '{"step_id":"STEP_ID","type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI'\''s route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}'
 > ```
 >
 > **Text finding** (only when no reasonable options exist):
 > ```bash
 > curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
 >   -H "Content-Type: application/json" \
->   -d '{"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn'\''t find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}'
+>   -d '{"step_id":"STEP_ID","type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn'\''t find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}'
 > ```
 >
 > Check the HTTP status code on the last line of output:
 > - **200** = accepted, continue
 > - **400** = fix your JSON and retry
-> - **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message
+> - **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+> - **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 >
 > After posting ALL questions, send the agent-complete signal:
 > ```bash
-> curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
+>   -H "Content-Type: application/json" \
+>   -d '{"step_id":"STEP_ID"}'
 > ```
 
-Replace `PORT` and `SESSION_ID` in the subagent prompt with the actual port and session ID values.
+Replace `PORT`, `SESSION_ID`, and `STEP_ID` in the subagent prompt with the actual port, session ID, and step ID values.
 
 ### Phase C — Collect answers from review UI (main thread)
 
