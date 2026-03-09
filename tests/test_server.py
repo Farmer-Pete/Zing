@@ -11,7 +11,14 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from zing_ai.server.app import create_app
-from zing_ai.server.mcp_tools import configure, create_review, start_step, wait_for_review
+from zing_ai.server.mcp_tools import (
+    configure,
+    create_review,
+    mark_agent_complete,
+    start_step,
+    submit_finding,
+    wait_for_review,
+)
 from zing_ai.server.models import (
     ChoiceFinding,
     ChoiceOption,
@@ -1234,3 +1241,139 @@ class TestStartStep(_ServerTestBase):
         resp = self.client.post("/s1/steps", json={})
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "missing_step_name")
+
+
+class TestMCPSubmitFinding(_ServerTestBase):
+    """Tests for the submit_finding and mark_agent_complete MCP tools."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        configure(self.manager, port=9876)
+
+    def test_submit_text_finding(self) -> None:
+        """submit_finding with a text finding stores it in the session step."""
+        self._create_session(session_id="sf-text", expected_agents=1)
+        result = asyncio.run(
+            submit_finding(
+                session_id="sf-text",
+                step_id=self.step_id,
+                finding={"type": "text", "title": "What do you think?"},
+            )
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("finding_id", result)
+
+        session = self.manager.get_session("sf-text")
+        assert session is not None
+        self.assertEqual(len(session.steps[0].findings), 1)
+        self.assertEqual(session.steps[0].findings[0].type, "text")
+        self.assertEqual(session.steps[0].findings[0].title, "What do you think?")
+
+    def test_submit_choice_finding(self) -> None:
+        """submit_finding with a choice finding preserves options."""
+        self._create_session(session_id="sf-choice", expected_agents=1)
+        result = asyncio.run(
+            submit_finding(
+                session_id="sf-choice",
+                step_id=self.step_id,
+                finding={
+                    "type": "choice",
+                    "title": "Pick an approach",
+                    "options": [
+                        {"label": "Option A", "description": "First approach"},
+                        {"label": "Option B", "description": "Second approach"},
+                    ],
+                },
+            )
+        )
+        self.assertEqual(result["status"], "ok")
+
+        session = self.manager.get_session("sf-choice")
+        assert session is not None
+        finding = session.steps[0].findings[0]
+        self.assertEqual(finding.type, "choice")
+        self.assertEqual(len(finding.options), 2)
+        self.assertEqual(finding.options[0].label, "Option A")
+        self.assertEqual(finding.options[1].label, "Option B")
+
+    def test_submit_invalid_finding(self) -> None:
+        """submit_finding with malformed dict raises a validation error."""
+        self._create_session(session_id="sf-invalid", expected_agents=1)
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(
+                submit_finding(
+                    session_id="sf-invalid",
+                    step_id=self.step_id,
+                    finding={"not_a_type": "garbage"},
+                )
+            )
+        # Pydantic ValidationError is raised for missing 'type' discriminator
+        self.assertIn("ValidationError", type(ctx.exception).__name__)
+
+    def test_submit_to_unknown_session(self) -> None:
+        """submit_finding with a bogus step_id raises KeyError."""
+        with self.assertRaises(KeyError):
+            asyncio.run(
+                submit_finding(
+                    session_id="nonexistent",
+                    step_id="00000000-0000-0000-0000-000000000000",
+                    finding={"type": "text", "title": "Nope"},
+                )
+            )
+
+    def test_submit_to_completed_step(self) -> None:
+        """submit_finding to a completed step raises ValueError."""
+        self._create_session(session_id="sf-completed", expected_agents=1)
+
+        # Add a finding, mark agent complete, then submit responses to complete the step
+        self.manager.add_finding(
+            "sf-completed", self.step_id, {"type": "text", "title": "A finding"}
+        )
+        self.manager.mark_agent_complete("sf-completed", self.step_id)
+
+        from zing_ai.server.models import UserResponse
+
+        self.manager.submit_responses(
+            "sf-completed", self.step_id, [UserResponse(answer="ok")]
+        )
+        # Step is now COMPLETED — submitting a new finding should fail
+        with self.assertRaises(ValueError):
+            asyncio.run(
+                submit_finding(
+                    session_id="sf-completed",
+                    step_id=self.step_id,
+                    finding={"type": "text", "title": "Too late"},
+                )
+            )
+
+    def test_mark_agent_complete(self) -> None:
+        """mark_agent_complete increments completed_agents."""
+        self._create_session(session_id="mac-basic", expected_agents=3)
+        result = asyncio.run(
+            mark_agent_complete(session_id="mac-basic", step_id=self.step_id)
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["step_state"], "pending")
+
+        session = self.manager.get_session("mac-basic")
+        assert session is not None
+        self.assertEqual(session.steps[0].completed_agents, 1)
+
+    def test_mark_all_agents_complete_transitions_to_ready(self) -> None:
+        """Step state changes to READY when all agents are done."""
+        self._create_session(session_id="mac-ready", expected_agents=2)
+
+        result1 = asyncio.run(
+            mark_agent_complete(session_id="mac-ready", step_id=self.step_id)
+        )
+        self.assertEqual(result1["step_state"], "pending")
+
+        result2 = asyncio.run(
+            mark_agent_complete(session_id="mac-ready", step_id=self.step_id)
+        )
+        self.assertEqual(result2["step_state"], "ready")
+
+        session = self.manager.get_session("mac-ready")
+        assert session is not None
+        self.assertEqual(session.steps[0].completed_agents, 2)
+        self.assertEqual(session.steps[0].state.value, "ready")
