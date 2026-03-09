@@ -65,7 +65,12 @@ Agents do NOT receive full file contents upfront. Instead, each agent uses Seren
 - `high`: Significant bug or vulnerability that will affect users
 - `medium`: Issue that should be fixed but won't cause immediate harm
 - `low`: Minor improvement or nitpick
+- `info`: Informational observation, not necessarily a problem
 </severity_scale>
+
+<category_values>
+Valid categories: `architecture`, `correctness`, `security`, `readability`, `performance`, `testing`, `style`
+</category_values>
 
 <confidence_scale>
 - `high`: You've read the surrounding code and you're sure this is a real problem
@@ -331,7 +336,7 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"triage","category":"...","severity":"...","confidence":"...","location":"file:line","description":"..."}'
+  -d '{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
 ```
 
 The agent must check the HTTP status code printed on the last line of the response:

@@ -3,11 +3,48 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+class Location(BaseModel):
+    """A file location with optional line number."""
+
+    file: str
+    line: int | None = None
+
+
+class Severity(StrEnum):
+    """Severity levels for triage findings."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class Confidence(StrEnum):
+    """Confidence levels for triage findings."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class Category(StrEnum):
+    """Categories for triage findings."""
+
+    ARCHITECTURE = "architecture"
+    CORRECTNESS = "correctness"
+    SECURITY = "security"
+    READABILITY = "readability"
+    PERFORMANCE = "performance"
+    TESTING = "testing"
+    STYLE = "style"
 
 
 class ChoiceOption(BaseModel):
@@ -42,11 +79,13 @@ class TriageFinding(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     type: Literal["triage"] = "triage"
-    description: str
-    category: str
-    severity: str
-    confidence: str
-    location: str | None = None
+    title: str
+    body: str = ""
+    category: Category
+    severity: Severity
+    confidence: Confidence
+    location: Location | None = None
+    options: list[ChoiceOption] | None = None
 
 
 Finding = Annotated[

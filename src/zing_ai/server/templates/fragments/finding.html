@@ -32,9 +32,10 @@
 </div>
 {% elif finding.type == "triage" %}
 <div id="finding-{{ finding.id }}" class="finding">
-    <div class="finding-header">{{ finding.description }}</div>
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
     <div class="finding-meta">
-        {% if finding.location %}<code>{{ finding.location }}</code> | {% endif %}
+        {% if finding.location %}<code>{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</code> | {% endif %}
         Severity: <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span> |
         Confidence: <span class="badge">{{ finding.confidence }}</span> |
         Category: {{ finding.category }}
@@ -45,5 +46,16 @@
         <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'downgrade'" data-on-click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
         <button class="action-btn" data-class-selected="$responses.{{ finding.id }} === 'discuss'" data-on-click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
     </div>
+    {% if finding.options %}
+    <div class="triage-options">
+        <div class="triage-options-label">Suggested approaches:</div>
+        {% for option in finding.options %}
+        <div class="triage-option">
+            <div class="option-label">{{ option.label }}</div>
+            <div class="option-description">{{ option.description }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
 </div>
 {% endif %}

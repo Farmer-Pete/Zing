@@ -13,8 +13,12 @@ from fastapi.testclient import TestClient
 from zing_ai.server.app import create_app
 from zing_ai.server.mcp_tools import configure, create_review, wait_for_review
 from zing_ai.server.models import (
+    Category,
     ChoiceFinding,
     ChoiceOption,
+    Confidence,
+    Location,
+    Severity,
     TextFinding,
     TriageFinding,
 )
@@ -60,7 +64,8 @@ class TestPostFindings(_ServerTestBase):
             "/test-session/findings",
             json={
                 "type": "triage",
-                "description": "Unused import",
+                "title": "Unused import",
+                "body": "The `os` module is imported but never used.",
                 "category": "style",
                 "severity": "low",
                 "confidence": "high",
@@ -192,7 +197,7 @@ class TestSubmit(_ServerTestBase):
             "/test-session/findings",
             json={
                 "type": "triage",
-                "description": "Unused import",
+                "title": "Unused import",
                 "category": "style",
                 "severity": "low",
                 "confidence": "high",
@@ -269,8 +274,8 @@ class TestSSEStream(_ServerTestBase):
             "/test-session/findings",
             json={
                 "type": "triage",
-                "description": "Old finding",
-                "category": "bug",
+                "title": "Old finding",
+                "category": "correctness",
                 "severity": "high",
                 "confidence": "high",
             },
@@ -329,8 +334,8 @@ class TestSSEStream(_ServerTestBase):
             "/unblock-session/findings",
             json={
                 "type": "triage",
-                "description": "Test finding",
-                "category": "bug",
+                "title": "Test finding",
+                "category": "correctness",
                 "severity": "high",
                 "confidence": "high",
             },
@@ -406,11 +411,12 @@ class TestFindingFragment(unittest.TestCase):
         """Triage finding renders action buttons with data-bind."""
         finding = TriageFinding(
             id="tri1",
-            description="Unused import os",
+            title="Unused import os",
+            body="The `os` module is imported but **never used**.",
             category="style",
             severity="low",
             confidence="high",
-            location="src/main.py:5",
+            location=Location(file="src/main.py", line=5),
         )
         html = finding_fragment(finding)
         self.assertIn("finding-tri1", html)
@@ -418,6 +424,8 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("src/main.py:5", html)
         self.assertIn("low", html)
         self.assertIn("high", html)
+        # Body renders as HTML (markdown processed)
+        self.assertIn("<strong>never used</strong>", html)
         # Action buttons
         self.assertIn("accept", html)
         self.assertIn("drop", html)
@@ -489,8 +497,8 @@ class TestConcurrentSessions(_ServerTestBase):
             "/session-b/findings",
             json={
                 "type": "triage",
-                "description": "Finding for B",
-                "category": "perf",
+                "title": "Finding for B",
+                "category": "performance",
                 "severity": "medium",
                 "confidence": "medium",
             },
@@ -683,7 +691,7 @@ class TestWaitForReview(_ServerTestBase):
             "/wait-session/findings",
             json={
                 "type": "triage",
-                "description": "Unused import",
+                "title": "Unused import",
                 "category": "style",
                 "severity": "low",
                 "confidence": "high",
@@ -706,7 +714,7 @@ class TestWaitForReview(_ServerTestBase):
 
         item = result["items"][0]
         self.assertEqual(item["finding"]["type"], "triage")
-        self.assertEqual(item["finding"]["description"], "Unused import")
+        self.assertEqual(item["finding"]["title"], "Unused import")
         self.assertEqual(item["response"]["action"], "accept")
 
     def test_wait_for_review_blocks_until_submission(self) -> None:
@@ -747,3 +755,170 @@ class TestWaitForReview(_ServerTestBase):
             self.assertEqual(len(result["items"]), 1)
 
         asyncio.run(_test_blocking())
+
+
+class TestTriageEnumValidation(_ServerTestBase):
+    """Tests for StrEnum validation on triage findings."""
+
+    def test_enum_validation_rejects_invalid_severity(self) -> None:
+        """POST triage with invalid severity returns 400."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Some finding",
+                "category": "style",
+                "severity": "invalid",
+                "confidence": "high",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_enum_validation_rejects_invalid_confidence(self) -> None:
+        """POST triage with invalid confidence returns 400."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Some finding",
+                "category": "style",
+                "severity": "low",
+                "confidence": "invalid",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_enum_validation_rejects_invalid_category(self) -> None:
+        """POST triage with invalid category returns 400."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Some finding",
+                "category": "invalid",
+                "severity": "low",
+                "confidence": "high",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_structured_location(self) -> None:
+        """POST triage with structured location stores and renders correctly."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Missing null check",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
+                "location": {"file": "src/main.py", "line": 42},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        finding = session.findings[0]
+        assert finding.location is not None
+        self.assertEqual(finding.location.file, "src/main.py")
+        self.assertEqual(finding.location.line, 42)
+        html = finding_fragment(finding)
+        self.assertIn("src/main.py:42", html)
+
+    def test_location_without_line(self) -> None:
+        """POST triage with location without line works correctly."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "File-level issue",
+                "category": "architecture",
+                "severity": "medium",
+                "confidence": "medium",
+                "location": {"file": "src/main.py"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        finding = session.findings[0]
+        html = finding_fragment(finding)
+        self.assertIn("src/main.py", html)
+        self.assertNotIn(":null", html)
+        self.assertNotIn(":None", html)
+
+    def test_triage_with_options(self) -> None:
+        """POST triage with options renders both action buttons and options text."""
+        self._create_session()
+        resp = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Consider refactoring",
+                "category": "readability",
+                "severity": "medium",
+                "confidence": "medium",
+                "options": [
+                    {"label": "Extract method", "description": "Pull the loop into a helper"},
+                    {"label": "Inline comments", "description": "Add comments to clarify intent"},
+                ],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        finding = session.findings[0]
+        html = finding_fragment(finding)
+        # Action buttons still present
+        self.assertIn("accept", html)
+        self.assertIn("drop", html)
+        # Options rendered
+        self.assertIn("triage-options", html)
+        self.assertIn("Suggested approaches:", html)
+        self.assertIn("Extract method", html)
+        self.assertIn("Pull the loop into a helper", html)
+        self.assertIn("Inline comments", html)
+
+    def test_triage_without_options(self) -> None:
+        """POST triage without options renders only action buttons, no options div."""
+        self._create_session()
+        self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Simple finding",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
+            },
+        )
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        finding = session.findings[0]
+        html = finding_fragment(finding)
+        self.assertIn("accept", html)
+        self.assertNotIn("triage-options", html)
+
+    def test_info_severity_badge(self) -> None:
+        """POST triage with severity info renders badge-info class."""
+        self._create_session()
+        self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "title": "Informational note",
+                "category": "architecture",
+                "severity": "info",
+                "confidence": "low",
+            },
+        )
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        finding = session.findings[0]
+        html = finding_fragment(finding)
+        self.assertIn("badge-info", html)
