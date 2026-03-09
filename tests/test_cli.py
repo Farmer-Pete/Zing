@@ -196,3 +196,27 @@ def test_reapply_patches_dispatches():
         result = runner.invoke(cli, ["reapply-patches", "--opencode"])
     assert result.exit_code == 0
     mock.assert_called_once()
+
+
+# -- MCP command --------------------------------------------------------------
+
+
+def test_mcp_default_port():
+    runner = CliRunner()
+    with patch("uvicorn.run") as mock_run:
+        result = runner.invoke(cli, ["mcp"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    _args, kwargs = mock_run.call_args
+    assert kwargs["host"] == "127.0.0.1"
+    assert kwargs["port"] == 9876
+
+
+def test_mcp_custom_port():
+    runner = CliRunner()
+    with patch("uvicorn.run") as mock_run:
+        result = runner.invoke(cli, ["mcp", "--port", "8080"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    _args, kwargs = mock_run.call_args
+    assert kwargs["port"] == 8080
