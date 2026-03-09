@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from zing_ai.server.models import (
@@ -51,7 +52,17 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._events: dict[str, asyncio.Event] = {}
         self._steps_by_id: dict[str, tuple[str, int]] = {}
+        self._listeners: list[Callable[[str, str], None]] = []
         self._load_existing_sessions()
+
+    def add_listener(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback that fires on session state changes."""
+        self._listeners.append(callback)
+
+    def _notify(self, event_type: str, session_id: str) -> None:
+        """Notify all registered listeners of a state change."""
+        for listener in self._listeners:
+            listener(event_type, session_id)
 
     @staticmethod
     def _validate_session_id(session_id: str) -> None:
@@ -142,6 +153,7 @@ class SessionManager:
         session = Session(session_id=session_id, title=title, zing_file=zing_file)
         self._sessions[session_id] = session
         self._persist(session)
+        self._notify("session_created", session_id)
         logger.info("Created session %s: %s", session_id, title)
         return session
 
@@ -180,6 +192,7 @@ class SessionManager:
         key = self._event_key(session_id, step.step_id)
         self._events[key] = asyncio.Event()
         self._persist(session)
+        self._notify("step_started", session_id)
         logger.info(
             "Started step '%s' (seq=%d, id=%s) in session %s (expecting %d agents)",
             step_name,
@@ -265,6 +278,7 @@ class SessionManager:
         finding = adapter.validate_python(finding_data)
         step.findings.append(finding)
         self._persist(session)
+        self._notify("finding_added", session_id)
         logger.info(
             "Added %s finding to step '%s' (id=%s, total: %d)",
             finding_data.get("type", "unknown"),
@@ -321,6 +335,9 @@ class SessionManager:
                 step_id,
             )
         self._persist(session)
+        self._notify("agent_complete", session_id)
+        if step.state == SessionState.READY:
+            self._notify("step_ready", session_id)
         return step
 
     def submit_responses(
@@ -362,6 +379,7 @@ class SessionManager:
         step.state = SessionState.COMPLETED
         self._update_session_state(session)
         self._persist(session)
+        self._notify("review_submitted", session_id)
 
         key = self._event_key(session_id, step_id)
         event = self._events.get(key)
@@ -435,6 +453,7 @@ class SessionManager:
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()
+        self._notify("session_cleaned_up", session_id)
         logger.info("Cleaned up session %s", session_id)
 
     def _get_session_or_raise(self, session_id: str) -> Session:
