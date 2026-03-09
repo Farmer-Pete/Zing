@@ -2,7 +2,7 @@
 <objective>
 Evaluate a zing plan or technical design document for soundness against established engineering principles including clarity, fitness for purpose, YAGNI, TDD readiness, operability, maintainability, correctness/safety, specificity/executability, and code quality. A key goal is eliminating ambiguity: when an agent opens the evaluated plan, it should know exactly what to build and exactly how to build it, with zero guesswork required.
 
-Read the provided file, perform a rigorous evaluation, present results as tables, then propose concrete improvements one at a time and apply the ones the user approves.
+Read the provided file, perform a rigorous evaluation, present results in the review UI, then propose concrete improvements as choices and apply the ones the user approves.
 </objective>
 
 <process>
@@ -59,7 +59,13 @@ This keeps agent prompts lean — agents receive distilled summaries, not full f
 </step>
 
 <step name="evaluate">
-You are now a senior technical design reviewer. Launch 4 parallel Task subagents — one for each evaluation pass. Each agent independently evaluates the plan against its assigned criteria and returns structured results.
+You are now a senior technical design reviewer. Launch 4 parallel Task subagents — one for each evaluation pass. Each agent independently evaluates the plan against its assigned criteria and posts results to the review server.
+
+### Session setup
+
+After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
+
+This session ID will be used by subagents to POST their findings to the review server.
 
 ### Preparing the agent prompts
 
@@ -78,10 +84,8 @@ Each agent receives the same shared context block:
 Each agent also receives:
 - Its specific pass criteria, litmus tests, and warning signs (copied verbatim below)
 - The MCP-only mandate: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files. Built-in tools are fine for non-code files (markdown, JSON, YAML, configs, .zing docs)."
-- Instructions to return results in this structured format — pipe-delimited lines, one per item:
-  - `RATING|criterion_name|Strong/Adequate/Weak/Missing|justification`
-  - `LITMUS|test_name|result`
-  - `WARNING|sign_name|Yes/No|details`
+- The **session ID** and **server port** for posting findings to the review server
+- Instructions for how to POST evaluation tables and improvement proposals (see below)
 
 ### Launching the agents
 
@@ -130,17 +134,33 @@ Launching 4 evaluation passes in parallel...
 - Only one approach was considered (no alternatives evaluated)
 - Components exist "for future flexibility" without a current requirement
 
-**Return your results as pipe-delimited lines:**
+**Posting results to the review server:**
+
+First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"text","question":"**Pass 1: Design Fundamentals**\n\n| Criterion | Rating | Justification |\n|---|---|---|\n| Clarity & Simplicity | {rating} | {justification} |\n| Fitness for Purpose | {rating} | {justification} |\n| YAGNI | {rating} | {justification} |\n| Maintainability | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| Simplest thing that could work? | {result} |\n| What requirement drives each component? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| \"Might need this someday\" justifications | {Yes/No} | {details} |\n| Only one approach considered | {Yes/No} | {details} |\n| Components for \"future flexibility\" | {Yes/No} | {details} |","context":"Informational — no response needed"}'
 ```
-RATING|Clarity & Simplicity|{rating}|{justification}
-RATING|Fitness for Purpose|{rating}|{justification}
-RATING|YAGNI|{rating}|{justification}
-RATING|Maintainability|{rating}|{justification}
-LITMUS|Simplest thing that could work?|{result}
-LITMUS|What requirement drives each component?|{result}
-WARNING|"Might need this someday" justifications|{Yes/No}|{details or "—"}
-WARNING|Only one approach considered|{Yes/No}|{details or "—"}
-WARNING|Components for "future flexibility"|{Yes/No}|{details or "—"}
+
+Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+```
+
+Check the HTTP status code on the last line of output:
+- **200** = accepted, continue
+- **400** = fix your JSON and retry
+- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+
+After posting ALL items, signal completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 ```
 
 ---
@@ -180,18 +200,33 @@ WARNING|Components for "future flexibility"|{Yes/No}|{details or "—"}
 - Deployment/migration strategy is deferred ("we'll figure it out later")
 - No tests or test strategy described
 
-**Return your results as pipe-delimited lines:**
+**Posting results to the review server:**
+
+First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"text","question":"**Pass 2: Robustness & Safety**\n\n| Criterion | Rating | Justification |\n|---|---|---|\n| Correctness & Safety | {rating} | {justification} |\n| Operability | {rating} | {justification} |\n| TDD Readiness | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| What happens when this fails? | {result} |\n| How will we know it'\''s working? | {result} |\n| How do we test this? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| Only happy path described | {Yes/No} | {details} |\n| Data model is afterthought | {Yes/No} | {details} |\n| Deployment strategy deferred | {Yes/No} | {details} |\n| No test strategy | {Yes/No} | {details} |","context":"Informational — no response needed"}'
 ```
-RATING|Correctness & Safety|{rating}|{justification}
-RATING|Operability|{rating}|{justification}
-RATING|TDD Readiness|{rating}|{justification}
-LITMUS|What happens when this fails?|{result}
-LITMUS|How will we know it's working?|{result}
-LITMUS|How do we test this?|{result}
-WARNING|Only happy path described|{Yes/No}|{details or "—"}
-WARNING|Data model is afterthought|{Yes/No}|{details or "—"}
-WARNING|Deployment strategy deferred|{Yes/No}|{details or "—"}
-WARNING|No test strategy|{Yes/No}|{details or "—"}
+
+Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+```
+
+Check the HTTP status code on the last line of output:
+- **200** = accepted, continue
+- **400** = fix your JSON and retry
+- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+
+After posting ALL items, signal completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 ```
 
 ---
@@ -237,21 +272,33 @@ WARNING|No test strategy|{Yes/No}|{details or "—"}
 - Steps that can't be verified independently — multiple steps must all be completed before any of them can be tested or verified, indicating they should be combined into a single step.
 - Scaffolding steps without behavior — steps that only create empty files, folder structures, or placeholder interfaces with no testable behavior, instead of being merged into the step that implements the actual behavior.
 
-**Return your results as pipe-delimited lines:**
+**Posting results to the review server:**
+
+First, POST your evaluation tables as a `text` item so they appear as read-only reference in the review UI:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"text","question":"**Pass 3: Plan as Executable Spec**\n\n| Criterion | Rating | Justification |\n|---|---|---|\n| Specificity & Executability | {rating} | {justification} |\n| Step Atomicity | {rating} | {justification} |\n\n| Litmus Test | Result |\n|---|---|\n| Could two people build different things from this plan? | {result} |\n| Can each step be completed, tested, and committed independently? | {result} |\n\n| Warning Sign | Found? | Details |\n|---|---|---|\n| Implementation over interfaces | {Yes/No} | {details} |\n| Steps missing acceptance criteria | {Yes/No} | {details} |\n| Vague or weasel words | {Yes/No} | {details} |\n| Unspecified tech choices | {Yes/No} | {details} |\n| Missing data models | {Yes/No} | {details} |\n| TBD/TODO markers | {Yes/No} | {details} |\n| Tests separated from implementation | {Yes/No} | {details} |\n| Steps that can'\''t be verified independently | {Yes/No} | {details} |\n| Scaffolding steps without behavior | {Yes/No} | {details} |","context":"Informational — no response needed"}'
 ```
-RATING|Specificity & Executability|{rating}|{justification}
-RATING|Step Atomicity|{rating}|{justification}
-LITMUS|Could two people build different things from this plan?|{result}
-LITMUS|Can each step be completed, tested, and committed independently?|{result}
-WARNING|Implementation over interfaces|{Yes/No}|{details or "—"}
-WARNING|Steps missing acceptance criteria|{Yes/No}|{details or "—"}
-WARNING|Vague or weasel words|{Yes/No}|{details or "—"}
-WARNING|Unspecified tech choices|{Yes/No}|{details or "—"}
-WARNING|Missing data models|{Yes/No}|{details or "—"}
-WARNING|TBD/TODO markers|{Yes/No}|{details or "—"}
-WARNING|Tests separated from implementation|{Yes/No}|{details or "—"}
-WARNING|Steps that can't be verified independently|{Yes/No}|{details or "—"}
-WARNING|Scaffolding steps without behavior|{Yes/No}|{details or "—"}
+
+Then, for each issue found (any criterion rated "Weak" or "Missing", any warning sign marked "Yes"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+```
+
+Check the HTTP status code on the last line of output:
+- **200** = accepted, continue
+- **400** = fix your JSON and retry
+- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+
+After posting ALL items, signal completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 ```
 
 ---
@@ -273,87 +320,42 @@ WARNING|Scaffolding steps without behavior|{Yes/No}|{details or "—"}
 - Are any new patterns introduced? If so, are they good patterns worth adopting, or unnecessary divergence from established conventions?
 - Can this solution be simplified without losing functionality?
 
-**Return your results as pipe-delimited lines:**
+**Posting results to the review server:**
+
+First, POST your evaluation table as a `text` item so it appears as read-only reference in the review UI:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"text","question":"**Pass 4: Code Quality**\n\n| Criterion | Rating | Justification |\n|---|---|---|\n| Code Quality & Idiomacy | {rating} | {justification} |","context":"Informational — no response needed"}'
 ```
-RATING|Code Quality & Idiomacy|{rating}|{justification}
+
+Then, for each issue found (criterion rated "Weak" or "Missing"), POST a `choice` item with 2-3 concrete improvement options plus "Skip":
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+```
+
+Check the HTTP status code on the last line of output:
+- **200** = accepted, continue
+- **400** = fix your JSON and retry
+- **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message (do not post more findings or signal agent-complete)
+
+After posting ALL items, signal completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
 ```
 
 ---
 
-### Collecting and presenting results
+### Collecting results
 
-After all 4 Task agents return, parse their pipe-delimited output and present the results as tables — one section per pass, using the same table format as before:
+After all 4 Task agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-**Pass 1: Design Fundamentals**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Clarity & Simplicity | {rating} | {justification} |
-| Fitness for Purpose | {rating} | {justification} |
-| YAGNI | {rating} | {justification} |
-| Maintainability | {rating} | {justification} |
-
-| Litmus Test | Result |
-|---|---|
-| Simplest thing that could work? | {result} |
-| What requirement drives each component? | {result} |
-
-| Warning Sign | Found? | Details |
-|---|---|---|
-| "Might need this someday" justifications | {Yes/No} | {details or "—"} |
-| Only one approach considered | {Yes/No} | {details or "—"} |
-| Components for "future flexibility" | {Yes/No} | {details or "—"} |
-
-**Pass 2: Robustness & Safety**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Correctness & Safety | {rating} | {justification} |
-| Operability | {rating} | {justification} |
-| TDD Readiness | {rating} | {justification} |
-
-| Litmus Test | Result |
-|---|---|
-| What happens when this fails? | {result} |
-| How will we know it's working? | {result} |
-| How do we test this? | {result} |
-
-| Warning Sign | Found? | Details |
-|---|---|---|
-| Only happy path described | {Yes/No} | {details or "—"} |
-| Data model is afterthought | {Yes/No} | {details or "—"} |
-| Deployment strategy deferred | {Yes/No} | {details or "—"} |
-| No test strategy | {Yes/No} | {details or "—"} |
-
-**Pass 3: Plan as Executable Spec**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Specificity & Executability | {rating} | {justification} |
-| Step Atomicity | {rating} | {justification} |
-
-| Litmus Test | Result |
-|---|---|
-| Could two people build different things from this plan? | {result} |
-| Can each step be completed, tested, and committed independently? | {result} |
-
-| Warning Sign | Found? | Details |
-|---|---|---|
-| Implementation over interfaces | {Yes/No} | {details or "—"} |
-| Steps missing acceptance criteria | {Yes/No} | {details or "—"} |
-| Vague or weasel words | {Yes/No} | {details or "—"} |
-| Unspecified tech choices | {Yes/No} | {details or "—"} |
-| Missing data models | {Yes/No} | {details or "—"} |
-| TBD/TODO markers | {Yes/No} | {details or "—"} |
-| Tests separated from implementation | {Yes/No} | {details or "—"} |
-| Steps that can't be verified independently | {Yes/No} | {details or "—"} |
-| Scaffolding steps without behavior | {Yes/No} | {details or "—"} |
-
-**Pass 4: Code Quality**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Code Quality & Idiomacy | {rating} | {justification} |
+Otherwise, proceed to the `present_summary` step. The evaluation tables and improvement proposals have already been posted to the review server by the agents — they will appear in the review UI alongside the actionable choice items.
 
 </step>
 
@@ -380,24 +382,15 @@ List specific, actionable changes to improve the design, ordered by priority. If
 </step>
 
 <step name="propose_improvements">
-If the verdict is **Adequate with Gaps** or **Needs Significant Rework**, compile a list of concrete improvements to the zing file. Each improvement should be a specific edit — not vague advice, but an actual change to make (e.g., "Add a Failure Modes section covering database unavailability and API timeout scenarios", "Rewrite the authentication section to specify JWT with refresh tokens instead of 'some auth mechanism'").
-
-Derive improvements from:
-- Any criterion rated "Weak" or "Missing"
-- Any warning sign marked "Yes"
-- Items in the Top Risks / Weaknesses list
-- Items in the Recommendations list
-
-Then walk through each improvement ONE AT A TIME using AskUserQuestion:
-- Clearly describe the problem and why it matters
-- Come up with 2-3 distinct ways to address it — different approaches, not just "apply or skip". Each option should be a concrete, specific change with a different trade-off or direction. Always include "Skip" as a final option.
-- Example: if the plan lacks error handling, options might be: "Add retry-with-backoff for all external calls", "Add circuit breaker pattern with fallback responses", "Add simple try/catch with logging and alerting", "Skip"
-- When the user picks an option, immediately apply the edit to the zing file using the Edit tool
-- If the user provides custom input via "Other", apply their version
-
-After all improvements have been walked through, summarize what was changed.
-
 If the verdict is **Strong Design**, skip this step and say "No improvements needed — the design looks solid."
+
+Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
+
+When `wait_for_review` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's selected option. For each choice the user made (excluding "Skip"):
+- Apply the corresponding edit to the zing file using the Edit tool
+- The option's `description` field contains the concrete edit to make
+
+After all improvements have been applied, summarize what was changed.
 </step>
 
 <step name="ensure_progress_section">
@@ -435,7 +428,7 @@ Then use AskUserQuestion to ask the user what they'd like to do next:
 - Don't skip passes or criteria — complete all four passes even if some seem less relevant
 - Don't combine passes — complete each pass and present its results before starting the next
 - Don't inflate ratings — be honest about gaps
-- Don't present all improvements at once — propose one at a time, wait for the answer
+- Don't bypass the review UI for improvements — let the user pick approaches in the browser
 - Don't ask questions about findings rated "Strong" — focus on gaps
 - Don't make assumptions about the user's domain — ask if context is unclear
 - Don't make vague suggestions — every proposed improvement should be a specific, concrete edit
@@ -446,11 +439,11 @@ Evaluation is complete when:
 
 - [ ] Document was read and understood
 - [ ] All files referenced in the plan were read (or noted as not yet existing)
-- [ ] Pass 1 (Design Fundamentals): 4 criteria rated, 2 litmus tests answered, 3 warning signs checked, results presented
-- [ ] Pass 2 (Robustness & Safety): 3 criteria rated, 3 litmus tests answered, 4 warning signs checked, results presented
-- [ ] Pass 3 (Plan as Executable Spec): 2 criteria rated, 2 litmus tests answered, 9 warning signs checked, results presented
-- [ ] Pass 4 (Code Quality): 1 criterion rated, results presented
+- [ ] Pass 1 (Design Fundamentals): 4 criteria rated, 2 litmus tests answered, 3 warning signs checked, results posted to review server
+- [ ] Pass 2 (Robustness & Safety): 3 criteria rated, 3 litmus tests answered, 4 warning signs checked, results posted to review server
+- [ ] Pass 3 (Plan as Executable Spec): 2 criteria rated, 2 litmus tests answered, 9 warning signs checked, results posted to review server
+- [ ] Pass 4 (Code Quality): 1 criterion rated, results posted to review server
 - [ ] Summary verdict, strengths, risks, and recommendations presented
-- [ ] Improvements proposed and applied (or skipped if design is strong)
+- [ ] Improvements reviewed in UI and applied (or skipped if design is strong)
 - [ ] Progress section ensured — added if missing, skipped if already present
 </success_criteria>
