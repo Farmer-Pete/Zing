@@ -9,20 +9,24 @@
 </div>
 {% elif finding.type == "choice" %}
 <div id="finding-{{ finding.id }}" class="finding">
-    <div class="finding-header">{{ finding.question }}</div>
-    {% if finding.context %}
-    <div class="finding-meta">{{ finding.context }}</div>
-    {% endif %}
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
     <div class="radio-group">
         {% for option in finding.options %}
-        <label>
+        <label class="option-card">
             <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="{{ option.label }}">
-            <span><strong>{{ option.label }}</strong>: {{ option.description }}</span>
+            <div class="option-content">
+                <div class="option-label">{{ option.label }}</div>
+                <div class="option-description">{{ option.description }}</div>
+            </div>
         </label>
         {% endfor %}
-        <label>
+        <label class="option-card">
             <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="skip">
-            <span>Skip</span>
+            <div class="option-content">
+                <div class="option-label">Skip</div>
+                <div class="option-description">Not important enough to address now</div>
+            </div>
         </label>
     </div>
 </div>

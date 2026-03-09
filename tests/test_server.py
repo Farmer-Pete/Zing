@@ -91,7 +91,7 @@ class TestPostFindings(_ServerTestBase):
             "/test-session/findings",
             json={
                 "type": "choice",
-                "question": "Pick an approach",
+                "title": "Pick an approach",
                 "options": [
                     {"label": "A", "description": "Option A"},
                     {"label": "B", "description": "Option B"},
@@ -202,7 +202,7 @@ class TestSubmit(_ServerTestBase):
             "/test-session/findings",
             json={
                 "type": "choice",
-                "question": "Pick one",
+                "title": "Pick one",
                 "options": [
                     {"label": "A", "description": "Option A"},
                     {"label": "B", "description": "Option B"},
@@ -386,7 +386,8 @@ class TestFindingFragment(unittest.TestCase):
         """Choice finding renders radio buttons with data-bind for each option."""
         finding = ChoiceFinding(
             id="ch1",
-            question="Pick one",
+            title="Pick one",
+            body="Some context about the choice",
             options=[
                 ChoiceOption(label="A", description="Option A"),
                 ChoiceOption(label="B", description="Option B"),

@@ -149,7 +149,7 @@ Then, for each issue found (any criterion rated "Weak" or "Missing", any warning
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
@@ -215,7 +215,7 @@ Then, for each issue found (any criterion rated "Weak" or "Missing", any warning
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
@@ -287,7 +287,7 @@ Then, for each issue found (any criterion rated "Weak" or "Missing", any warning
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:
@@ -335,7 +335,7 @@ Then, for each issue found (criterion rated "Weak" or "Missing"), POST a `choice
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"choice","question":"Problem: {describe the specific problem found}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
+  -d '{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}'
 ```
 
 Check the HTTP status code on the last line of output:

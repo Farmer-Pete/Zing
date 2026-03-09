@@ -32,8 +32,8 @@ class ChoiceFinding(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     type: Literal["choice"] = "choice"
-    question: str
-    context: str | None = None
+    title: str
+    body: str = ""
     options: list[ChoiceOption]
 
 
