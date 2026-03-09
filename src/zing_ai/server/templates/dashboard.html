@@ -6,6 +6,7 @@
 <h1>Zing Dashboard</h1>
 
 {% if sessions %}
+<div data-signals="{_d: true}">
 <ul class="session-list">
     {% for s in sessions %}
     <li>
@@ -22,19 +23,16 @@
             Created: {{ s.created_at.strftime('%Y-%m-%d %H:%M') }} |
             Findings: {{ s.findings | length }}
         </div>
-        {% if s.state.value == "completed" %}
         <div style="margin-top: 0.5rem;">
-            <a href="/{{ s.session_id }}">View review</a>
+            {% if s.state.value == "completed" %}
+            <a href="/{{ s.session_id }}">View review</a> |
+            {% endif %}
+            <button class="cleanup-btn" type="button" data-on:click="@post('/sessions/{{ s.session_id }}/cleanup')">Delete</button>
         </div>
-        {% endif %}
-        {% if s.state.value == "completed" %}
-        <div style="margin-top: 0.25rem;">
-            <button class="cleanup-btn" type="button" data-on:click="@post('/sessions/{{ s.session_id }}/cleanup')">Cleanup</button>
-        </div>
-        {% endif %}
     </li>
     {% endfor %}
 </ul>
+</div>
 {% else %}
 <p>No sessions found.</p>
 {% endif %}

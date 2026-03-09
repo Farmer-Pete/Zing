@@ -373,9 +373,10 @@ async def dashboard_events(request: Request):  # noqa: ANN201
 
 
 @router.post("/sessions/{session_id}/cleanup", response_model=None)
+@datastar_response
 async def post_cleanup(
     session_id: str, request: Request,
-) -> JSONResponse:
+):  # noqa: ANN201
     """Remove a session from the manager.
 
     Args:
@@ -385,12 +386,12 @@ async def post_cleanup(
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
     if session is None:
-        return _session_not_found(session_id)
+        return
 
     manager.cleanup_session(session_id)
     _notify_dashboard_connections("cleaned_up")
     logger.info("Session %s cleaned up via dashboard", session_id)
-    return JSONResponse(status_code=200, content={"status": "ok"})
+    return SSE.redirect("/dashboard")
 
 
 
