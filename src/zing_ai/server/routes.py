@@ -106,6 +106,7 @@ async def post_start_step(session_id: str, request: Request) -> JSONResponse:
         status_code=200,
         content={
             "status": "started",
+            "step_id": step.step_id,
             "step_name": step.step_name,
             "sequence": step.sequence,
         },
@@ -117,25 +118,33 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
     """Accept a finding from a subagent and add it to a workflow step."""
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
+        logger.warning("Finding rejected: session '%s' does not exist", session_id)
         return _session_not_found(session_id)
 
     try:
         body: dict[str, Any] = await request.json()
     except json.JSONDecodeError:
+        logger.warning(
+            "Finding rejected for session '%s': request body is not valid JSON",
+            session_id,
+        )
         return JSONResponse(
             status_code=400,
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
 
-    step_name = body.pop("step_name", None)
-    if not step_name:
+    step_id = body.pop("step_id", None)
+    if not step_id:
+        logger.warning(
+            "Finding rejected for session '%s': missing step_id (body keys: %s)",
+            session_id,
+            list(body.keys()),
+        )
         return JSONResponse(
             status_code=400,
             content={
-                "error": "missing_step_name",
-                "message": (
-                    "step_name is required. Specify the workflow step this finding belongs to."
-                ),
+                "error": "missing_step_id",
+                "message": "step_id is required. Use the step_id returned by start_step.",
             },
         )
 
@@ -147,6 +156,13 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
             {"field": e["loc"][-1] if e["loc"] else "unknown", "error": e["msg"]}
             for e in exc.errors()
         ]
+        logger.warning(
+            "Finding rejected for session '%s' step '%s': validation failed: %s (input: %s)",
+            session_id,
+            step_id,
+            details,
+            {k: v for k, v in body.items() if k != "body"},
+        )
         return JSONResponse(
             status_code=400,
             content={
@@ -156,9 +172,32 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
             },
         )
 
-    finding = manager.add_finding(session_id, body, step_name=step_name)
+    try:
+        finding = manager.add_finding(session_id, step_id, body)
+    except KeyError as exc:
+        logger.warning(
+            "Finding rejected for session '%s': step '%s' not found",
+            session_id,
+            step_id,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "step_not_found", "message": str(exc)},
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Finding rejected for session '%s' step '%s': %s",
+            session_id,
+            step_id,
+            exc,
+        )
+        return JSONResponse(
+            status_code=409,
+            content={"error": "invalid_state", "message": str(exc)},
+        )
+
     _notify_sse_connections(session_id, "finding")
-    logger.info("Finding added to session %s step '%s': %s", session_id, step_name, finding.type)
+    logger.info("Finding added to session %s (step_id=%s): %s", session_id, step_id, finding.type)
     return JSONResponse(
         status_code=200,
         content={"status": "ok", "finding_id": finding.id},
@@ -180,33 +219,36 @@ async def post_agent_complete(session_id: str, request: Request) -> JSONResponse
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
 
-    step_name = body.get("step_name")
-    if not step_name:
+    step_id = body.get("step_id")
+    if not step_id:
         return JSONResponse(
             status_code=400,
             content={
-                "error": "missing_step_name",
-                "message": (
-                    "step_name is required. Specify the workflow step this agent belongs to."
-                ),
+                "error": "missing_step_id",
+                "message": "step_id is required. Use the step_id returned by start_step.",
             },
         )
 
     try:
-        step = manager.mark_agent_complete(session_id, step_name)
+        step = manager.mark_agent_complete(session_id, step_id)
     except KeyError as exc:
         return JSONResponse(
             status_code=404,
             content={"error": "step_not_found", "message": str(exc)},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "invalid_state", "message": str(exc)},
         )
 
     if step.state.value == "ready":
         _notify_sse_connections(session_id, "ready")
         _notify_dashboard_connections("agent_complete")
     logger.info(
-        "Agent complete for session %s step '%s' (%d/%d)",
+        "Agent complete for session %s (step_id=%s, %d/%d)",
         session_id,
-        step_name,
+        step_id,
         step.completed_agents,
         step.expected_agents,
     )
@@ -214,7 +256,8 @@ async def post_agent_complete(session_id: str, request: Request) -> JSONResponse
         status_code=200,
         content={
             "status": "ok",
-            "step_name": step_name,
+            "step_id": step_id,
+            "step_name": step.step_name,
             "completed_agents": step.completed_agents,
             "expected_agents": step.expected_agents,
             "state": step.state.value,
@@ -242,20 +285,20 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
 
-    step_name = body.get("step_name")
-    if not step_name:
+    step_id = body.get("step_id")
+    if not step_id:
         return JSONResponse(
             status_code=400,
             content={
-                "error": "missing_step_name",
+                "error": "missing_step_id",
                 "message": (
-                    "step_name is required. Specify the workflow step to submit responses for."
+                    "step_id is required. Specify the workflow step to submit responses for."
                 ),
             },
         )
 
     try:
-        step = manager._get_latest_step(session_id, step_name)
+        _session_from_step, step = manager.get_step_by_id(step_id)
     except KeyError as exc:
         return JSONResponse(
             status_code=404,
@@ -268,8 +311,8 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
             content={
                 "error": "invalid_state",
                 "message": (
-                    f"Step '{step_name}' in session '{session_id}' is in state "
-                    f"'{step.state.value}', expected 'ready'"
+                    f"Step '{step.step_name}' (id={step_id}) in session '{session_id}' is in "
+                    f"state '{step.state.value}', expected 'ready'"
                 ),
             },
         )
@@ -291,7 +334,7 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
         )
 
     try:
-        review = manager.submit_responses(session_id, step_name, responses)
+        review = manager.submit_responses(session_id, step_id, responses)
     except ValueError as exc:
         return JSONResponse(
             status_code=400,
@@ -300,9 +343,10 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
     _notify_sse_connections(session_id, "completed")
     _notify_dashboard_connections("review_submitted")
     logger.info(
-        "Session %s step '%s' submitted with %d responses",
+        "Session %s step '%s' (id=%s) submitted with %d responses",
         session_id,
-        step_name,
+        step.step_name,
+        step_id,
         len(responses),
     )
     return JSONResponse(
@@ -366,10 +410,10 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
             f'<div id="error">Session \'{session_id}\' not found</div>'
         )
 
-    # Determine which step to stream
-    step_name = request.query_params.get("step")
-    if not step_name and session.steps:
-        step_name = session.steps[-1].step_name
+    # Determine which step to stream (by step_id)
+    step_id = request.query_params.get("step")
+    if not step_id and session.steps:
+        step_id = session.steps[-1].step_id
 
     async def _generate():  # noqa: ANN202
         """Yield SSE events for existing and new findings."""
@@ -380,11 +424,11 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
             if current_session is None:
                 return
 
-            # Find the target step
+            # Find the target step by step_id
             target_step = None
-            if step_name:
-                for s in reversed(current_session.steps):
-                    if s.step_name == step_name:
+            if step_id:
+                for s in current_session.steps:
+                    if s.step_id == step_id:
                         target_step = s
                         break
 
@@ -429,11 +473,11 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if current_session is None:
                     return
 
-                # Re-find the target step (it may have been updated)
+                # Re-find the target step by step_id
                 target_step = None
-                if step_name:
-                    for s in reversed(current_session.steps):
-                        if s.step_name == step_name:
+                if step_id:
+                    for s in current_session.steps:
+                        if s.step_id == step_id:
                             target_step = s
                             break
                 if target_step is None:
@@ -546,10 +590,10 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     if session is None:
         return _session_not_found(session_id)
 
-    # Determine which step to display
-    step_name = request.query_params.get("step")
-    if not step_name and session.steps:
-        step_name = session.steps[-1].step_name
+    # Determine which step to display (by step_id)
+    step_id = request.query_params.get("step")
+    if not step_id and session.steps:
+        step_id = session.steps[-1].step_id
 
-    html = render("review.html", session=session, current_step=step_name)
+    html = render("review.html", session=session, current_step=step_id)
     return HTMLResponse(content=html)

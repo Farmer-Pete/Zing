@@ -139,10 +139,7 @@ class SessionManager:
                 logger.warning("Rejected zing_file (does not exist): %s", zing_file)
                 msg = f"zing_file path does not exist: {zing_file}"
                 raise ValueError(msg)
-        session = Session.model_validate(
-            {"session_id": session_id, "title": title, "zing_file": zing_file},
-            context={"creating": True},
-        )
+        session = Session(session_id=session_id, title=title, zing_file=zing_file)
         self._sessions[session_id] = session
         self._persist(session)
         logger.info("Created session %s: %s", session_id, title)
@@ -193,7 +190,7 @@ class SessionManager:
         )
         return step
 
-    def _get_latest_step(self, session_id: str, step_name: str) -> WorkflowStep:
+    def get_latest_step(self, session_id: str, step_name: str) -> WorkflowStep:
         """Return the most recent step with the given name.
 
         Args:
@@ -212,7 +209,7 @@ class SessionManager:
                 return step
         raise KeyError(f"No step '{step_name}' found in session '{session_id}'")
 
-    def _get_step_by_id(self, step_id: str) -> tuple[Session, WorkflowStep]:
+    def get_step_by_id(self, step_id: str) -> tuple[Session, WorkflowStep]:
         """Return the session and step for a given step_id.
 
         Args:
@@ -248,7 +245,7 @@ class SessionManager:
             ValueError: If the step doesn't belong to the session, or is in
                 READY or COMPLETED state.
         """
-        session, step = self._get_step_by_id(step_id)
+        session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
             msg = (
                 f"Step '{step_id}' belongs to session '{session.session_id}', "
@@ -277,12 +274,13 @@ class SessionManager:
         )
         return finding
 
-    def mark_agent_complete(self, step_id: str) -> WorkflowStep:
+    def mark_agent_complete(self, session_id: str, step_id: str) -> WorkflowStep:
         """Mark one agent as complete for a workflow step.
 
         If all expected agents are done, transitions the step state to READY.
 
         Args:
+            session_id: The session ID that the step must belong to.
             step_id: The UUID of the workflow step.
 
         Returns:
@@ -290,9 +288,16 @@ class SessionManager:
 
         Raises:
             KeyError: If no step with that ID exists.
-            ValueError: If the step is in READY or COMPLETED state.
+            ValueError: If the step doesn't belong to the session, or is in
+                READY or COMPLETED state.
         """
-        session, step = self._get_step_by_id(step_id)
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
         if step.state in (SessionState.READY, SessionState.COMPLETED):
             msg = (
                 f"Step '{step.step_name}' (id={step_id}) is in state "
@@ -338,8 +343,13 @@ class SessionManager:
             KeyError: If the session or step does not exist.
             ValueError: If response count doesn't match finding count.
         """
-        session = self._get_session_or_raise(session_id)
-        _session_from_step, step = self._get_step_by_id(step_id)
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{_session_from_step.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
 
         if len(responses) != len(step.findings):
             msg = (
@@ -386,7 +396,7 @@ class SessionManager:
         Raises:
             KeyError: If the session or step does not exist.
         """
-        _session, step = self._get_step_by_id(step_id)
+        _session, step = self.get_step_by_id(step_id)
 
         if step.state != SessionState.COMPLETED:
             key = self._event_key(session_id, step_id)
@@ -394,7 +404,7 @@ class SessionManager:
                 self._events[key] = asyncio.Event()
             await self._events[key].wait()
             # Re-fetch after await in case step was updated
-            _session, step = self._get_step_by_id(step_id)
+            _session, step = self.get_step_by_id(step_id)
 
         responses = step.responses or []
         items = [
@@ -421,7 +431,7 @@ class SessionManager:
         if session:
             for step in session.steps:
                 self._steps_by_id.pop(step.step_id, None)
-                self._events.pop(self._event_key(session_id, step.step_name), None)
+                self._events.pop(self._event_key(session_id, step.step_id), None)
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()

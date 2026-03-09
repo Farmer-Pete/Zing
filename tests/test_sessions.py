@@ -38,6 +38,26 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session.steps == []
         assert session.total_findings == 0
 
+    def test_create_session_zing_file_none(self) -> None:
+        """Creating a session with zing_file=None succeeds."""
+        session = self.manager.create_session("s1", "Test", zing_file=None)
+        assert session.zing_file is None
+
+    def test_create_session_zing_file_absolute(self) -> None:
+        """Creating a session with a valid absolute zing_file path succeeds."""
+        session = self.manager.create_session("s1", "Test", zing_file=__file__)
+        assert session.zing_file == __file__
+
+    def test_create_session_zing_file_relative_rejected(self) -> None:
+        """Creating a session with a relative zing_file path raises ValueError."""
+        with self.assertRaises(ValueError, msg="zing_file must be an absolute path"):
+            self.manager.create_session("s1", "Test", zing_file="relative/path.md")
+
+    def test_create_session_zing_file_nonexistent_rejected(self) -> None:
+        """Creating a session with a non-existent absolute path raises ValueError."""
+        with self.assertRaises(ValueError, msg="zing_file path does not exist"):
+            self.manager.create_session("s1", "Test", zing_file="/nonexistent/path.md")
+
     def test_start_step(self) -> None:
         """Starting a step adds it to the session and returns a step_id."""
         self.manager.create_session("s1", "Test")
@@ -128,12 +148,12 @@ class TestSessionLifecycle(unittest.TestCase):
         })
 
         # First agent completes — still pending
-        updated = self.manager.mark_agent_complete(step.step_id)
+        updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.state == SessionState.PENDING
         assert updated.completed_agents == 1
 
         # Second agent completes — now ready
-        updated = self.manager.mark_agent_complete(step.step_id)
+        updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.state == SessionState.READY
         assert updated.completed_agents == 2
 
@@ -198,7 +218,7 @@ class TestConcurrentSessions(unittest.TestCase):
         self.manager.create_session("s2", "Session 2")
         step2 = self.manager.start_step("s2", _STEP, 2)
 
-        self.manager.mark_agent_complete(step1.step_id)
+        self.manager.mark_agent_complete("s1", step1.step_id)
         s1 = self.manager.get_session("s1")
         s2 = self.manager.get_session("s2")
         assert s1 is not None
@@ -237,7 +257,7 @@ class TestCleanup(unittest.TestCase):
 
         self.manager.cleanup_session("s1")
         with self.assertRaises(KeyError):
-            self.manager._get_step_by_id(step_id)
+            self.manager.get_step_by_id(step_id)
 
     def test_cleanup_nonexistent_session(self) -> None:
         """Cleaning up a nonexistent session does not raise."""
@@ -271,15 +291,15 @@ class TestAgentTracking(unittest.TestCase):
         self.manager.create_session("s1", "Test")
         step = self.manager.start_step("s1", _STEP, 3)
 
-        updated = self.manager.mark_agent_complete(step.step_id)
+        updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.completed_agents == 1
         assert updated.state == SessionState.PENDING
 
-        updated = self.manager.mark_agent_complete(step.step_id)
+        updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.completed_agents == 2
         assert updated.state == SessionState.PENDING
 
-        updated = self.manager.mark_agent_complete(step.step_id)
+        updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.completed_agents == 3
         assert updated.state == SessionState.READY
 
@@ -288,9 +308,9 @@ class TestAgentTracking(unittest.TestCase):
         self.manager.create_session("s1", "Test")
         step = self.manager.start_step("s1", _STEP, 1)
 
-        self.manager.mark_agent_complete(step.step_id)
+        self.manager.mark_agent_complete("s1", step.step_id)
         with self.assertRaises(ValueError):
-            self.manager.mark_agent_complete(step.step_id)
+            self.manager.mark_agent_complete("s1", step.step_id)
 
     def test_invalid_session_id_raises(self) -> None:
         """Operations on a nonexistent session raise KeyError."""
@@ -298,7 +318,7 @@ class TestAgentTracking(unittest.TestCase):
             self.manager.add_finding("s1", "nonexistent-uuid", {"type": "text", "title": "Q"})
 
         with self.assertRaises(KeyError):
-            self.manager.mark_agent_complete("nonexistent-uuid")
+            self.manager.mark_agent_complete("s1", "nonexistent-uuid")
 
         with self.assertRaises(KeyError):
             self.manager.submit_responses("nonexistent", "nonexistent-step-id", [])
@@ -307,7 +327,7 @@ class TestAgentTracking(unittest.TestCase):
         """Adding a finding to a READY step raises ValueError."""
         self.manager.create_session("s1", "Test")
         step = self.manager.start_step("s1", _STEP, 1)
-        self.manager.mark_agent_complete(step.step_id)
+        self.manager.mark_agent_complete("s1", step.step_id)
 
         with self.assertRaises(ValueError):
             self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Late"})
@@ -317,7 +337,7 @@ class TestAgentTracking(unittest.TestCase):
         self.manager.create_session("s1", "Test")
         step = self.manager.start_step("s1", _STEP, 1)
         self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q"})
-        self.manager.mark_agent_complete(step.step_id)
+        self.manager.mark_agent_complete("s1", step.step_id)
         self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
 
         with self.assertRaises(ValueError):
@@ -359,7 +379,7 @@ class TestPersistence(unittest.TestCase):
             "type": "text",
             "title": "Will this persist?",
         })
-        mgr1.mark_agent_complete(step.step_id)
+        mgr1.mark_agent_complete("s1", step.step_id)
 
         # Create a new manager pointing at the same data dir
         mgr2 = SessionManager(data_dir=self.data_dir)
@@ -378,7 +398,7 @@ class TestPersistence(unittest.TestCase):
         step_id = step.step_id
 
         mgr2 = SessionManager(data_dir=self.data_dir)
-        session, reloaded_step = mgr2._get_step_by_id(step_id)
+        session, reloaded_step = mgr2.get_step_by_id(step_id)
         assert reloaded_step.step_name == _STEP
         assert reloaded_step.step_id == step_id
 
@@ -473,7 +493,7 @@ class TestWaitForReview(unittest.TestCase):
                 "type": "text",
                 "title": "Async question",
             })
-            self.manager.mark_agent_complete(step.step_id)
+            self.manager.mark_agent_complete("s1", step.step_id)
 
             async def _submit_later() -> None:
                 await asyncio.sleep(0.05)
@@ -502,7 +522,7 @@ class TestWaitForReview(unittest.TestCase):
                 "type": "text",
                 "title": "Q",
             })
-            self.manager.mark_agent_complete(step.step_id)
+            self.manager.mark_agent_complete("s1", step.step_id)
             self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
 
             # Should return immediately since step is completed

@@ -103,6 +103,6 @@ async def wait_for_review(session_id: str, step_name: str) -> dict:
     Both session_id and step_name are required.
     """
     sm = _get_session_manager()
-    step = sm._get_latest_step(session_id, step_name)
+    step = sm.get_latest_step(session_id, step_name)
     review_response = await sm.wait_for_review(session_id, step.step_id)
     return review_response.model_dump()

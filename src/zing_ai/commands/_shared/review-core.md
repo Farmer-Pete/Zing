@@ -328,7 +328,7 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to pull full file context when the diff hunks alone are insufficient for its analysis (see diff_preparation step for guidance on when to do this)
 - Any additional skill-specific context (see the calling skill's `analyze_changes` step for extras)
-- The **session ID** and **server port** for posting findings to the review server
+- The **session ID**, **step ID** (from `start_step`), and **server port** for posting findings to the review server
 - Instructions to POST each finding to the review server as JSON, and signal completion when done (see below)
 
 **Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
@@ -336,27 +336,28 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+  -d '{"step_id":"STEP_ID","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
 ```
 
-The `step_name` field is **required** — the server will reject findings without it. Use the step name provided by the parent when dispatching agents.
+The `step_id` field is **required** — use the step_id returned by `start_step`. The server will reject findings without it, or if the step is already marked as ready/completed.
 
 The agent must check the HTTP status code printed on the last line of the response:
 - **200** = accepted, continue to next finding
 - **400** = malformed request — read the error details from the response body, fix the JSON, and retry
-- **404** = verify the session ID is correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
 
 When the agent has finished posting all findings (or has no findings), it signals completion:
 
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
   -H "Content-Type: application/json" \
-  -d '{"step_name":"STEP_NAME"}'
+  -d '{"step_id":"STEP_ID"}'
 ```
 
 If the agent has no findings, it should still signal agent-complete.
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **step name** so it can include `"step_name":"STEP_NAME"` in all finding POST and agent-complete requests.
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **step ID** so it can include `"step_id":"STEP_ID"` in all finding POST and agent-complete requests.
 - Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
