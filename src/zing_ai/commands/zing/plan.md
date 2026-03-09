@@ -85,30 +85,31 @@ Each subagent receives a prompt with:
 > **Prefer `choice` type** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
 >
 > **Choice finding** (preferred — use whenever you can suggest options):
-> ```bash
-> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
->   -H "Content-Type: application/json" \
->   -d '{"step_id":"STEP_ID","type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI'\''s route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}'
+> ```
+> Call the `submit_finding` MCP tool with:
+>   session_id: SESSION_ID
+>   step_id: STEP_ID
+>   finding: {"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}
 > ```
 >
 > **Text finding** (only when no reasonable options exist):
-> ```bash
-> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
->   -H "Content-Type: application/json" \
->   -d '{"step_id":"STEP_ID","type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn'\''t find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}'
+> ```
+> Call the `submit_finding` MCP tool with:
+>   session_id: SESSION_ID
+>   step_id: STEP_ID
+>   finding: {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}
 > ```
 >
-> Check the HTTP status code on the last line of output:
-> - **200** = accepted, continue
-> - **400** = fix your JSON and retry
-> - **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
-> - **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
+> If the tool raises an error, check the error message:
+> - `ValueError` = fix the finding data and retry
+> - `KeyError` = abort with FATAL error (wrong session/step ID)
+> - `RuntimeError` = abort immediately (step already completed)
 >
-> After posting ALL questions, send the agent-complete signal:
-> ```bash
-> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
->   -H "Content-Type: application/json" \
->   -d '{"step_id":"STEP_ID"}'
+> After posting ALL questions, signal completion:
+> ```
+> Call the `mark_agent_complete` MCP tool with:
+>   session_id: SESSION_ID
+>   step_id: STEP_ID
 > ```
 
 Replace `PORT`, `SESSION_ID`, and `STEP_ID` in the subagent prompt with the actual port, session ID, and step ID values.

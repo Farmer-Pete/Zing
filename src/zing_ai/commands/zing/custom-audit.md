@@ -171,29 +171,29 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 
 **Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
 
-```bash
-curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
-  -H "Content-Type: application/json" \
-  -d '{"step_id":"STEP_ID","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+```
+Call the `submit_finding` MCP tool with:
+  session_id: SESSION_ID
+  step_id: STEP_ID
+  finding: {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
 ```
 
-The `step_id` field is **required** — use the step_id returned by `start_step`. The server will reject findings without it, or if the step is already marked as ready/completed.
+The `step_id` field is **required** — use the step_id returned by `start_step`. The tool will reject findings without it, or if the step is already marked as ready/completed.
 
-The agent must check the HTTP status code printed on the last line of the response:
-- **200** = accepted, continue to next finding
-- **400** = malformed request — read the error details from the response body, fix the JSON, and retry
-- **404** = verify the step_id and session ID are correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
-- **409** = step is no longer accepting submissions (already READY or COMPLETED) — abort immediately
+If the tool raises an error, check the error message:
+- `ValueError` = fix the finding data and retry
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `RuntimeError` = abort immediately (step already completed)
 
 When the agent has finished posting all findings (or has no findings), it signals completion:
 
-```bash
-curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
-  -H "Content-Type: application/json" \
-  -d '{"step_id":"STEP_ID"}'
+```
+Call the `mark_agent_complete` MCP tool with:
+  session_id: SESSION_ID
+  step_id: STEP_ID
 ```
 
-If the agent has no findings, it should still signal agent-complete.
+If the agent has no findings, it should still signal `mark_agent_complete`.
 
 Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 
