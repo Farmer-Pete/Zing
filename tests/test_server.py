@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from zing_ai.server.app import create_app
+from zing_ai.server.mcp_tools import configure, create_review, wait_for_review
 from zing_ai.server.sessions import SessionManager
 
 
@@ -285,3 +288,108 @@ class TestHTMLEndpoints(_ServerTestBase):
         resp = self.client.get("/no-such-session")
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"], "session_not_found")
+
+
+class TestCreateReview(_ServerTestBase):
+    """Tests for the create_review MCP tool."""
+
+    def test_create_review_creates_session_and_returns_url(self) -> None:
+        """create_review creates a session and returns a URL."""
+        configure(self.manager, port=9876)
+        with patch("zing_ai.server.mcp_tools.webbrowser.open") as mock_open:
+            result = asyncio.run(
+                create_review(
+                    session_id="mcp-session",
+                    title="MCP Review",
+                    zing_file="test.zing",
+                    expected_agents=2,
+                )
+            )
+        self.assertEqual(result["status"], "created")
+        self.assertEqual(result["url"], "http://localhost:9876/mcp-session")
+        mock_open.assert_called_once_with("http://localhost:9876/mcp-session")
+
+        session = self.manager.get_session("mcp-session")
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(session.title, "MCP Review")
+        self.assertEqual(session.expected_agents, 2)
+
+
+class TestWaitForReview(_ServerTestBase):
+    """Tests for the wait_for_review MCP tool."""
+
+    def test_wait_for_review_returns_correct_json(self) -> None:
+        """wait_for_review returns correct JSON with full finding data."""
+        configure(self.manager, port=9876)
+        self._create_session(session_id="wait-session", expected_agents=1)
+
+        # Add a finding and submit responses
+        self.client.post(
+            "/wait-session/findings",
+            json={
+                "type": "triage",
+                "description": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
+            },
+        )
+        self.client.post("/wait-session/agent-complete")
+        self.client.post(
+            "/wait-session/submit",
+            json={"responses": [{"action": "accept"}]},
+        )
+
+        # Now wait_for_review should return immediately since the event is already set
+        result = asyncio.run(
+            wait_for_review(session_id="wait-session")
+        )
+
+        self.assertEqual(result["session_id"], "wait-session")
+        self.assertIsInstance(result["items"], list)
+        self.assertEqual(len(result["items"]), 1)
+
+        item = result["items"][0]
+        self.assertEqual(item["finding"]["type"], "triage")
+        self.assertEqual(item["finding"]["description"], "Unused import")
+        self.assertEqual(item["response"]["action"], "accept")
+
+    def test_wait_for_review_blocks_until_submission(self) -> None:
+        """wait_for_review blocks until the session is submitted."""
+        configure(self.manager, port=9876)
+        self._create_session(session_id="block-session", expected_agents=1)
+
+        self.client.post(
+            "/block-session/findings",
+            json={"type": "text", "question": "What do you think?"},
+        )
+        self.client.post("/block-session/agent-complete")
+
+        async def _test_blocking() -> None:
+            completed = False
+
+            async def do_wait() -> dict:
+                nonlocal completed
+                result = await wait_for_review(session_id="block-session")
+                completed = True
+                return result
+
+            task = asyncio.create_task(do_wait())
+
+            # Yield control briefly — wait_for_review should NOT have completed yet
+            await asyncio.sleep(0.05)
+            self.assertFalse(completed, "wait_for_review should block until submission")
+
+            # Submit responses to unblock
+            self.client.post(
+                "/block-session/submit",
+                json={"responses": [{"answer": "Looks good"}]},
+            )
+
+            result = await task
+            self.assertTrue(completed)
+            self.assertEqual(result["session_id"], "block-session")
+            self.assertEqual(len(result["items"]), 1)
+
+        asyncio.run(_test_blocking())
