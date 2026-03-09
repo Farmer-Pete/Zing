@@ -10,7 +10,13 @@ Read the provided zing document to understand what the user wants to build.
 </step>
 
 <step name="explore_codebase">
-Before asking any questions, explore the codebase to understand the current state of the zing spec. This step has two phases:
+Before asking any questions, explore the codebase to understand the current state of the zing spec.
+
+### Session setup
+
+After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
+
+This session ID will be used by subagents to POST their questions to the review server.
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
@@ -64,28 +70,36 @@ Each subagent receives a prompt with:
 ## Findings: {area name}
 
 {Bulleted list of what exists in the codebase relevant to this area — files found, patterns observed, tech stack details, existing interfaces, gaps identified}
-
-## Proposed Questions
-
-{Numbered list of questions for the user, grounded in specific codebase findings. Each question should reference what was found. Example:
-1. "I see you're using Express with middleware pattern X — should this new feature follow the same pattern?"
-2. "The existing data model has table Y — does this feature extend that or need a new model?"}
 ```
 
-**Important:** Subagents must NOT call AskUserQuestion directly. They only return proposed questions as text in their output.
+**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent POSTs its proposed questions to the review server. Include these instructions verbatim in each subagent prompt:
 
-### Phase C — Centralized Q&A (main thread)
+> For each question you want to ask the user, POST it to the review server:
+> ```bash
+> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+>   -H "Content-Type: application/json" \
+>   -d '{"type":"text","question":"I see you'\''re using pattern X — should this follow the same pattern?","context":"Found in src/foo/bar.py"}'
+> ```
+> Check the HTTP status code on the last line of output:
+> - **200** = accepted, continue
+> - **400** = fix your JSON and retry
+> - **404** = verify the session ID is correct. If it is correct, abort immediately with a `FATAL: session not found` error message
+>
+> After posting ALL questions, send the agent-complete signal:
+> ```bash
+> curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+> ```
 
-After all subagents complete, collect their findings and proposed questions. Then:
+Replace `PORT` and `SESSION_ID` in the subagent prompt with the actual port and session ID values.
 
-1. **Merge findings:** Combine all subagent findings into a single understanding of the codebase state.
-2. **Deduplicate questions:** Remove duplicate or near-duplicate questions from different subagents.
-3. **Prioritize:** Order questions by importance — architecture decisions and ambiguities first, edge cases and nice-to-haves last.
-4. **Ask the user:** Use AskUserQuestion to ask the user, batching up to 4 related questions per call where they share a theme. Ground every question in specific codebase findings from the subagents. Ask about:
-   - Ambiguities or gaps in the zing document
-   - Decisions that affect architecture or integration with existing code
-   - Behavior in edge cases and error scenarios
-   - Anything a junior engineer would likely misunderstand or get wrong
+### Phase C — Collect answers from review UI (main thread)
+
+After all subagents return, check each subagent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all the planning questions posted by the subagents and answer them all at once. When the user submits the review, `wait_for_review` returns a list of items — each containing the original question, context, and the user's answer.
+
+1. **Merge findings:** Combine all subagent findings (from their returned text output) into a single understanding of the codebase state.
+2. **Incorporate answers:** Iterate over the returned review items and incorporate the user's answers into your understanding. Use these answers alongside the merged findings when fleshing out the plan in the next step.
 </step>
 
 <step name="flesh_out_document">
@@ -115,6 +129,8 @@ After all questions are answered, update the zing document so it can be handed t
    - Testable — it should be clear how to verify the step is done
 
    Group steps into phases where it makes sense (e.g., "Phase 1: Data Model", "Phase 2: API Endpoints", "Phase 3: Frontend"). Number every step.
+
+   **Context and current behavior:** The action plan should begin with an overview section (before the numbered steps) that explains how the relevant parts of the system currently work at a detailed technical level — what code runs, what data flows where, what the current structure looks like. Be visual in this section — use Mermaid diagrams liberally (sequence diagrams, flowcharts, component diagrams) to show the current architecture, data flows, and how the proposed changes fit in. A picture is worth a thousand words, and diagrams communicate system behavior far more effectively than prose alone. This gives the reader the context they need before diving into individual steps. For individual steps or phases that involve complicated changes, also include a brief explanation of how things work today and how they're changing, rather than just saying "add X to Y". The goal is that a reader who has never seen this codebase can follow the plan without needing to go read the code themselves first.
 
 5. A **Progress** section at the end of the document to track completion. Generate a checklist from the action plan with every step listed. Use this exact format:
 
