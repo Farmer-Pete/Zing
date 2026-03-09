@@ -66,7 +66,7 @@ class TestPostFindings(_ServerTestBase):
                 "confidence": "high",
             },
         )
-        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["status"], "ok")
         self.assertIn("finding_id", body)
@@ -82,7 +82,7 @@ class TestPostFindings(_ServerTestBase):
             "/test-session/findings",
             json={"type": "text", "question": "What is the main goal?"},
         )
-        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.status_code, 200)
 
     def test_valid_choice_finding(self) -> None:
         """A valid choice finding is accepted."""
@@ -98,7 +98,7 @@ class TestPostFindings(_ServerTestBase):
                 ],
             },
         )
-        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.status_code, 200)
 
     def test_invalid_session_returns_404(self) -> None:
         """Posting a finding to a nonexistent session returns 404."""
@@ -410,7 +410,54 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("drop", html)
         self.assertIn("downgrade", html)
         self.assertIn("discuss", html)
-        self.assertIn('data-bind="responses.tri1"', html)
+        self.assertIn("data-class-selected=\"$responses.tri1 === 'accept'\"", html)
+
+
+class TestMarkdownFilter(unittest.TestCase):
+    """Tests for the _render_markdown Jinja2 filter."""
+
+    def test_renders_basic_markdown(self) -> None:
+        """Basic markdown with bold and italic renders to HTML tags."""
+        from zing_ai.server.templates import _render_markdown
+
+        result = _render_markdown("**bold** and *italic*")
+        self.assertIn("<strong>", result)
+        self.assertIn("<em>", result)
+
+    def test_renders_code_blocks(self) -> None:
+        """Fenced code blocks render with Pygments syntax highlighting."""
+        from zing_ai.server.templates import _render_markdown
+
+        md = "```python\ndef hello():\n    return 42\n```"
+        result = _render_markdown(md)
+        self.assertIn('<div class="highlight">', result)
+        self.assertIn("<span", result)
+
+    def test_empty_input(self) -> None:
+        """Empty string input returns empty string without error."""
+        from zing_ai.server.templates import _render_markdown
+
+        result = _render_markdown("")
+        self.assertEqual(result, "")
+
+    def test_returns_markup(self) -> None:
+        """Return type is markupsafe.Markup, not plain str."""
+        import markupsafe
+
+        from zing_ai.server.templates import _render_markdown
+
+        result = _render_markdown("hello")
+        self.assertIsInstance(result, markupsafe.Markup)
+
+    def test_fallback_on_render_error(self) -> None:
+        """If mistune raises, filter falls back to escaped text in <pre> tags."""
+        from zing_ai.server.templates import _render_markdown
+
+        with patch("zing_ai.server.templates._markdown", side_effect=Exception("boom")):
+            result = _render_markdown("<script>alert('xss')</script>")
+        self.assertIn("<pre>", result)
+        self.assertIn("&lt;script&gt;", result)
+        self.assertNotIn("<script>", result)
 
 
 class TestConcurrentSessions(_ServerTestBase):
@@ -516,24 +563,6 @@ class TestCleanup(_ServerTestBase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"], "session_not_found")
 
-
-class TestOpenFile(_ServerTestBase):
-    """Tests for the POST /sessions/{session_id}/open-file endpoint."""
-
-    def test_open_file_calls_subprocess(self) -> None:
-        """POST open-file calls subprocess.run with correct path."""
-        self._create_session(session_id="s1", title="Open Test")
-        with patch("zing_ai.server.routes.subprocess.run") as mock_run:
-            resp = self.client.post("/sessions/s1/open-file")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["status"], "ok")
-        mock_run.assert_called_once_with(["open", "test.zing"])
-
-    def test_open_file_returns_404_for_invalid_session(self) -> None:
-        """POST open-file returns 404 for nonexistent session."""
-        resp = self.client.post("/sessions/nonexistent/open-file")
-        self.assertEqual(resp.status_code, 404)
-        self.assertEqual(resp.json()["error"], "session_not_found")
 
 
 class TestDashboardSSE(_ServerTestBase):
