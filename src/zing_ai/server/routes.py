@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from collections import defaultdict
 from typing import Any
 
@@ -23,6 +24,9 @@ router = APIRouter()
 # Per-session list of asyncio queues for active SSE connections.
 # Each SSE connection registers its own queue to receive push notifications.
 _sse_queues: dict[str, list[asyncio.Queue[str]]] = defaultdict(list)
+
+# Queues for dashboard SSE connections — notified when any session changes state.
+_dashboard_queues: list[asyncio.Queue[str]] = []
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -44,6 +48,16 @@ def _notify_sse_connections(session_id: str, event: str) -> None:
         event: An event type string (e.g. "finding", "ready", "completed").
     """
     for queue in _sse_queues.get(session_id, []):
+        queue.put_nowait(event)
+
+
+def _notify_dashboard_connections(event: str) -> None:
+    """Push an event to all active dashboard SSE queues.
+
+    Args:
+        event: An event type string (e.g. "created", "completed", "cleaned_up").
+    """
+    for queue in _dashboard_queues:
         queue.put_nowait(event)
 
 
@@ -103,6 +117,7 @@ async def post_agent_complete(session_id: str, request: Request) -> JSONResponse
     session = manager.mark_agent_complete(session_id)
     if session.state.value == "ready":
         _notify_sse_connections(session_id, "ready")
+        _notify_dashboard_connections("agent_complete")
     logger.info(
         "Agent complete for session %s (%d/%d)",
         session_id,
@@ -152,6 +167,7 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
 
     review = manager.submit_responses(session_id, responses)
     _notify_sse_connections(session_id, "completed")
+    _notify_dashboard_connections("review_submitted")
     logger.info("Session %s submitted with %d responses", session_id, len(responses))
     return JSONResponse(
         status_code=200,
@@ -298,6 +314,74 @@ async def get_dashboard(request: Request) -> HTMLResponse:
     sessions = manager.list_sessions()
     html = render("dashboard.html", sessions=sessions)
     return HTMLResponse(content=html)
+
+
+@router.get("/dashboard/events")
+@datastar_response
+async def dashboard_events(request: Request):  # noqa: ANN201
+    """SSE endpoint that pushes re-rendered session list when session state changes."""
+    manager = request.app.state.session_manager
+
+    async def _generate():  # noqa: ANN202
+        """Yield SSE events with updated dashboard session list."""
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=30.0)
+                except TimeoutError:
+                    continue
+
+                sessions = manager.list_sessions()
+                html = render("dashboard.html", sessions=sessions)
+                yield SSE.patch_elements(html, selector="body", mode="innerHTML")
+        finally:
+            if queue in _dashboard_queues:
+                _dashboard_queues.remove(queue)
+
+    return _generate()
+
+
+@router.post("/sessions/{session_id}/cleanup", response_model=None)
+async def post_cleanup(
+    session_id: str, request: Request,
+) -> JSONResponse:
+    """Remove a session from the manager.
+
+    Args:
+        session_id: The session to clean up.
+        request: The incoming request.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(session_id)
+    if session is None:
+        return _session_not_found(session_id)
+
+    manager.cleanup_session(session_id)
+    _notify_dashboard_connections("cleaned_up")
+    logger.info("Session %s cleaned up via dashboard", session_id)
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
+@router.post("/sessions/{session_id}/open-file", response_model=None)
+async def post_open_file(
+    session_id: str, request: Request,
+) -> JSONResponse:
+    """Open the zing file for a session in the default macOS application.
+
+    Args:
+        session_id: The session whose zing file to open.
+        request: The incoming request.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(session_id)
+    if session is None:
+        return _session_not_found(session_id)
+
+    subprocess.run(["open", session.zing_file])  # noqa: S603, S607
+    logger.info("Opened zing file for session %s: %s", session_id, session.zing_file)
+    return JSONResponse(status_code=200, content={"status": "ok"})
 
 
 @router.get("/{session_id}", response_model=None)

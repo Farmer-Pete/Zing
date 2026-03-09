@@ -451,12 +451,22 @@ class TestHTMLEndpoints(_ServerTestBase):
     """Tests for the HTML page endpoints."""
 
     def test_dashboard(self) -> None:
-        """Dashboard returns HTML with session list."""
+        """Dashboard returns HTML listing all sessions with correct status badges."""
         self._create_session(session_id="s1", title="First Session")
+        self._create_session(session_id="s2", title="Second Session", expected_agents=1)
+        # Complete the second session so it gets a different status badge
+        self.client.post(
+            "/s2/findings",
+            json={"type": "text", "question": "How is it?"},
+        )
+        self.client.post("/s2/agent-complete")
         resp = self.client.get("/dashboard")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("First Session", resp.text)
+        self.assertIn("Second Session", resp.text)
         self.assertIn("Zing Dashboard", resp.text)
+        self.assertIn("status-pending", resp.text)
+        self.assertIn("status-ready", resp.text)
 
     def test_session_page(self) -> None:
         """Session page returns HTML with session details."""
@@ -487,6 +497,109 @@ class TestHTMLEndpoints(_ServerTestBase):
         resp = self.client.get("/no-such-session")
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"], "session_not_found")
+
+
+class TestCleanup(_ServerTestBase):
+    """Tests for the POST /sessions/{session_id}/cleanup endpoint."""
+
+    def test_cleanup_removes_session(self) -> None:
+        """POST cleanup removes session from manager and returns 200."""
+        self._create_session(session_id="s1", title="To Clean")
+        resp = self.client.post("/sessions/s1/cleanup")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ok")
+        self.assertIsNone(self.manager.get_session("s1"))
+
+    def test_cleanup_returns_404_for_invalid_session(self) -> None:
+        """POST cleanup returns 404 for nonexistent session."""
+        resp = self.client.post("/sessions/nonexistent/cleanup")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"], "session_not_found")
+
+
+class TestOpenFile(_ServerTestBase):
+    """Tests for the POST /sessions/{session_id}/open-file endpoint."""
+
+    def test_open_file_calls_subprocess(self) -> None:
+        """POST open-file calls subprocess.run with correct path."""
+        self._create_session(session_id="s1", title="Open Test")
+        with patch("zing_ai.server.routes.subprocess.run") as mock_run:
+            resp = self.client.post("/sessions/s1/open-file")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ok")
+        mock_run.assert_called_once_with(["open", "test.zing"])
+
+    def test_open_file_returns_404_for_invalid_session(self) -> None:
+        """POST open-file returns 404 for nonexistent session."""
+        resp = self.client.post("/sessions/nonexistent/open-file")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"], "session_not_found")
+
+
+class TestDashboardSSE(_ServerTestBase):
+    """Tests for the dashboard SSE notification mechanism."""
+
+    def test_dashboard_notified_on_agent_complete(self) -> None:
+        """Dashboard SSE queues receive events when agent completes."""
+        from zing_ai.server.routes import _dashboard_queues
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            self._create_session(
+                session_id="sse-dash", title="SSE Dashboard Test", expected_agents=1,
+            )
+            self.client.post(
+                "/sse-dash/findings",
+                json={"type": "text", "question": "Test?"},
+            )
+            self.client.post("/sse-dash/agent-complete")
+            # The agent_complete notification should be in the queue
+            event = queue.get_nowait()
+            self.assertEqual(event, "agent_complete")
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_dashboard_notified_on_review_submitted(self) -> None:
+        """Dashboard SSE queues receive events when review is submitted."""
+        from zing_ai.server.routes import _dashboard_queues
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            self._create_session(
+                session_id="sse-sub", title="Submit Test", expected_agents=1,
+            )
+            self.client.post(
+                "/sse-sub/findings",
+                json={"type": "text", "question": "How?"},
+            )
+            self.client.post("/sse-sub/agent-complete")
+            # Drain the agent_complete event
+            queue.get_nowait()
+
+            self.client.post(
+                "/sse-sub/submit",
+                json={"responses": [{"answer": "Fine"}]},
+            )
+            event = queue.get_nowait()
+            self.assertEqual(event, "review_submitted")
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_dashboard_notified_on_cleanup(self) -> None:
+        """Dashboard SSE queues receive events when session is cleaned up."""
+        from zing_ai.server.routes import _dashboard_queues
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            self._create_session(session_id="sse-clean", title="Cleanup Test")
+            self.client.post("/sessions/sse-clean/cleanup")
+            event = queue.get_nowait()
+            self.assertEqual(event, "cleaned_up")
+        finally:
+            _dashboard_queues.remove(queue)
 
 
 class TestCreateReview(_ServerTestBase):
