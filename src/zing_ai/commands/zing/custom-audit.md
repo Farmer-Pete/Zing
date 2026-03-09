@@ -54,6 +54,18 @@ Convert the user's description into a concrete set of files to audit.
 
    If "Add or remove files": Ask the user what to add/remove, re-resolve, and confirm again.
    If "Cancel": Exit.
+
+### Session setup
+
+After confirming scope with the user, call `create_review()` to get a new session ID.
+
+The `create_review()` call requires:
+- `session_id`: a unique identifier (e.g., `"custom-audit-{scope_slug}-{timestamp}"`)
+- `title`: e.g., `"Code Audit — {user_description}"`
+- `zing_file`: empty string (custom audits don't use zing docs)
+- `expected_agents`: `6` (the number of review agents)
+
+This session ID and the server port will be passed to the review agents.
 </step>
 
 <step name="read_files">
@@ -123,7 +135,8 @@ Launch 6 parallel Task agents to review the code. Each agent receives:
 - The severity/confidence scales from the shared review reference
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to explore code beyond the provided context (callers, callees, related modules, test coverage)
-- Instructions to return findings in pipe-delimited format, one finding per line: `FINDING|category|severity|confidence|file_path:line_number|description`. If the agent has no findings, it should return `NO_FINDINGS`.
+- The **session ID** and **server port** for posting findings to the review server
+- Instructions to POST each finding to the review server as JSON, and signal completion when done (see below)
 
 **Adapted framing for all agents:**
 
@@ -156,13 +169,32 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 - Agent 5 (Performance & Data Integrity): Performance (incl. all sub-items)
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`.
+**Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+```
+
+The agent must check the HTTP status code printed on the last line of the response:
+- **200** = accepted, continue to next finding
+- **400** = malformed request — read the error details from the response body, fix the JSON, and retry
+- **404** = verify the session ID is correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+
+When the agent has finished posting all findings (or has no findings), it signals completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+```
+
+If the agent has no findings, it should still signal agent-complete.
+
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 
 **After all 6 agents return**, the parent:
-1. Collects all `FINDING|...` lines from all agents
-2. Deduplicates: if two agents flagged the same `file_path:line_number`, keep the finding with the higher severity and concatenate both descriptions
-3. Sorts by severity (critical first), then confidence
-4. Proceeds to the `present_summary` step with the merged findings list
+1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+2. Otherwise, proceeds to the `present_summary` step.
 </step>
 
 <step name="present_summary">
@@ -181,12 +213,30 @@ Went through everything — nothing jumped out. This code looks solid.
 Write an empty findings report and exit.
 </step>
 
+<step name="check_and_review">
+After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+- **Accepted findings**: Include in the report as-is.
+- **Dropped findings**: Exclude from the report entirely.
+- **Downgraded findings**: Include in the report with their adjusted severity.
+- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines from the shared review reference for discuss items only), then include in the report with a note that they were flagged for discussion.
+
+If no findings remain after triage (all dropped), say something like:
+```
+Went through everything — nothing survived triage. This code looks solid.
+```
+Write an empty findings report and exit.
+</step>
+
 <step name="walk_through_findings">
 Follow the `walk_through_findings` guidelines from the shared review reference. Code snippets come from the actual file content at the relevant line numbers (not from diffs).
 </step>
 
 <step name="write_report">
-After all findings have been reviewed, compile the valid findings into a GitHub-flavored markdown file.
+Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
 First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-audit-{scope_slug}-{datetime}.md` where `{scope_slug}` is a sanitized short version of the user's description (max ~30 chars, lowercase, spaces/slashes replaced with dashes) and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
 
@@ -215,7 +265,7 @@ Audited on {YYYY-MM-DD}. {file_count} files reviewed ({total_lines} lines). {val
 
 `{file_path}:{line_number}` — **{severity}**, {confidence} confidence
 
-{Write the explanation the same way you explained it during the walkthrough — conversationally, with specific references to the code. Include a code snippet showing the problematic lines.}
+{Write the explanation conversationally, with specific references to the code. Include a code snippet showing the problematic lines. For downgraded findings, use the adjusted severity. For discuss findings, include a note: "(Flagged for discussion)".}
 
 ```{language}
 {relevant code snippet}
@@ -298,10 +348,10 @@ Review is complete when:
 - [ ] Big-picture assessment shared (scope, structure, first impressions, dependencies)
 - [ ] Code was analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were presented in a sorted summary table
-- [ ] Each finding was walked through one at a time with the user
-- [ ] User validated or invalidated each finding
-- [ ] Valid findings were written to a markdown file in `.zing/` in GFM format
+- [ ] Findings were posted to the review server by subagents
+- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
+- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>
