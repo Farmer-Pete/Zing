@@ -7,6 +7,12 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "click>=8.1",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "datastar-py>=0.4",
+    "pydantic>=2.0",
+    "mcp",
+    "jinja2",
 ]
 
 [project.scripts]
@@ -23,6 +29,7 @@ dev = [
     "ruff>=0.15",
     "pyright>=1.1",
     "pyleft>=1.1",
+    "httpx>=0.28",
 ]
 
 [tool.ruff]
