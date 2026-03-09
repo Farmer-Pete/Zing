@@ -20,7 +20,7 @@ def create_app(
 ) -> Starlette:
     """Create and configure the application.
 
-    Returns a Starlette app that routes OAuth/MCP paths to the MCP sub-app
+    Returns a Starlette app that routes MCP paths to the MCP sub-app
     and everything else to the FastAPI web UI.
 
     Args:
@@ -44,15 +44,9 @@ def create_app(
     configure(sm, port=port)
     fastapi_app.include_router(router)
 
-    # Outer Starlette app: MCP/OAuth routes first, then FastAPI as fallback.
-    # Middleware from the MCP app (BearerAuthBackend, AuthContextMiddleware)
-    # is carried over so token validation works on the /mcp endpoint.
-    # Non-auth routes like /register and /token are unaffected because
-    # BearerAuthBackend returns None when no Bearer token is present.
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]
 
     return Starlette(
         routes=routes,
         lifespan=lifespan,
-        middleware=mcp_starlette.user_middleware,
     )
