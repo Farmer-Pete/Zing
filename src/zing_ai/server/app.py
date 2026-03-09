@@ -10,7 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from zing_ai.server.mcp_tools import configure, mcp_server
-from zing_ai.server.routes import router
+from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
 from zing_ai.server.sessions import SessionManager
 
 
@@ -28,6 +28,29 @@ def create_app(
         port: The port the server will listen on, used for MCP tool URL construction.
     """
     sm = session_manager or SessionManager()
+
+    # Map SessionManager events to the existing SSE/dashboard notification functions
+    def _on_session_event(event_type: str, session_id: str) -> None:
+        sse_events = {
+            "finding_added": "finding",
+            "step_started": "step_started",
+            "agent_complete": "agent_complete",
+            "step_ready": "ready",
+            "review_submitted": "completed",
+        }
+        dashboard_events = {
+            "session_created": "created",
+            "step_started": "step_started",
+            "agent_complete": "agent_complete",
+            "review_submitted": "review_submitted",
+            "session_cleaned_up": "cleaned_up",
+        }
+        if event_type in sse_events:
+            _notify_sse_connections(session_id, sse_events[event_type])
+        if event_type in dashboard_events:
+            _notify_dashboard_connections(dashboard_events[event_type])
+
+    sm.add_listener(_on_session_event)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
