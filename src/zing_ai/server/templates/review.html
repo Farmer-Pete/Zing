@@ -3,6 +3,7 @@
 {% block title %}{{ session.title }} — Zing Review{% endblock %}
 
 {% block content %}
+<p><a href="/dashboard">&larr; Dashboard</a></p>
 <h1>{{ session.title }}</h1>
 <p class="finding-meta">Session: {{ session.session_id }} | State: <span class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span></p>
 

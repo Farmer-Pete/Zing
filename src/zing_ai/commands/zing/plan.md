@@ -72,14 +72,28 @@ Each subagent receives a prompt with:
 {Bulleted list of what exists in the codebase relevant to this area — files found, patterns observed, tech stack details, existing interfaces, gaps identified}
 ```
 
-**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent POSTs its proposed questions to the review server. Include these instructions verbatim in each subagent prompt:
+**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent POSTs its questions to the review server. Include these instructions verbatim in each subagent prompt:
 
-> For each question you want to ask the user, POST it to the review server:
+> **Only POST items that require a decision from the user.** Do NOT post statements, analysis results, or confirmations like "X works fine" or "No changes needed" — those belong in your returned findings text, not in the review UI. Every posted item must ask the user to decide something.
+>
+> The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide.
+>
+> **Prefer `choice` type** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
+>
+> **Choice finding** (preferred — use whenever you can suggest options):
 > ```bash
 > curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
 >   -H "Content-Type: application/json" \
->   -d '{"type":"text","title":"Should this follow the existing pattern X?","body":"I see you'\''re using pattern X in `src/foo/bar.py`...","context":"Found in src/foo/bar.py"}'
+>   -d '{"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI'\''s route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}'
 > ```
+>
+> **Text finding** (only when no reasonable options exist):
+> ```bash
+> curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+>   -H "Content-Type: application/json" \
+>   -d '{"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn'\''t find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}'
+> ```
+>
 > Check the HTTP status code on the last line of output:
 > - **200** = accepted, continue
 > - **400** = fix your JSON and retry

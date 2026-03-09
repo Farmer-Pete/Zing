@@ -107,6 +107,15 @@ It also benefits from having the **[GitHub CLI (`gh`)](https://cli.github.com/)*
 
 These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
 
+### Permissions
+
+Zing's review commands use an MCP server and `curl` to coordinate reviews. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:
+
+```json
+"Bash(curl:*)",
+"mcp__zing-ai__*"
+```
+
 <!--
 ### Install from PyPI
 
