@@ -317,3 +317,26 @@ def test_opencode_partial_install_cleanup(tmp_path: Path) -> None:
 
     md_files = list(target.rglob("*.md")) if target.exists() else []
     assert md_files == [], f"Partial files left behind: {md_files}"
+
+
+# ---------------------------------------------------------------------------
+# MCP registration integration
+# ---------------------------------------------------------------------------
+
+
+def test_claude_install_calls_register_mcp_server(tmp_path: Path) -> None:
+    """install_claude() calls register_mcp_server('claude') after writing manifest."""
+    target = tmp_path / "commands"
+    with patch("zing_ai.installer.register_mcp_server") as mock_reg:
+        install_claude(target_dir=target)
+
+    mock_reg.assert_called_once_with("claude")
+
+
+def test_opencode_install_calls_register_mcp_server(tmp_path: Path) -> None:
+    """install_opencode() calls register_mcp_server('opencode') after writing manifest."""
+    target = tmp_path / "commands"
+    with patch("zing_ai.installer.register_mcp_server") as mock_reg:
+        install_opencode(target_dir=target)
+
+    mock_reg.assert_called_once_with("opencode")
