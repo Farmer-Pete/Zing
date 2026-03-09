@@ -52,9 +52,10 @@ class _ServerTestBase(unittest.TestCase):
         self.manager.create_session(
             session_id=session_id,
             title=title,
-            zing_file="test.zing",
+            zing_file=None,
         )
-        self.manager.start_step(session_id, _STEP, expected_agents)
+        step = self.manager.start_step(session_id, _STEP, expected_agents)
+        self.step_id = step.step_id
 
 
 class TestPostFindings(_ServerTestBase):
@@ -66,7 +67,7 @@ class TestPostFindings(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Unused import",
                 "body": "The `os` module is imported but never used.",
@@ -89,7 +90,7 @@ class TestPostFindings(_ServerTestBase):
         self._create_session()
         resp = self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "What is the main goal?"},
+            json={"step_id": self.step_id, "type": "text", "title": "What is the main goal?"},
         )
         self.assertEqual(resp.status_code, 200)
 
@@ -99,7 +100,7 @@ class TestPostFindings(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "choice",
                 "title": "Pick an approach",
                 "options": [
@@ -110,26 +111,39 @@ class TestPostFindings(_ServerTestBase):
         )
         self.assertEqual(resp.status_code, 200)
 
-    def test_missing_step_name_returns_400(self) -> None:
-        """Posting a finding without step_name returns 400."""
+    def test_missing_step_id_returns_400(self) -> None:
+        """Posting a finding without step_id returns 400."""
         self._create_session()
         resp = self.client.post(
             "/test-session/findings",
-            json={"type": "text", "title": "No step name"},
+            json={"type": "text", "title": "No step id"},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "missing_step_name")
+        self.assertEqual(resp.json()["error"], "missing_step_id")
 
     def test_invalid_session_returns_404(self) -> None:
         """Posting a finding to a nonexistent session returns 404."""
         resp = self.client.post(
             "/no-such-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "Hello?"},
+            json={"step_id": "nonexistent-uuid", "type": "text", "title": "Hello?"},
         )
         self.assertEqual(resp.status_code, 404)
         body = resp.json()
         self.assertEqual(body["error"], "session_not_found")
         self.assertIn("no-such-session", body["message"])
+
+    def test_step_from_wrong_session_returns_409(self) -> None:
+        """Posting a finding with a step_id from a different session returns 409."""
+        self._create_session(session_id="test-session")
+        self.manager.create_session("other-session", "Other", zing_file=None)
+        resp = self.client.post(
+            "/other-session/findings",
+            json={"step_id": self.step_id, "type": "text", "title": "Wrong session"},
+        )
+        self.assertEqual(resp.status_code, 409)
+        body = resp.json()
+        self.assertEqual(body["error"], "invalid_state")
+        self.assertIn("test-session", body["message"])
 
     def test_valid_evaluation_finding(self) -> None:
         """A valid evaluation finding is accepted and stored."""
@@ -137,7 +151,7 @@ class TestPostFindings(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "evaluation",
                 "title": "Pass 1: Design Fundamentals",
                 "criteria": [
@@ -164,7 +178,7 @@ class TestPostFindings(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "evaluation",
                 "title": "Pass 1",
                 "criteria": [
@@ -179,7 +193,7 @@ class TestPostFindings(_ServerTestBase):
         self._create_session()
         resp = self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "triage"},  # missing required fields
+            json={"step_id": self.step_id, "type": "triage"},  # missing required fields
         )
         self.assertEqual(resp.status_code, 400)
         body = resp.json()
@@ -196,7 +210,7 @@ class TestAgentComplete(_ServerTestBase):
         self._create_session(expected_agents=2)
         resp = self.client.post(
             "/test-session/agent-complete",
-            json={"step_name": _STEP},
+            json={"step_id": self.step_id},
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -207,25 +221,25 @@ class TestAgentComplete(_ServerTestBase):
     def test_all_agents_complete_transitions_to_ready(self) -> None:
         """When all expected agents complete, step transitions to ready."""
         self._create_session(expected_agents=2)
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
-        resp = self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
+        resp = self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["completed_agents"], 2)
         self.assertEqual(body["state"], "ready")
 
-    def test_missing_step_name_returns_400(self) -> None:
-        """Agent-complete without step_name returns 400."""
+    def test_missing_step_id_returns_400(self) -> None:
+        """Agent-complete without step_id returns 400."""
         self._create_session()
         resp = self.client.post("/test-session/agent-complete", json={})
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "missing_step_name")
+        self.assertEqual(resp.json()["error"], "missing_step_id")
 
     def test_invalid_session_returns_404(self) -> None:
         """Signaling agent-complete on a nonexistent session returns 404."""
         resp = self.client.post(
             "/no-such-session/agent-complete",
-            json={"step_name": _STEP},
+            json={"step_id": "nonexistent-uuid"},
         )
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"], "session_not_found")
@@ -239,13 +253,13 @@ class TestSubmit(_ServerTestBase):
         self._create_session(expected_agents=1)
         self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "What is the goal?"},
+            json={"step_id": self.step_id, "type": "text", "title": "What is the goal?"},
         )
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
         resp = self.client.post(
             "/test-session/submit",
-            json={"step_name": _STEP, "responses": [{"answer": "Build a review UI"}]},
+            json={"step_id": self.step_id, "responses": [{"answer": "Build a review UI"}]},
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -262,12 +276,12 @@ class TestSubmit(_ServerTestBase):
         # Add findings of each type
         r1 = self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "What do you think?"},
+            json={"step_id": self.step_id, "type": "text", "title": "What do you think?"},
         )
         r2 = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Unused import",
                 "category": "style",
@@ -278,7 +292,7 @@ class TestSubmit(_ServerTestBase):
         r3 = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "choice",
                 "title": "Pick one",
                 "options": [
@@ -287,7 +301,7 @@ class TestSubmit(_ServerTestBase):
                 ],
             },
         )
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
         text_id = r1.json()["finding_id"]
         triage_id = r2.json()["finding_id"]
@@ -297,7 +311,7 @@ class TestSubmit(_ServerTestBase):
         resp = self.client.post(
             "/test-session/submit",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "responses": {
                     text_id: "Looks good",
                     triage_id: "accept",
@@ -324,7 +338,7 @@ class TestSubmit(_ServerTestBase):
         self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "evaluation",
                 "title": "Pass 1",
                 "criteria": [
@@ -334,15 +348,15 @@ class TestSubmit(_ServerTestBase):
         )
         r2 = self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "Any thoughts?"},
+            json={"step_id": self.step_id, "type": "text", "title": "Any thoughts?"},
         )
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
         text_id = r2.json()["finding_id"]
 
         resp = self.client.post(
             "/test-session/submit",
-            json={"step_name": _STEP, "responses": {text_id: "Looks good"}},
+            json={"step_id": self.step_id, "responses": {text_id: "Looks good"}},
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["items_count"], 2)
@@ -361,30 +375,30 @@ class TestSubmit(_ServerTestBase):
     def test_submit_returns_400_for_invalid_responses(self) -> None:
         """Submitting non-list non-dict responses returns 400."""
         self._create_session(expected_agents=1)
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
         resp = self.client.post(
             "/test-session/submit",
-            json={"step_name": _STEP, "responses": "invalid"},
+            json={"step_id": self.step_id, "responses": "invalid"},
         )
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "invalid_responses")
 
-    def test_missing_step_name_returns_400(self) -> None:
-        """Submitting without step_name returns 400."""
+    def test_missing_step_id_returns_400(self) -> None:
+        """Submitting without step_id returns 400."""
         self._create_session(expected_agents=1)
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
         resp = self.client.post(
             "/test-session/submit",
             json={"responses": [{"answer": "test"}]},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "missing_step_name")
+        self.assertEqual(resp.json()["error"], "missing_step_id")
 
     def test_invalid_session_returns_404(self) -> None:
         """Submitting to a nonexistent session returns 404."""
         resp = self.client.post(
             "/no-such-session/submit",
-            json={"step_name": _STEP, "responses": []},
+            json={"step_id": "nonexistent-step", "responses": []},
         )
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["error"], "session_not_found")
@@ -395,19 +409,19 @@ class TestSubmit(_ServerTestBase):
         r1 = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "choice",
                 "title": "Pick one",
                 "options": [{"label": "A", "description": "Option A"}],
             },
         )
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
         choice_id = r1.json()["finding_id"]
         resp = self.client.post(
             "/test-session/submit",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "responses": {
                     choice_id: "__other__",
                     f"{choice_id}_other": "My custom answer",
@@ -432,7 +446,7 @@ class TestSSEStream(_ServerTestBase):
         resp_finding = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Old finding",
                 "category": "correctness",
@@ -442,9 +456,9 @@ class TestSSEStream(_ServerTestBase):
         )
         finding_id = resp_finding.json()["finding_id"]
         # Mark agent complete so the stream terminates
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
-        resp = self.client.get(f"/test-session/stream?step={_STEP}")
+        resp = self.client.get(f"/test-session/stream?step={self.step_id}")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
         body_text = resp.text
@@ -460,12 +474,12 @@ class TestSSEStream(_ServerTestBase):
         # Add a finding and complete agent so the stream terminates
         resp_finding = self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "Added after connect?"},
+            json={"step_id": self.step_id, "type": "text", "title": "Added after connect?"},
         )
         finding_id = resp_finding.json()["finding_id"]
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
-        resp = self.client.get(f"/test-session/stream?step={_STEP}")
+        resp = self.client.get(f"/test-session/stream?step={self.step_id}")
         self.assertEqual(resp.status_code, 200)
         # The finding should appear in the stream by its ID
         self.assertIn(finding_id, resp.text)
@@ -476,11 +490,11 @@ class TestSSEStream(_ServerTestBase):
         self._create_session(expected_agents=1)
         self.client.post(
             "/test-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "Quick question"},
+            json={"step_id": self.step_id, "type": "text", "title": "Quick question"},
         )
-        self.client.post("/test-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/test-session/agent-complete", json={"step_id": self.step_id})
 
-        resp = self.client.get(f"/test-session/stream?step={_STEP}")
+        resp = self.client.get(f"/test-session/stream?step={self.step_id}")
         self.assertEqual(resp.status_code, 200)
         # Submit button should be present
         self.assertIn("Submit Review", resp.text)
@@ -493,7 +507,7 @@ class TestSSEStream(_ServerTestBase):
         self.client.post(
             "/unblock-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Test finding",
                 "category": "correctness",
@@ -501,7 +515,7 @@ class TestSSEStream(_ServerTestBase):
                 "confidence": "high",
             },
         )
-        self.client.post("/unblock-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/unblock-session/agent-complete", json={"step_id": self.step_id})
 
         # Submit via Datastar signals
         session = self.manager.get_session("unblock-session")
@@ -509,7 +523,7 @@ class TestSSEStream(_ServerTestBase):
         finding_id = session.steps[0].findings[0].id
         self.client.post(
             "/unblock-session/submit",
-            json={"step_name": _STEP, "responses": {finding_id: "accept"}},
+            json={"step_id": self.step_id, "responses": {finding_id: "accept"}},
         )
 
         # wait_for_review should return immediately since step is completed
@@ -721,16 +735,18 @@ class TestConcurrentSessions(_ServerTestBase):
     def test_sessions_are_isolated(self) -> None:
         """Findings posted to one session don't appear in another."""
         self._create_session(session_id="session-a", expected_agents=1)
+        step_id_a = self.step_id
         self._create_session(session_id="session-b", expected_agents=1)
+        step_id_b = self.step_id
 
         self.client.post(
             "/session-a/findings",
-            json={"step_name": _STEP, "type": "text", "title": "Question for A"},
+            json={"step_id": step_id_a, "type": "text", "title": "Question for A"},
         )
         self.client.post(
             "/session-b/findings",
             json={
-                "step_name": _STEP,
+                "step_id": step_id_b,
                 "type": "triage",
                 "title": "Finding for B",
                 "category": "performance",
@@ -757,12 +773,13 @@ class TestHTMLEndpoints(_ServerTestBase):
         """Dashboard returns HTML listing all sessions with correct status badges."""
         self._create_session(session_id="s1", title="First Session")
         self._create_session(session_id="s2", title="Second Session", expected_agents=1)
+        step_id_s2 = self.step_id
         # Complete the second session's step so it gets a different status badge
         self.client.post(
             "/s2/findings",
-            json={"step_name": _STEP, "type": "text", "title": "How is it?"},
+            json={"step_id": step_id_s2, "type": "text", "title": "How is it?"},
         )
-        self.client.post("/s2/agent-complete", json={"step_name": _STEP})
+        self.client.post("/s2/agent-complete", json={"step_id": step_id_s2})
         resp = self.client.get("/dashboard")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("First Session", resp.text)
@@ -833,9 +850,9 @@ class TestDashboardSSE(_ServerTestBase):
             )
             self.client.post(
                 "/sse-dash/findings",
-                json={"step_name": _STEP, "type": "text", "title": "Test?"},
+                json={"step_id": self.step_id, "type": "text", "title": "Test?"},
             )
-            self.client.post("/sse-dash/agent-complete", json={"step_name": _STEP})
+            self.client.post("/sse-dash/agent-complete", json={"step_id": self.step_id})
             # The agent_complete notification should be in the queue
             event = queue.get_nowait()
             self.assertEqual(event, "agent_complete")
@@ -854,15 +871,15 @@ class TestDashboardSSE(_ServerTestBase):
             )
             self.client.post(
                 "/sse-sub/findings",
-                json={"step_name": _STEP, "type": "text", "title": "How?"},
+                json={"step_id": self.step_id, "type": "text", "title": "How?"},
             )
-            self.client.post("/sse-sub/agent-complete", json={"step_name": _STEP})
+            self.client.post("/sse-sub/agent-complete", json={"step_id": self.step_id})
             # Drain the agent_complete event
             queue.get_nowait()
 
             self.client.post(
                 "/sse-sub/submit",
-                json={"step_name": _STEP, "responses": [{"answer": "Fine"}]},
+                json={"step_id": self.step_id, "responses": [{"answer": "Fine"}]},
             )
             event = queue.get_nowait()
             self.assertEqual(event, "review_submitted")
@@ -895,7 +912,7 @@ class TestCreateReview(_ServerTestBase):
                 create_review(
                     session_id="mcp-session",
                     title="MCP Review",
-                    zing_file="test.zing",
+                    zing_file=None,
                 )
             )
         self.assertEqual(result["status"], "created")
@@ -911,13 +928,14 @@ class TestCreateReview(_ServerTestBase):
         """start_step MCP tool creates a workflow step."""
         configure(self.manager, port=9876)
         asyncio.run(
-            create_review(session_id="step-test", title="Step Test", zing_file="test.zing")
+            create_review(session_id="step-test", title="Step Test", zing_file=None)
         )
         result = asyncio.run(
             start_step(session_id="step-test", step_name="code-review", expected_agents=6)
         )
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["step_name"], "code-review")
+        self.assertIn("step_id", result)
 
         session = self.manager.get_session("step-test")
         assert session is not None
@@ -937,7 +955,7 @@ class TestWaitForReview(_ServerTestBase):
         self.client.post(
             "/wait-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Unused import",
                 "category": "style",
@@ -945,10 +963,10 @@ class TestWaitForReview(_ServerTestBase):
                 "confidence": "high",
             },
         )
-        self.client.post("/wait-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/wait-session/agent-complete", json={"step_id": self.step_id})
         self.client.post(
             "/wait-session/submit",
-            json={"step_name": _STEP, "responses": [{"action": "accept"}]},
+            json={"step_id": self.step_id, "responses": [{"action": "accept"}]},
         )
 
         # Now wait_for_review should return immediately since the event is already set
@@ -973,9 +991,9 @@ class TestWaitForReview(_ServerTestBase):
 
         self.client.post(
             "/block-session/findings",
-            json={"step_name": _STEP, "type": "text", "title": "What do you think?"},
+            json={"step_id": self.step_id, "type": "text", "title": "What do you think?"},
         )
-        self.client.post("/block-session/agent-complete", json={"step_name": _STEP})
+        self.client.post("/block-session/agent-complete", json={"step_id": self.step_id})
 
         async def _test_blocking() -> None:
             completed = False
@@ -995,7 +1013,7 @@ class TestWaitForReview(_ServerTestBase):
             # Submit responses to unblock
             self.client.post(
                 "/block-session/submit",
-                json={"step_name": _STEP, "responses": [{"answer": "Looks good"}]},
+                json={"step_id": self.step_id, "responses": [{"answer": "Looks good"}]},
             )
 
             result = await task
@@ -1015,7 +1033,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Some finding",
                 "category": "style",
@@ -1031,7 +1049,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Some finding",
                 "category": "style",
@@ -1047,7 +1065,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Some finding",
                 "category": "invalid",
@@ -1063,7 +1081,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Missing null check",
                 "category": "correctness",
@@ -1088,7 +1106,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "File-level issue",
                 "category": "architecture",
@@ -1112,7 +1130,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         resp = self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Consider refactoring",
                 "category": "readability",
@@ -1145,7 +1163,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Simple finding",
                 "category": "style",
@@ -1166,7 +1184,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         self.client.post(
             "/test-session/findings",
             json={
-                "step_name": _STEP,
+                "step_id": self.step_id,
                 "type": "triage",
                 "title": "Informational note",
                 "category": "architecture",
@@ -1186,7 +1204,7 @@ class TestStartStep(_ServerTestBase):
 
     def test_start_step(self) -> None:
         """Starting a step returns correct response."""
-        self.manager.create_session("s1", "Test", "test.zing")
+        self.manager.create_session("s1", "Test")
         resp = self.client.post(
             "/s1/steps",
             json={"step_name": "code-review", "expected_agents": 6},
@@ -1195,11 +1213,12 @@ class TestStartStep(_ServerTestBase):
         body = resp.json()
         self.assertEqual(body["status"], "started")
         self.assertEqual(body["step_name"], "code-review")
+        self.assertIn("step_id", body)
         self.assertEqual(body["sequence"], 0)
 
     def test_missing_step_name_returns_400(self) -> None:
         """Starting a step without step_name returns 400."""
-        self.manager.create_session("s1", "Test", "test.zing")
+        self.manager.create_session("s1", "Test")
         resp = self.client.post("/s1/steps", json={})
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "missing_step_name")
