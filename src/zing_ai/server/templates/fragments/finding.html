@@ -1,0 +1,44 @@
+{% if finding.type == "text" %}
+<div id="finding-{{ finding.id }}" class="finding">
+    <div class="finding-header">{{ finding.question }}</div>
+    {% if finding.context %}
+    <div class="finding-meta">{{ finding.context }}</div>
+    {% endif %}
+    <textarea data-bind="responses.{{ finding.id }}" placeholder="Type your answer..."></textarea>
+</div>
+{% elif finding.type == "choice" %}
+<div id="finding-{{ finding.id }}" class="finding">
+    <div class="finding-header">{{ finding.question }}</div>
+    {% if finding.context %}
+    <div class="finding-meta">{{ finding.context }}</div>
+    {% endif %}
+    <div class="radio-group">
+        {% for option in finding.options %}
+        <label>
+            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="{{ option.label }}">
+            <span><strong>{{ option.label }}</strong>: {{ option.description }}</span>
+        </label>
+        {% endfor %}
+        <label>
+            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="skip">
+            <span>Skip</span>
+        </label>
+    </div>
+</div>
+{% elif finding.type == "triage" %}
+<div id="finding-{{ finding.id }}" class="finding">
+    <div class="finding-header">{{ finding.description }}</div>
+    <div class="finding-meta">
+        {% if finding.location %}<code>{{ finding.location }}</code> | {% endif %}
+        Severity: <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span> |
+        Confidence: <span class="badge">{{ finding.confidence }}</span> |
+        Category: {{ finding.category }}
+    </div>
+    <div class="action-group">
+        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'accept'" type="button">Accept</button>
+        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'drop'" type="button">Drop</button>
+        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'downgrade'" type="button">Downgrade</button>
+        <button class="action-btn" data-bind="responses.{{ finding.id }}" data-on-click="$responses.{{ finding.id }} = 'discuss'" type="button">Discuss</button>
+    </div>
+</div>
+{% endif %}

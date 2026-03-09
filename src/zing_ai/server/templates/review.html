@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}{{ session.title }} — Zing Review{% endblock %}
+
+{% block content %}
+<h1>{{ session.title }}</h1>
+<p class="finding-meta">Session: {{ session.session_id }} | State: <span class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span></p>
+
+<div id="review-root"
+     data-signals="{responses: {}}"
+     data-on-load="@get('/{{ session.session_id }}/stream')">
+
+    <div id="findings-container">
+    </div>
+
+    <div id="review-status" style="display: none;">
+    </div>
+
+    <div id="submit-section" style="display: none;">
+    </div>
+</div>
+{% endblock %}

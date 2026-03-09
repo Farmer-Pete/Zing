@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Zing Dashboard{% endblock %}
+
+{% block content %}
+<h1>Zing Dashboard</h1>
+
+{% if sessions %}
+<ul class="session-list">
+    {% for s in sessions %}
+    <li>
+        <div>
+            {% if s.state.value == "pending" or s.state.value == "ready" %}
+            <a href="/{{ s.session_id }}">{{ s.title }}</a>
+            {% else %}
+            <span class="finding-header">{{ s.title }}</span>
+            {% endif %}
+            <span class="status-badge status-{{ s.state.value }}">{{ s.state.value }}</span>
+        </div>
+        <div class="finding-meta">
+            Zing file: <code>{{ s.zing_file }}</code> |
+            Created: {{ s.created_at.strftime('%Y-%m-%d %H:%M') }} |
+            Findings: {{ s.findings | length }}
+        </div>
+        {% if s.state.value == "completed" %}
+        <div style="margin-top: 0.5rem;">
+            <a href="/{{ s.session_id }}">View review</a> |
+            <button class="open-btn" onclick="window.open('file://{{ s.zing_file }}')">Open zing file</button>
+        </div>
+        {% endif %}
+        {% if s.state.value == "completed" %}
+        <div style="margin-top: 0.25rem;">
+            <form method="post" action="/{{ s.session_id }}/cleanup" style="display: inline;">
+                <button class="cleanup-btn" type="submit">Cleanup</button>
+            </form>
+        </div>
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No sessions found.</p>
+{% endif %}
+{% endblock %}

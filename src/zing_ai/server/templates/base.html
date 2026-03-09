@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Zing Review{% endblock %}</title>
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@starfederation/datastar"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; color: #1a1a1a; background: #f5f5f5; padding: 2rem; max-width: 960px; margin: 0 auto; }
+        h1 { margin-bottom: 1rem; }
+        h2 { margin-bottom: 0.5rem; font-size: 1.25rem; }
+        .finding { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+        .finding-header { font-weight: 600; margin-bottom: 0.5rem; }
+        .finding-meta { font-size: 0.875rem; color: #666; margin-bottom: 0.5rem; }
+        .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .badge-high { background: #fee2e2; color: #991b1b; }
+        .badge-medium { background: #fef3c7; color: #92400e; }
+        .badge-low { background: #d1fae5; color: #065f46; }
+        textarea { width: 100%; min-height: 80px; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; resize: vertical; }
+        .radio-group { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+        .radio-group label { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+        .action-group { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+        .action-btn { padding: 0.375rem 0.75rem; border: 2px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 0.875rem; }
+        .action-btn:hover { border-color: #666; }
+        .action-btn.selected { border-color: #2563eb; background: #eff6ff; }
+        .submit-banner { background: #d1fae5; border: 1px solid #059669; border-radius: 8px; padding: 1rem; margin-top: 1rem; text-align: center; }
+        .submit-btn { padding: 0.75rem 2rem; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; margin-top: 0.5rem; }
+        .submit-btn:hover { background: #1d4ed8; }
+        .session-list { list-style: none; }
+        .session-list li { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+        .session-list a { color: #2563eb; text-decoration: none; font-weight: 600; }
+        .session-list a:hover { text-decoration: underline; }
+        .status-badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .status-pending { background: #fef3c7; color: #92400e; }
+        .status-ready { background: #dbeafe; color: #1e40af; }
+        .status-completed { background: #d1fae5; color: #065f46; }
+        .open-btn { padding: 0.25rem 0.75rem; background: #059669; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.875rem; }
+        .cleanup-btn { padding: 0.25rem 0.75rem; background: #dc2626; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.875rem; }
+        code { background: #f0f0f0; padding: 0.125rem 0.25rem; border-radius: 3px; font-size: 0.875rem; }
+        pre { background: #f0f0f0; padding: 0.75rem; border-radius: 4px; overflow-x: auto; margin: 0.5rem 0; }
+        #findings-container { min-height: 100px; }
+    </style>
+</head>
+<body>
+    {% block content %}{% endblock %}
+</body>
+</html>

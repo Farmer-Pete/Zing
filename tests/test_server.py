@@ -12,6 +12,13 @@ from fastapi.testclient import TestClient
 
 from zing_ai.server.app import create_app
 from zing_ai.server.mcp_tools import configure, create_review, wait_for_review
+from zing_ai.server.models import (
+    ChoiceFinding,
+    ChoiceOption,
+    TextFinding,
+    TriageFinding,
+)
+from zing_ai.server.routes import finding_fragment
 from zing_ai.server.sessions import SessionManager
 
 
@@ -173,6 +180,75 @@ class TestSubmit(_ServerTestBase):
         assert session is not None
         self.assertEqual(session.state.value, "completed")
 
+    def test_submit_datastar_signals(self) -> None:
+        """Submitting Datastar signals maps finding IDs to responses."""
+        self._create_session(expected_agents=1)
+        # Add findings of each type
+        r1 = self.client.post(
+            "/test-session/findings",
+            json={"type": "text", "question": "What do you think?"},
+        )
+        r2 = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "triage",
+                "description": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
+            },
+        )
+        r3 = self.client.post(
+            "/test-session/findings",
+            json={
+                "type": "choice",
+                "question": "Pick one",
+                "options": [
+                    {"label": "A", "description": "Option A"},
+                    {"label": "B", "description": "Option B"},
+                ],
+            },
+        )
+        self.client.post("/test-session/agent-complete")
+
+        text_id = r1.json()["finding_id"]
+        triage_id = r2.json()["finding_id"]
+        choice_id = r3.json()["finding_id"]
+
+        # Submit as Datastar signals (responses is a dict)
+        resp = self.client.post(
+            "/test-session/submit",
+            json={
+                "responses": {
+                    text_id: "Looks good",
+                    triage_id: "accept",
+                    choice_id: "A",
+                }
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["items_count"], 3)
+
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        self.assertEqual(session.state.value, "completed")
+        assert session.responses is not None
+        self.assertEqual(session.responses[0].answer, "Looks good")
+        self.assertEqual(session.responses[1].action, "accept")
+        self.assertEqual(session.responses[2].selected, "A")
+
+    def test_submit_returns_400_for_invalid_responses(self) -> None:
+        """Submitting non-list non-dict responses returns 400."""
+        self._create_session(expected_agents=1)
+        self.client.post("/test-session/agent-complete")
+        resp = self.client.post(
+            "/test-session/submit",
+            json={"responses": "invalid"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "invalid_responses")
+
     def test_invalid_session_returns_404(self) -> None:
         """Submitting to a nonexistent session returns 404."""
         resp = self.client.post(
@@ -209,8 +285,8 @@ class TestSSEStream(_ServerTestBase):
         body_text = resp.text
         # The backfilled finding should appear by its ID
         self.assertIn(finding_id, body_text)
-        self.assertIn("triage", body_text)
-        self.assertIn("Ready for review", body_text)
+        self.assertIn("Old finding", body_text)
+        self.assertIn("ready for review", body_text.lower())
 
     def test_stream_receives_new_findings(self) -> None:
         """SSE stream receives findings that are added after connection starts."""
@@ -228,7 +304,113 @@ class TestSSEStream(_ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         # The finding should appear in the stream by its ID
         self.assertIn(finding_id, resp.text)
-        self.assertIn("text", resp.text)
+        self.assertIn("Added after connect?", resp.text)
+
+    def test_stream_shows_submit_button_when_ready(self) -> None:
+        """SSE stream sends submit button HTML when all agents complete."""
+        self._create_session(expected_agents=1)
+        self.client.post(
+            "/test-session/findings",
+            json={"type": "text", "question": "Quick question"},
+        )
+        self.client.post("/test-session/agent-complete")
+
+        resp = self.client.get("/test-session/stream")
+        self.assertEqual(resp.status_code, 200)
+        # Submit button should be present
+        self.assertIn("Submit Review", resp.text)
+        self.assertIn("@post(", resp.text)
+
+    def test_submit_unblocks_wait_for_review(self) -> None:
+        """Submit endpoint collects responses and unblocks wait_for_review."""
+        configure(self.manager, port=9876)
+        self._create_session(session_id="unblock-session", expected_agents=1)
+        self.client.post(
+            "/unblock-session/findings",
+            json={
+                "type": "triage",
+                "description": "Test finding",
+                "category": "bug",
+                "severity": "high",
+                "confidence": "high",
+            },
+        )
+        self.client.post("/unblock-session/agent-complete")
+
+        # Submit via Datastar signals
+        finding_id = self.manager.get_session("unblock-session").findings[0].id  # type: ignore[union-attr]
+        self.client.post(
+            "/unblock-session/submit",
+            json={"responses": {finding_id: "accept"}},
+        )
+
+        # wait_for_review should return immediately since session is completed
+        result = asyncio.run(wait_for_review(session_id="unblock-session"))
+        self.assertEqual(result["session_id"], "unblock-session")
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["finding"]["type"], "triage")
+        self.assertEqual(result["items"][0]["response"]["action"], "accept")
+
+
+class TestFindingFragment(unittest.TestCase):
+    """Tests for the finding_fragment() template renderer."""
+
+    def test_text_finding_renders_textarea(self) -> None:
+        """Text finding renders with a textarea and data-bind."""
+        finding = TextFinding(id="txt1", question="What do you think?")
+        html = finding_fragment(finding)
+        self.assertIn("finding-txt1", html)
+        self.assertIn("<textarea", html)
+        self.assertIn('data-bind="responses.txt1"', html)
+        self.assertIn("What do you think?", html)
+
+    def test_text_finding_with_context(self) -> None:
+        """Text finding renders context when provided."""
+        finding = TextFinding(id="txt2", question="Your thoughts?", context="Some context")
+        html = finding_fragment(finding)
+        self.assertIn("Some context", html)
+
+    def test_choice_finding_renders_radio_buttons(self) -> None:
+        """Choice finding renders radio buttons with data-bind for each option."""
+        finding = ChoiceFinding(
+            id="ch1",
+            question="Pick one",
+            options=[
+                ChoiceOption(label="A", description="Option A"),
+                ChoiceOption(label="B", description="Option B"),
+            ],
+        )
+        html = finding_fragment(finding)
+        self.assertIn("finding-ch1", html)
+        self.assertIn('type="radio"', html)
+        self.assertIn('data-bind="responses.ch1"', html)
+        self.assertIn("Option A", html)
+        self.assertIn("Option B", html)
+        # Should have a skip option
+        self.assertIn('value="skip"', html)
+
+    def test_triage_finding_renders_action_buttons(self) -> None:
+        """Triage finding renders action buttons with data-bind."""
+        finding = TriageFinding(
+            id="tri1",
+            description="Unused import os",
+            category="style",
+            severity="low",
+            confidence="high",
+            location="src/main.py:5",
+        )
+        html = finding_fragment(finding)
+        self.assertIn("finding-tri1", html)
+        self.assertIn("Unused import os", html)
+        self.assertIn("src/main.py:5", html)
+        self.assertIn("low", html)
+        self.assertIn("high", html)
+        # Action buttons
+        self.assertIn("accept", html)
+        self.assertIn("drop", html)
+        self.assertIn("downgrade", html)
+        self.assertIn("discuss", html)
+        self.assertIn('data-bind="responses.tri1"', html)
 
 
 class TestConcurrentSessions(_ServerTestBase):
@@ -282,6 +464,23 @@ class TestHTMLEndpoints(_ServerTestBase):
         resp = self.client.get("/s1")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("My Review", resp.text)
+
+    def test_review_page_has_datastar_script(self) -> None:
+        """Review page includes Datastar CDN script tag."""
+        self._create_session(session_id="s1", title="Review Test")
+        resp = self.client.get("/s1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("datastar", resp.text)
+        self.assertIn("<script", resp.text)
+
+    def test_review_page_has_sse_connection(self) -> None:
+        """Review page has data-on-load with @get for SSE connection."""
+        self._create_session(session_id="s1", title="SSE Test")
+        resp = self.client.get("/s1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("data-on-load", resp.text)
+        self.assertIn("@get(", resp.text)
+        self.assertIn("/s1/stream", resp.text)
 
     def test_session_page_not_found(self) -> None:
         """Requesting a nonexistent session page returns 404."""
