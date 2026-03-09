@@ -63,9 +63,10 @@ The `create_review()` call requires:
 - `session_id`: a unique identifier (e.g., `"custom-audit-{scope_slug}-{timestamp}"`)
 - `title`: e.g., `"Code Audit — {user_description}"`
 - `zing_file`: empty string (custom audits don't use zing docs)
-- `expected_agents`: `6` (the number of review agents)
 
-This session ID and the server port will be passed to the review agents.
+After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents.
+
+This session ID, step name (`"code-review"`), and the server port will be passed to the review agents.
 </step>
 
 <step name="read_files">
@@ -174,8 +175,10 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+  -d '{"step_name":"STEP_NAME","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
 ```
+
+The `step_name` field is **required** — the server will reject findings without it. Use the step name provided by the parent when dispatching agents.
 
 The agent must check the HTTP status code printed on the last line of the response:
 - **200** = accepted, continue to next finding
@@ -185,7 +188,9 @@ The agent must check the HTTP status code printed on the last line of the respon
 When the agent has finished posting all findings (or has no findings), it signals completion:
 
 ```bash
-curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
+  -H "Content-Type: application/json" \
+  -d '{"step_name":"STEP_NAME"}'
 ```
 
 If the agent has no findings, it should still signal agent-complete.
@@ -216,7 +221,7 @@ Write an empty findings report and exit.
 <step name="check_and_review">
 After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+Otherwise, call `wait_for_review(session_id, "code-review")`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
 
 When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
 - **Accepted findings**: Include in the report as-is.

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum, StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Location(BaseModel):
@@ -161,20 +161,69 @@ class UserResponse(BaseModel):
     action: ResponseAction | None = None
     selected: str | None = None
     answer: str | None = None
+    other_text: str | None = None
+
+
+class WorkflowStep(BaseModel):
+    """A single workflow step within a session.
+
+    A step groups findings and responses for one phase of the review workflow.
+    The same step_name can appear multiple times in a session (for loops);
+    the sequence field provides ordering.
+    """
+
+    step_name: str
+    sequence: int
+    findings: list[Finding] = Field(default_factory=list)
+    responses: list[UserResponse] | None = None
+    expected_agents: int = 0
+    completed_agents: int = 0
+    state: SessionState = SessionState.PENDING
+    created_at: datetime = Field(default_factory=datetime.now)
 
 
 class Session(BaseModel):
-    """A review session containing findings and their responses."""
+    """A review session containing workflow steps with findings and responses."""
 
     session_id: str
     title: str
     zing_file: str
-    expected_agents: int
-    completed_agents: int = 0
+    steps: list[WorkflowStep] = Field(default_factory=list)
     state: SessionState = SessionState.PENDING
-    findings: list[Finding] = Field(default_factory=list)
-    responses: list[UserResponse] | None = None
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_flat_findings(cls, data: Any) -> Any:
+        """Migrate old flat-findings session format to workflow steps."""
+        if isinstance(data, dict) and "findings" in data and "steps" not in data:
+            step = {
+                "step_name": "review",
+                "sequence": 0,
+                "findings": data.pop("findings", []),
+                "responses": data.pop("responses", None),
+                "expected_agents": data.pop("expected_agents", 0),
+                "completed_agents": data.pop("completed_agents", 0),
+                "state": data.get("state", "pending"),
+                "created_at": data.get("created_at"),
+            }
+            data["steps"] = [step]
+        # Clean up fields that moved to WorkflowStep
+        data.pop("expected_agents", None)
+        data.pop("completed_agents", None)
+        data.pop("findings", None)
+        data.pop("responses", None)
+        return data
+
+    @property
+    def current_step_name(self) -> str | None:
+        """Return the name of the most recent workflow step, or None."""
+        return self.steps[-1].step_name if self.steps else None
+
+    @property
+    def total_findings(self) -> int:
+        """Return the total number of findings across all steps."""
+        return sum(len(step.findings) for step in self.steps)
 
 
 class ReviewItem(BaseModel):
@@ -185,7 +234,8 @@ class ReviewItem(BaseModel):
 
 
 class ReviewResponse(BaseModel):
-    """The complete review response for a session."""
+    """The complete review response for a workflow step."""
 
     session_id: str
+    step_name: str
     items: list[ReviewItem]

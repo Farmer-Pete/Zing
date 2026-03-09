@@ -336,8 +336,10 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 ```bash
 curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
   -H "Content-Type: application/json" \
-  -d '{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
+  -d '{"step_name":"STEP_NAME","type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}'
 ```
+
+The `step_name` field is **required** — the server will reject findings without it. Use the step name provided by the parent when dispatching agents.
 
 The agent must check the HTTP status code printed on the last line of the response:
 - **200** = accepted, continue to next finding
@@ -347,12 +349,14 @@ The agent must check the HTTP status code printed on the last line of the respon
 When the agent has finished posting all findings (or has no findings), it signals completion:
 
 ```bash
-curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/agent-complete \
+  -H "Content-Type: application/json" \
+  -d '{"step_name":"STEP_NAME"}'
 ```
 
 If the agent has no findings, it should still signal agent-complete.
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **step name** so it can include `"step_name":"STEP_NAME"` in all finding POST and agent-complete requests.
 - Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
@@ -366,7 +370,7 @@ Launch all 6 agents in parallel using 6 `Task` tool calls in a single message wi
 </step>
 
 <step name="present_summary">
-Call `wait_for_review(session_id)` MCP tool. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
+Call `wait_for_review(session_id, step_name)` MCP tool. Both `session_id` and `step_name` are required. This blocks until the user has reviewed all findings for that workflow step in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
 
 Process the returned JSON:
 - **Accepted findings**: Apply them (the calling skill defines how to apply findings — e.g., posting PR comments, writing to a report file).

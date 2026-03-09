@@ -60,7 +60,7 @@ def _get_session_manager() -> SessionManager:
 
 @mcp_server.tool()
 async def create_review(
-    session_id: str, title: str, zing_file: str, expected_agents: int
+    session_id: str, title: str, zing_file: str
 ) -> dict:
     """Creates a review session, opens browser, returns URL."""
     sm = _get_session_manager()
@@ -68,7 +68,6 @@ async def create_review(
         session_id=session_id,
         title=title,
         zing_file=zing_file,
-        expected_agents=expected_agents,
     )
     url = f"http://localhost:{_port}/{session_id}"
     webbrowser.open(url)
@@ -77,8 +76,31 @@ async def create_review(
 
 
 @mcp_server.tool()
-async def wait_for_review(session_id: str) -> dict:
-    """Blocks until user submits. Returns full findings + responses."""
+async def start_step(
+    session_id: str, step_name: str, expected_agents: int
+) -> dict:
+    """Starts a new workflow step within a session.
+
+    Must be called before agents submit findings for this step.
+    The same step_name can be used multiple times (for loops).
+    """
     sm = _get_session_manager()
-    review_response = await sm.wait_for_review(session_id)
+    step = sm.start_step(session_id, step_name, expected_agents)
+    _notify_dashboard_connections("step_started")
+    return {
+        "status": "started",
+        "step_name": step.step_name,
+        "sequence": step.sequence,
+    }
+
+
+@mcp_server.tool()
+async def wait_for_review(session_id: str, step_name: str) -> dict:
+    """Blocks until user submits feedback for a specific workflow step.
+
+    Returns the full findings + responses for that step.
+    Both session_id and step_name are required.
+    """
+    sm = _get_session_manager()
+    review_response = await sm.wait_for_review(session_id, step_name)
     return review_response.model_dump()

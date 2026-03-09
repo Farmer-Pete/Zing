@@ -21,7 +21,8 @@
         <div class="finding-meta">
             Zing file: <code>{{ s.zing_file }}</code> |
             Created: {{ s.created_at.strftime('%Y-%m-%d %H:%M') }} |
-            Findings: {{ s.findings | length }}
+            {% if s.current_step_name %}Step: <strong>{{ s.current_step_name }}</strong> | {% endif %}
+            Findings: {{ s.total_findings }}
         </div>
         <div style="margin-top: 0.5rem;">
             {% if s.state.value == "completed" %}

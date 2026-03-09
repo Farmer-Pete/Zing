@@ -20,6 +20,7 @@ from zing_ai.server.models import (
     Session,
     SessionState,
     UserResponse,
+    WorkflowStep,
 )
 
 _LOG_LEVEL = os.environ.get("ZING_LOG_LEVEL", "INFO").upper()
@@ -61,6 +62,10 @@ class SessionManager:
             )
             raise ValueError(msg)
 
+    def _event_key(self, session_id: str, step_name: str) -> str:
+        """Return the event key for a session + step combination."""
+        return f"{session_id}:{step_name}"
+
     def _session_path(self, session_id: str) -> Path:
         """Return the JSON file path for a session."""
         self._validate_session_id(session_id)
@@ -79,19 +84,34 @@ class SessionManager:
                 data = json.loads(path.read_text())
                 session = Session.model_validate(data)
                 self._sessions[session.session_id] = session
-                self._events[session.session_id] = asyncio.Event()
-                if session.state == SessionState.COMPLETED:
-                    self._events[session.session_id].set()
-                logger.info("Loaded session %s from disk (state=%s)", session.session_id, session.state.value)
+                # Create events for each workflow step
+                for step in session.steps:
+                    key = self._event_key(session.session_id, step.step_name)
+                    self._events[key] = asyncio.Event()
+                    if step.state == SessionState.COMPLETED:
+                        self._events[key].set()
+                logger.info(
+                    "Loaded session %s from disk (state=%s, steps=%d)",
+                    session.session_id,
+                    session.state.value,
+                    len(session.steps),
+                )
             except Exception:
                 logger.exception("Failed to load session from %s", path)
+
+    def _update_session_state(self, session: Session) -> None:
+        """Update session-level state based on the latest step."""
+        if not session.steps:
+            session.state = SessionState.PENDING
+            return
+        latest = session.steps[-1]
+        session.state = latest.state
 
     def create_session(
         self,
         session_id: str,
         title: str,
         zing_file: str,
-        expected_agents: int,
     ) -> Session:
         """Create a new review session.
 
@@ -99,7 +119,6 @@ class SessionManager:
             session_id: Unique identifier for the session.
             title: Human-readable title for the session.
             zing_file: Path to the zing file being reviewed.
-            expected_agents: Number of agents expected to report findings.
 
         Returns:
             The newly created Session.
@@ -112,20 +131,86 @@ class SessionManager:
             session_id=session_id,
             title=title,
             zing_file=zing_file,
-            expected_agents=expected_agents,
         )
         self._sessions[session_id] = session
-        self._events[session_id] = asyncio.Event()
         self._persist(session)
-        logger.info("Created session %s: %s (expecting %d agents)", session_id, title, expected_agents)
+        logger.info("Created session %s: %s", session_id, title)
         return session
 
-    def add_finding(self, session_id: str, finding_data: dict[str, Any]) -> Finding:
-        """Append a finding to a session's findings list.
+    def start_step(
+        self,
+        session_id: str,
+        step_name: str,
+        expected_agents: int,
+    ) -> WorkflowStep:
+        """Start a new workflow step within a session.
+
+        The same step_name can be used multiple times (for loops). Each call
+        creates a new step with an incrementing sequence number.
+
+        Args:
+            session_id: The session to add the step to.
+            step_name: Name of the workflow step.
+            expected_agents: Number of agents expected to report findings.
+
+        Returns:
+            The newly created WorkflowStep.
+
+        Raises:
+            KeyError: If the session does not exist.
+        """
+        session = self._get_session_or_raise(session_id)
+        step = WorkflowStep(
+            step_name=step_name,
+            sequence=len(session.steps),
+            expected_agents=expected_agents,
+        )
+        session.steps.append(step)
+        session.state = SessionState.PENDING
+        # Create a fresh event for this step (replaces old event if looping)
+        key = self._event_key(session_id, step_name)
+        self._events[key] = asyncio.Event()
+        self._persist(session)
+        logger.info(
+            "Started step '%s' (seq=%d) in session %s (expecting %d agents)",
+            step_name,
+            step.sequence,
+            session_id,
+            expected_agents,
+        )
+        return step
+
+    def _get_latest_step(self, session_id: str, step_name: str) -> WorkflowStep:
+        """Return the most recent step with the given name.
+
+        Args:
+            session_id: The session to search.
+            step_name: The step name to find.
+
+        Returns:
+            The most recent WorkflowStep with the given name.
+
+        Raises:
+            KeyError: If no step with that name exists in the session.
+        """
+        session = self._get_session_or_raise(session_id)
+        for step in reversed(session.steps):
+            if step.step_name == step_name:
+                return step
+        raise KeyError(f"No step '{step_name}' found in session '{session_id}'")
+
+    def add_finding(
+        self, session_id: str, finding_data: dict[str, Any], step_name: str
+    ) -> Finding:
+        """Append a finding to a workflow step's findings list.
+
+        If no step with the given name exists, one is auto-created with
+        expected_agents=0.
 
         Args:
             session_id: The session to add the finding to.
             finding_data: Dictionary of finding data (must include 'type' discriminator).
+            step_name: The workflow step to add the finding to.
 
         Returns:
             The validated Finding object.
@@ -134,108 +219,147 @@ class SessionManager:
             KeyError: If the session does not exist.
         """
         session = self._get_session_or_raise(session_id)
+        try:
+            step = self._get_latest_step(session_id, step_name)
+        except KeyError:
+            step = self.start_step(session_id, step_name, expected_agents=0)
+            # Re-fetch session since start_step may have modified it
+            session = self._get_session_or_raise(session_id)
+
         from pydantic import TypeAdapter
 
         adapter = TypeAdapter(Finding)
         finding = adapter.validate_python(finding_data)
-        session.findings.append(finding)
+        step.findings.append(finding)
         self._persist(session)
-        logger.info("Added %s finding to session %s (total: %d)", finding_data.get("type", "unknown"), session_id, len(session.findings))
+        logger.info(
+            "Added %s finding to session %s step '%s' (total: %d)",
+            finding_data.get("type", "unknown"),
+            session_id,
+            step_name,
+            len(step.findings),
+        )
         return finding
 
-    def mark_agent_complete(self, session_id: str) -> Session:
-        """Mark one agent as complete for a session.
+    def mark_agent_complete(self, session_id: str, step_name: str) -> WorkflowStep:
+        """Mark one agent as complete for a workflow step.
 
-        If all expected agents are done, transitions state to READY.
+        If all expected agents are done, transitions the step state to READY.
 
         Args:
             session_id: The session to update.
+            step_name: The workflow step to update.
 
         Returns:
-            The updated Session.
+            The updated WorkflowStep.
 
         Raises:
-            KeyError: If the session does not exist.
+            KeyError: If the session or step does not exist.
         """
         session = self._get_session_or_raise(session_id)
-        session.completed_agents += 1
+        step = self._get_latest_step(session_id, step_name)
+        step.completed_agents += 1
         logger.info(
-            "Agent completed for session %s (%d/%d)",
+            "Agent completed for session %s step '%s' (%d/%d)",
             session_id,
-            session.completed_agents,
-            session.expected_agents,
+            step_name,
+            step.completed_agents,
+            step.expected_agents,
         )
-        if session.completed_agents >= session.expected_agents:
-            session.state = SessionState.READY
-            logger.info("Session %s is now READY for review", session_id)
+        if step.completed_agents >= step.expected_agents:
+            step.state = SessionState.READY
+            self._update_session_state(session)
+            logger.info(
+                "Step '%s' in session %s is now READY for review",
+                step_name,
+                session_id,
+            )
         self._persist(session)
-        return session
+        return step
 
     def submit_responses(
         self,
         session_id: str,
+        step_name: str,
         responses: list[UserResponse],
     ) -> ReviewResponse:
-        """Store user responses and mark session as completed.
+        """Store user responses for a workflow step and mark it as completed.
 
         Args:
             session_id: The session to submit responses for.
+            step_name: The workflow step to submit responses for.
             responses: List of user responses, one per finding.
 
         Returns:
             A ReviewResponse pairing findings with responses.
 
         Raises:
-            KeyError: If the session does not exist.
+            KeyError: If the session or step does not exist.
+            ValueError: If response count doesn't match finding count.
         """
         session = self._get_session_or_raise(session_id)
+        step = self._get_latest_step(session_id, step_name)
 
-        if len(responses) != len(session.findings):
+        if len(responses) != len(step.findings):
             msg = (
-                f"Expected {len(session.findings)} responses but got {len(responses)} "
-                f"for session {session_id}"
+                f"Expected {len(step.findings)} responses but got {len(responses)} "
+                f"for session {session_id} step '{step_name}'"
             )
             raise ValueError(msg)
 
-        session.responses = responses
-        session.state = SessionState.COMPLETED
+        step.responses = responses
+        step.state = SessionState.COMPLETED
+        self._update_session_state(session)
         self._persist(session)
 
-        event = self._events.get(session_id)
+        key = self._event_key(session_id, step_name)
+        event = self._events.get(key)
         if event:
             event.set()
 
         items = [
             ReviewItem(finding=finding, response=response)
-            for finding, response in zip(session.findings, responses, strict=True)
+            for finding, response in zip(step.findings, responses, strict=True)
         ]
-        logger.info("Session %s completed with %d responses", session_id, len(responses))
-        return ReviewResponse(session_id=session_id, items=items)
+        logger.info(
+            "Step '%s' in session %s completed with %d responses",
+            step_name,
+            session_id,
+            len(responses),
+        )
+        return ReviewResponse(session_id=session_id, step_name=step_name, items=items)
 
-    async def wait_for_review(self, session_id: str) -> ReviewResponse:
-        """Block until a session's review is submitted.
+    async def wait_for_review(self, session_id: str, step_name: str) -> ReviewResponse:
+        """Block until a workflow step's review is submitted.
+
+        If the step is already completed, returns immediately.
 
         Args:
             session_id: The session to wait for.
+            step_name: The workflow step to wait for.
 
         Returns:
             The ReviewResponse once submitted.
 
         Raises:
-            KeyError: If the session does not exist.
+            KeyError: If the session or step does not exist.
         """
-        self._get_session_or_raise(session_id)
-        event = self._events.get(session_id)
-        if event:
-            await event.wait()
+        step = self._get_latest_step(session_id, step_name)
 
-        session = self._sessions[session_id]
-        responses = session.responses or []
+        if step.state != SessionState.COMPLETED:
+            key = self._event_key(session_id, step_name)
+            if key not in self._events:
+                self._events[key] = asyncio.Event()
+            await self._events[key].wait()
+            # Re-fetch after await in case step was updated
+            step = self._get_latest_step(session_id, step_name)
+
+        responses = step.responses or []
         items = [
             ReviewItem(finding=finding, response=response)
-            for finding, response in zip(session.findings, responses, strict=True)
+            for finding, response in zip(step.findings, responses, strict=True)
         ]
-        return ReviewResponse(session_id=session_id, items=items)
+        return ReviewResponse(session_id=session_id, step_name=step_name, items=items)
 
     def get_session(self, session_id: str) -> Session | None:
         """Return a session by ID, or None if not found."""
@@ -251,8 +375,10 @@ class SessionManager:
         Args:
             session_id: The session to remove.
         """
-        self._sessions.pop(session_id, None)
-        self._events.pop(session_id, None)
+        session = self._sessions.pop(session_id, None)
+        if session:
+            for step in session.steps:
+                self._events.pop(self._event_key(session_id, step.step_name), None)
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()

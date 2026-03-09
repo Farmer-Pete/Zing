@@ -22,6 +22,16 @@
         </label>
         {% endfor %}
         <label class="option-card">
+            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="__other__">
+            <div class="option-content">
+                <div class="option-label">Other</div>
+                <div class="option-description">Enter a custom response</div>
+            </div>
+        </label>
+        <div data-show="$responses['{{ finding.id }}'] === '__other__'" style="margin-top: 0.5rem;">
+            <textarea data-bind="responses.{{ finding.id }}_other" placeholder="Type your response..."></textarea>
+        </div>
+        <label class="option-card">
             <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="skip">
             <div class="option-content">
                 <div class="option-label">Skip</div>

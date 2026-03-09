@@ -31,9 +31,10 @@ The `create_review()` call requires:
 - `session_id`: a unique identifier (e.g., `"pr-audit-{number}-{timestamp}"`)
 - `title`: e.g., `"PR Review — #{number} {title}"`
 - `zing_file`: path to the zing doc if one exists, otherwise empty string
-- `expected_agents`: `6` (the number of review agents)
 
-This session ID and the server port will be passed to the shared review steps.
+After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents.
+
+This session ID, step name (`"code-review"`), and the server port will be passed to the shared review steps.
 </step>
 
 <step name="checkout_pr">
@@ -92,7 +93,7 @@ Submit an approving review and exit.
 <step name="check_and_review">
 After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+Otherwise, call `wait_for_review(session_id, "code-review")`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
 
 When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
 - **Accepted findings**: Include in the report and submit as PR line-level comments.

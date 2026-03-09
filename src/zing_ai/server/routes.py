@@ -73,9 +73,9 @@ def finding_fragment(finding: Finding) -> str:
     return render("fragments/finding.html", finding=finding)
 
 
-@router.post("/{session_id}/findings")
-async def post_finding(session_id: str, request: Request) -> JSONResponse:
-    """Accept a finding from a subagent and add it to the session."""
+@router.post("/{session_id}/steps")
+async def post_start_step(session_id: str, request: Request) -> JSONResponse:
+    """Start a new workflow step within a session."""
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
         return _session_not_found(session_id)
@@ -87,6 +87,58 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
+
+    step_name = body.get("step_name")
+    if not step_name:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_step_name",
+                "message": "step_name is required",
+            },
+        )
+
+    expected_agents = body.get("expected_agents", 0)
+    step = manager.start_step(session_id, step_name, expected_agents)
+    _notify_sse_connections(session_id, "step_started")
+    _notify_dashboard_connections("step_started")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "started",
+            "step_name": step.step_name,
+            "sequence": step.sequence,
+        },
+    )
+
+
+@router.post("/{session_id}/findings")
+async def post_finding(session_id: str, request: Request) -> JSONResponse:
+    """Accept a finding from a subagent and add it to a workflow step."""
+    manager = request.app.state.session_manager
+    if manager.get_session(session_id) is None:
+        return _session_not_found(session_id)
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+        )
+
+    step_name = body.pop("step_name", None)
+    if not step_name:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_step_name",
+                "message": (
+                    "step_name is required. Specify the workflow step this finding belongs to."
+                ),
+            },
+        )
+
     adapter = TypeAdapter(Finding)
     try:
         adapter.validate_python(body)
@@ -104,9 +156,9 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
             },
         )
 
-    finding = manager.add_finding(session_id, body)
+    finding = manager.add_finding(session_id, body, step_name=step_name)
     _notify_sse_connections(session_id, "finding")
-    logger.info("Finding added to session %s: %s", session_id, finding.type)
+    logger.info("Finding added to session %s step '%s': %s", session_id, step_name, finding.type)
     return JSONResponse(
         status_code=200,
         content={"status": "ok", "finding_id": finding.id},
@@ -115,35 +167,64 @@ async def post_finding(session_id: str, request: Request) -> JSONResponse:
 
 @router.post("/{session_id}/agent-complete")
 async def post_agent_complete(session_id: str, request: Request) -> JSONResponse:
-    """Signal that one subagent has finished producing findings."""
+    """Signal that one subagent has finished producing findings for a workflow step."""
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
         return _session_not_found(session_id)
 
-    session = manager.mark_agent_complete(session_id)
-    if session.state.value == "ready":
+    try:
+        body: dict[str, Any] = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+        )
+
+    step_name = body.get("step_name")
+    if not step_name:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_step_name",
+                "message": (
+                    "step_name is required. Specify the workflow step this agent belongs to."
+                ),
+            },
+        )
+
+    try:
+        step = manager.mark_agent_complete(session_id, step_name)
+    except KeyError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "step_not_found", "message": str(exc)},
+        )
+
+    if step.state.value == "ready":
         _notify_sse_connections(session_id, "ready")
         _notify_dashboard_connections("agent_complete")
     logger.info(
-        "Agent complete for session %s (%d/%d)",
+        "Agent complete for session %s step '%s' (%d/%d)",
         session_id,
-        session.completed_agents,
-        session.expected_agents,
+        step_name,
+        step.completed_agents,
+        step.expected_agents,
     )
     return JSONResponse(
         status_code=200,
         content={
             "status": "ok",
-            "completed_agents": session.completed_agents,
-            "expected_agents": session.expected_agents,
-            "state": session.state.value,
+            "step_name": step_name,
+            "completed_agents": step.completed_agents,
+            "expected_agents": step.expected_agents,
+            "state": step.state.value,
         },
     )
 
 
 @router.post("/{session_id}/submit")
 async def post_submit(session_id: str, request: Request) -> JSONResponse:
-    """Accept user responses for all findings in a session.
+    """Accept user responses for all findings in a workflow step.
 
     Handles both JSON API calls (with ``responses`` array) and Datastar
     signal submissions (with ``responses.*`` keys in the body).
@@ -153,21 +234,44 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
     if session is None:
         return _session_not_found(session_id)
 
-    if session.state.value != "ready":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "invalid_state",
-                "message": f"Session '{session_id}' is in state '{session.state.value}', expected 'ready'",
-            },
-        )
-
     try:
         body: dict[str, Any] = await request.json()
     except json.JSONDecodeError:
         return JSONResponse(
             status_code=400,
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+        )
+
+    step_name = body.get("step_name")
+    if not step_name:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_step_name",
+                "message": (
+                    "step_name is required. Specify the workflow step to submit responses for."
+                ),
+            },
+        )
+
+    try:
+        step = manager._get_latest_step(session_id, step_name)
+    except KeyError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "step_not_found", "message": str(exc)},
+        )
+
+    if step.state.value != "ready":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "invalid_state",
+                "message": (
+                    f"Step '{step_name}' in session '{session_id}' is in state "
+                    f"'{step.state.value}', expected 'ready'"
+                ),
+            },
         )
 
     # Check if this is a Datastar signal submission (has "responses" as a dict)
@@ -179,7 +283,7 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
         responses = [UserResponse.model_validate(r) for r in raw_responses]
     elif isinstance(raw_responses, dict):
         # Datastar signal submission — map finding IDs to responses
-        responses = _map_signals_to_responses(session.findings, raw_responses)
+        responses = _map_signals_to_responses(step.findings, raw_responses)
     else:
         return JSONResponse(
             status_code=400,
@@ -187,7 +291,7 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
         )
 
     try:
-        review = manager.submit_responses(session_id, responses)
+        review = manager.submit_responses(session_id, step_name, responses)
     except ValueError as exc:
         return JSONResponse(
             status_code=400,
@@ -195,12 +299,18 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
         )
     _notify_sse_connections(session_id, "completed")
     _notify_dashboard_connections("review_submitted")
-    logger.info("Session %s submitted with %d responses", session_id, len(responses))
+    logger.info(
+        "Session %s step '%s' submitted with %d responses",
+        session_id,
+        step_name,
+        len(responses),
+    )
     return JSONResponse(
         status_code=200,
         content={
             "status": "ok",
             "session_id": review.session_id,
+            "step_name": review.step_name,
             "items_count": len(review.items),
         },
     )
@@ -213,7 +323,7 @@ def _map_signals_to_responses(
     """Convert Datastar response signals to a list of UserResponse objects.
 
     Args:
-        findings: The session's findings list (determines ordering).
+        findings: The step's findings list (determines ordering).
         signals: Dict mapping finding IDs to response values from Datastar signals.
 
     Returns:
@@ -225,7 +335,14 @@ def _map_signals_to_responses(
         if finding.type == "text":
             responses.append(UserResponse(answer=value if isinstance(value, str) else None))
         elif finding.type == "choice":
-            responses.append(UserResponse(selected=value if isinstance(value, str) else None))
+            selected = value if isinstance(value, str) else None
+            other_text = None
+            if selected == "__other__":
+                other_key = f"{finding.id}_other"
+                raw_other = signals.get(other_key)
+                if isinstance(raw_other, str) and raw_other.strip():
+                    other_text = raw_other.strip()
+            responses.append(UserResponse(selected=selected, other_text=other_text))
         elif finding.type == "triage":
             action = None
             if isinstance(value, str) and value in {a.value for a in ResponseAction}:
@@ -241,13 +358,18 @@ def _map_signals_to_responses(
 @router.get("/{session_id}/stream")
 @datastar_response
 async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
-    """SSE endpoint that streams findings as they arrive."""
+    """SSE endpoint that streams findings as they arrive for a workflow step."""
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
     if session is None:
         return SSE.patch_elements(
             f'<div id="error">Session \'{session_id}\' not found</div>'
         )
+
+    # Determine which step to stream
+    step_name = request.query_params.get("step")
+    if not step_name and session.steps:
+        step_name = session.steps[-1].step_name
 
     async def _generate():  # noqa: ANN202
         """Yield SSE events for existing and new findings."""
@@ -258,9 +380,20 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
             if current_session is None:
                 return
 
+            # Find the target step
+            target_step = None
+            if step_name:
+                for s in reversed(current_session.steps):
+                    if s.step_name == step_name:
+                        target_step = s
+                        break
+
+            if target_step is None:
+                return
+
             # Backfill existing findings
             seen = 0
-            for finding in current_session.findings:
+            for finding in target_step.findings:
                 yield SSE.patch_elements(
                     finding_fragment(finding),
                     selector="#findings-container",
@@ -269,7 +402,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 seen += 1
 
             # If already ready/completed, show submit UI immediately
-            if current_session.state.value in ("ready", "completed"):
+            if target_step.state.value in ("ready", "completed"):
                 yield SSE.patch_elements(
                     '<div id="review-status" class="submit-banner">'
                     "All agents complete — ready for review</div>",
@@ -296,8 +429,18 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if current_session is None:
                     return
 
+                # Re-find the target step (it may have been updated)
+                target_step = None
+                if step_name:
+                    for s in reversed(current_session.steps):
+                        if s.step_name == step_name:
+                            target_step = s
+                            break
+                if target_step is None:
+                    return
+
                 # Yield any new findings since last check
-                for finding in current_session.findings[seen:]:
+                for finding in target_step.findings[seen:]:
                     yield SSE.patch_elements(
                         finding_fragment(finding),
                         selector="#findings-container",
@@ -306,7 +449,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     seen += 1
 
                 # Check terminal states
-                if event == "ready" or current_session.state.value in ("ready", "completed"):
+                if event == "ready" or target_step.state.value in ("ready", "completed"):
                     yield SSE.patch_elements(
                         '<div id="review-status" class="submit-banner">'
                         "All agents complete — ready for review</div>",
@@ -403,5 +546,10 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     if session is None:
         return _session_not_found(session_id)
 
-    html = render("review.html", session=session)
+    # Determine which step to display
+    step_name = request.query_params.get("step")
+    if not step_name and session.steps:
+        step_name = session.steps[-1].step_name
+
+    html = render("review.html", session=session, current_step=step_name)
     return HTMLResponse(content=html)
