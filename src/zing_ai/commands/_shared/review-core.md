@@ -323,7 +323,29 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to pull full file context when the diff hunks alone are insufficient for its analysis (see diff_preparation step for guidance on when to do this)
 - Any additional skill-specific context (see the calling skill's `analyze_changes` step for extras)
-- Instructions to return findings in pipe-delimited format, one finding per line: `FINDING|category|severity|confidence|file_path:line_number|description`. Example: `FINDING|Logic Errors and Bugs|high|high|src/auth.py:42|Null check missing — req.user can be undefined when session expires`. If the agent has no findings, it should return `NO_FINDINGS`.
+- The **session ID** and **server port** for posting findings to the review server
+- Instructions to POST each finding to the review server as JSON, and signal completion when done (see below)
+
+**Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
+
+```bash
+curl -s -w "\n%{http_code}" -X POST http://localhost:PORT/SESSION_ID/findings \
+  -H "Content-Type: application/json" \
+  -d '{"type":"triage","category":"...","severity":"...","confidence":"...","location":"file:line","description":"..."}'
+```
+
+The agent must check the HTTP status code printed on the last line of the response:
+- **200** = accepted, continue to next finding
+- **400** = malformed request — read the error details from the response body, fix the JSON, and retry
+- **404** = verify the session ID is correct, then abort immediately with a `FATAL` error message (do not post more findings or signal agent-complete)
+
+When the agent has finished posting all findings (or has no findings), it signals completion:
+
+```bash
+curl -s -X POST http://localhost:PORT/SESSION_ID/agent-complete
+```
+
+If the agent has no findings, it should still signal agent-complete.
 
 Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 - Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
@@ -334,35 +356,25 @@ Launch all 6 agents in parallel using 6 `Task` tool calls in a single message wi
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion — reviews all changed files for test coverage, test determinism, error handling completeness, and production readiness. Use Serena to verify what tests exercise and check monitoring setup.
 
 **After all 6 agents return**, the parent:
-1. Collects all `FINDING|...` lines from all agents
-2. Deduplicates: if two agents flagged the same `file_path:line_number`, keep the finding with the higher severity and concatenate both descriptions
-3. Sorts by severity (critical first), then confidence
-4. Proceeds to the `present_summary` step with the merged findings list
+1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+2. Otherwise, proceeds to the `present_summary` step.
 </step>
 
 <step name="present_summary">
-Show a compact table so the user can see all findings at a glance:
+Call `wait_for_review(session_id)` MCP tool. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
 
-| # | What | Where | Severity | How sure? |
-|---|------|-------|----------|-----------|
-| 1 | Short natural description | file:line | critical/high/medium/low | pretty sure / fairly sure / not sure |
+Process the returned JSON:
+- **Accepted findings**: Apply them (the calling skill defines how to apply findings — e.g., posting PR comments, writing to a report file).
+- **Dropped findings**: Skip them entirely.
+- **Discuss findings**: Walk through each one conversationally with the user, explaining the finding and asking for their input on how to proceed.
 
-Map confidence levels to natural language:
-- high -> "pretty sure"
-- medium -> "fairly sure"
-- low -> "not sure"
-
-Sort by severity (critical first), then confidence.
-
-After the table, say something like "Let's go through these one at a time." to transition into the walkthrough.
-
-The calling skill provides the intro line before the table and the no-findings behavior.
+The calling skill provides the no-findings behavior.
 </step>
 
 <walk_through_findings>
-Walk through each finding ONE AT A TIME, in the order presented in the summary table.
+This step is handled by the browser-based review UI. The user reviews findings there and submits decisions (accept, drop, or discuss). The `present_summary` step calls `wait_for_review(session_id)` which blocks until the user is done.
 
-For each finding, explain it the way you'd write a PR comment — naturally and specifically:
+For findings marked "discuss", walk through each one conversationally with the user:
 
 - Lead with what you noticed, referencing the file and line conversationally: "In `auth.py` around line 15, ..."
 - Show a short code snippet from the diff so the user can see exactly what you're talking about
@@ -376,22 +388,13 @@ For each finding, explain it the way you'd write a PR comment — naturally and 
   - "Small thing —"
   - "So in the new `handleSubmit` function..."
 
-After explaining, use AskUserQuestion:
-- Question: "What do you think?" (use the header to show which # you're on, like "3/7")
-- Options:
-  - "Yeah, good catch" (description: "Valid — track this finding")
-  - "Nah, not an issue" (description: "False positive — skip it")
-  - "Fair point, but low priority" (description: "Real issue but downgrade severity to low")
-
-Record the decision. If "low priority", set severity to `low` in the final output.
-
-Continue until all findings have been reviewed.
+After explaining, ask the user what they'd like to do with the finding and record their decision.
 </walk_through_findings>
 
 <anti_patterns>
 - Do NOT flag minor style preferences (spacing, brace style, trailing commas) unless they cause genuine confusion
 - Do NOT flag issues in code that was not changed in this branch/PR
-- Do NOT present all findings at once for bulk approval — walk through one at a time
+- Do NOT present all findings at once for bulk approval — the user reviews them in the browser UI
 - Do NOT fabricate line numbers — use actual line numbers from the files
 - Do NOT rely solely on diff hunks when evaluating correctness, security, or performance — use Serena to pull surrounding context when the diff alone is insufficient
 - Do NOT over-flag "possible" issues with low confidence just to pad the findings list — only flag things worth a human's attention
