@@ -6,7 +6,6 @@ import webbrowser
 
 from mcp.server.fastmcp import FastMCP
 
-from zing_ai.server.routes import _notify_dashboard_connections
 from zing_ai.server.sessions import SessionManager
 
 _DEFAULT_PORT = 9876
@@ -50,7 +49,6 @@ async def create_review(
     )
     url = f"http://localhost:{_port}/{session_id}"
     webbrowser.open(url)
-    _notify_dashboard_connections("created")
     return {"status": "created", "url": url}
 
 
@@ -65,7 +63,6 @@ async def start_step(
     """
     sm = _get_session_manager()
     step = sm.start_step(session_id, step_name, expected_agents)
-    _notify_dashboard_connections("step_started")
     return {
         "status": "started",
         "step_id": step.step_id,
