@@ -4,27 +4,14 @@ from __future__ import annotations
 
 import webbrowser
 
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 
-from zing_ai.server.auth import NoopOAuthProvider
 from zing_ai.server.routes import _notify_dashboard_connections
 from zing_ai.server.sessions import SessionManager
 
-_auth_provider = NoopOAuthProvider()
-
 _DEFAULT_PORT = 9876
-_base_url = f"http://127.0.0.1:{_DEFAULT_PORT}"
 
-mcp_server = FastMCP(
-    "Zing Review",
-    auth_server_provider=_auth_provider,
-    auth=AuthSettings(
-        issuer_url=_base_url,
-        resource_server_url=_base_url,
-        client_registration_options=ClientRegistrationOptions(enabled=True),
-    ),
-)
+mcp_server = FastMCP("Zing Review")
 
 _session_manager: SessionManager | None = None
 _port: int = _DEFAULT_PORT
@@ -40,14 +27,6 @@ def configure(session_manager: SessionManager, port: int = _DEFAULT_PORT) -> Non
     global _session_manager, _port  # noqa: PLW0603
     _session_manager = session_manager
     _port = port
-
-    # Update auth settings to match the actual port.
-    base_url = f"http://127.0.0.1:{port}"
-    mcp_server.settings.auth = AuthSettings(
-        issuer_url=base_url,
-        resource_server_url=base_url,
-        client_registration_options=ClientRegistrationOptions(enabled=True),
-    )
 
 
 def _get_session_manager() -> SessionManager:
