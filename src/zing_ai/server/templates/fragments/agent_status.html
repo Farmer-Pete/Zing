@@ -1,0 +1,8 @@
+<div id="agents-container">
+{% for agent in step.agents %}
+<div class="agent {% if agent.state.value == 'running' %}agent-running{% else %}agent-completed{% endif %}">
+    <strong>{{ agent.name }}</strong>
+    {% if agent.description %}<div class="finding-meta">{{ agent.description | markdown }}</div>{% endif %}
+</div>
+{% endfor %}
+</div>

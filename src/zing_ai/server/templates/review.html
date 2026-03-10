@@ -31,8 +31,12 @@
      data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}"
      data-init="@get('/{{ session.session_id }}/stream?step={{ current_step }}&active_tab=step')">
 
+    {% if step %}{% include "fragments/agent_status.html" %}{% else %}<div id="agents-container"></div>{% endif %}
+
     <div id="findings-container">
     </div>
+
+    {% if step %}{% include "fragments/log_viewer.html" %}{% endif %}
 
     <div id="review-status">
     </div>

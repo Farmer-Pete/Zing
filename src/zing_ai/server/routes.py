@@ -337,6 +337,19 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     )
                     seen += 1
 
+                # Backfill agent status and logs
+                if target_step.agents:
+                    yield SSE.patch_elements(
+                        render("fragments/agent_status.html", step=target_step),
+                    )
+                if target_step.logs:
+                    yield SSE.patch_elements(
+                        render("fragments/log_viewer.html", step=target_step),
+                    )
+
+                # Track log count for incremental updates
+                seen_logs = len(target_step.logs)
+
                 # If already ready/completed, show submit UI immediately
                 if target_step.state.value in ("ready", "completed"):
                     if target_step.state.value == "completed":
@@ -420,6 +433,19 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                             mode="append",
                         )
                         seen += 1
+
+                    # Stream agent status changes
+                    if event in ("agent_started", "agent_stopped"):
+                        yield SSE.patch_elements(
+                            render("fragments/agent_status.html", step=target_step),
+                        )
+
+                    # Stream new log entries
+                    if event == "log_added" and len(target_step.logs) > seen_logs:
+                        yield SSE.patch_elements(
+                            render("fragments/log_viewer.html", step=target_step),
+                        )
+                        seen_logs = len(target_step.logs)
 
                     # Check terminal states
                     if event == "ready" or target_step.state.value in ("ready", "completed"):
@@ -557,6 +583,14 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                             saved_responses[finding.id] = resp.answer
                 break
 
+    # Resolve the active step object for agent/log display in templates
+    active_step = None
+    if step_id:
+        for s in session.steps:
+            if s.step_id == step_id:
+                active_step = s
+                break
+
     page_html = render(
         "review.html",
         session=session,
@@ -564,5 +598,6 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
         current_tab=current_tab,
         plan_html=plan_html,
         saved_responses=saved_responses,
+        step=active_step,
     )
     return HTMLResponse(content=page_html)
