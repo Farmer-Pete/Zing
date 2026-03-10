@@ -34,15 +34,18 @@ def create_app(
         sse_events = {
             "finding_added": "finding",
             "step_started": "step_started",
-            "agent_complete": "agent_complete",
+            "agent_started": "agent_started",
+            "agent_stopped": "agent_stopped",
             "step_ready": "ready",
             "review_submitted": "completed",
+            "log_added": "log_added",
             "session_updated": "session_updated",
         }
         dashboard_events = {
             "session_created": "created",
             "step_started": "step_started",
-            "agent_complete": "agent_complete",
+            "agent_started": "agent_started",
+            "agent_stopped": "agent_stopped",
             "review_submitted": "review_submitted",
             "session_cleaned_up": "cleaned_up",
         }
