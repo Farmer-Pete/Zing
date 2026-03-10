@@ -142,8 +142,28 @@ class SessionState(str, Enum):
     """Possible states of a review session."""
 
     PENDING = "pending"
+    STARTED = "started"
     READY = "ready"
     COMPLETED = "completed"
+
+
+class AgentState(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+
+
+class Agent(BaseModel):
+    name: str
+    description: str = ""
+    state: AgentState = AgentState.RUNNING
+    started_at: datetime = Field(default_factory=datetime.now)
+    completed_at: datetime | None = None
+
+
+class LogEntry(BaseModel):
+    timestamp: datetime = Field(default_factory=datetime.now)
+    agent_name: str = ""
+    message: str = ""
 
 
 class ResponseAction(str, Enum):
