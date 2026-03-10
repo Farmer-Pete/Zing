@@ -63,13 +63,15 @@ You are now a senior technical design reviewer. Launch 4 parallel Task subagents
 
 ### Session setup
 
-After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
+After reading the zing doc, parse its YAML frontmatter. Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
 
-The create_review() call requires: session_id (unique identifier), title (human-readable), zing_file (absolute path to the zing doc — resolve using the working directory before calling). Always resolve the zing file path to an absolute path before passing it to create_review().
+If there is no `session` in the frontmatter (or no frontmatter at all), this is a standalone invocation. Call `session_create(title)` to get a new session ID and step IDs, then update the zing doc's frontmatter to include `session: {session_id}` and `steps:` with the returned step ID mapping. Save the file after updating.
 
-After creating the session, call `start_step(session_id, "plan-evaluation", 4)` to initialize the workflow step for the 4 evaluation agents. This returns a `step_id` — a unique identifier for this step.
+Once you have the session ID and step IDs, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title=doc_title)` to associate the zing file with the session.
 
-This session ID and step ID (from `start_step`) will be used by subagents to POST their findings to the review server.
+Then call `step_start(session_id, steps.plan-audit)` where `steps.plan-audit` is the plan-audit step ID from the frontmatter. This transitions the plan-audit step from PENDING to STARTED.
+
+The session ID and plan-audit step ID will be used by subagents for agent lifecycle tracking.
 
 ### Preparing the agent prompts
 
@@ -138,40 +140,30 @@ Launching 4 evaluation passes in parallel...
 - Only one approach was considered (no alternatives evaluated)
 - Components exist "for future flexibility" without a current requirement
 
-**Posting results to the review server:**
+**Agent lifecycle and returning results:**
 
-First, POST your evaluation as a structured `evaluation` item:
+At the very start of your task, call `agent_start(session_id, step_id, name="design-fundamentals", description="Evaluating design fundamentals")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="design-fundamentals")`.
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":{true|false},"details":"{details}"},{"name":"Only one approach considered","found":{true|false},"details":"{details}"},{"name":"Components for future flexibility","found":{true|false},"details":"{details}"}]}
-```
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
 **Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), submit a `choice` finding with the improvement options plus "Skip":
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
 ```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
+## Evaluation: Pass 1 — Design Fundamentals
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":true,"details":"{details}"},{"name":"Only one approach considered","found":false,"details":""},{"name":"Components for future flexibility","found":false,"details":""}]}
+{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
 ```
 
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
-- `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
-
-After posting ALL items, signal completion:
-
-```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-```
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -210,40 +202,30 @@ Call the `mark_agent_complete` MCP tool with:
 - Deployment/migration strategy is deferred ("we'll figure it out later")
 - No tests or test strategy described
 
-**Posting results to the review server:**
+**Agent lifecycle and returning results:**
 
-First, POST your evaluation as a structured `evaluation` item:
+At the very start of your task, call `agent_start(session_id, step_id, name="robustness-safety", description="Evaluating robustness and safety")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="robustness-safety")`.
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":{true|false},"details":"{details}"},{"name":"Data model is afterthought","found":{true|false},"details":"{details}"},{"name":"Deployment strategy deferred","found":{true|false},"details":"{details}"},{"name":"No test strategy","found":{true|false},"details":"{details}"}]}
-```
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
 **Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), submit a `choice` finding with the improvement options plus "Skip":
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
 ```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
+## Evaluation: Pass 2 — Robustness & Safety
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":true,"details":"{details}"},{"name":"Data model is afterthought","found":false,"details":""},{"name":"Deployment strategy deferred","found":false,"details":""},{"name":"No test strategy","found":false,"details":""}]}
+{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
 ```
 
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
-- `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
-
-After posting ALL items, signal completion:
-
-```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-```
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -288,40 +270,30 @@ Call the `mark_agent_complete` MCP tool with:
 - Steps that can't be verified independently — multiple steps must all be completed before any of them can be tested or verified, indicating they should be combined into a single step.
 - Scaffolding steps without behavior — steps that only create empty files, folder structures, or placeholder interfaces with no testable behavior, instead of being merged into the step that implements the actual behavior.
 
-**Posting results to the review server:**
+**Agent lifecycle and returning results:**
 
-First, POST your evaluation as a structured `evaluation` item:
+At the very start of your task, call `agent_start(session_id, step_id, name="executable-spec", description="Evaluating plan as executable spec")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="executable-spec")`.
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":{true|false},"details":"{details}"},{"name":"Steps missing acceptance criteria","found":{true|false},"details":"{details}"},{"name":"Vague or weasel words","found":{true|false},"details":"{details}"},{"name":"Unspecified tech choices","found":{true|false},"details":"{details}"},{"name":"Missing data models","found":{true|false},"details":"{details}"},{"name":"TBD/TODO markers","found":{true|false},"details":"{details}"},{"name":"Tests separated from implementation","found":{true|false},"details":"{details}"},{"name":"Steps that cannot be verified independently","found":{true|false},"details":"{details}"},{"name":"Scaffolding steps without behavior","found":{true|false},"details":"{details}"}]}
-```
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
 **Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
-Then, for each issue found (any criterion rated "weak" or "missing", any warning sign with `found: true`), submit a `choice` finding with the improvement options plus "Skip":
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
 ```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
+## Evaluation: Pass 3 — Plan as Executable Spec
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":true,"details":"{details}"},{"name":"Steps missing acceptance criteria","found":false,"details":""},{"name":"Vague or weasel words","found":false,"details":""},{"name":"Unspecified tech choices","found":false,"details":""},{"name":"Missing data models","found":false,"details":""},{"name":"TBD/TODO markers","found":false,"details":""},{"name":"Tests separated from implementation","found":false,"details":""},{"name":"Steps that cannot be verified independently","found":false,"details":""},{"name":"Scaffolding steps without behavior","found":false,"details":""}]}
+{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
 ```
 
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
-- `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
-
-After posting ALL items, signal completion:
-
-```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-```
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -342,40 +314,30 @@ Call the `mark_agent_complete` MCP tool with:
 - Are any new patterns introduced? If so, are they good patterns worth adopting, or unnecessary divergence from established conventions?
 - Can this solution be simplified without losing functionality?
 
-**Posting results to the review server:**
+**Agent lifecycle and returning results:**
 
-First, POST your evaluation as a structured `evaluation` item:
+At the very start of your task, call `agent_start(session_id, step_id, name="code-quality", description="Evaluating code quality and idiomacy")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="code-quality")`.
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}
-```
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
 **Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
-Then, for each issue found (criterion rated "weak" or "missing"), submit a `choice` finding with the improvement options plus "Skip":
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
 ```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
+## Evaluation: Pass 4 — Code Quality
+...your evaluation text with criteria ratings...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}
+{"type":"choice","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"},{"label":"Skip","description":"Not important enough to address now"}]}
 ```
 
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
-- `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
-
-After posting ALL items, signal completion:
-
-```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-```
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing"). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -383,7 +345,17 @@ Call the `mark_agent_complete` MCP tool with:
 
 After all 4 Task agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, proceed to the `present_summary` step. The evaluation tables and improvement proposals have already been posted to the review server by the agents — they will appear in the review UI alongside the actionable choice items.
+Otherwise, collect and deduplicate findings from all agents:
+
+1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the plan-audit step ID and `finding_data` is the parsed JSON object.
+
+4. **Merge evaluation text:** Combine all agent evaluation text (from above the `---JSONL---` marker in each agent's output) into a consolidated view for the summary step.
+
+Then proceed to the `present_summary` step.
 
 </step>
 
@@ -412,9 +384,9 @@ List specific, actionable changes to improve the design, ordered by priority. If
 <step name="propose_improvements">
 If the verdict is **Strong Design**, skip this step and say "No improvements needed — the design looks solid."
 
-Otherwise, call `wait_for_review(session_id, "plan-evaluation")`. This opens the review UI in the browser where the user can see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
+Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. This opens the review UI in the browser where the user can see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
 
-When `wait_for_review` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's selected option. For each choice the user made (excluding "Skip"):
+When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's selected option. For each choice the user made (excluding "Skip"):
 - Apply the corresponding edit to the zing file using the Edit tool
 - The option's `description` field contains the concrete edit to make
 
