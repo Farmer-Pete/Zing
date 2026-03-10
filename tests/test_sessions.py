@@ -225,15 +225,17 @@ class TestSessionLifecycle(unittest.TestCase):
             "confidence": "medium",
         })
 
-        # First agent completes — still pending
-        updated = self.manager.mark_agent_complete("s1", step.step_id)
-        assert updated.state == SessionState.PENDING
-        assert updated.completed_agents == 1
+        # Start two agents
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.start_agent("s1", step.step_id, "agent-2")
+
+        # First agent completes — still started (not all done)
+        updated = self.manager.stop_agent("s1", step.step_id, "agent-1")
+        assert updated.state == SessionState.STARTED
 
         # Second agent completes — now ready
-        updated = self.manager.mark_agent_complete("s1", step.step_id)
+        updated = self.manager.stop_agent("s1", step.step_id, "agent-2")
         assert updated.state == SessionState.READY
-        assert updated.completed_agents == 2
 
         # Submit responses
         responses = [
@@ -296,14 +298,15 @@ class TestConcurrentSessions(unittest.TestCase):
         s2 = self.manager.create_session("s2", "Session 2", steps=[_STEP])
         step2 = self.manager.start_step("s2", s2.steps[0].step_id)
 
-        self.manager.mark_agent_complete("s1", step1.step_id)
+        self.manager.start_agent("s1", step1.step_id, "agent-1")
+        self.manager.stop_agent("s1", step1.step_id, "agent-1")
         s1 = self.manager.get_session("s1")
         s2 = self.manager.get_session("s2")
         assert s1 is not None
         assert s2 is not None
         assert s1.steps[0].state == SessionState.READY
-        assert s2.steps[0].state == SessionState.PENDING
-        assert s2.steps[0].completed_agents == 0
+        assert s2.steps[0].state == SessionState.STARTED
+        assert len(s2.steps[0].agents) == 0
 
 
 class TestCleanup(unittest.TestCase):
@@ -354,7 +357,7 @@ class TestCleanup(unittest.TestCase):
 
 
 class TestAgentTracking(unittest.TestCase):
-    """Test expected_agents tracking and edge cases."""
+    """Test agent lifecycle tracking and edge cases."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -364,39 +367,34 @@ class TestAgentTracking(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_increments_correctly(self) -> None:
-        """Each mark_agent_complete increments the count by one."""
+    def test_stop_agent_transitions_when_all_done(self) -> None:
+        """Stopping the last agent transitions step to READY."""
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        updated = self.manager.mark_agent_complete("s1", step.step_id)
-        assert updated.completed_agents == 1
-        assert updated.state == SessionState.PENDING
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.start_agent("s1", step.step_id, "agent-2")
 
-        updated = self.manager.mark_agent_complete("s1", step.step_id)
-        assert updated.completed_agents == 2
-        assert updated.state == SessionState.PENDING
+        updated = self.manager.stop_agent("s1", step.step_id, "agent-1")
+        assert updated.state == SessionState.STARTED
 
-        updated = self.manager.mark_agent_complete("s1", step.step_id)
-        assert updated.completed_agents == 3
+        updated = self.manager.stop_agent("s1", step.step_id, "agent-2")
         assert updated.state == SessionState.READY
 
-    def test_agent_complete_rejected_when_ready(self) -> None:
-        """mark_agent_complete raises ValueError once step is READY."""
+    def test_stop_agent_rejected_when_already_completed(self) -> None:
+        """stop_agent raises ValueError if agent is already completed."""
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        self.manager.mark_agent_complete("s1", step.step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
         with self.assertRaises(ValueError):
-            self.manager.mark_agent_complete("s1", step.step_id)
+            self.manager.stop_agent("s1", step.step_id, "agent-1")
 
     def test_invalid_session_id_raises(self) -> None:
         """Operations on a nonexistent session raise KeyError."""
         with self.assertRaises(KeyError):
             self.manager.add_finding("s1", "nonexistent-uuid", {"type": "text", "title": "Q"})
-
-        with self.assertRaises(KeyError):
-            self.manager.mark_agent_complete("s1", "nonexistent-uuid")
 
         with self.assertRaises(KeyError):
             self.manager.submit_responses("nonexistent", "nonexistent-step-id", [])
@@ -405,7 +403,8 @@ class TestAgentTracking(unittest.TestCase):
         """Adding a finding to a READY step raises ValueError."""
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
-        self.manager.mark_agent_complete("s1", step.step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
 
         with self.assertRaises(ValueError):
             self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Late"})
@@ -415,7 +414,8 @@ class TestAgentTracking(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q"})
-        self.manager.mark_agent_complete("s1", step.step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
         self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
 
         with self.assertRaises(ValueError):
@@ -429,6 +429,48 @@ class TestAgentTracking(unittest.TestCase):
 
         with self.assertRaises(ValueError, msg="Step .* belongs to session 's1', not 's2'"):
             self.manager.add_finding("s2", step.step_id, {"type": "text", "title": "Wrong session"})
+
+    def test_submit_responses_with_autosave(self) -> None:
+        """Auto-save 2 of 3 responses, then submit all 3 → verify COMPLETED."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        # Add 3 findings
+        f1 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q1"})
+        f2 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q2"})
+        f3 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q3"})
+
+        # Auto-save 2 of 3 responses (by finding ID)
+        self.manager.save_response("s1", step.step_id, f1.id, UserResponse(answer="A1"))
+        self.manager.save_response("s1", step.step_id, f2.id, UserResponse(answer="A2"))
+
+        # Verify partial auto-save state
+        _, partial_step = self.manager.get_step_by_id(step.step_id)
+        assert partial_step.responses is not None
+        assert len(partial_step.responses) == 3  # save_response pads the list
+        assert partial_step.state != SessionState.COMPLETED
+
+        # Submit all 3 final responses (overwrites auto-saved)
+        final_responses = [
+            UserResponse(answer="Final A1"),
+            UserResponse(answer="Final A2"),
+            UserResponse(answer="Final A3"),
+        ]
+        review = self.manager.submit_responses("s1", step.step_id, final_responses)
+
+        assert review.session_id == "s1"
+        assert len(review.items) == 3
+        assert review.items[0].response.answer == "Final A1"
+        assert review.items[1].response.answer == "Final A2"
+        assert review.items[2].response.answer == "Final A3"
+
+        # Verify step is COMPLETED
+        _, completed_step = self.manager.get_step_by_id(step.step_id)
+        assert completed_step.state == SessionState.COMPLETED
+
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert session.state == SessionState.COMPLETED
 
     def test_step_id_unique(self) -> None:
         """Pre-created steps each have a unique step_id."""
@@ -455,7 +497,7 @@ class TestPersistence(unittest.TestCase):
             "type": "text",
             "title": "Will this persist?",
         })
-        mgr1.mark_agent_complete("s1", step.step_id)
+        mgr1.start_agent("s1", step.step_id, "agent-1")
 
         # Create a new manager pointing at the same data dir
         mgr2 = SessionManager(data_dir=self.data_dir)
@@ -463,8 +505,8 @@ class TestPersistence(unittest.TestCase):
         assert session is not None
         assert session.title == "Persistent"
         assert session.total_findings == 1
-        assert session.steps[0].completed_agents == 1
-        assert session.steps[0].state == SessionState.PENDING
+        assert len(session.steps[0].agents) == 1
+        assert session.steps[0].state == SessionState.STARTED
 
     def test_step_id_survives_persistence(self) -> None:
         """step_id index is rebuilt on reload."""
@@ -503,8 +545,8 @@ class TestPersistence(unittest.TestCase):
         assert len(session.steps) == 1
         assert session.steps[0].step_name == "review"
         assert len(session.steps[0].findings) == 1
-        assert session.steps[0].expected_agents == 2
-        assert session.steps[0].completed_agents == 1
+        # Legacy counter fields are stripped by migration; agents list is empty
+        assert session.steps[0].agents == []
 
 
 class TestWorkflowStepLooping(unittest.TestCase):
@@ -569,7 +611,8 @@ class TestWaitForReview(unittest.TestCase):
                 "type": "text",
                 "title": "Async question",
             })
-            self.manager.mark_agent_complete("s1", step.step_id)
+            self.manager.start_agent("s1", step.step_id, "agent-1")
+            self.manager.stop_agent("s1", step.step_id, "agent-1")
 
             async def _submit_later() -> None:
                 await asyncio.sleep(0.05)
@@ -598,7 +641,8 @@ class TestWaitForReview(unittest.TestCase):
                 "type": "text",
                 "title": "Q",
             })
-            self.manager.mark_agent_complete("s1", step.step_id)
+            self.manager.start_agent("s1", step.step_id, "agent-1")
+            self.manager.stop_agent("s1", step.step_id, "agent-1")
             self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
 
             # Should return immediately since step is completed

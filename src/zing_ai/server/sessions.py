@@ -370,58 +370,6 @@ class SessionManager:
         )
         return entry
 
-    def mark_agent_complete(self, session_id: str, step_id: str) -> WorkflowStep:
-        """Mark one agent as complete for a workflow step.
-
-        If all expected agents are done, transitions the step state to READY.
-
-        Args:
-            session_id: The session ID that the step must belong to.
-            step_id: The UUID of the workflow step.
-
-        Returns:
-            The updated WorkflowStep.
-
-        Raises:
-            KeyError: If no step with that ID exists.
-            ValueError: If the step doesn't belong to the session, or is in
-                READY or COMPLETED state.
-        """
-        session, step = self.get_step_by_id(step_id)
-        if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
-            raise ValueError(msg)
-        if step.state in (SessionState.READY, SessionState.COMPLETED):
-            msg = (
-                f"Step '{step.step_name}' (id={step_id}) is in state "
-                f"'{step.state.value}' and cannot accept agent-complete signals"
-            )
-            raise ValueError(msg)
-        step.completed_agents += 1
-        logger.info(
-            "Agent completed for step '%s' (id=%s, %d/%d)",
-            step.step_name,
-            step_id,
-            step.completed_agents,
-            step.expected_agents,
-        )
-        if step.completed_agents >= step.expected_agents:
-            step.state = SessionState.READY
-            self._update_session_state(session)
-            logger.info(
-                "Step '%s' (id=%s) is now READY for review",
-                step.step_name,
-                step_id,
-            )
-        self._persist(session)
-        self._notify("agent_complete", session_id)
-        if step.state == SessionState.READY:
-            self._notify("step_ready", session_id)
-        return step
-
     def start_agent(
         self,
         session_id: str,
@@ -596,19 +544,25 @@ class SessionManager:
         step_id: str,
         responses: list[UserResponse],
     ) -> ReviewResponse:
-        """Store user responses for a workflow step and mark it as completed.
+        """Submit final user responses for a workflow step and mark it as completed.
+
+        The submitted responses list is the final version and overwrites any
+        responses that were previously auto-saved via ``save_response``.
+        The step transitions to COMPLETED and the wait event is set so that
+        any ``wait_for_review`` caller is unblocked.
 
         Args:
             session_id: The session to submit responses for.
             step_id: The UUID of the workflow step.
-            responses: List of user responses, one per finding.
+            responses: Final list of user responses, one per finding.
 
         Returns:
             A ReviewResponse pairing findings with responses.
 
         Raises:
             KeyError: If the session or step does not exist.
-            ValueError: If response count doesn't match finding count.
+            ValueError: If the step doesn't belong to the session, or
+                response count doesn't match finding count.
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
