@@ -25,10 +25,10 @@ class TestSessionLifecycle(unittest.TestCase):
         self._tmp.cleanup()
 
     def _create_session_with_step(
-        self, session_id: str = "s1", title: str = "Test", expected_agents: int = 1
+        self, session_id: str = "s1", title: str = "Test",
     ) -> WorkflowStep:
-        self.manager.create_session(session_id, title)
-        return self.manager.start_step(session_id, _STEP, expected_agents)
+        session = self.manager.create_session(session_id, title, steps=[_STEP])
+        return self.manager.start_step(session_id, session.steps[0].step_id)
 
     def test_create_session(self) -> None:
         """Creating a session sets initial state to PENDING with no steps."""
@@ -79,18 +79,33 @@ class TestSessionLifecycle(unittest.TestCase):
             assert found_step.step_id == step.step_id
 
     def test_start_step(self) -> None:
-        """Starting a step adds it to the session and returns a step_id."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", "review", 2)
+        """Starting a step transitions it from PENDING to STARTED."""
+        session = self.manager.create_session("s1", "Test", steps=["review"])
+        step_id = session.steps[0].step_id
+        step = self.manager.start_step("s1", step_id)
         assert step.step_name == "review"
         assert step.sequence == 0
-        assert step.expected_agents == 2
-        assert step.state == SessionState.PENDING
-        assert len(step.step_id) == 32  # uuid4().hex
+        assert step.state == SessionState.STARTED
+        assert step.step_id == step_id
 
         session = self.manager.get_session("s1")
         assert session is not None
         assert len(session.steps) == 1
+        assert session.steps[0].state == SessionState.STARTED
+
+    def test_start_step_already_started(self) -> None:
+        """Starting an already-started step raises ValueError."""
+        session = self.manager.create_session("s1", "Test", steps=["review"])
+        step_id = session.steps[0].step_id
+        self.manager.start_step("s1", step_id)
+        with self.assertRaises(ValueError):
+            self.manager.start_step("s1", step_id)
+
+    def test_start_step_nonexistent(self) -> None:
+        """Starting a nonexistent step raises KeyError."""
+        self.manager.create_session("s1", "Test", steps=["review"])
+        with self.assertRaises(KeyError):
+            self.manager.start_step("s1", "nonexistent-step-id")
 
     def test_add_finding_text(self) -> None:
         """Adding a text finding appends it to the step."""
@@ -153,7 +168,7 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_full_lifecycle(self) -> None:
         """Full lifecycle: create → start step → add findings → agents complete → submit."""
-        step = self._create_session_with_step(expected_agents=2)
+        step = self._create_session_with_step()
 
         self.manager.add_finding("s1", step.step_id, {
             "type": "text",
@@ -205,10 +220,10 @@ class TestConcurrentSessions(unittest.TestCase):
 
     def test_sessions_are_isolated(self) -> None:
         """Findings added to one session don't appear in another."""
-        self.manager.create_session("s1", "Session 1")
-        step1 = self.manager.start_step("s1", _STEP, 1)
-        self.manager.create_session("s2", "Session 2")
-        step2 = self.manager.start_step("s2", _STEP, 1)
+        s1 = self.manager.create_session("s1", "Session 1", steps=[_STEP])
+        step1 = self.manager.start_step("s1", s1.steps[0].step_id)
+        s2 = self.manager.create_session("s2", "Session 2", steps=[_STEP])
+        step2 = self.manager.start_step("s2", s2.steps[0].step_id)
 
         self.manager.add_finding("s1", step1.step_id, {
             "type": "text",
@@ -233,10 +248,10 @@ class TestConcurrentSessions(unittest.TestCase):
 
     def test_agent_completion_isolated(self) -> None:
         """Completing an agent in one session doesn't affect another."""
-        self.manager.create_session("s1", "Session 1")
-        step1 = self.manager.start_step("s1", _STEP, 1)
-        self.manager.create_session("s2", "Session 2")
-        step2 = self.manager.start_step("s2", _STEP, 2)
+        s1 = self.manager.create_session("s1", "Session 1", steps=[_STEP])
+        step1 = self.manager.start_step("s1", s1.steps[0].step_id)
+        s2 = self.manager.create_session("s2", "Session 2", steps=[_STEP])
+        step2 = self.manager.start_step("s2", s2.steps[0].step_id)
 
         self.manager.mark_agent_complete("s1", step1.step_id)
         s1 = self.manager.get_session("s1")
@@ -271,8 +286,8 @@ class TestCleanup(unittest.TestCase):
 
     def test_cleanup_removes_step_index(self) -> None:
         """Cleanup removes step_id entries from the index."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", _STEP, 1)
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
         step_id = step.step_id
 
         self.manager.cleanup_session("s1")
@@ -308,8 +323,8 @@ class TestAgentTracking(unittest.TestCase):
 
     def test_increments_correctly(self) -> None:
         """Each mark_agent_complete increments the count by one."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", _STEP, 3)
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
 
         updated = self.manager.mark_agent_complete("s1", step.step_id)
         assert updated.completed_agents == 1
@@ -325,8 +340,8 @@ class TestAgentTracking(unittest.TestCase):
 
     def test_agent_complete_rejected_when_ready(self) -> None:
         """mark_agent_complete raises ValueError once step is READY."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", _STEP, 1)
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
 
         self.manager.mark_agent_complete("s1", step.step_id)
         with self.assertRaises(ValueError):
@@ -345,8 +360,8 @@ class TestAgentTracking(unittest.TestCase):
 
     def test_add_finding_rejects_ready_step(self) -> None:
         """Adding a finding to a READY step raises ValueError."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", _STEP, 1)
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.mark_agent_complete("s1", step.step_id)
 
         with self.assertRaises(ValueError):
@@ -354,8 +369,8 @@ class TestAgentTracking(unittest.TestCase):
 
     def test_add_finding_rejects_completed_step(self) -> None:
         """Adding a finding to a COMPLETED step raises ValueError."""
-        self.manager.create_session("s1", "Test")
-        step = self.manager.start_step("s1", _STEP, 1)
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q"})
         self.manager.mark_agent_complete("s1", step.step_id)
         self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
@@ -365,19 +380,17 @@ class TestAgentTracking(unittest.TestCase):
 
     def test_add_finding_rejects_wrong_session(self) -> None:
         """Adding a finding with a step_id from a different session raises ValueError."""
-        self.manager.create_session("s1", "Session 1")
-        step = self.manager.start_step("s1", _STEP, 1)
+        session = self.manager.create_session("s1", "Session 1", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.create_session("s2", "Session 2")
 
         with self.assertRaises(ValueError, msg="Step .* belongs to session 's1', not 's2'"):
             self.manager.add_finding("s2", step.step_id, {"type": "text", "title": "Wrong session"})
 
     def test_step_id_unique(self) -> None:
-        """Each start_step call generates a unique step_id."""
-        self.manager.create_session("s1", "Test")
-        step1 = self.manager.start_step("s1", "review", 1)
-        step2 = self.manager.start_step("s1", "review", 1)
-        assert step1.step_id != step2.step_id
+        """Pre-created steps each have a unique step_id."""
+        session = self.manager.create_session("s1", "Test", steps=["review", "review"])
+        assert session.steps[0].step_id != session.steps[1].step_id
 
 
 class TestPersistence(unittest.TestCase):
@@ -393,8 +406,8 @@ class TestPersistence(unittest.TestCase):
     def test_sessions_survive_restart(self) -> None:
         """Sessions created by one manager are loaded by a new one."""
         mgr1 = SessionManager(data_dir=self.data_dir)
-        mgr1.create_session("s1", "Persistent")
-        step = mgr1.start_step("s1", _STEP, 2)
+        session = mgr1.create_session("s1", "Persistent", steps=[_STEP])
+        step = mgr1.start_step("s1", session.steps[0].step_id)
         mgr1.add_finding("s1", step.step_id, {
             "type": "text",
             "title": "Will this persist?",
@@ -413,8 +426,8 @@ class TestPersistence(unittest.TestCase):
     def test_step_id_survives_persistence(self) -> None:
         """step_id index is rebuilt on reload."""
         mgr1 = SessionManager(data_dir=self.data_dir)
-        mgr1.create_session("s1", "Test")
-        step = mgr1.start_step("s1", _STEP, 1)
+        session = mgr1.create_session("s1", "Test", steps=[_STEP])
+        step = mgr1.start_step("s1", session.steps[0].step_id)
         step_id = step.step_id
 
         mgr2 = SessionManager(data_dir=self.data_dir)
@@ -463,10 +476,10 @@ class TestWorkflowStepLooping(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_duplicate_step_names(self) -> None:
-        """Starting the same step name twice creates two steps with different IDs."""
-        self.manager.create_session("s1", "Test")
-        step1 = self.manager.start_step("s1", "review", 1)
-        step2 = self.manager.start_step("s1", "review", 1)
+        """Pre-creating the same step name twice creates two steps with different IDs."""
+        session = self.manager.create_session("s1", "Test", steps=["review", "review"])
+        step1 = self.manager.start_step("s1", session.steps[0].step_id)
+        step2 = self.manager.start_step("s1", session.steps[1].step_id)
         assert step1.sequence == 0
         assert step2.sequence == 1
         assert step1.step_id != step2.step_id
@@ -477,11 +490,11 @@ class TestWorkflowStepLooping(unittest.TestCase):
 
     def test_findings_go_to_correct_step_by_id(self) -> None:
         """Findings are routed to the correct step via step_id."""
-        self.manager.create_session("s1", "Test")
-        step1 = self.manager.start_step("s1", "review", 1)
+        session = self.manager.create_session("s1", "Test", steps=["review", "review"])
+        step1 = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.add_finding("s1", step1.step_id, {"type": "text", "title": "First"})
 
-        step2 = self.manager.start_step("s1", "review", 1)
+        step2 = self.manager.start_step("s1", session.steps[1].step_id)
         self.manager.add_finding("s1", step2.step_id, {"type": "text", "title": "Second"})
 
         session = self.manager.get_session("s1")
@@ -507,8 +520,8 @@ class TestWaitForReview(unittest.TestCase):
         """wait_for_review unblocks when submit_responses is called."""
 
         async def _run() -> None:
-            self.manager.create_session("s1", "Async Test")
-            step = self.manager.start_step("s1", _STEP, 1)
+            session = self.manager.create_session("s1", "Async Test", steps=[_STEP])
+            step = self.manager.start_step("s1", session.steps[0].step_id)
             self.manager.add_finding("s1", step.step_id, {
                 "type": "text",
                 "title": "Async question",
@@ -536,8 +549,8 @@ class TestWaitForReview(unittest.TestCase):
         """wait_for_review returns immediately if step is already completed."""
 
         async def _run() -> None:
-            self.manager.create_session("s1", "Test")
-            step = self.manager.start_step("s1", _STEP, 1)
+            session = self.manager.create_session("s1", "Test", steps=[_STEP])
+            step = self.manager.start_step("s1", session.steps[0].step_id)
             self.manager.add_finding("s1", step.step_id, {
                 "type": "text",
                 "title": "Q",

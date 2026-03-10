@@ -53,15 +53,16 @@ class _ServerTestBase(unittest.TestCase):
         self,
         session_id: str = "test-session",
         title: str = "Test Session",
-        expected_agents: int = 2,
+        expected_agents: int = 1,  # noqa: ARG002 — legacy, kept for caller compat
     ) -> None:
         """Helper to create a session with a default workflow step for testing."""
-        self.manager.create_session(
+        session = self.manager.create_session(
             session_id=session_id,
             title=title,
             zing_file=None,
+            steps=[_STEP],
         )
-        step = self.manager.start_step(session_id, _STEP, expected_agents)
+        step = self.manager.start_step(session_id, session.steps[0].step_id)
         self.step_id = step.step_id
 
 
@@ -943,23 +944,24 @@ class TestCreateReview(_ServerTestBase):
         assert session is not None
         self.assertEqual(session.title, "MCP Review")
 
-    def test_start_step_creates_step(self) -> None:
-        """start_step MCP tool creates a workflow step."""
+    def test_start_step_transitions_step(self) -> None:
+        """start_step MCP tool transitions a pre-created step to STARTED."""
         configure(self.manager, port=9876)
         asyncio.run(
-            create_review(session_id="step-test", title="Step Test", zing_file=None)
+            create_review(
+                session_id="step-test", title="Step Test",
+                zing_file=None, steps=["code-review"],
+            )
         )
+        session = self.manager.get_session("step-test")
+        assert session is not None
+        step_id = session.steps[0].step_id
         result = asyncio.run(
-            start_step(session_id="step-test", step_name="code-review", expected_agents=6)
+            start_step(session_id="step-test", step_id=step_id)
         )
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["step_name"], "code-review")
-        self.assertIn("step_id", result)
-
-        session = self.manager.get_session("step-test")
-        assert session is not None
-        self.assertEqual(len(session.steps), 1)
-        self.assertEqual(session.steps[0].expected_agents, 6)
+        self.assertEqual(result["step_id"], step_id)
 
 
 class TestWaitForReview(_ServerTestBase):
@@ -1223,24 +1225,25 @@ class TestStartStep(_ServerTestBase):
 
     def test_start_step(self) -> None:
         """Starting a step returns correct response."""
-        self.manager.create_session("s1", "Test")
+        session = self.manager.create_session("s1", "Test", steps=["code-review"])
+        step_id = session.steps[0].step_id
         resp = self.client.post(
             "/s1/steps",
-            json={"step_name": "code-review", "expected_agents": 6},
+            json={"step_id": step_id},
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["status"], "started")
         self.assertEqual(body["step_name"], "code-review")
-        self.assertIn("step_id", body)
+        self.assertEqual(body["step_id"], step_id)
         self.assertEqual(body["sequence"], 0)
 
-    def test_missing_step_name_returns_400(self) -> None:
-        """Starting a step without step_name returns 400."""
-        self.manager.create_session("s1", "Test")
+    def test_missing_step_id_returns_400(self) -> None:
+        """Starting a step without step_id returns 400."""
+        self.manager.create_session("s1", "Test", steps=["review"])
         resp = self.client.post("/s1/steps", json={})
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "missing_step_name")
+        self.assertEqual(resp.json()["error"], "missing_step_id")
 
 
 class TestMCPSubmitFinding(_ServerTestBase):

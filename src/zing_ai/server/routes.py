@@ -76,7 +76,7 @@ def finding_fragment(finding: Finding) -> str:
 
 @router.post("/{session_id}/steps")
 async def post_start_step(session_id: str, request: Request) -> JSONResponse:
-    """Start a new workflow step within a session."""
+    """Start a pre-created workflow step, transitioning it from PENDING to STARTED."""
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
         return _session_not_found(session_id)
@@ -89,18 +89,28 @@ async def post_start_step(session_id: str, request: Request) -> JSONResponse:
             content={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
 
-    step_name = body.get("step_name")
-    if not step_name:
+    step_id = body.get("step_id")
+    if not step_id:
         return JSONResponse(
             status_code=400,
             content={
-                "error": "missing_step_name",
-                "message": "step_name is required",
+                "error": "missing_step_id",
+                "message": "step_id is required",
             },
         )
 
-    expected_agents = body.get("expected_agents", 0)
-    step = manager.start_step(session_id, step_name, expected_agents)
+    try:
+        step = manager.start_step(session_id, step_id)
+    except KeyError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "step_not_found", "message": str(exc)},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "invalid_state", "message": str(exc)},
+        )
     return JSONResponse(
         status_code=200,
         content={

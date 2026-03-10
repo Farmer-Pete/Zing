@@ -38,7 +38,10 @@ def _get_session_manager() -> SessionManager:
 
 @mcp_server.tool()
 async def create_review(
-    session_id: str, title: str, zing_file: str | None = None
+    session_id: str,
+    title: str,
+    zing_file: str | None = None,
+    steps: list[str] | None = None,
 ) -> dict:
     """Creates a review session, opens browser, returns URL."""
     sm = _get_session_manager()
@@ -46,6 +49,7 @@ async def create_review(
         session_id=session_id,
         title=title,
         zing_file=zing_file,
+        steps=steps,
     )
     url = f"http://localhost:{_port}/{session_id}"
     webbrowser.open(url)
@@ -54,15 +58,14 @@ async def create_review(
 
 @mcp_server.tool()
 async def start_step(
-    session_id: str, step_name: str, expected_agents: int
+    session_id: str, step_id: str,
 ) -> dict:
-    """Starts a new workflow step within a session.
+    """Starts a pre-created workflow step, transitioning it from PENDING to STARTED.
 
     Must be called before agents submit findings for this step.
-    The same step_name can be used multiple times (for loops).
     """
     sm = _get_session_manager()
-    step = sm.start_step(session_id, step_name, expected_agents)
+    step = sm.start_step(session_id, step_id)
     return {
         "status": "started",
         "step_id": step.step_id,

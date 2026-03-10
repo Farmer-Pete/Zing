@@ -169,46 +169,40 @@ class SessionManager:
     def start_step(
         self,
         session_id: str,
-        step_name: str,
-        expected_agents: int,
+        step_id: str,
     ) -> WorkflowStep:
-        """Start a new workflow step within a session.
-
-        The same step_name can be used multiple times (for loops). Each call
-        creates a new step with an incrementing sequence number.
+        """Transition an existing workflow step from PENDING to STARTED.
 
         Args:
-            session_id: The session to add the step to.
-            step_name: Name of the workflow step.
-            expected_agents: Number of agents expected to report findings.
+            session_id: The session containing the step.
+            step_id: The ID of the pre-created step to start.
 
         Returns:
-            The newly created WorkflowStep.
+            The started WorkflowStep.
 
         Raises:
-            KeyError: If the session does not exist.
+            KeyError: If the session or step does not exist.
+            ValueError: If the step is not in PENDING state.
         """
-        session = self._get_session_or_raise(session_id)
-        step = WorkflowStep(
-            step_name=step_name,
-            sequence=len(session.steps),
-            expected_agents=expected_agents,
-        )
-        session.steps.append(step)
-        self._steps_by_id[step.step_id] = (session_id, len(session.steps) - 1)
-        session.state = SessionState.PENDING
-        # Create a fresh event for this step
-        key = self._event_key(session_id, step.step_id)
-        self._events[key] = asyncio.Event()
+        self._get_session_or_raise(session_id)
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            raise KeyError(f"Step '{step_id}' does not belong to session '{session_id}'")
+        if step.state != SessionState.PENDING:
+            msg = (
+                f"Step '{step_id}' is in state '{step.state.value}', "
+                f"expected '{SessionState.PENDING.value}'"
+            )
+            raise ValueError(msg)
+        step.state = SessionState.STARTED
         self._persist(session)
         self._notify("step_started", session_id)
         logger.info(
-            "Started step '%s' (seq=%d, id=%s) in session %s (expecting %d agents)",
-            step_name,
+            "Started step '%s' (seq=%d, id=%s) in session %s",
+            step.step_name,
             step.sequence,
             step.step_id,
             session_id,
-            expected_agents,
         )
         return step
 
