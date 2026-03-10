@@ -130,7 +130,8 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
 
 
 @router.post("/{session_id}/submit")
-async def post_submit(session_id: str, request: Request) -> JSONResponse:
+@datastar_response
+async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     """Accept user responses for all findings in a workflow step.
 
     Handles both JSON API calls (with ``responses`` array) and Datastar
@@ -211,15 +212,20 @@ async def post_submit(session_id: str, request: Request) -> JSONResponse:
         step_id,
         len(responses),
     )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "ok",
-            "session_id": review.session_id,
-            "step_name": review.step_name,
-            "items_count": len(review.items),
-        },
-    )
+
+    def _sse_patches():  # noqa: ANN202
+        yield SSE.patch_elements(
+            '<div id="review-status" class="submit-banner">'
+            "Review submitted — thank you!</div>",
+        )
+        yield SSE.patch_elements(
+            '<div id="submit-section">'
+            '<button class="submit-btn"'
+            ' style="background: #059669; cursor: default;"'
+            " disabled>Review submitted</button></div>",
+        )
+
+    return _sse_patches()
 
 
 def _map_signals_to_responses(
@@ -333,16 +339,28 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
 
                 # If already ready/completed, show submit UI immediately
                 if target_step.state.value in ("ready", "completed"):
-                    yield SSE.patch_elements(
-                        '<div id="review-status" class="submit-banner">'
-                        "All agents complete — ready for review</div>",
-                    )
-                    yield SSE.patch_elements(
-                        '<div id="submit-section">'
-                        f'<button class="submit-btn" '
-                        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                        "Submit Review</button></div>",
-                    )
+                    if target_step.state.value == "completed":
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "Review submitted — thank you!</div>",
+                        )
+                        yield SSE.patch_elements(
+                            '<div id="submit-section">'
+                            '<button class="submit-btn"'
+                            ' style="background: #059669; cursor: default;"'
+                            " disabled>Review submitted</button></div>",
+                        )
+                    else:
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "All agents complete — ready for review</div>",
+                        )
+                        yield SSE.patch_elements(
+                            '<div id="submit-section">'
+                            f'<button class="submit-btn" '
+                            f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
+                            "Submit Review</button></div>",
+                        )
                     return
 
             # Stream events (findings for active step + notification dots for other tabs)
@@ -421,6 +439,12 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         yield SSE.patch_elements(
                             '<div id="review-status" class="submit-banner">'
                             "Review submitted — thank you!</div>",
+                        )
+                        yield SSE.patch_elements(
+                            '<div id="submit-section">'
+                            '<button class="submit-btn"'
+                            ' style="background: #059669; cursor: default;"'
+                            " disabled>Review submitted</button></div>",
                         )
                         return
         finally:
