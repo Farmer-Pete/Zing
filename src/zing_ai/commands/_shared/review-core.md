@@ -328,36 +328,43 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to pull full file context when the diff hunks alone are insufficient for its analysis (see diff_preparation step for guidance on when to do this)
 - Any additional skill-specific context (see the calling skill's `analyze_changes` step for extras)
-- The **session ID**, **step ID** (from `start_step`), and **server port** for posting findings to the review server
-- Instructions to POST each finding to the review server as JSON, and signal completion when done (see below)
+- The **session ID** and **step ID** (from `step_start`)
+- Instructions to call `agent_start` at the beginning, return findings as JSONL, and call `agent_stop` when done (see below)
 
-**Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
+**Agent lifecycle and finding format:** Each agent follows this lifecycle:
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
-```
+1. **Start:** Call the `mcp__zing-ai__agent_start` MCP tool at the beginning:
+   ```
+   mcp__zing-ai__agent_start(session_id=SESSION_ID, step_id=STEP_ID, name=AGENT_NAME, description=AGENT_DESCRIPTION)
+   ```
+   Where `AGENT_NAME` is a short identifier (e.g., "architecture", "correctness", "security", "readability", "performance", "testing") and `AGENT_DESCRIPTION` is the agent's role (e.g., "Architecture & Design review").
 
-The `step_id` field is **required** — use the step_id returned by `start_step`. The tool will reject findings without it, or if the step is already marked as ready/completed.
+2. **Collect findings:** Review the diff using the assigned checklist. Format each finding as a single JSON object on one line (JSONL format):
+   ```
+   {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
+   ```
 
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
-- `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
+3. **Stop:** Call the `mcp__zing-ai__agent_stop` MCP tool when done:
+   ```
+   mcp__zing-ai__agent_stop(session_id=SESSION_ID, step_id=STEP_ID, name=AGENT_NAME)
+   ```
 
-When the agent has finished posting all findings (or has no findings), it signals completion:
+4. **Return findings:** After calling `agent_stop`, return all findings in the task output using the `---JSONL---` delimiter:
+   ```
+   ---JSONL---
+   {"type":"triage","title":"First finding","body":"...","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/foo.py","line":42},"options":[{"label":"Fix it","description":"..."}]}
+   {"type":"triage","title":"Second finding","body":"...","category":"security","severity":"medium","confidence":"medium","location":{"file":"src/bar.py","line":17},"options":[{"label":"Add validation","description":"..."}]}
+   ```
+   If the agent has no findings, still call `agent_stop` and return an empty JSONL section:
+   ```
+   ---JSONL---
+   ```
 
-```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-```
+If `agent_start` or `agent_stop` returns an error, check the error message:
+- `ValueError` = fix the input and retry
+- `KeyError` = abort with FATAL error (wrong session/step/agent name)
 
-If the agent has no findings, it should still signal `mark_agent_complete`.
-
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **step ID** so it can include `"step_id":"STEP_ID"` in all finding POST and agent-complete requests.
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls.
 - Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
@@ -371,9 +378,22 @@ Launch all 6 agents in parallel using 6 `Task` tool calls in a single message wi
 </step>
 
 <step name="present_summary">
-Call `wait_for_review(session_id, step_name)` MCP tool. Both `session_id` and `step_name` are required. This blocks until the user has reviewed all findings for that workflow step in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
+**1. Parse JSONL from agent outputs:** For each of the 6 agents, find the `---JSONL---` delimiter in its task output and parse every subsequent line as a JSON object. Collect all findings into a single list.
 
-Process the returned JSON:
+**2. Deduplicate findings:** Remove duplicate findings where both `type` and `title` match exactly. Keep the first occurrence, discard later duplicates.
+
+**3. Submit findings to the review server:** For each unique finding, call the `mcp__zing-ai__finding_submit` MCP tool:
+```
+mcp__zing-ai__finding_submit(session_id=SESSION_ID, step_id=STEP_ID, finding=FINDING_OBJECT)
+```
+If the tool returns an error:
+- `ValueError` = fix the finding data and retry
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `RuntimeError` = abort immediately (step already completed)
+
+**4. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
+
+**5. Process the returned JSON:**
 - **Accepted findings**: Apply them (the calling skill defines how to apply findings — e.g., posting PR comments, writing to a report file).
 - **Dropped findings**: Skip them entirely.
 - **Discuss findings**: Walk through each one conversationally with the user, explaining the finding and asking for their input on how to proceed.
