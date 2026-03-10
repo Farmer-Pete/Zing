@@ -58,6 +58,49 @@ class TestSessionLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError, msg="zing_file path does not exist"):
             self.manager.create_session("s1", "Test", zing_file="/nonexistent/path.md")
 
+    def test_update_session(self) -> None:
+        """update_session changes zing_file and title on an existing session."""
+        session = self.manager.create_session("s1", "Original Title")
+        assert session.title == "Original Title"
+        assert session.zing_file is None
+
+        updated = self.manager.update_session(
+            "s1", zing_file=__file__, title="New Title",
+        )
+        assert updated.title == "New Title"
+        assert updated.zing_file == __file__
+
+        # Verify changes persisted by reloading
+        reloaded = SessionManager(data_dir=self.data_dir)
+        s = reloaded.get_session("s1")
+        assert s is not None
+        assert s.title == "New Title"
+        assert s.zing_file == __file__
+
+    def test_update_session_partial(self) -> None:
+        """update_session with None parameters skips those fields."""
+        self.manager.create_session("s1", "Title", zing_file=__file__)
+
+        # Update only title
+        updated = self.manager.update_session("s1", title="New Title")
+        assert updated.title == "New Title"
+        assert updated.zing_file == __file__
+
+        # Update only zing_file (using setUp.py as a different valid file)
+        updated2 = self.manager.update_session("s1", zing_file=__file__)
+        assert updated2.title == "New Title"
+        assert updated2.zing_file == __file__
+
+    def test_update_session_validates_zing_file(self) -> None:
+        """update_session rejects relative and nonexistent zing_file paths."""
+        self.manager.create_session("s1", "Title")
+
+        with self.assertRaises(ValueError):
+            self.manager.update_session("s1", zing_file="relative/path.md")
+
+        with self.assertRaises(ValueError):
+            self.manager.update_session("s1", zing_file="/nonexistent/path.md")
+
     def test_create_session_with_steps(self) -> None:
         """Creating a session with steps pre-creates all WorkflowStep objects."""
         step_names = ["plan", "plan-audit", "build", "build-audit"]

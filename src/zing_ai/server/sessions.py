@@ -166,6 +166,42 @@ class SessionManager:
         logger.info("Created session %s: %s", session_id, title)
         return session
 
+    def update_session(
+        self,
+        session_id: str,
+        zing_file: str | None = None,
+        title: str | None = None,
+    ) -> Session:
+        """Update fields on an existing session.
+
+        Either parameter can be ``None`` to skip updating that field.
+
+        Args:
+            session_id: The session to update.
+            zing_file: If not None, set the session's zing_file (must be absolute and exist).
+            title: If not None, set the session's title.
+
+        Returns:
+            The updated Session.
+        """
+        session = self._get_session_or_raise(session_id)
+        if zing_file is not None:
+            if not os.path.isabs(zing_file):
+                logger.warning("Rejected zing_file (not absolute): %s", zing_file)
+                msg = f"zing_file must be an absolute path, got: {zing_file}"
+                raise ValueError(msg)
+            if not os.path.exists(zing_file):
+                logger.warning("Rejected zing_file (does not exist): %s", zing_file)
+                msg = f"zing_file path does not exist: {zing_file}"
+                raise ValueError(msg)
+            session.zing_file = zing_file
+        if title is not None:
+            session.title = title
+        self._persist(session)
+        self._notify("session_updated", session_id)
+        logger.info("Updated session %s", session_id)
+        return session
+
     def start_step(
         self,
         session_id: str,
