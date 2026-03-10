@@ -244,8 +244,7 @@ class Session(BaseModel):
                 "sequence": 0,
                 "findings": data.pop("findings", []),
                 "responses": data.pop("responses", None),
-                "expected_agents": data.pop("expected_agents", 0),
-                "completed_agents": data.pop("completed_agents", 0),
+                "agents": [],
                 "state": data.get("state", "pending"),
                 "created_at": data.get("created_at"),
             }
