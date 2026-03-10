@@ -57,15 +57,11 @@ Convert the user's description into a concrete set of files to audit.
 
 ### Session setup
 
-After confirming scope with the user, call `create_review()` to get a new session ID.
+After confirming scope with the user, call `session_create(title="Code Audit — {user_description}", steps=["code-review"])` to get a new session ID and step IDs.
 
-The `create_review()` call requires:
-- `session_id`: a unique identifier (e.g., `"custom-audit-{scope_slug}-{timestamp}"`)
-- `title`: e.g., `"Code Audit — {user_description}"`
+Then call `step_start(session_id, step_id)` where `step_id` is the code-review step ID returned by `session_create`. This transitions the step from PENDING to STARTED.
 
-After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents. This returns a `step_id` — a unique identifier for this step.
-
-This session ID, step ID (from `start_step`), and the server port will be passed to the review agents.
+The session ID and step ID will be passed to the review agents.
 </step>
 
 <step name="read_files">
@@ -135,8 +131,8 @@ Launch 6 parallel Task agents to review the code. Each agent receives:
 - The severity/confidence scales from the shared review reference
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to explore code beyond the provided context (callers, callees, related modules, test coverage)
-- The **session ID** and **server port** for posting findings to the review server
-- Instructions to POST each finding to the review server as JSON, and signal completion when done (see below)
+- The **session ID** and **step ID** for agent lifecycle tracking and finding submission
+- Instructions for agent lifecycle and JSONL return format (see below)
 
 **Adapted framing for all agents:**
 
@@ -169,37 +165,28 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 - Agent 5 (Performance & Data Integrity): Performance (incl. all sub-items)
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion
 
-**Agent finding submission:** Instead of returning pipe-delimited lines, each agent posts findings directly to the review server. For each finding, the agent runs:
+**Agent lifecycle and returning results:**
 
-```
-Call the `submit_finding` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
-  finding: {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
-```
+Each agent must call `agent_start(session_id, step_id, name="{agent-name}", description="{agent description}")` at the very start of its task, and `agent_stop(session_id, step_id, name="{agent-name}")` at the very end (after all analysis is done).
 
-The `step_id` field is **required** — use the step_id returned by `start_step`. The tool will reject findings without it, or if the step is already marked as ready/completed.
-
-If the tool raises an error, check the error message:
-- `ValueError` = fix the finding data and retry
+If `agent_start` or `agent_stop` returns an error:
 - `KeyError` = abort with FATAL error (wrong session/step ID)
-- `RuntimeError` = abort immediately (step already completed)
+- `ValueError` = fix and retry
 
-When the agent has finished posting all findings (or has no findings), it signals completion:
+**Do NOT call `finding_submit` directly.** Instead, format each finding as a JSON line and return them all at the end of the task output using this exact format:
 
 ```
-Call the `mark_agent_complete` MCP tool with:
-  session_id: SESSION_ID
-  step_id: STEP_ID
+---JSONL---
+{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
 ```
 
-If the agent has no findings, it should still signal `mark_agent_complete`.
+Each line after `---JSONL---` must be a single valid JSON object — one line per finding. If the agent has no findings, omit the `---JSONL---` marker entirely.
 
 Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 
 **After all 6 agents return**, the parent:
 1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
-2. Otherwise, proceeds to the `present_summary` step.
+2. Otherwise, proceeds to the `check_and_review` step.
 </step>
 
 <step name="present_summary">
@@ -221,9 +208,17 @@ Write an empty findings report and exit.
 <step name="check_and_review">
 After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id, "code-review")`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+Otherwise, collect and deduplicate findings from all agents:
 
-When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the code-review step ID and `finding_data` is the parsed JSON object.
+
+Then call `review_wait(session_id, step_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `review_wait` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
 - **Accepted findings**: Include in the report as-is.
 - **Dropped findings**: Exclude from the report entirely.
 - **Downgraded findings**: Include in the report with their adjusted severity.
@@ -353,8 +348,8 @@ Review is complete when:
 - [ ] Big-picture assessment shared (scope, structure, first impressions, dependencies)
 - [ ] Code was analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were posted to the review server by subagents
-- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
+- [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
 - [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it

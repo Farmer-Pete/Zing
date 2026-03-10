@@ -25,16 +25,11 @@ Store the PR number, head branch, base branch, title, and URL for later use.
 
 ### Session setup
 
-After resolving the PR, check if the zing doc (if one was provided as an argument) has `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no zing doc, no frontmatter, or no `session` in the frontmatter, call `create_review()` to get a new session ID. If a zing doc exists, update its frontmatter to include `session: {session_id}` and save the file.
+After resolving the PR, call `session_create(title="PR Review — #{number} {title}", steps=["code-review"])` to get a new session ID and step IDs.
 
-The `create_review()` call requires:
-- `session_id`: a unique identifier (e.g., `"pr-audit-{number}-{timestamp}"`)
-- `title`: e.g., `"PR Review — #{number} {title}"`
-- `zing_file`: absolute path to the zing doc if one exists (resolve to absolute first), otherwise omit the parameter
+Then call `step_start(session_id, step_id)` where `step_id` is the code-review step ID returned by `session_create`. This transitions the step from PENDING to STARTED.
 
-After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents. This returns a `step_id` — a unique identifier for this step.
-
-This session ID, step ID (from `start_step`), and the server port will be passed to the shared review steps.
+The session ID and step ID will be passed to the shared review steps.
 </step>
 
 <step name="checkout_pr">
@@ -69,7 +64,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. Pass the **session ID** and **server port** to each agent so they can POST findings to the review server. In addition to the shared agent context, each agent also receives:
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. Pass the **session ID** and **step ID** to each agent for agent lifecycle and finding submission. In addition to the shared agent context, each agent also receives:
 - A note of which lines in each assigned file appear in the diff (so agents know which lines can receive line-level comments)
 - PR-specific context: PR number `{number}`, head branch `{headRefName}`, base branch `{baseRefName}`
 </step>
@@ -93,9 +88,17 @@ Submit an approving review and exit.
 <step name="check_and_review">
 After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id, "code-review")`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+Otherwise, collect and deduplicate findings from all agents:
 
-When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the code-review step ID and `finding_data` is the parsed JSON object.
+
+Then call `review_wait(session_id, step_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `review_wait` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
 - **Accepted findings**: Include in the report and submit as PR line-level comments.
 - **Dropped findings**: Exclude from the report and PR review entirely.
 - **Downgraded findings**: Include in the report and PR review with their adjusted severity.
@@ -283,8 +286,8 @@ Review is complete when:
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were posted to the review server by subagents
-- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
+- [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
 - [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it

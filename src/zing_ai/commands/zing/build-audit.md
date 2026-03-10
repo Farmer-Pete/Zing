@@ -28,16 +28,15 @@ Exit.
 
 ### Session setup
 
-After detecting the branch, check if the zing doc (if one was provided as an argument) has `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no zing doc, no frontmatter, or no `session` in the frontmatter, call `create_review()` to get a new session ID. If a zing doc exists, update its frontmatter to include `session: {session_id}` and save the file.
+After detecting the branch, parse the zing doc's YAML frontmatter (if one was provided as an argument). Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
 
-The `create_review()` call requires:
-- `session_id`: a unique identifier (e.g., `"build-audit-{branch_name}-{timestamp}"`)
-- `title`: e.g., `"Code Review — {branch_name}"`
-- `zing_file`: absolute path to the zing doc if one exists (resolve to absolute first), otherwise omit the parameter
+If there is no zing doc, no frontmatter, or no `session` in the frontmatter, this is a standalone invocation. Call `session_create(title="Code Review — {branch_name}", steps=["code-review"])` to get a new session ID and step IDs. If a zing doc exists, update its frontmatter to include `session: {session_id}` and the `steps:` mapping, then save the file.
 
-After creating the session, call `start_step(session_id, "code-review", 6)` to initialize the workflow step for the 6 review agents. This returns a `step_id` — a unique identifier for this step.
+Once you have the session ID, if a zing doc exists, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title="Code Review — {branch_name}")` to associate the zing file with the session.
 
-This session ID, step ID (from `start_step`), and the server port will be passed to the shared review steps.
+Then call `step_start(session_id, steps.build-audit)` where `steps.build-audit` is the build-audit step ID from the frontmatter (or the code-review step ID if this is a standalone invocation). This transitions the step from PENDING to STARTED.
+
+The session ID and step ID will be passed to the shared review steps.
 </step>
 
 <step name="read_changed_files">
@@ -52,7 +51,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **server port** to each agent so they can POST findings to the review server.
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle and finding submission.
 </step>
 
 <step name="present_summary">
@@ -74,9 +73,17 @@ Write an empty findings report and exit.
 <step name="check_and_review">
 After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id, "code-review")`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+Otherwise, collect and deduplicate findings from all agents:
 
-When `wait_for_review` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
+1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the build-audit step ID (or code-review step ID for standalone invocations) and `finding_data` is the parsed JSON object.
+
+Then call `review_wait(session_id, step_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
+
+When `review_wait` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
 - **Accepted findings**: Include in the report as-is.
 - **Dropped findings**: Exclude from the report entirely.
 - **Downgraded findings**: Include in the report with their adjusted severity.
@@ -199,8 +206,8 @@ Review is complete when:
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were posted to the review server by subagents
-- [ ] Review UI was opened for batch triage via `wait_for_review()`
+- [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
+- [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
 - [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
