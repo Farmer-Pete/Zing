@@ -37,6 +37,7 @@ def create_app(
             "agent_complete": "agent_complete",
             "step_ready": "ready",
             "review_submitted": "completed",
+            "session_updated": "session_updated",
         }
         dashboard_events = {
             "session_created": "created",

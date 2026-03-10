@@ -9,12 +9,13 @@
 
 <nav class="step-nav">
     {% if session.zing_file %}
-    <a href="/{{ session.session_id }}?tab=plan" class="step-link {% if current_tab == 'plan' %}active{% endif %}">
+    <a href="/{{ session.session_id }}?tab=plan" id="step-tab-plan"
+       class="step-link {% if current_tab == 'plan' %}active{% endif %}">
         Plan
     </a>
     {% endif %}
     {% for step in session.steps %}
-    <a href="/{{ session.session_id }}?step={{ step.step_id }}"
+    <a href="/{{ session.session_id }}?step={{ step.step_id }}" id="step-tab-{{ step.step_id }}"
        class="step-link {% if step.step_id == current_step and current_tab != 'plan' %}active{% endif %}">
         {{ step.step_name }}
         <span class="status-badge status-{{ step.state.value }}">{{ step.state.value }}</span>
@@ -23,11 +24,12 @@
 </nav>
 
 {% if current_tab == 'plan' %}
+<div data-init="@get('/{{ session.session_id }}/stream?active_tab=plan')"></div>
     {% include "fragments/markdown_tab.html" %}
 {% else %}
 <div id="review-root"
      data-signals="{responses: {}, step_id: '{{ current_step }}'}"
-     data-init="@get('/{{ session.session_id }}/stream{% if current_step %}?step={{ current_step }}{% endif %}')">
+     data-init="@get('/{{ session.session_id }}/stream?step={{ current_step }}&active_tab=step')">
 
     <div id="findings-container">
     </div>

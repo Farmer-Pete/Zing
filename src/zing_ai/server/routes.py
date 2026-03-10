@@ -260,6 +260,18 @@ def _map_signals_to_responses(
     return responses
 
 
+def _notification_dot_html(tab_id: str) -> str:
+    """Return a Datastar-compatible element that adds the notification-dot class to a tab.
+
+    Args:
+        tab_id: The DOM id of the tab link element (e.g. "step-tab-<step_id>").
+
+    Returns:
+        An HTML snippet that patches the tab element's class via SSE.
+    """
+    return f'<a id="{html.escape(tab_id)}" class="step-link notification-dot"></a>'
+
+
 @router.get("/{session_id}/stream")
 @datastar_response
 async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
@@ -276,6 +288,9 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
     if not step_id and session.steps:
         step_id = session.steps[-1].step_id
 
+    # Track which tab is active so we can send notification dots for other tabs
+    active_tab = request.query_params.get("active_tab", "step")
+
     async def _generate():  # noqa: ANN202
         """Yield SSE events for existing and new findings."""
         queue: asyncio.Queue[str] = asyncio.Queue()
@@ -285,42 +300,51 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
             if current_session is None:
                 return
 
-            # Find the target step by step_id
-            target_step = None
-            if step_id:
-                for s in current_session.steps:
-                    if s.step_id == step_id:
-                        target_step = s
-                        break
+            # Track finding counts for all steps to detect changes in non-active tabs
+            step_finding_counts: dict[str, int] = {
+                s.step_id: len(s.findings) for s in current_session.steps
+            }
 
-            if target_step is None:
-                return
-
-            # Backfill existing findings
+            # Count of findings already sent for the active step
             seen = 0
-            for finding in target_step.findings:
-                yield SSE.patch_elements(
-                    finding_fragment(finding),
-                    selector="#findings-container",
-                    mode="append",
-                )
-                seen += 1
 
-            # If already ready/completed, show submit UI immediately
-            if target_step.state.value in ("ready", "completed"):
-                yield SSE.patch_elements(
-                    '<div id="review-status" class="submit-banner">'
-                    "All agents complete — ready for review</div>",
-                )
-                yield SSE.patch_elements(
-                    '<div id="submit-section">'
-                    f'<button class="submit-btn" '
-                    f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                    "Submit Review</button></div>",
-                )
-                return
+            # If viewing a step tab, stream its findings
+            if active_tab == "step":
+                # Find the target step by step_id
+                target_step = None
+                if step_id:
+                    for s in current_session.steps:
+                        if s.step_id == step_id:
+                            target_step = s
+                            break
 
-            # Stream new findings as they arrive via queue notifications
+                if target_step is None:
+                    return
+
+                # Backfill existing findings
+                for finding in target_step.findings:
+                    yield SSE.patch_elements(
+                        finding_fragment(finding),
+                        selector="#findings-container",
+                        mode="append",
+                    )
+                    seen += 1
+
+                # If already ready/completed, show submit UI immediately
+                if target_step.state.value in ("ready", "completed"):
+                    yield SSE.patch_elements(
+                        '<div id="review-status" class="submit-banner">'
+                        "All agents complete — ready for review</div>",
+                    )
+                    yield SSE.patch_elements(
+                        '<div id="submit-section">'
+                        f'<button class="submit-btn" '
+                        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
+                        "Submit Review</button></div>",
+                    )
+                    return
+
+            # Stream events (findings for active step + notification dots for other tabs)
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -335,45 +359,69 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if current_session is None:
                     return
 
-                # Re-find the target step by step_id
-                target_step = None
-                if step_id:
+                # Check for notification dots on non-active step tabs
+                for s in current_session.steps:
+                    old_count = step_finding_counts.get(s.step_id, 0)
+                    new_count = len(s.findings)
+                    if new_count > old_count:
+                        step_finding_counts[s.step_id] = new_count
+                        # Only show dot if this is NOT the currently viewed step
+                        if s.step_id != step_id or active_tab == "plan":
+                            yield SSE.patch_elements(
+                                _notification_dot_html(f"step-tab-{s.step_id}"),
+                                mode="morph",
+                            )
+
+                # If zing_file was updated, show dot on the Plan tab (unless viewing it)
+                if (
+                    event == "session_updated"
+                    and active_tab != "plan"
+                    and current_session.zing_file
+                ):
+                    yield SSE.patch_elements(
+                        _notification_dot_html("step-tab-plan"),
+                        mode="morph",
+                    )
+
+                # If viewing a step tab, also stream findings for the active step
+                if active_tab == "step" and step_id:
+                    target_step = None
                     for s in current_session.steps:
                         if s.step_id == step_id:
                             target_step = s
                             break
-                if target_step is None:
-                    return
+                    if target_step is None:
+                        return
 
-                # Yield any new findings since last check
-                for finding in target_step.findings[seen:]:
-                    yield SSE.patch_elements(
-                        finding_fragment(finding),
-                        selector="#findings-container",
-                        mode="append",
-                    )
-                    seen += 1
+                    # Yield any new findings since last check
+                    for finding in target_step.findings[seen:]:
+                        yield SSE.patch_elements(
+                            finding_fragment(finding),
+                            selector="#findings-container",
+                            mode="append",
+                        )
+                        seen += 1
 
-                # Check terminal states
-                if event == "ready" or target_step.state.value in ("ready", "completed"):
-                    yield SSE.patch_elements(
-                        '<div id="review-status" class="submit-banner">'
-                        "All agents complete — ready for review</div>",
-                    )
-                    yield SSE.patch_elements(
-                        '<div id="submit-section">'
-                        f'<button class="submit-btn" '
-                        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                        "Submit Review</button></div>",
-                    )
-                    return
+                    # Check terminal states
+                    if event == "ready" or target_step.state.value in ("ready", "completed"):
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "All agents complete — ready for review</div>",
+                        )
+                        yield SSE.patch_elements(
+                            '<div id="submit-section">'
+                            f'<button class="submit-btn" '
+                            f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
+                            "Submit Review</button></div>",
+                        )
+                        return
 
-                if event == "completed":
-                    yield SSE.patch_elements(
-                        '<div id="review-status" class="submit-banner">'
-                        "Review submitted — thank you!</div>",
-                    )
-                    return
+                    if event == "completed":
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "Review submitted — thank you!</div>",
+                        )
+                        return
         finally:
             # Remove this connection's queue
             queues = _sse_queues.get(session_id, [])
