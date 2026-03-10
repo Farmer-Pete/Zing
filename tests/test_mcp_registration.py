@@ -25,9 +25,9 @@ def test_claude_calls_subprocess_with_correct_args() -> None:
         [
             "claude", "mcp", "add",
             "-s", "user",
-            "-t", "http",
             "zing-ai",
-            "http://127.0.0.1:9876/mcp",
+            "--",
+            "npx", "mcp-remote", "http://127.0.0.1:9876/mcp",
         ],
         check=True,
         capture_output=True,

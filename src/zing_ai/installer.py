@@ -341,12 +341,16 @@ def register_mcp_server(runtime: str) -> None:
 
 
 def _register_mcp_claude() -> None:
-    """Register the Zing MCP server for Claude Code via the CLI."""
+    """Register the Zing MCP server for Claude Code via the CLI.
+
+    Uses mcp-remote (npx) as a stdio-to-HTTP bridge to avoid Claude Code's
+    OAuth discovery issues with direct HTTP transport.
+    """
     if shutil.which("claude") is None:
         logger.warning(
             "claude CLI not found on PATH; skipping MCP server registration. "
-            "Run 'claude mcp add -s user -t http zing-ai "
-            "http://127.0.0.1:9876/mcp' manually."
+            "Run 'claude mcp add -s user zing-ai -- "
+            "npx mcp-remote http://127.0.0.1:9876/mcp' manually."
         )
         return
 
@@ -356,9 +360,9 @@ def _register_mcp_claude() -> None:
             [
                 "claude", "mcp", "add",
                 "-s", "user",
-                "-t", "http",
                 "zing-ai",
-                "http://127.0.0.1:9876/mcp",
+                "--",
+                "npx", "mcp-remote", "http://127.0.0.1:9876/mcp",
             ],
             check=True,
             capture_output=True,
