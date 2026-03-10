@@ -14,13 +14,15 @@ Before asking any questions, explore the codebase to understand the current stat
 
 ### Session setup
 
-After reading the zing doc, check for `session` in its YAML frontmatter. If a `session` value is present, use that as the session ID. If there is no `session` in the frontmatter (or no frontmatter at all), call `create_review()` to get a new session ID, then update the zing doc's frontmatter to include `session: {session_id}`. Save the file after updating.
+After reading the zing doc, parse its YAML frontmatter. Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
 
-The create_review() call requires: session_id (unique identifier), title (human-readable), zing_file (absolute path to the zing doc — resolve using the working directory before calling). Always resolve the zing file path to an absolute path before passing it to create_review().
+If there is no `session` in the frontmatter (or no frontmatter at all), this is a standalone invocation. Call `session_create(title)` to get a new session ID and step IDs, then update the zing doc's frontmatter to include `session: {session_id}` and `steps:` with the returned step ID mapping. Save the file after updating.
 
-After obtaining the session ID, call `start_step(session_id, "planning-questions", {N})` where `{N}` is the number of subagents you will launch. This returns a `step_id` — a unique identifier for this step.
+Once you have the session ID and step IDs, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title=doc_title)` to associate the zing file with the session.
 
-This session ID and step ID (from `start_step`) will be used by subagents to POST their questions to the review server.
+Then call `step_start(session_id, steps.plan)` where `steps.plan` is the plan step ID from the frontmatter. This transitions the plan step from PENDING to STARTED.
+
+The session ID and plan step ID will be used by subagents for agent lifecycle tracking.
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
@@ -76,52 +78,52 @@ Each subagent receives a prompt with:
 {Bulleted list of what exists in the codebase relevant to this area — files found, patterns observed, tech stack details, existing interfaces, gaps identified}
 ```
 
-**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent POSTs its questions to the review server. Include these instructions verbatim in each subagent prompt:
+**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent tracks its lifecycle via MCP tools and returns its findings as JSONL. Include these instructions verbatim in each subagent prompt:
 
-> **Only POST items that require a decision from the user.** Do NOT post statements, analysis results, or confirmations like "X works fine" or "No changes needed" — those belong in your returned findings text, not in the review UI. Every posted item must ask the user to decide something.
+> **Agent lifecycle:** At the very start of your task, call `agent_start(session_id, step_id, name, description)` where `name` is your area name (e.g. "data-model") and `description` is a short phrase describing what you're investigating. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name)`.
+>
+> **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations like "X works fine" or "No changes needed" — those belong in your returned findings text, not in the review UI. Every finding must ask the user to decide something.
 >
 > The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide.
 >
 > **Prefer `choice` type** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
 >
-> **Choice finding** (preferred — use whenever you can suggest options):
+> **Do NOT call `finding_submit` directly.** Instead, format each finding as a JSON line and return them all at the end of your task output using this exact format:
+>
 > ```
-> Call the `submit_finding` MCP tool with:
->   session_id: SESSION_ID
->   step_id: STEP_ID
->   finding: {"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}
+> ## Findings: {area name}
+> ...bulleted findings text...
+>
+> ---JSONL---
+> {"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}
+> {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}
 > ```
 >
-> **Text finding** (only when no reasonable options exist):
-> ```
-> Call the `submit_finding` MCP tool with:
->   session_id: SESSION_ID
->   step_id: STEP_ID
->   finding: {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}
-> ```
+> Each line after `---JSONL---` must be a single valid JSON object. If you have no findings that require user decisions, omit the `---JSONL---` section entirely.
 >
-> If the tool raises an error, check the error message:
-> - `ValueError` = fix the finding data and retry
+> If `agent_start` or `agent_stop` returns an error:
 > - `KeyError` = abort with FATAL error (wrong session/step ID)
-> - `RuntimeError` = abort immediately (step already completed)
->
-> After posting ALL questions, signal completion:
-> ```
-> Call the `mark_agent_complete` MCP tool with:
->   session_id: SESSION_ID
->   step_id: STEP_ID
-> ```
+> - `ValueError` = fix and retry
 
-Replace `PORT`, `SESSION_ID`, and `STEP_ID` in the subagent prompt with the actual port, session ID, and step ID values.
+Replace `SESSION_ID` and `STEP_ID` in the subagent prompt with the actual session ID and plan step ID values.
 
-### Phase C — Collect answers from review UI (main thread)
+### Phase C — Collect results and submit to review UI (main thread)
 
 After all subagents return, check each subagent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-Otherwise, call `wait_for_review(session_id)`. This opens the review UI in the browser where the user can see all the planning questions posted by the subagents and answer them all at once. When the user submits the review, `wait_for_review` returns a list of items — each containing the original question, context, and the user's answer.
+Otherwise, collect and deduplicate findings from all subagents:
 
-1. **Merge findings:** Combine all subagent findings (from their returned text output) into a single understanding of the codebase state.
-2. **Incorporate answers:** Iterate over the returned review items and incorporate the user's answers into your understanding. Use these answers alongside the merged findings when fleshing out the plan in the next step.
+1. **Parse JSONL from each subagent:** For each subagent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all subagents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first subagent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the plan step ID and `finding_data` is the parsed JSON object.
+
+4. **Wait for review:** Call `review_wait(session_id, step_id)` where `step_id` is the plan step ID. This opens the review UI in the browser where the user can see all the planning questions and answer them all at once. When the user submits the review, `review_wait` returns a list of items — each containing the original question, context, and the user's answer.
+
+5. **Merge findings:** Combine all subagent findings (from the bulleted text above the `---JSONL---` marker in each subagent's output) into a single understanding of the codebase state.
+
+6. **Incorporate answers:** Iterate over the returned review items and incorporate the user's answers into your understanding. Use these answers alongside the merged findings when fleshing out the plan in the next step.
 </step>
 
 <step name="flesh_out_document">
