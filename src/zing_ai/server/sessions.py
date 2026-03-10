@@ -126,6 +126,7 @@ class SessionManager:
         session_id: str,
         title: str,
         zing_file: str | None = None,
+        steps: list[str] | None = None,
     ) -> Session:
         """Create a new review session.
 
@@ -133,6 +134,7 @@ class SessionManager:
             session_id: Unique identifier for the session.
             title: Human-readable title for the session.
             zing_file: Absolute path to the zing file, or None if no zing doc.
+            steps: Optional list of step names to pre-create as PENDING steps.
 
         Returns:
             The newly created Session.
@@ -151,6 +153,13 @@ class SessionManager:
                 msg = f"zing_file path does not exist: {zing_file}"
                 raise ValueError(msg)
         session = Session(session_id=session_id, title=title, zing_file=zing_file)
+        if steps:
+            for i, step_name in enumerate(steps):
+                step = WorkflowStep(step_name=step_name, sequence=i)
+                session.steps.append(step)
+                self._steps_by_id[step.step_id] = (session_id, i)
+                key = self._event_key(session_id, step.step_id)
+                self._events[key] = asyncio.Event()
         self._sessions[session_id] = session
         self._persist(session)
         self._notify("session_created", session_id)

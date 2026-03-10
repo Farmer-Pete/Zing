@@ -58,6 +58,26 @@ class TestSessionLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError, msg="zing_file path does not exist"):
             self.manager.create_session("s1", "Test", zing_file="/nonexistent/path.md")
 
+    def test_create_session_with_steps(self) -> None:
+        """Creating a session with steps pre-creates all WorkflowStep objects."""
+        step_names = ["plan", "plan-audit", "build", "build-audit"]
+        session = self.manager.create_session("s1", "Title", steps=step_names)
+        assert len(session.steps) == 4
+        # Each step has the correct name, sequence, and PENDING state
+        for i, name in enumerate(step_names):
+            step = session.steps[i]
+            assert step.step_name == name
+            assert step.sequence == i
+            assert step.state == SessionState.PENDING
+        # All step_ids are unique
+        step_ids = [s.step_id for s in session.steps]
+        assert len(set(step_ids)) == 4
+        # get_step_by_id works for all pre-created steps
+        for step in session.steps:
+            found_session, found_step = self.manager.get_step_by_id(step.step_id)
+            assert found_session.session_id == "s1"
+            assert found_step.step_id == step.step_id
+
     def test_start_step(self) -> None:
         """Starting a step adds it to the session and returns a step_id."""
         self.manager.create_session("s1", "Test")
