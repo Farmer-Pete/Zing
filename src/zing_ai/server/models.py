@@ -250,10 +250,11 @@ class Session(BaseModel):
             }
             data["steps"] = [step]
         # Clean up fields that moved to WorkflowStep
-        data.pop("expected_agents", None)
-        data.pop("completed_agents", None)
-        data.pop("findings", None)
-        data.pop("responses", None)
+        if isinstance(data, dict):
+            data.pop("expected_agents", None)
+            data.pop("completed_agents", None)
+            data.pop("findings", None)
+            data.pop("responses", None)
         return data
 
     @property

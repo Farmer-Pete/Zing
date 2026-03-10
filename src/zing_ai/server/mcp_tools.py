@@ -64,7 +64,10 @@ async def session_create(title: str, steps: list[str] | None = None) -> dict:
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}
     url = f"http://localhost:{_port}/{session_id}"
-    webbrowser.open(url)
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass  # Headless/CI environments may not have a browser
     step_map = {s.step_name: s.step_id for s in session.steps}
     return {"session_id": session_id, "steps": step_map, "url": url}
 
@@ -138,7 +141,10 @@ async def review_wait(session_id: str, step_id: str) -> dict:
     """Block until user submits review for a step. Returns findings + responses."""
     sm = _get_session_manager()
     url = f"http://localhost:{_port}/{session_id}"
-    webbrowser.open(url)
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass  # Headless/CI environments may not have a browser
     try:
         review_response = await sm.wait_for_review(session_id, step_id)
     except KeyError as exc:

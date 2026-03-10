@@ -106,12 +106,18 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
         )
 
     # Build a UserResponse from the remaining fields
-    response = UserResponse(
-        action=body.get("action"),
-        selected=body.get("selected"),
-        answer=body.get("answer"),
-        other_text=body.get("other_text"),
-    )
+    try:
+        response = UserResponse(
+            action=body.get("action"),
+            selected=body.get("selected"),
+            answer=body.get("answer"),
+            other_text=body.get("other_text"),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_response", "message": str(exc)},
+        )
 
     try:
         manager.save_response(session_id, step_id, finding_id, response)
@@ -166,12 +172,24 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
         )
 
     try:
-        _session_from_step, step = manager.get_step_by_id(step_id)
+        session_from_step, step = manager.get_step_by_id(step_id)
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
             detail={"error": "step_not_found", "message": str(exc)},
         ) from exc
+
+    if session_from_step.session_id != session_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "step_session_mismatch",
+                "message": (
+                    f"Step '{step_id}' belongs to session '{session_from_step.session_id}', "
+                    f"not '{session_id}'"
+                ),
+            },
+        )
 
     if step.state.value != "ready":
         raise HTTPException(
@@ -454,7 +472,19 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         seen_logs = len(target_step.logs)
 
                     # Check terminal states
-                    if event == "ready" or target_step.state.value in ("ready", "completed"):
+                    if target_step.state.value == "completed":
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "Review submitted — thank you!</div>",
+                        )
+                        yield SSE.patch_elements(
+                            '<div id="submit-section">'
+                            '<button class="submit-btn"'
+                            ' style="background: #059669; cursor: default;"'
+                            " disabled>Review submitted</button></div>",
+                        )
+                        return
+                    if event == "ready" or target_step.state.value == "ready":
                         yield SSE.patch_elements(
                             '<div id="review-status" class="submit-banner">'
                             "All agents complete — ready for review</div>",

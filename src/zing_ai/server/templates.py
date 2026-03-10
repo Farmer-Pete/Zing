@@ -20,7 +20,18 @@ _formatter = HtmlFormatter(nowrap=True, style="monokai")
 
 
 class _PygmentsRenderer(mistune.HTMLRenderer):
-    """Mistune HTML renderer that syntax-highlights fenced code blocks with Pygments."""
+    """Mistune HTML renderer that syntax-highlights fenced code blocks with Pygments.
+
+    Raw HTML tags in markdown are escaped to prevent XSS.
+    """
+
+    def html(self, text: str) -> str:
+        """Escape raw HTML blocks to prevent stored XSS."""
+        return html.escape(text)
+
+    def inline_html(self, text: str) -> str:
+        """Escape inline raw HTML to prevent stored XSS."""
+        return html.escape(text)
 
     def block_code(self, code: str, info: str | None = None) -> str:
         """Render a fenced code block with Pygments syntax highlighting.

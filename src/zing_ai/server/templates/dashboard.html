@@ -11,7 +11,7 @@
     {% for s in sessions %}
     <li>
         <div>
-            {% if s.state.value == "pending" or s.state.value == "ready" %}
+            {% if s.state.value in ("pending", "started", "ready") %}
             <a href="/{{ s.session_id }}">{{ s.title }}</a>
             {% else %}
             <span class="finding-header">{{ s.title }}</span>

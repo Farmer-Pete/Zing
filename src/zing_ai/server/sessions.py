@@ -88,9 +88,11 @@ class SessionManager:
         return self._data_dir / f"{session_id}.json"
 
     def _persist(self, session: Session) -> None:
-        """Write a session to disk as JSON."""
+        """Write a session to disk as JSON atomically (write-then-rename)."""
         path = self._session_path(session.session_id)
-        path.write_text(session.model_dump_json(indent=2))
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(session.model_dump_json(indent=2))
+        tmp_path.replace(path)
         logger.debug("Persisted session %s to %s", session.session_id, path)
 
     def _load_existing_sessions(self) -> None:
@@ -235,6 +237,7 @@ class SessionManager:
             )
             raise ValueError(msg)
         step.state = SessionState.STARTED
+        self._update_session_state(session)
         self._persist(session)
         self._notify("step_started", session_id)
         logger.info(
@@ -528,6 +531,9 @@ class SessionManager:
         # Lazily initialize responses list with empty UserResponse objects
         if step.responses is None:
             step.responses = [UserResponse() for _ in step.findings]
+        # Extend if findings were added since responses was initialized
+        while len(step.responses) < len(step.findings):
+            step.responses.append(UserResponse())
 
         step.responses[finding_index] = response
         self._persist(session)
@@ -629,7 +635,10 @@ class SessionManager:
             # Re-fetch after await — raises KeyError if session was cleaned up
             _session, step = self.get_step_by_id(step_id)
 
-        responses = step.responses or []
+        responses = step.responses or [UserResponse() for _ in step.findings]
+        # Pad responses if findings were added after responses was initialized
+        while len(responses) < len(step.findings):
+            responses.append(UserResponse())
         items = [
             ReviewItem(finding=finding, response=response)
             for finding, response in zip(step.findings, responses, strict=True)
