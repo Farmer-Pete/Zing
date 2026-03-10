@@ -804,5 +804,58 @@ class TestSaveResponse(unittest.TestCase):
             )
 
 
+class TestAddLog(unittest.TestCase):
+    """Tests for SessionManager.add_log."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_add_three_log_entries(self) -> None:
+        """Add 3 log entries and verify step.logs has 3 entries with correct data."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        self.manager.add_log("s1", step.step_id, "agent-a", "Starting analysis")
+        self.manager.add_log("s1", step.step_id, "agent-b", "Found 3 issues")
+        entry3 = self.manager.add_log("s1", step.step_id, "agent-a", "Analysis complete")
+
+        updated_session = self.manager.get_session("s1")
+        updated_step = updated_session.steps[0]
+        assert len(updated_step.logs) == 3
+
+        assert updated_step.logs[0].agent_name == "agent-a"
+        assert updated_step.logs[0].message == "Starting analysis"
+        assert updated_step.logs[0].timestamp is not None
+
+        assert updated_step.logs[1].agent_name == "agent-b"
+        assert updated_step.logs[1].message == "Found 3 issues"
+        assert updated_step.logs[1].timestamp is not None
+
+        assert updated_step.logs[2].agent_name == "agent-a"
+        assert updated_step.logs[2].message == "Analysis complete"
+
+        # Verify the return value matches
+        assert entry3.agent_name == "agent-a"
+        assert entry3.message == "Analysis complete"
+
+    def test_add_log_wrong_session_raises(self) -> None:
+        """Adding a log with wrong session_id raises ValueError."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        with self.assertRaises(ValueError):
+            self.manager.add_log("wrong-session", step.step_id, "agent", "msg")
+
+    def test_add_log_unknown_step_raises(self) -> None:
+        """Adding a log with unknown step_id raises KeyError."""
+        self.manager.create_session("s1", "Test", steps=[_STEP])
+        with self.assertRaises(KeyError):
+            self.manager.add_log("s1", "nonexistent-step-id", "agent", "msg")
+
+
 if __name__ == "__main__":
     unittest.main()

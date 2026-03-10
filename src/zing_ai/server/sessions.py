@@ -19,6 +19,7 @@ from zing_ai.server.models import (
     Agent,
     AgentState,
     Finding,
+    LogEntry,
     ReviewItem,
     ReviewResponse,
     Session,
@@ -329,6 +330,45 @@ class SessionManager:
             len(step.findings),
         )
         return finding
+
+    def add_log(
+        self, session_id: str, step_id: str, agent_name: str, message: str
+    ) -> LogEntry:
+        """Append a log entry to a workflow step.
+
+        Args:
+            session_id: The session ID that the step must belong to.
+            step_id: The UUID of the workflow step.
+            agent_name: Name of the agent producing the log.
+            message: The log message text.
+
+        Returns:
+            The created LogEntry object.
+
+        Raises:
+            KeyError: If no step with that ID exists.
+            ValueError: If the step doesn't belong to the session.
+        """
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
+
+        entry = LogEntry(agent_name=agent_name, message=message)
+        step.logs.append(entry)
+        self._persist(session)
+        self._notify("log_added", session_id)
+        logger.info(
+            "Added log entry from '%s' to step '%s' (id=%s, total: %d)",
+            agent_name,
+            step.step_name,
+            step_id,
+            len(step.logs),
+        )
+        return entry
 
     def mark_agent_complete(self, session_id: str, step_id: str) -> WorkflowStep:
         """Mark one agent as complete for a workflow step.
