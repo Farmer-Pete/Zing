@@ -197,10 +197,31 @@ class WorkflowStep(BaseModel):
     sequence: int
     findings: list[Finding] = Field(default_factory=list)
     responses: list[UserResponse] | None = None
-    expected_agents: int = 0
-    completed_agents: int = 0
+    agents: list[Agent] = Field(default_factory=list)
+    logs: list[LogEntry] = Field(default_factory=list)
     state: SessionState = SessionState.PENDING
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data: Any) -> Any:
+        """Migrate old session data that used counter fields instead of agent lists."""
+        if not isinstance(data, dict):
+            return data
+        # Drop legacy counter fields, ensure agents list exists
+        data.pop("expected_agents", None)
+        data.pop("completed_agents", None)
+        if "agents" not in data:
+            data["agents"] = []
+        if "logs" not in data:
+            data["logs"] = []
+        # Handle unknown state values (e.g. old data missing STARTED)
+        state = data.get("state")
+        if isinstance(state, str):
+            valid_states = {s.value for s in SessionState}
+            if state not in valid_states:
+                data["state"] = SessionState.PENDING.value
+        return data
 
 
 class Session(BaseModel):
