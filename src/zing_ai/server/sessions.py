@@ -490,6 +490,66 @@ class SessionManager:
             self._notify("step_ready", session_id)
         return step
 
+
+    def save_response(
+        self,
+        session_id: str,
+        step_id: str,
+        finding_id: str,
+        response: UserResponse,
+    ) -> None:
+        """Auto-save a single response for incremental persistence.
+
+        Finds the finding by ID within the step, lazily initializes
+        ``step.responses`` if needed, and stores the response at the
+        matching index.  Does **not** set any event or change step state —
+        that only happens on submit.
+
+        Args:
+            session_id: The session that owns the step.
+            step_id: The UUID of the workflow step.
+            finding_id: The ``id`` of the finding to save a response for.
+            response: The user response to persist.
+
+        Raises:
+            KeyError: If no step with that ID exists.
+            ValueError: If the step doesn't belong to the session, or no
+                finding with the given ID exists in the step.
+        """
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
+
+        # Find the index of the matching finding
+        finding_index: int | None = None
+        for i, finding in enumerate(step.findings):
+            if finding.id == finding_id:
+                finding_index = i
+                break
+        if finding_index is None:
+            msg = (
+                f"No finding with id '{finding_id}' in step '{step.step_name}' "
+                f"(id={step_id})"
+            )
+            raise ValueError(msg)
+
+        # Lazily initialize responses list with empty UserResponse objects
+        if step.responses is None:
+            step.responses = [UserResponse() for _ in step.findings]
+
+        step.responses[finding_index] = response
+        self._persist(session)
+        logger.debug(
+            "Auto-saved response for finding '%s' in step '%s' (id=%s)",
+            finding_id,
+            step.step_name,
+            step_id,
+        )
+
     def submit_responses(
         self,
         session_id: str,

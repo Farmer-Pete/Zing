@@ -679,5 +679,130 @@ class TestAgentLifecycle(unittest.TestCase):
             self.manager.stop_agent("s1", step.step_id, "agent-1")
 
 
+class TestSaveResponse(unittest.TestCase):
+    """Test save_response method for incremental auto-save."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_save_response_stores_at_correct_index(self) -> None:
+        """Add 3 findings, save response for finding 2, verify responses[1] is set."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        f1 = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Finding 1",
+        })
+        f2 = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Finding 2",
+        })
+        f3 = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Finding 3",
+        })
+
+        response = UserResponse(answer="my answer")
+        self.manager.save_response("s1", step.step_id, f2.id, response)
+
+        _, updated_step = self.manager.get_step_by_id(step.step_id)
+        assert updated_step.responses is not None
+        assert len(updated_step.responses) == 3
+        # Finding 2 is at index 1
+        assert updated_step.responses[1].answer == "my answer"
+        # Others should be empty UserResponse objects
+        assert updated_step.responses[0].action is None
+        assert updated_step.responses[0].answer is None
+        assert updated_step.responses[2].action is None
+        assert updated_step.responses[2].answer is None
+
+    def test_save_response_overwrites_previous(self) -> None:
+        """Multiple auto-saves overwrite previous values for the same finding."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        finding = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Q1",
+        })
+
+        self.manager.save_response(
+            "s1", step.step_id, finding.id, UserResponse(answer="first"),
+        )
+        self.manager.save_response(
+            "s1", step.step_id, finding.id, UserResponse(answer="second"),
+        )
+
+        _, updated_step = self.manager.get_step_by_id(step.step_id)
+        assert updated_step.responses is not None
+        assert updated_step.responses[0].answer == "second"
+
+    def test_save_response_lazy_init(self) -> None:
+        """step.responses is initialized lazily on first save."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        finding = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Q1",
+        })
+
+        # Before save, responses should be None
+        _, pre_step = self.manager.get_step_by_id(step.step_id)
+        assert pre_step.responses is None
+
+        self.manager.save_response(
+            "s1", step.step_id, finding.id, UserResponse(answer="hello"),
+        )
+
+        _, post_step = self.manager.get_step_by_id(step.step_id)
+        assert post_step.responses is not None
+
+    def test_save_response_does_not_change_state(self) -> None:
+        """Auto-save does not change step state or set events."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        finding = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Q1",
+        })
+
+        self.manager.save_response(
+            "s1", step.step_id, finding.id, UserResponse(answer="test"),
+        )
+
+        _, updated_step = self.manager.get_step_by_id(step.step_id)
+        assert updated_step.state == SessionState.STARTED
+
+    def test_save_response_invalid_finding_id(self) -> None:
+        """Saving a response for a nonexistent finding raises ValueError."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Q1",
+        })
+
+        with self.assertRaises(ValueError):
+            self.manager.save_response(
+                "s1", step.step_id, "nonexistent", UserResponse(answer="x"),
+            )
+
+    def test_save_response_wrong_session_id(self) -> None:
+        """Saving a response with wrong session ID raises ValueError."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+
+        finding = self.manager.add_finding("s1", step.step_id, {
+            "type": "text", "title": "Q1",
+        })
+
+        with self.assertRaises(ValueError):
+            self.manager.save_response(
+                "wrong-session", step.step_id, finding.id, UserResponse(answer="x"),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
