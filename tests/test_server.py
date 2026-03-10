@@ -56,7 +56,6 @@ class _ServerTestBase(unittest.TestCase):
         self,
         session_id: str = "test-session",
         title: str = "Test Session",
-        expected_agents: int = 1,  # noqa: ARG002 — legacy, kept for caller compat
     ) -> None:
         """Helper to create a session with a default workflow step for testing."""
         session = self.manager.create_session(
@@ -179,7 +178,7 @@ class TestSubmit(_ServerTestBase):
 
     def test_submit_responses(self) -> None:
         """Submitting responses stores them and transitions to completed."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         self._add_finding_and_ready()
 
         resp = self.client.post(
@@ -187,9 +186,8 @@ class TestSubmit(_ServerTestBase):
             json={"step_id": self.step_id, "responses": [{"answer": "Build a review UI"}]},
         )
         self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["items_count"], 1)
+        # Response is SSE (Datastar patches), not JSON
+        self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
 
         session = self.manager.get_session("test-session")
         assert session is not None
@@ -197,7 +195,7 @@ class TestSubmit(_ServerTestBase):
 
     def test_submit_datastar_signals(self) -> None:
         """Submitting Datastar signals maps finding IDs to responses."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         # Add findings of each type via manager
         f_text = self.manager.add_finding(
             "test-session", self.step_id,
@@ -237,8 +235,8 @@ class TestSubmit(_ServerTestBase):
             },
         )
         self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["items_count"], 3)
+        # Response is SSE (Datastar patches), not JSON
+        self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
 
         session = self.manager.get_session("test-session")
         assert session is not None
@@ -251,7 +249,7 @@ class TestSubmit(_ServerTestBase):
 
     def test_submit_with_evaluation_finding(self) -> None:
         """Evaluation findings are auto-acknowledged with empty UserResponse."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         self.manager.add_finding(
             "test-session", self.step_id,
             {
@@ -273,7 +271,7 @@ class TestSubmit(_ServerTestBase):
             json={"step_id": self.step_id, "responses": {f_text.id: "Looks good"}},
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["items_count"], 2)
+        self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
 
         session = self.manager.get_session("test-session")
         assert session is not None
@@ -288,7 +286,7 @@ class TestSubmit(_ServerTestBase):
 
     def test_submit_returns_400_for_invalid_responses(self) -> None:
         """Submitting non-list non-dict responses returns 400."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
         resp = self.client.post(
@@ -296,11 +294,11 @@ class TestSubmit(_ServerTestBase):
             json={"step_id": self.step_id, "responses": "invalid"},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "invalid_responses")
+        self.assertEqual(resp.json()["detail"]["error"], "invalid_responses")
 
     def test_missing_step_id_returns_400(self) -> None:
         """Submitting without step_id returns 400."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
         resp = self.client.post(
@@ -308,7 +306,7 @@ class TestSubmit(_ServerTestBase):
             json={"responses": [{"answer": "test"}]},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "missing_step_id")
+        self.assertEqual(resp.json()["detail"]["error"], "missing_step_id")
 
     def test_invalid_session_returns_404(self) -> None:
         """Submitting to a nonexistent session returns 404."""
@@ -317,11 +315,11 @@ class TestSubmit(_ServerTestBase):
             json={"step_id": "nonexistent-step", "responses": []},
         )
         self.assertEqual(resp.status_code, 404)
-        self.assertEqual(resp.json()["error"], "session_not_found")
+        self.assertEqual(resp.json()["detail"]["error"], "session_not_found")
 
     def test_submit_other_choice(self) -> None:
         """Submitting __other__ choice captures freeform text."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         f_choice = self.manager.add_finding(
             "test-session", self.step_id,
             {
@@ -370,7 +368,7 @@ class TestSSEStream(_ServerTestBase):
 
     def test_backfills_existing_findings(self) -> None:
         """SSE stream includes findings that existed before the connection."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         finding_id = self._add_finding_and_ready()
 
         resp = self.client.get(f"/test-session/stream?step={self.step_id}")
@@ -384,7 +382,7 @@ class TestSSEStream(_ServerTestBase):
 
     def test_stream_receives_new_findings(self) -> None:
         """SSE stream receives findings that are added after connection starts."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         finding = self.manager.add_finding(
             "test-session", self.step_id,
             {"type": "text", "title": "Added after connect?"},
@@ -400,7 +398,7 @@ class TestSSEStream(_ServerTestBase):
 
     def test_stream_shows_submit_button_when_ready(self) -> None:
         """SSE stream sends submit button HTML when all agents complete."""
-        self._create_session(expected_agents=1)
+        self._create_session()
         self.manager.add_finding(
             "test-session", self.step_id,
             {"type": "text", "title": "Quick question"},
@@ -417,7 +415,7 @@ class TestSSEStream(_ServerTestBase):
     def test_submit_unblocks_wait_for_review(self) -> None:
         """Submit endpoint collects responses and unblocks wait_for_review."""
         configure(self.manager, port=9876)
-        self._create_session(session_id="unblock-session", expected_agents=1)
+        self._create_session(session_id="unblock-session")
         finding = self.manager.add_finding(
             "unblock-session", self.step_id,
             {
@@ -645,9 +643,9 @@ class TestConcurrentSessions(_ServerTestBase):
 
     def test_sessions_are_isolated(self) -> None:
         """Findings added to one session don't appear in another."""
-        self._create_session(session_id="session-a", expected_agents=1)
+        self._create_session(session_id="session-a")
         step_id_a = self.step_id
-        self._create_session(session_id="session-b", expected_agents=1)
+        self._create_session(session_id="session-b")
         step_id_b = self.step_id
 
         self.manager.add_finding(
@@ -679,7 +677,7 @@ class TestHTMLEndpoints(_ServerTestBase):
     def test_dashboard(self) -> None:
         """Dashboard returns HTML listing all sessions with correct status badges."""
         self._create_session(session_id="s1", title="First Session")
-        self._create_session(session_id="s2", title="Second Session", expected_agents=1)
+        self._create_session(session_id="s2", title="Second Session")
         step_id_s2 = self.step_id
         # Complete the second session's step so it gets a different status badge
         self.client.post(
@@ -761,7 +759,7 @@ class TestDashboardSSE(_ServerTestBase):
         _dashboard_queues.append(queue)
         try:
             self._create_session(
-                session_id="sse-dash", title="SSE Dashboard Test", expected_agents=1,
+                session_id="sse-dash", title="SSE Dashboard Test",
             )
             # Drain observer events from session creation and step start
             self._drain_queue(queue)
@@ -783,7 +781,7 @@ class TestDashboardSSE(_ServerTestBase):
         _dashboard_queues.append(queue)
         try:
             self._create_session(
-                session_id="sse-sub", title="Submit Test", expected_agents=1,
+                session_id="sse-sub", title="Submit Test",
             )
             self.manager.add_finding(
                 "sse-sub", self.step_id,
@@ -972,7 +970,7 @@ class TestReviewWait(_ServerTestBase):
     def test_review_wait_returns_correct_json(self) -> None:
         """review_wait returns correct JSON with full finding data."""
         configure(self.manager, port=9876)
-        self._create_session(session_id="wait-session", expected_agents=1)
+        self._create_session(session_id="wait-session")
 
         # Add a finding, complete agent lifecycle, then submit responses
         self.manager.add_finding(
@@ -1007,7 +1005,7 @@ class TestReviewWait(_ServerTestBase):
     def test_review_wait_blocks_until_submission(self) -> None:
         """review_wait blocks until the step is submitted."""
         configure(self.manager, port=9876)
-        self._create_session(session_id="block-session", expected_agents=1)
+        self._create_session(session_id="block-session")
 
         self.manager.add_finding(
             "block-session", self.step_id, {"type": "text", "title": "What do you think?"}
@@ -1190,7 +1188,7 @@ class TestMCPFindingSubmit(_ServerTestBase):
 
     def test_submit_text_finding(self) -> None:
         """finding_submit with a text finding stores it in the session step."""
-        self._create_session(session_id="sf-text", expected_agents=1)
+        self._create_session(session_id="sf-text")
         result = asyncio.run(
             finding_submit(
                 session_id="sf-text",
@@ -1209,7 +1207,7 @@ class TestMCPFindingSubmit(_ServerTestBase):
 
     def test_submit_choice_finding(self) -> None:
         """finding_submit with a choice finding preserves options."""
-        self._create_session(session_id="sf-choice", expected_agents=1)
+        self._create_session(session_id="sf-choice")
         result = asyncio.run(
             finding_submit(
                 session_id="sf-choice",
@@ -1247,7 +1245,7 @@ class TestMCPFindingSubmit(_ServerTestBase):
 
     def test_submit_to_completed_step_returns_error(self) -> None:
         """finding_submit to a completed step returns error dict."""
-        self._create_session(session_id="sf-completed", expected_agents=1)
+        self._create_session(session_id="sf-completed")
 
         # Add a finding, start+stop agent to transition to READY, then submit responses
         self.manager.add_finding(

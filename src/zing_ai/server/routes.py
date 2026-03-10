@@ -12,7 +12,7 @@ from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.fastapi import datastar_response
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from zing_ai.server.models import Finding, ResponseAction, UserResponse
@@ -140,21 +140,24 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
     if session is None:
-        return _session_not_found(session_id)
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "session_not_found", "message": f"Session '{session_id}' not found"},
+        )
 
     try:
         body: dict[str, Any] = await request.json()
     except json.JSONDecodeError:
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+            detail={"error": "invalid_json", "message": "Request body is not valid JSON"},
         )
 
     step_id = body.get("step_id")
     if not step_id:
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={
+            detail={
                 "error": "missing_step_id",
                 "message": (
                     "step_id is required. Specify the workflow step to submit responses for."
@@ -165,15 +168,15 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     try:
         _session_from_step, step = manager.get_step_by_id(step_id)
     except KeyError as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=404,
-            content={"error": "step_not_found", "message": str(exc)},
-        )
+            detail={"error": "step_not_found", "message": str(exc)},
+        ) from exc
 
     if step.state.value != "ready":
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "error": "invalid_state",
                 "message": (
                     f"Step '{step.step_name}' (id={step_id}) in session '{session_id}' is in "
@@ -193,18 +196,21 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
         # Datastar signal submission — map finding IDs to responses
         responses = _map_signals_to_responses(step.findings, raw_responses)
     else:
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={"error": "invalid_responses", "message": "responses must be a list or object"},
+            detail={
+                "error": "invalid_responses",
+                "message": "responses must be a list or object",
+            },
         )
 
     try:
         review = manager.submit_responses(session_id, step_id, responses)
     except ValueError as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={"error": "response_count_mismatch", "message": str(exc)},
-        )
+            detail={"error": "response_count_mismatch", "message": str(exc)},
+        ) from exc
     logger.info(
         "Session %s step '%s' (id=%s) submitted with %d responses",
         session_id,
