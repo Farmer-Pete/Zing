@@ -179,6 +179,19 @@
         .step-link { padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 6px; text-decoration: none; color: #1a1a1a; background: #fff; font-size: 0.875rem; }
         .step-link.active { border-color: #2563eb; background: #eff6ff; }
         .step-link:hover { border-color: #9ca3af; }
+
+        /* Animations */
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .status-started { background: #dbeafe; color: #1e40af; }
+        .status-started::before { content: ''; display: inline-block; width: 0.75em; height: 0.75em; border: 2px solid #1e40af; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 0.375rem; vertical-align: middle; }
+
+        .agent-running::before { content: ''; display: inline-block; width: 0.5em; height: 0.5em; background: #2563eb; border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; margin-right: 0.375rem; }
+        .agent-completed::before { content: '✓ '; color: #059669; }
+
+        .notification-dot { position: relative; }
+        .notification-dot::after { content: ''; position: absolute; top: 2px; right: 2px; width: 8px; height: 8px; background: #ef4444; border-radius: 50%; }
     </style>
 </head>
 <body>
