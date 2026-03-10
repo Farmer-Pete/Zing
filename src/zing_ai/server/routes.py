@@ -13,7 +13,6 @@ from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import TypeAdapter, ValidationError
 
 from zing_ai.server.models import Finding, ResponseAction, UserResponse
 from zing_ai.server.templates import render
@@ -74,9 +73,13 @@ def finding_fragment(finding: Finding) -> str:
     return render("fragments/finding.html", finding=finding)
 
 
-@router.post("/{session_id}/steps")
-async def post_start_step(session_id: str, request: Request) -> JSONResponse:
-    """Start a pre-created workflow step, transitioning it from PENDING to STARTED."""
+@router.post("/{session_id}/save-response")
+async def post_save_response(session_id: str, request: Request) -> JSONResponse:
+    """Auto-save a single finding response on blur/change events.
+
+    Accepts JSON with ``step_id``, ``finding_id``, and response fields
+    (``action``, ``selected``, ``answer``, ``other_text``).
+    """
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
         return _session_not_found(session_id)
@@ -90,184 +93,38 @@ async def post_start_step(session_id: str, request: Request) -> JSONResponse:
         )
 
     step_id = body.get("step_id")
-    if not step_id:
+    finding_id = body.get("finding_id")
+    if not step_id or not finding_id:
         return JSONResponse(
             status_code=400,
             content={
-                "error": "missing_step_id",
-                "message": "step_id is required",
+                "error": "missing_fields",
+                "message": "step_id and finding_id are required",
             },
         )
 
+    # Build a UserResponse from the remaining fields
+    response = UserResponse(
+        action=body.get("action"),
+        selected=body.get("selected"),
+        answer=body.get("answer"),
+        other_text=body.get("other_text"),
+    )
+
     try:
-        step = manager.start_step(session_id, step_id)
+        manager.save_response(session_id, step_id, finding_id, response)
     except KeyError as exc:
         return JSONResponse(
             status_code=404,
-            content={"error": "step_not_found", "message": str(exc)},
+            content={"error": "not_found", "message": str(exc)},
         )
     except ValueError as exc:
         return JSONResponse(
-            status_code=409,
-            content={"error": "invalid_state", "message": str(exc)},
-        )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "started",
-            "step_id": step.step_id,
-            "step_name": step.step_name,
-            "sequence": step.sequence,
-        },
-    )
-
-
-@router.post("/{session_id}/findings")
-async def post_finding(session_id: str, request: Request) -> JSONResponse:
-    """Accept a finding from a subagent and add it to a workflow step."""
-    manager = request.app.state.session_manager
-    if manager.get_session(session_id) is None:
-        logger.warning("Finding rejected: session '%s' does not exist", session_id)
-        return _session_not_found(session_id)
-
-    try:
-        body: dict[str, Any] = await request.json()
-    except json.JSONDecodeError:
-        logger.warning(
-            "Finding rejected for session '%s': request body is not valid JSON",
-            session_id,
-        )
-        return JSONResponse(
             status_code=400,
-            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
+            content={"error": "invalid_request", "message": str(exc)},
         )
 
-    step_id = body.pop("step_id", None)
-    if not step_id:
-        logger.warning(
-            "Finding rejected for session '%s': missing step_id (body keys: %s)",
-            session_id,
-            list(body.keys()),
-        )
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "missing_step_id",
-                "message": "step_id is required. Use the step_id returned by start_step.",
-            },
-        )
-
-    adapter = TypeAdapter(Finding)
-    try:
-        adapter.validate_python(body)
-    except ValidationError as exc:
-        details = [
-            {"field": e["loc"][-1] if e["loc"] else "unknown", "error": e["msg"]}
-            for e in exc.errors()
-        ]
-        logger.warning(
-            "Finding rejected for session '%s' step '%s': validation failed: %s (input: %s)",
-            session_id,
-            step_id,
-            details,
-            {k: v for k, v in body.items() if k != "body"},
-        )
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "validation_error",
-                "message": "Finding validation failed",
-                "details": details,
-            },
-        )
-
-    try:
-        finding = manager.add_finding(session_id, step_id, body)
-    except KeyError as exc:
-        logger.warning(
-            "Finding rejected for session '%s': step '%s' not found",
-            session_id,
-            step_id,
-        )
-        return JSONResponse(
-            status_code=404,
-            content={"error": "step_not_found", "message": str(exc)},
-        )
-    except ValueError as exc:
-        logger.warning(
-            "Finding rejected for session '%s' step '%s': %s",
-            session_id,
-            step_id,
-            exc,
-        )
-        return JSONResponse(
-            status_code=409,
-            content={"error": "invalid_state", "message": str(exc)},
-        )
-
-    logger.info("Finding added to session %s (step_id=%s): %s", session_id, step_id, finding.type)
-    return JSONResponse(
-        status_code=200,
-        content={"status": "ok", "finding_id": finding.id},
-    )
-
-
-@router.post("/{session_id}/agent-complete")
-async def post_agent_complete(session_id: str, request: Request) -> JSONResponse:
-    """Signal that one subagent has finished producing findings for a workflow step."""
-    manager = request.app.state.session_manager
-    if manager.get_session(session_id) is None:
-        return _session_not_found(session_id)
-
-    try:
-        body: dict[str, Any] = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "invalid_json", "message": "Request body is not valid JSON"},
-        )
-
-    step_id = body.get("step_id")
-    if not step_id:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "missing_step_id",
-                "message": "step_id is required. Use the step_id returned by start_step.",
-            },
-        )
-
-    try:
-        step = manager.mark_agent_complete(session_id, step_id)
-    except KeyError as exc:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "step_not_found", "message": str(exc)},
-        )
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=409,
-            content={"error": "invalid_state", "message": str(exc)},
-        )
-
-    logger.info(
-        "Agent complete for session %s (step_id=%s, %d/%d)",
-        session_id,
-        step_id,
-        step.completed_agents,
-        step.expected_agents,
-    )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "ok",
-            "step_id": step_id,
-            "step_name": step.step_name,
-            "completed_agents": step.completed_agents,
-            "expected_agents": step.expected_agents,
-            "state": step.state.value,
-        },
-    )
+    return JSONResponse(status_code=200, content={"status": "ok"})
 
 
 @router.post("/{session_id}/submit")
