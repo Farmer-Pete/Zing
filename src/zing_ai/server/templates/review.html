@@ -7,18 +7,24 @@
 <h1>{{ session.title }}</h1>
 <p class="finding-meta">Session: {{ session.session_id }} | State: <span class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span></p>
 
-{% if session.steps | length > 1 %}
 <nav class="step-nav">
+    {% if session.zing_file %}
+    <a href="/{{ session.session_id }}?tab=plan" class="step-link {% if current_tab == 'plan' %}active{% endif %}">
+        Plan
+    </a>
+    {% endif %}
     {% for step in session.steps %}
     <a href="/{{ session.session_id }}?step={{ step.step_id }}"
-       class="step-link {% if step.step_id == current_step %}active{% endif %}">
+       class="step-link {% if step.step_id == current_step and current_tab != 'plan' %}active{% endif %}">
         {{ step.step_name }}
         <span class="status-badge status-{{ step.state.value }}">{{ step.state.value }}</span>
     </a>
     {% endfor %}
 </nav>
-{% endif %}
 
+{% if current_tab == 'plan' %}
+    {% include "fragments/markdown_tab.html" %}
+{% else %}
 <div id="review-root"
      data-signals="{responses: {}, step_id: '{{ current_step }}'}"
      data-init="@get('/{{ session.session_id }}/stream{% if current_step %}?step={{ current_step }}{% endif %}')">
@@ -32,4 +38,5 @@
     <div id="submit-section">
     </div>
 </div>
+{% endif %}
 {% endblock %}

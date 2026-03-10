@@ -6,6 +6,7 @@ import asyncio
 import html
 import json
 import logging
+import pathlib
 from collections import defaultdict
 from typing import Any
 
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from zing_ai.server.models import Finding, ResponseAction, UserResponse
-from zing_ai.server.templates import render
+from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger("zing_ai.server")
 
@@ -450,10 +451,26 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     if session is None:
         return _session_not_found(session_id)
 
+    tab = request.query_params.get("tab")
+    plan_html = None
+    current_tab = None
+
+    if tab == "plan" and session.zing_file:
+        current_tab = "plan"
+        zing_path = pathlib.Path(session.zing_file)
+        if zing_path.is_file():
+            plan_html = render_markdown(zing_path.read_text(encoding="utf-8"))
+
     # Determine which step to display (by step_id)
     step_id = request.query_params.get("step")
     if not step_id and session.steps:
         step_id = session.steps[-1].step_id
 
-    html = render("review.html", session=session, current_step=step_id)
-    return HTMLResponse(content=html)
+    page_html = render(
+        "review.html",
+        session=session,
+        current_step=step_id,
+        current_tab=current_tab,
+        plan_html=plan_html,
+    )
+    return HTMLResponse(content=page_html)

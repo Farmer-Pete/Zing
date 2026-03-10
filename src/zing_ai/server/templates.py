@@ -23,8 +23,14 @@ class _PygmentsRenderer(mistune.HTMLRenderer):
     """Mistune HTML renderer that syntax-highlights fenced code blocks with Pygments."""
 
     def block_code(self, code: str, info: str | None = None) -> str:
-        """Render a fenced code block with Pygments syntax highlighting."""
+        """Render a fenced code block with Pygments syntax highlighting.
+
+        Mermaid blocks are rendered as ``<pre class="mermaid">`` so the
+        Mermaid JS client-side library can pick them up.
+        """
         lang = info.split()[0] if info else ""
+        if lang == "mermaid":
+            return f'<pre class="mermaid">{html.escape(code)}</pre>\n'
         try:
             lexer = get_lexer_by_name(lang, stripall=True) if lang else guess_lexer(code)
         except ClassNotFound:
@@ -51,6 +57,15 @@ def _render_markdown(text: str | None) -> markupsafe.Markup:
     except Exception:
         logger.exception("Markdown rendering failed, falling back to plain text")
         return markupsafe.Markup(f"<pre>{html.escape(text)}</pre>")
+
+
+def render_markdown(text: str) -> markupsafe.Markup:
+    """Render markdown text to HTML with syntax-highlighted code blocks.
+
+    Public wrapper around the internal markdown renderer for use outside
+    of Jinja2 templates (e.g. rendering zing file content in route handlers).
+    """
+    return _render_markdown(text)
 
 
 _env = Environment(
