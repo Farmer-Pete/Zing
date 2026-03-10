@@ -28,7 +28,7 @@
     {% include "fragments/markdown_tab.html" %}
 {% else %}
 <div id="review-root"
-     data-signals="{responses: {}, step_id: '{{ current_step }}'}"
+     data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}"
      data-init="@get('/{{ session.session_id }}/stream?step={{ current_step }}&active_tab=step')">
 
     <div id="findings-container">

@@ -62,16 +62,17 @@ def _notify_dashboard_connections(event: str) -> None:
         queue.put_nowait(event)
 
 
-def finding_fragment(finding: Finding) -> str:
+def finding_fragment(finding: Finding, session_id: str) -> str:
     """Render a single finding as an HTML fragment.
 
     Args:
         finding: The finding model to render.
+        session_id: The session ID for auto-save POST URLs.
 
     Returns:
         Rendered HTML string for the finding.
     """
-    return render("fragments/finding.html", finding=finding)
+    return render("fragments/finding.html", finding=finding, session_id=session_id)
 
 
 @router.post("/{session_id}/save-response")
@@ -324,7 +325,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 # Backfill existing findings
                 for finding in target_step.findings:
                     yield SSE.patch_elements(
-                        finding_fragment(finding),
+                        finding_fragment(finding, session_id),
                         selector="#findings-container",
                         mode="append",
                     )
@@ -396,7 +397,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     # Yield any new findings since last check
                     for finding in target_step.findings[seen:]:
                         yield SSE.patch_elements(
-                            finding_fragment(finding),
+                            finding_fragment(finding, session_id),
                             selector="#findings-container",
                             mode="append",
                         )
@@ -514,11 +515,30 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     if not step_id and session.steps:
         step_id = session.steps[-1].step_id
 
+    # Build saved responses dict for Datastar signal initialization
+    saved_responses: dict[str, str] = {}
+    if step_id:
+        for s in session.steps:
+            if s.step_id == step_id and s.responses:
+                for i, finding in enumerate(s.findings):
+                    if i < len(s.responses):
+                        resp = s.responses[i]
+                        if resp.action is not None:
+                            saved_responses[finding.id] = resp.action.value
+                        elif resp.selected is not None:
+                            saved_responses[finding.id] = resp.selected
+                            if resp.other_text is not None:
+                                saved_responses[f"{finding.id}_other"] = resp.other_text
+                        elif resp.answer is not None:
+                            saved_responses[finding.id] = resp.answer
+                break
+
     page_html = render(
         "review.html",
         session=session,
         current_step=step_id,
         current_tab=current_tab,
         plan_html=plan_html,
+        saved_responses=saved_responses,
     )
     return HTMLResponse(content=page_html)

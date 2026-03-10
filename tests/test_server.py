@@ -452,7 +452,7 @@ class TestFindingFragment(unittest.TestCase):
     def test_text_finding_renders_textarea(self) -> None:
         """Text finding renders with a textarea and data-bind."""
         finding = TextFinding(id="txt1", title="What do you think?", body="Some **markdown**")
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("finding-txt1", html)
         self.assertIn("<textarea", html)
         self.assertIn('data-bind="responses.txt1"', html)
@@ -461,7 +461,7 @@ class TestFindingFragment(unittest.TestCase):
     def test_text_finding_with_context(self) -> None:
         """Text finding renders context when provided."""
         finding = TextFinding(id="txt2", title="Your thoughts?", context="Some context")
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("Some context", html)
 
     def test_text_finding_with_markdown_body(self) -> None:
@@ -471,7 +471,7 @@ class TestFindingFragment(unittest.TestCase):
             title="Architecture review",
             body="Using **bold** and `inline code` in the body.",
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("finding-body", html)
         self.assertIn("<strong>bold</strong>", html)
         self.assertIn("<code>inline code</code>", html)
@@ -487,7 +487,7 @@ class TestFindingFragment(unittest.TestCase):
                 ChoiceOption(label="B", description="Option B"),
             ],
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("finding-ch1", html)
         self.assertIn('type="radio"', html)
         self.assertIn('data-bind="responses.ch1"', html)
@@ -504,7 +504,7 @@ class TestFindingFragment(unittest.TestCase):
             title="Pick one",
             options=[ChoiceOption(label="A", description="Option A")],
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("__other__", html)
         self.assertIn("data-show", html)
         self.assertIn("ch2_other", html)
@@ -520,7 +520,7 @@ class TestFindingFragment(unittest.TestCase):
             confidence="high",
             location=Location(file="src/main.py", line=5),
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("finding-tri1", html)
         self.assertIn("Unused import os", html)
         self.assertIn("src/main.py:5", html)
@@ -553,7 +553,7 @@ class TestFindingFragment(unittest.TestCase):
                 WarningSign(name="Only one approach", found=False),
             ],
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("finding-eval1", html)
         self.assertIn("Pass 1: Design Fundamentals", html)
         self.assertIn("eval-table", html)
@@ -585,7 +585,7 @@ class TestFindingFragment(unittest.TestCase):
                 CriterionRating(name="Code Quality", rating="adequate", justification="Decent"),
             ],
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("Code Quality", html)
         self.assertIn("badge-adequate", html)
         # Should not render litmus or warning tables
@@ -1105,7 +1105,7 @@ class TestTriageEnumValidation(_ServerTestBase):
         assert finding.location is not None
         self.assertEqual(finding.location.file, "src/main.py")
         self.assertEqual(finding.location.line, 42)
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("src/main.py:42", html)
 
     def test_location_without_line(self) -> None:
@@ -1119,7 +1119,7 @@ class TestTriageEnumValidation(_ServerTestBase):
                 "location": {"file": "src/main.py"},
             },
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("src/main.py", html)
         self.assertNotIn(":null", html)
         self.assertNotIn(":None", html)
@@ -1138,7 +1138,7 @@ class TestTriageEnumValidation(_ServerTestBase):
                 ],
             },
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         # Action buttons still present
         self.assertIn("accept", html)
         self.assertIn("drop", html)
@@ -1159,7 +1159,7 @@ class TestTriageEnumValidation(_ServerTestBase):
                 "category": "style", "severity": "low", "confidence": "high",
             },
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("accept", html)
         self.assertNotIn("triage-options", html)
 
@@ -1173,7 +1173,7 @@ class TestTriageEnumValidation(_ServerTestBase):
                 "category": "architecture", "severity": "info", "confidence": "low",
             },
         )
-        html = finding_fragment(finding)
+        html = finding_fragment(finding, "test-session")
         self.assertIn("badge-info", html)
 
 
