@@ -10,11 +10,14 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from zing_ai.server.models import (
+    Agent,
+    AgentState,
     Finding,
     ReviewItem,
     ReviewResponse,
@@ -376,6 +379,114 @@ class SessionManager:
         self._persist(session)
         self._notify("agent_complete", session_id)
         if step.state == SessionState.READY:
+            self._notify("step_ready", session_id)
+        return step
+
+    def start_agent(
+        self,
+        session_id: str,
+        step_id: str,
+        name: str,
+        description: str = "",
+    ) -> Agent:
+        """Register and start an agent for a workflow step.
+
+        Creates an Agent in RUNNING state and appends it to the step's agent list.
+
+        Args:
+            session_id: The session containing the step.
+            step_id: The UUID of the workflow step.
+            name: Unique name identifying the agent within this step.
+            description: Optional description of what the agent does.
+
+        Returns:
+            The newly created Agent.
+
+        Raises:
+            KeyError: If the session or step does not exist.
+            ValueError: If the step doesn't belong to the session.
+        """
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
+        agent = Agent(name=name, description=description, state=AgentState.RUNNING)
+        step.agents.append(agent)
+        self._persist(session)
+        self._notify("agent_started", session_id)
+        logger.info(
+            "Started agent '%s' for step '%s' (id=%s) in session %s",
+            name,
+            step.step_name,
+            step_id,
+            session_id,
+        )
+        return agent
+
+    def stop_agent(
+        self,
+        session_id: str,
+        step_id: str,
+        name: str,
+    ) -> WorkflowStep:
+        """Stop a running agent and optionally transition the step to READY.
+
+        Sets the agent state to COMPLETED and records its completion time.
+        If all agents in the step are now COMPLETED, transitions the step to READY.
+
+        Args:
+            session_id: The session containing the step.
+            step_id: The UUID of the workflow step.
+            name: The name of the agent to stop.
+
+        Returns:
+            The updated WorkflowStep.
+
+        Raises:
+            KeyError: If the session, step, or agent does not exist.
+            ValueError: If the step doesn't belong to the session, or the
+                agent is already COMPLETED.
+        """
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
+        agent = None
+        for a in step.agents:
+            if a.name == name:
+                agent = a
+                break
+        if agent is None:
+            raise KeyError(f"No agent named '{name}' found in step '{step_id}'")
+        if agent.state == AgentState.COMPLETED:
+            raise ValueError(f"Agent '{name}' is already completed in step '{step_id}'")
+        agent.state = AgentState.COMPLETED
+        agent.completed_at = datetime.now()
+        logger.info(
+            "Stopped agent '%s' for step '%s' (id=%s) in session %s",
+            name,
+            step.step_name,
+            step_id,
+            session_id,
+        )
+        all_done = all(a.state == AgentState.COMPLETED for a in step.agents)
+        if all_done:
+            step.state = SessionState.READY
+            self._update_session_state(session)
+            logger.info(
+                "All agents completed — step '%s' (id=%s) is now READY",
+                step.step_name,
+                step_id,
+            )
+        self._persist(session)
+        self._notify("agent_stopped", session_id)
+        if all_done:
             self._notify("step_ready", session_id)
         return step
 

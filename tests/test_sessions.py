@@ -609,5 +609,75 @@ class TestWaitForReview(unittest.TestCase):
         asyncio.run(_run())
 
 
+class TestAgentLifecycle(unittest.TestCase):
+    """Test start_agent and stop_agent methods."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_start_agent_creates_running_agent(self) -> None:
+        """start_agent creates an Agent in RUNNING state."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        agent = self.manager.start_agent("s1", step.step_id, "agent-1", "First agent")
+        assert agent.name == "agent-1"
+        assert agent.description == "First agent"
+        assert agent.state.value == "running"
+        assert agent.completed_at is None
+
+    def test_stop_agent_transitions_to_completed(self) -> None:
+        """stop_agent transitions agent to COMPLETED state."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.start_agent("s1", step.step_id, "agent-2")
+
+        updated = self.manager.stop_agent("s1", step.step_id, "agent-1")
+        stopped = [a for a in updated.agents if a.name == "agent-1"][0]
+        assert stopped.state.value == "completed"
+        assert stopped.completed_at is not None
+
+    def test_three_agents_step_transitions(self) -> None:
+        """Start 3 agents, stop 2 -> step still STARTED, stop 3rd -> step READY."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "a1")
+        self.manager.start_agent("s1", step.step_id, "a2")
+        self.manager.start_agent("s1", step.step_id, "a3")
+
+        updated = self.manager.stop_agent("s1", step.step_id, "a1")
+        assert updated.state == SessionState.STARTED
+
+        updated = self.manager.stop_agent("s1", step.step_id, "a2")
+        assert updated.state == SessionState.STARTED
+
+        updated = self.manager.stop_agent("s1", step.step_id, "a3")
+        assert updated.state == SessionState.READY
+
+    def test_stop_agent_unknown_name_raises(self) -> None:
+        """stop_agent raises KeyError if agent name not found."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+
+        with self.assertRaises(KeyError):
+            self.manager.stop_agent("s1", step.step_id, "nonexistent")
+
+    def test_stop_agent_twice_raises(self) -> None:
+        """Stopping the same agent twice raises ValueError."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
+        with self.assertRaises(ValueError):
+            self.manager.stop_agent("s1", step.step_id, "agent-1")
+
+
 if __name__ == "__main__":
     unittest.main()
