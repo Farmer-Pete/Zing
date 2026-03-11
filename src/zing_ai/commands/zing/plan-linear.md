@@ -167,7 +167,14 @@ End with: "Zing! Linear tickets created."
 
 Then use AskUserQuestion to ask the user what they'd like to do next:
 - Option 1: "Start build" — invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing plan file
-- Option 2: "Not now" — end the session without invoking anything
+- Option 2: "Start build (fresh context)" — print the following and stop:
+  ```
+  Run these commands to start the build with a clean context window:
+  /clear
+  /zing:build {file_path}
+  ```
+  where `{file_path}` is the path to the zing plan file. Do NOT invoke the build skill — just print these instructions and end.
+- Option 3: "Not now" — end the session without invoking anything
 </step>
 
 </process>

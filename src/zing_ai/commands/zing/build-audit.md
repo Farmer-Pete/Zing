@@ -105,10 +105,17 @@ Reviewed on {YYYY-MM-DD} against `{base_branch}`. {count} files changed across {
 {relevant code snippet}
 `` `
 
+**Approach:** {the user's selected approach — see instructions below}
+
 ---
 
 ### 2. ...
 ```
+
+**Including the selected approach:** Each `ReviewItem` returned by `review_wait()` contains a `response` with `selected` and `other_text` fields. For each finding in the report:
+- If `response.selected` is set and is NOT `"__other__"`: use the `selected` value as the approach text (it will match one of the finding's `options[].label` values — include the matching option's `description` too, e.g. "**Approach:** Add guard clause — Check for None and return a 404, simple minimal change").
+- If `response.selected` is `"__other__"` and `response.other_text` is set: use the `other_text` as the approach (e.g. "**Approach:** Wrap in a try/except and log the error instead").
+- If `response.selected` is not set (no approach was chosen): omit the **Approach:** line entirely for that finding.
 
 After writing, tell the user:
 ```
