@@ -119,6 +119,22 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
             content={"error": "invalid_response", "message": str(exc)},
         )
 
+    # Merge with existing response to preserve fields from earlier saves
+    # (e.g. selecting an approach shouldn't clear a previously-set action)
+    try:
+        _, step = manager.get_step_by_id(step_id)
+        idx = next(i for i, f in enumerate(step.findings) if f.id == finding_id)
+        if step.responses and idx < len(step.responses):
+            existing = step.responses[idx]
+            response = UserResponse(
+                action=response.action if response.action is not None else existing.action,
+                selected=response.selected if response.selected is not None else existing.selected,
+                answer=response.answer if response.answer is not None else existing.answer,
+                other_text=response.other_text if response.other_text is not None else existing.other_text,
+            )
+    except (KeyError, StopIteration):
+        pass  # No existing response to merge with; proceed with new one
+
     try:
         manager.save_response(session_id, step_id, finding_id, response)
     except KeyError as exc:
@@ -283,7 +299,19 @@ def _map_signals_to_responses(
             action = None
             if isinstance(value, str) and value in {a.value for a in ResponseAction}:
                 action = ResponseAction(value)
-            responses.append(UserResponse(action=action))
+            # Extract selected approach (if any)
+            approach_key = f"{finding.id}_approach"
+            selected = signals.get(approach_key)
+            selected = selected if isinstance(selected, str) else None
+            other_text = None
+            if selected == "__other__":
+                other_key = f"{finding.id}_approach_other"
+                raw_other = signals.get(other_key)
+                if isinstance(raw_other, str) and raw_other.strip():
+                    other_text = raw_other.strip()
+            responses.append(
+                UserResponse(action=action, selected=selected, other_text=other_text)
+            )
         elif finding.type == "evaluation":
             responses.append(UserResponse())
         else:

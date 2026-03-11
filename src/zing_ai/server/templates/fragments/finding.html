@@ -60,11 +60,24 @@
     <div class="triage-options">
         <div class="triage-options-label">Suggested approaches:</div>
         {% for option in finding.options %}
-        <div class="triage-option">
-            <div class="option-label">{{ option.label }}</div>
-            <div class="option-description">{{ option.description }}</div>
-        </div>
+        <label class="option-card">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="{{ option.label }}" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach']})">
+            <div class="option-content">
+                <div class="option-label">{{ option.label }}</div>
+                <div class="option-description">{{ option.description }}</div>
+            </div>
+        </label>
         {% endfor %}
+        <label class="option-card">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="__other__" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach']})">
+            <div class="option-content">
+                <div class="option-label">Other</div>
+                <div class="option-description">Describe a different approach</div>
+            </div>
+        </label>
+        <div data-show="$responses['{{ finding.id }}_approach'] === '__other__'" style="margin-top: 0.5rem;">
+            <textarea data-bind="responses.{{ finding.id }}_approach_other" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach'], other_text: $responses['{{ finding.id }}_approach_other']})" placeholder="Describe your preferred approach..."></textarea>
+        </div>
     </div>
     {% endif %}
 </div>
