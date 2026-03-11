@@ -171,9 +171,10 @@ class TestSubmit(_ServerTestBase):
         if finding_data is None:
             finding_data = {"type": "text", "title": "What is the goal?"}
         finding = self.manager.add_finding(session_id, self.step_id, finding_data)
-        # Transition step to ready by starting and stopping an agent
+        # Transition step to ready by starting and stopping an agent, then marking ready
         self.manager.start_agent(session_id, self.step_id, "test-agent")
         self.manager.stop_agent(session_id, self.step_id, "test-agent")
+        self.manager.mark_step_ready(session_id, self.step_id)
         return finding.id
 
     def test_submit_responses(self) -> None:
@@ -221,6 +222,7 @@ class TestSubmit(_ServerTestBase):
         # Transition step to ready
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
 
         # Submit as Datastar signals (responses is a dict)
         resp = self.client.post(
@@ -265,6 +267,7 @@ class TestSubmit(_ServerTestBase):
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
 
         resp = self.client.post(
             "/test-session/submit",
@@ -289,6 +292,7 @@ class TestSubmit(_ServerTestBase):
         self._create_session()
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
         resp = self.client.post(
             "/test-session/submit",
             json={"step_id": self.step_id, "responses": "invalid"},
@@ -301,6 +305,7 @@ class TestSubmit(_ServerTestBase):
         self._create_session()
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
         resp = self.client.post(
             "/test-session/submit",
             json={"responses": [{"answer": "test"}]},
@@ -329,6 +334,7 @@ class TestSubmit(_ServerTestBase):
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
 
         resp = self.client.post(
             "/test-session/submit",
@@ -364,6 +370,7 @@ class TestSSEStream(_ServerTestBase):
         finding = self.manager.add_finding(session_id, self.step_id, finding_data)
         self.manager.start_agent(session_id, self.step_id, "test-agent")
         self.manager.stop_agent(session_id, self.step_id, "test-agent")
+        self.manager.mark_step_ready(session_id, self.step_id)
         return finding.id
 
     def test_backfills_existing_findings(self) -> None:
@@ -389,6 +396,7 @@ class TestSSEStream(_ServerTestBase):
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
 
         resp = self.client.get(f"/test-session/stream?step={self.step_id}")
         self.assertEqual(resp.status_code, 200)
@@ -405,6 +413,7 @@ class TestSSEStream(_ServerTestBase):
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
         self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
 
         resp = self.client.get(f"/test-session/stream?step={self.step_id}")
         self.assertEqual(resp.status_code, 200)
@@ -425,6 +434,7 @@ class TestSSEStream(_ServerTestBase):
         )
         self.manager.start_agent("unblock-session", self.step_id, "test-agent")
         self.manager.stop_agent("unblock-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("unblock-session", self.step_id)
 
         # Submit via Datastar signals
         self.client.post(
@@ -789,6 +799,7 @@ class TestDashboardSSE(_ServerTestBase):
             )
             self.manager.start_agent("sse-sub", self.step_id, "test-agent")
             self.manager.stop_agent("sse-sub", self.step_id, "test-agent")
+            self.manager.mark_step_ready("sse-sub", self.step_id)
             # Drain all earlier events
             self._drain_queue(queue)
 

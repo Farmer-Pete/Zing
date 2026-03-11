@@ -233,9 +233,12 @@ class TestSessionLifecycle(unittest.TestCase):
         updated = self.manager.stop_agent("s1", step.step_id, "agent-1")
         assert updated.state == SessionState.STARTED
 
-        # Second agent completes — now ready
+        # Second agent completes — step stays STARTED until explicitly marked ready
         updated = self.manager.stop_agent("s1", step.step_id, "agent-2")
-        assert updated.state == SessionState.READY
+        assert updated.state == SessionState.STARTED
+
+        # Mark step ready (parent does this after submitting findings)
+        self.manager.mark_step_ready("s1", step.step_id)
 
         # Submit responses
         responses = [
@@ -304,7 +307,7 @@ class TestConcurrentSessions(unittest.TestCase):
         s2 = self.manager.get_session("s2")
         assert s1 is not None
         assert s2 is not None
-        assert s1.steps[0].state == SessionState.READY
+        assert s1.steps[0].state == SessionState.STARTED
         assert s2.steps[0].state == SessionState.STARTED
         assert len(s2.steps[0].agents) == 0
 
@@ -367,8 +370,8 @@ class TestAgentTracking(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_stop_agent_transitions_when_all_done(self) -> None:
-        """Stopping the last agent transitions step to READY."""
+    def test_stop_agent_keeps_step_started(self) -> None:
+        """Stopping the last agent keeps step in STARTED (parent submits findings first)."""
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
@@ -379,7 +382,7 @@ class TestAgentTracking(unittest.TestCase):
         assert updated.state == SessionState.STARTED
 
         updated = self.manager.stop_agent("s1", step.step_id, "agent-2")
-        assert updated.state == SessionState.READY
+        assert updated.state == SessionState.STARTED
 
     def test_stop_agent_rejected_when_already_completed(self) -> None:
         """stop_agent raises ValueError if agent is already completed."""
@@ -405,6 +408,7 @@ class TestAgentTracking(unittest.TestCase):
         step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.start_agent("s1", step.step_id, "agent-1")
         self.manager.stop_agent("s1", step.step_id, "agent-1")
+        self.manager.mark_step_ready("s1", step.step_id)
 
         with self.assertRaises(ValueError):
             self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Late"})
@@ -686,8 +690,8 @@ class TestAgentLifecycle(unittest.TestCase):
         assert stopped.state.value == "completed"
         assert stopped.completed_at is not None
 
-    def test_three_agents_step_transitions(self) -> None:
-        """Start 3 agents, stop 2 -> step still STARTED, stop 3rd -> step READY."""
+    def test_three_agents_step_stays_started(self) -> None:
+        """Start 3 agents, stop all 3 -> step still STARTED until mark_step_ready."""
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
         self.manager.start_agent("s1", step.step_id, "a1")
@@ -701,6 +705,9 @@ class TestAgentLifecycle(unittest.TestCase):
         assert updated.state == SessionState.STARTED
 
         updated = self.manager.stop_agent("s1", step.step_id, "a3")
+        assert updated.state == SessionState.STARTED
+
+        updated = self.manager.mark_step_ready("s1", step.step_id)
         assert updated.state == SessionState.READY
 
     def test_stop_agent_unknown_name_raises(self) -> None:

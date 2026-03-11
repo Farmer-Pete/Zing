@@ -339,7 +339,7 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
    ```
    Where `AGENT_NAME` is a short identifier (e.g., "architecture", "correctness", "security", "readability", "performance", "testing") and `AGENT_DESCRIPTION` is the agent's role (e.g., "Architecture & Design review").
 
-2. **Collect findings:** Review the diff using the assigned checklist. Format each finding as a single JSON object on one line (JSONL format):
+2. **Collect findings:** Review the diff using the assigned checklist. **Do NOT call `finding_submit` directly** — the parent process handles deduplication and submission. Format each finding as a single JSON object on one line (JSONL format):
    ```
    {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
    ```

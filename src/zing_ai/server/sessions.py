@@ -423,10 +423,12 @@ class SessionManager:
         step_id: str,
         name: str,
     ) -> WorkflowStep:
-        """Stop a running agent and optionally transition the step to READY.
+        """Stop a running agent.
 
         Sets the agent state to COMPLETED and records its completion time.
-        If all agents in the step are now COMPLETED, transitions the step to READY.
+        The step remains in STARTED state so that the parent process can still
+        submit findings via ``add_finding`` after all agents finish.  The step
+        transitions to READY later when ``mark_step_ready`` is called.
 
         Args:
             session_id: The session containing the step.
@@ -468,19 +470,60 @@ class SessionManager:
         )
         all_done = all(a.state == AgentState.COMPLETED for a in step.agents)
         if all_done:
-            step.state = SessionState.READY
-            self._update_session_state(session)
             logger.info(
-                "All agents completed — step '%s' (id=%s) is now READY",
+                "All agents completed for step '%s' (id=%s) — "
+                "awaiting finding submission before transitioning to READY",
                 step.step_name,
                 step_id,
             )
         self._persist(session)
         self._notify("agent_stopped", session_id)
         if all_done:
-            self._notify("step_ready", session_id)
+            self._notify("agents_done", session_id)
         return step
 
+
+    def mark_step_ready(self, session_id: str, step_id: str) -> WorkflowStep:
+        """Transition a step from STARTED to READY.
+
+        Called by the parent process after all agent findings have been
+        submitted.  This makes the step visible to the review UI.
+
+        Args:
+            session_id: The session containing the step.
+            step_id: The UUID of the workflow step.
+
+        Returns:
+            The updated WorkflowStep.
+
+        Raises:
+            KeyError: If the session or step does not exist.
+            ValueError: If the step doesn't belong to the session, or is not
+                in STARTED state.
+        """
+        session, step = self.get_step_by_id(step_id)
+        if session.session_id != session_id:
+            msg = (
+                f"Step '{step_id}' belongs to session '{session.session_id}', "
+                f"not '{session_id}'"
+            )
+            raise ValueError(msg)
+        if step.state != SessionState.STARTED:
+            msg = (
+                f"Step '{step.step_name}' (id={step_id}) is in state "
+                f"'{step.state.value}', expected 'started'"
+            )
+            raise ValueError(msg)
+        step.state = SessionState.READY
+        self._update_session_state(session)
+        self._persist(session)
+        self._notify("step_ready", session_id)
+        logger.info(
+            "Step '%s' (id=%s) transitioned to READY",
+            step.step_name,
+            step_id,
+        )
+        return step
 
     def save_response(
         self,
@@ -609,10 +652,28 @@ class SessionManager:
         )
         return ReviewResponse(session_id=session_id, step_name=step.step_name, items=items)
 
-    async def wait_for_review(self, session_id: str, step_id: str) -> ReviewResponse:
-        """Block until a workflow step's review is submitted.
+    def _build_review_response(
+        self, session_id: str, step: WorkflowStep,
+    ) -> ReviewResponse:
+        """Build a ReviewResponse from a step's findings and responses."""
+        responses = step.responses or [UserResponse() for _ in step.findings]
+        # Pad responses if findings were added after responses was initialized
+        while len(responses) < len(step.findings):
+            responses.append(UserResponse())
+        items = [
+            ReviewItem(finding=finding, response=response)
+            for finding, response in zip(step.findings, responses, strict=True)
+        ]
+        return ReviewResponse(session_id=session_id, step_name=step.step_name, items=items)
 
-        If the step is already completed, returns immediately.
+    async def wait_for_review(self, session_id: str, step_id: str) -> ReviewResponse:
+        """Transition a step to READY and block until the review is submitted.
+
+        If the step is already COMPLETED (review previously submitted), returns
+        the existing responses immediately without waiting.
+
+        If the step is in STARTED state, it is first transitioned to READY so
+        the review UI can show findings and accept user input.
 
         Args:
             session_id: The session to wait for.
@@ -627,23 +688,24 @@ class SessionManager:
         """
         _session, step = self.get_step_by_id(step_id)
 
-        if step.state != SessionState.COMPLETED:
-            key = self._event_key(session_id, step_id)
-            if key not in self._events:
-                self._events[key] = asyncio.Event()
-            await self._events[key].wait()
-            # Re-fetch after await — raises KeyError if session was cleaned up
+        # If a review was already submitted, return it immediately
+        if step.state == SessionState.COMPLETED:
+            return self._build_review_response(session_id, step)
+
+        # Transition to READY if still in STARTED (findings have been submitted)
+        if step.state == SessionState.STARTED:
+            self.mark_step_ready(session_id, step_id)
             _session, step = self.get_step_by_id(step_id)
 
-        responses = step.responses or [UserResponse() for _ in step.findings]
-        # Pad responses if findings were added after responses was initialized
-        while len(responses) < len(step.findings):
-            responses.append(UserResponse())
-        items = [
-            ReviewItem(finding=finding, response=response)
-            for finding, response in zip(step.findings, responses, strict=True)
-        ]
-        return ReviewResponse(session_id=session_id, step_name=step.step_name, items=items)
+        # Wait for user to submit the review
+        key = self._event_key(session_id, step_id)
+        if key not in self._events:
+            self._events[key] = asyncio.Event()
+        await self._events[key].wait()
+        # Re-fetch after await — raises KeyError if session was cleaned up
+        _session, step = self.get_step_by_id(step_id)
+
+        return self._build_review_response(session_id, step)
 
     def get_session(self, session_id: str) -> Session | None:
         """Return a session by ID, or None if not found."""

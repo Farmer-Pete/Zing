@@ -36,6 +36,7 @@ def create_app(
             "step_started": "step_started",
             "agent_started": "agent_started",
             "agent_stopped": "agent_stopped",
+            "agents_done": "agents_done",
             "step_ready": "ready",
             "review_submitted": "completed",
             "log_added": "log_added",

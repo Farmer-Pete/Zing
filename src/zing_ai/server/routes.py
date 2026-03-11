@@ -471,6 +471,13 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         )
                         seen_logs = len(target_step.logs)
 
+                    # Show intermediate status when agents finish
+                    if event == "agents_done":
+                        yield SSE.patch_elements(
+                            '<div id="review-status" class="submit-banner">'
+                            "All agents complete — submitting findings\u2026</div>",
+                        )
+
                     # Check terminal states
                     if target_step.state.value == "completed":
                         yield SSE.patch_elements(
