@@ -26,6 +26,21 @@
 {% if current_tab == 'plan' %}
 <div data-init="@get('/{{ session.session_id }}/stream?active_tab=plan')"></div>
     {% include "fragments/markdown_tab.html" %}
+{% elif step and step.state.value in ("ready", "completed") %}
+<div id="review-root"
+     data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}">
+
+    {% include "fragments/agent_status.html" %}
+
+    <div id="findings-container">
+        {% for f_html in rendered_findings %}{{ f_html | safe }}{% endfor %}
+    </div>
+
+    {% include "fragments/log_viewer.html" %}
+
+    {{ review_status_html | safe }}
+    {{ submit_html | safe }}
+</div>
 {% else %}
 <div id="review-root"
      data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}"

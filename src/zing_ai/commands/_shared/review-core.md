@@ -1,6 +1,6 @@
 # Shared Code Review Reference
 
-This file is referenced by `/zing:build-audit` and `/zing:pr-audit`. Edit here to update both.
+This file is referenced by `/zing:build-audit`, `/zing:pr-audit`, and `/zing:custom-audit`. Edit here to update all three.
 
 <tone>
 You are a senior developer reviewing a teammate's PR. Write the way you'd actually talk in a code review:
@@ -77,6 +77,16 @@ Valid categories: `architecture`, `correctness`, `security`, `readability`, `per
 - `medium`: Looks like an issue but you can't fully verify without runtime context or deeper knowledge of the system
 - `low`: Something feels off but you might be missing context — worth a second pair of eyes
 </confidence_scale>
+
+<finding_body_format>
+The `body` field is rendered as GitHub-flavored markdown with syntax-highlighted code blocks and mermaid diagram support. Write the body as a self-contained explanation that a reader can understand without opening the source file.
+
+**Code snippets**: Embed fenced code blocks (with language tags) directly in the prose wherever code is referenced. Show 5-10 lines of surrounding context so the reader can see the issue in situ. Use the actual code from the file (read via Serena), not approximations. Interleave snippets with explanation naturally — "Here's the handler:" followed by the code block, then "The problem is that `x` can be null here because..."
+
+**Mermaid diagrams**: When the issue involves data flow, state transitions, call chains, race conditions, or complex control flow, include a `mermaid` fenced code block to illustrate the relationships. Not every finding needs one — skip for simple bugs, naming issues, or single-location problems.
+
+**What NOT to do**: Don't just say "on line 42, the null check is missing" without showing the code. Don't dump a huge code block and leave the reader to find the issue — highlight the specific problematic lines in your explanation.
+</finding_body_format>
 
 <review_categories>
 
@@ -328,8 +338,9 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to pull full file context when the diff hunks alone are insufficient for its analysis (see diff_preparation step for guidance on when to do this)
 - Any additional skill-specific context (see the calling skill's `analyze_changes` step for extras)
-- The **session ID** and **step ID** (from `step_start`)
+- The **session ID** and **step ID** (from `step_start`) — for `agent_start`/`agent_stop` calls ONLY
 - Instructions to call `agent_start` at the beginning, return findings as JSONL, and call `agent_stop` when done (see below)
+- **CRITICAL: The explicit instruction that agents must NEVER call `finding_submit`. Only the parent process calls `finding_submit` after deduplicating agent results. Include this verbatim in each agent's prompt: "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."**
 
 **Agent lifecycle and finding format:** Each agent follows this lifecycle:
 
@@ -339,9 +350,9 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
    ```
    Where `AGENT_NAME` is a short identifier (e.g., "architecture", "correctness", "security", "readability", "performance", "testing") and `AGENT_DESCRIPTION` is the agent's role (e.g., "Architecture & Design review").
 
-2. **Collect findings:** Review the diff using the assigned checklist. **Do NOT call `finding_submit` directly** — the parent process handles deduplication and submission. Format each finding as a single JSON object on one line (JSONL format):
+2. **Collect findings:** Review the diff using the assigned checklist. **NEVER call `mcp__zing-ai__finding_submit`** — this is forbidden for agents. The parent process collects all agent findings, deduplicates them, and submits them. Agents must only return findings as text. Format each finding as a single JSON object on one line (JSONL format). The `body` field supports GitHub-flavored markdown — follow the `finding_body_format` guidelines above for writing rich, self-contained bodies with embedded code snippets and optional mermaid diagrams:
    ```
-   {"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds. Adding a guard clause would fix it.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add null check","description":"Guard against None return from get_user()"}]}
    ```
 
 3. **Stop:** Call the `mcp__zing-ai__agent_stop` MCP tool when done:
@@ -349,11 +360,11 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
    mcp__zing-ai__agent_stop(session_id=SESSION_ID, step_id=STEP_ID, name=AGENT_NAME)
    ```
 
-4. **Return findings:** After calling `agent_stop`, return all findings in the task output using the `---JSONL---` delimiter:
+4. **Return findings:** After calling `agent_stop`, return all findings in the task output using the `---JSONL---` delimiter. Each `body` should be a rich, self-contained markdown explanation following the `finding_body_format` guidelines — include code snippets and mermaid diagrams where appropriate:
    ```
    ---JSONL---
-   {"type":"triage","title":"First finding","body":"...","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/foo.py","line":42},"options":[{"label":"Fix it","description":"..."}]}
-   {"type":"triage","title":"Second finding","body":"...","category":"security","severity":"medium","confidence":"medium","location":{"file":"src/bar.py","line":17},"options":[{"label":"Add validation","description":"..."}]}
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/foo.py","line":42},"options":[{"label":"Add null check","description":"Guard against None return from get_user()"}]}
+   {"type":"triage","title":"Session token in URL query parameter","body":"The session token is passed as a query parameter, which means it gets logged in server access logs, browser history, and any proxy logs along the way.\n\n```python\ndef build_auth_url(token: str) -> str:\n    return f\"/dashboard?session={token}\"\n```\n\nMove the token to an `Authorization` header or a `Set-Cookie` with `HttpOnly` and `Secure` flags instead.","category":"security","severity":"medium","confidence":"medium","location":{"file":"src/bar.py","line":17},"options":[{"label":"Move token to header","description":"Use Authorization header or HttpOnly cookie instead of query parameter"}]}
    ```
    If the agent has no findings, still call `agent_stop` and return an empty JSONL section:
    ```
@@ -364,7 +375,10 @@ If `agent_start` or `agent_stop` returns an error, check the error message:
 - `ValueError` = fix the input and retry
 - `KeyError` = abort with FATAL error (wrong session/step/agent name)
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files." Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls.
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include these mandates verbatim:
+1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
+Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls only.
 - Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
@@ -372,17 +386,19 @@ Launch all 6 agents in parallel using 6 `Task` tool calls in a single message wi
 - Agent 5 (Performance & Data Integrity): Performance (incl. Database Query Performance, Memory, Concurrency and Data Integrity, External Data Defensiveness) — reviews all changed files for performance issues, N+1 queries, data integrity, external data defensiveness, and concurrency. Use Serena to read model definitions, check indexes, and trace queryset construction.
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion — reviews all changed files for test coverage, test determinism, error handling completeness, and production readiness. Use Serena to verify what tests exercise and check monitoring setup.
 
-**After all 6 agents return**, the parent:
-1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
-2. Otherwise, proceeds to the `present_summary` step.
+**After all 6 agents return**, the parent proceeds to the `check_and_review` step.
 </step>
 
-<step name="present_summary">
-**1. Parse JSONL from agent outputs:** For each of the 6 agents, find the `---JSONL---` delimiter in its task output and parse every subsequent line as a JSON object. Collect all findings into a single list.
+<step name="check_and_review">
+This step collects agent results, submits findings for user triage, and returns the triaged findings list to the calling skill.
 
-**2. Deduplicate findings:** Remove duplicate findings where both `type` and `title` match exactly. Keep the first occurrence, discard later duplicates.
+**1. Check for fatal errors:** Check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-**3. Submit findings to the review server:** For each unique finding, call the `mcp__zing-ai__finding_submit` MCP tool:
+**2. Parse JSONL from agent outputs:** For each of the 6 agents, find the `---JSONL---` delimiter in its task output and parse every subsequent line as a JSON object. Collect all findings into a single list.
+
+**3. Deduplicate findings:** Remove duplicate findings where both `type` and `title` match exactly. Keep the first occurrence, discard later duplicates.
+
+**4. Submit findings to the review server:** For each unique finding, call the `mcp__zing-ai__finding_submit` MCP tool:
 ```
 mcp__zing-ai__finding_submit(session_id=SESSION_ID, step_id=STEP_ID, finding=FINDING_OBJECT)
 ```
@@ -391,18 +407,19 @@ If the tool returns an error:
 - `KeyError` = abort with FATAL error (wrong session/step ID)
 - `RuntimeError` = abort immediately (step already completed)
 
-**4. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
+**5. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
 
-**5. Process the returned JSON:**
-- **Accepted findings**: Apply them (the calling skill defines how to apply findings — e.g., posting PR comments, writing to a report file).
-- **Dropped findings**: Skip them entirely.
-- **Discuss findings**: Walk through each one conversationally with the user, explaining the finding and asking for their input on how to proceed.
+**6. Process the returned JSON:**
+- **Accepted findings**: Include in the output (the calling skill defines how — e.g., report file, PR line comments).
+- **Dropped findings**: Exclude entirely.
+- **Downgraded findings**: Include in the output with their adjusted severity.
+- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines), then include in the output with a note that they were flagged for discussion.
 
-The calling skill provides the no-findings behavior.
+**7. No findings after triage:** If no findings remain after triage (all dropped), the calling skill provides the no-findings behavior and message.
 </step>
 
 <walk_through_findings>
-This step is handled by the browser-based review UI. The user reviews findings there and submits decisions (accept, drop, or discuss). The `present_summary` step calls `wait_for_review(session_id)` which blocks until the user is done.
+This step is handled by the browser-based review UI. The user reviews findings there and submits decisions (accept, drop, or discuss). The `check_and_review` step calls `review_wait(session_id, step_id)` which blocks until the user is done.
 
 For findings marked "discuss", walk through each one conversationally with the user:
 

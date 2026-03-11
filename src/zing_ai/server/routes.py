@@ -531,7 +531,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
 async def get_dashboard(request: Request) -> HTMLResponse:
     """Return the dashboard HTML page."""
     manager = request.app.state.session_manager
-    sessions = manager.list_sessions()
+    sessions = sorted(manager.list_sessions(), key=lambda s: s.created_at, reverse=True)
     html = render("dashboard.html", sessions=sessions)
     return HTMLResponse(content=html)
 
@@ -553,7 +553,9 @@ async def dashboard_events(request: Request):  # noqa: ANN201
                 except TimeoutError:
                     continue
 
-                sessions = manager.list_sessions()
+                sessions = sorted(
+                    manager.list_sessions(), key=lambda s: s.created_at, reverse=True,
+                )
                 html = render("dashboard.html", sessions=sessions)
                 yield SSE.patch_elements(html, selector="body", mode="innerHTML")
         finally:
@@ -634,6 +636,38 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                 active_step = s
                 break
 
+    # For completed/ready steps, pre-render findings and submit UI server-side
+    # instead of relying on SSE backfill (which may close before Datastar processes events)
+    rendered_findings: list[str] = []
+    review_status_html = ""
+    submit_html = ""
+    if active_step and active_step.state.value in ("ready", "completed"):
+        rendered_findings = [
+            finding_fragment(f, session_id) for f in active_step.findings
+        ]
+        if active_step.state.value == "completed":
+            review_status_html = (
+                '<div id="review-status" class="submit-banner">'
+                "Review submitted — thank you!</div>"
+            )
+            submit_html = (
+                '<div id="submit-section">'
+                '<button class="submit-btn"'
+                ' style="background: #059669; cursor: default;"'
+                " disabled>Review submitted</button></div>"
+            )
+        else:
+            review_status_html = (
+                '<div id="review-status" class="submit-banner">'
+                "All agents complete — ready for review</div>"
+            )
+            submit_html = (
+                '<div id="submit-section">'
+                '<button class="submit-btn" '
+                f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
+                "Submit Review</button></div>"
+            )
+
     page_html = render(
         "review.html",
         session=session,
@@ -642,5 +676,8 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
         plan_html=plan_html,
         saved_responses=saved_responses,
         step=active_step,
+        rendered_findings=rendered_findings,
+        review_status_html=review_status_html,
+        submit_html=submit_html,
     )
     return HTMLResponse(content=page_html)

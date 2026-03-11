@@ -51,7 +51,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle and finding submission.
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
 </step>
 
 <step name="present_summary">
@@ -61,8 +61,6 @@ Give a brief, natural overview of the branch before diving into findings. Someth
 Alright, I've looked through the {count} files changed on `{branch_name}`. Here's what I found — {total_count} things I want to flag:
 ```
 
-Follow the `present_summary` step from the shared review reference for the table format and confidence mapping.
-
 If no issues were found, just say something like:
 ```
 Looked through everything — nothing jumped out at me. Changes look solid.
@@ -71,29 +69,10 @@ Write an empty findings report and exit.
 </step>
 
 <step name="check_and_review">
-After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+Follow the `check_and_review` step from the shared review reference.
 
-Otherwise, collect and deduplicate findings from all agents:
-
-1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
-
-2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
-
-3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the build-audit step ID (or code-review step ID for standalone invocations) and `finding_data` is the parsed JSON object.
-
-Then call `review_wait(session_id, step_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
-
-When `review_wait` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
-- **Accepted findings**: Include in the report as-is.
-- **Dropped findings**: Exclude from the report entirely.
-- **Downgraded findings**: Include in the report with their adjusted severity.
-- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines from the shared review reference for discuss items only), then include in the report with a note that they were flagged for discussion.
-
-If no findings remain after triage (all dropped), say something like:
-```
-Looked through everything — nothing survived triage. Changes look solid.
-```
-Write an empty findings report and exit.
+- **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
+- **No findings after triage**: Say something like "Looked through everything — nothing survived triage. Changes look solid." Write an empty findings report and exit.
 </step>
 
 <step name="write_report">

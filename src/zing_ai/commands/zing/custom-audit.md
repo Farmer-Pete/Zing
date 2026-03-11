@@ -131,7 +131,7 @@ Launch 6 parallel Task agents to review the code. Each agent receives:
 - The severity/confidence scales from the shared review reference
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to explore code beyond the provided context (callers, callees, related modules, test coverage)
-- The **session ID** and **step ID** for agent lifecycle tracking and finding submission
+- The **session ID** and **step ID** for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`)
 - Instructions for agent lifecycle and JSONL return format (see below)
 
 **Adapted framing for all agents:**
@@ -173,16 +173,18 @@ If `agent_start` or `agent_stop` returns an error:
 - `KeyError` = abort with FATAL error (wrong session/step ID)
 - `ValueError` = fix and retry
 
-**Do NOT call `finding_submit` directly.** Instead, format each finding as a JSON line and return them all at the end of the task output using this exact format:
+**NEVER call `mcp__zing-ai__finding_submit`** — this is forbidden for agents. The parent process collects all agent findings, deduplicates them, and submits them. Agents must only return findings as text. Format each finding as a JSON line and return them all at the end of the task output using this exact format. The `body` field supports GitHub-flavored markdown — follow the `finding_body_format` guidelines from the shared review reference for writing rich, self-contained bodies with embedded code snippets and optional mermaid diagrams:
 
 ```
 ---JSONL---
-{"type":"triage","title":"...","body":"...","category":"...","severity":"...","confidence":"...","location":{"file":"...","line":N},"options":[{"label":"...","description":"..."}]}
+{"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add null check","description":"Guard against None return from get_user()"}]}
 ```
 
 Each line after `---JSONL---` must be a single valid JSON object — one line per finding. If the agent has no findings, omit the `---JSONL---` marker entirely.
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include these mandates verbatim:
+1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
 
 **After all 6 agents return**, the parent:
 1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
@@ -196,8 +198,6 @@ Give a brief, natural overview of the audit scope before diving into findings. S
 Alright, I've gone through the {count} files in the audit scope ({user_description}). Here's what I found — {total_count} things I want to flag:
 ```
 
-Follow the `present_summary` step from the shared review reference for the table format and confidence mapping.
-
 If no issues were found, just say something like:
 ```
 Went through everything — nothing jumped out. This code looks solid.
@@ -206,29 +206,10 @@ Write an empty findings report and exit.
 </step>
 
 <step name="check_and_review">
-After all 6 agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+Follow the `check_and_review` step from the shared review reference.
 
-Otherwise, collect and deduplicate findings from all agents:
-
-1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
-
-2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
-
-3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the code-review step ID and `finding_data` is the parsed JSON object.
-
-Then call `review_wait(session_id, step_id)`. This opens the review UI in the browser where the user can see all findings posted by the 6 review agents. The user triages each finding — accepting, dropping, downgrading severity, or marking for discussion — and submits all decisions at once.
-
-When `review_wait` returns, it provides a list of `ReviewItem` objects. Each item contains the original finding data and the user's triage decision:
-- **Accepted findings**: Include in the report as-is.
-- **Dropped findings**: Exclude from the report entirely.
-- **Downgraded findings**: Include in the report with their adjusted severity.
-- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines from the shared review reference for discuss items only), then include in the report with a note that they were flagged for discussion.
-
-If no findings remain after triage (all dropped), say something like:
-```
-Went through everything — nothing survived triage. This code looks solid.
-```
-Write an empty findings report and exit.
+- **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
+- **No findings after triage**: Say something like "Went through everything — nothing survived triage. This code looks solid." Write an empty findings report and exit.
 </step>
 
 <step name="walk_through_findings">

@@ -42,6 +42,27 @@
         .session-list li { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
         .session-list a { color: #2563eb; text-decoration: none; font-weight: 600; }
         .session-list a:hover { text-decoration: underline; }
+
+        /* Timeline */
+        .timeline { position: relative; padding-left: 2rem; }
+        .timeline::before { content: ''; position: absolute; left: 0.5rem; top: 0.5rem; bottom: 0.5rem; width: 2px; background: #d1d5db; }
+        .timeline-item { position: relative; margin-bottom: 1.5rem; }
+        .timeline-dot { position: absolute; left: -1.75rem; top: 0.375rem; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px #d1d5db; z-index: 1; }
+        .status-dot-pending { background: #fbbf24; box-shadow: 0 0 0 2px #f59e0b; }
+        .status-dot-started { background: #3b82f6; box-shadow: 0 0 0 2px #2563eb; animation: pulse 1.5s ease-in-out infinite; }
+        .status-dot-ready { background: #3b82f6; box-shadow: 0 0 0 2px #2563eb; }
+        .status-dot-completed { background: #10b981; box-shadow: 0 0 0 2px #059669; }
+        .timeline-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.875rem 1rem; transition: box-shadow 0.15s; }
+        .timeline-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .timeline-time { font-size: 0.75rem; color: #9ca3af; font-weight: 500; margin-bottom: 0.25rem; letter-spacing: 0.01em; }
+        .timeline-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .timeline-header a { color: #2563eb; text-decoration: none; font-weight: 600; font-size: 1rem; }
+        .timeline-header a:hover { text-decoration: underline; }
+        .timeline-actions { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+        .timeline-view-link { color: #2563eb; text-decoration: none; font-size: 0.875rem; font-weight: 500; }
+        .timeline-view-link:hover { text-decoration: underline; }
+        .timeline-day { font-size: 0.8125rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.75rem 0 0.5rem; margin-left: -0.25rem; border-top: 1px solid #e5e7eb; margin-top: 0.5rem; }
+        .timeline-day:first-child { border-top: none; margin-top: 0; }
         .status-badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
         .status-pending { background: #fef3c7; color: #92400e; }
         .status-ready { background: #dbeafe; color: #1e40af; }
