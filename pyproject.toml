@@ -27,6 +27,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-playwright>=0.6",
     "pre-commit>=4.0",
     "ruff>=0.15",
     "pyright>=1.1",
@@ -47,6 +48,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "W"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+markers = ["ui: browser-based UI tests (require Playwright)"]
 
 [tool.pyleft]
 paths = ["src"]
