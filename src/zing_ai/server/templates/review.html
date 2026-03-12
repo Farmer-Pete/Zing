@@ -53,7 +53,7 @@
     <div id="findings-container">
     </div>
 
-    {% if step %}{% include "fragments/log_viewer.html" %}{% endif %}
+    {% if step %}{% include "fragments/log_viewer.html" %}{% else %}<div id="log-viewer"></div>{% endif %}
 
     <div id="review-status">
     </div>

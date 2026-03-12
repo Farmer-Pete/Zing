@@ -1,7 +1,14 @@
+<div id="log-viewer">
 {% if step.logs %}
-<details id="log-viewer">
+<details id="log-details" open>
     <summary>Build logs ({{ step.logs | length }} entries)</summary>
-    <pre class="log-output">{% for entry in step.logs %}[{{ entry.timestamp.strftime('%H:%M:%S') }}] {{ entry.agent_name }}: {{ entry.message }}
+    {% for agent_name, entries in step.logs | groupby("agent_name") %}
+    <div class="log-group">
+        <div class="log-group-header">{{ agent_name or "system" }}</div>
+        <pre class="log-output">{% for entry in entries %}[{{ entry.timestamp.strftime('%H:%M:%S') }}] {{ entry.message }}
 {% endfor %}</pre>
+    </div>
+    {% endfor %}
 </details>
 {% endif %}
+</div>
