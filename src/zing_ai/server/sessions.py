@@ -236,6 +236,22 @@ class SessionManager:
                 f"expected '{SessionState.PENDING.value}'"
             )
             raise ValueError(msg)
+        # Auto-complete any prior steps that are still in-progress
+        for prior in session.steps:
+            if prior.step_id == step_id:
+                break
+            if prior.state in (SessionState.STARTED, SessionState.READY):
+                prior.state = SessionState.COMPLETED
+                key = self._event_key(session_id, prior.step_id)
+                event = self._events.get(key)
+                if event:
+                    event.set()
+                logger.info(
+                    "Auto-completed step '%s' (id=%s) — new step starting",
+                    prior.step_name,
+                    prior.step_id,
+                )
+
         step.state = SessionState.STARTED
         self._update_session_state(session)
         self._persist(session)

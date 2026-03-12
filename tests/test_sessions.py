@@ -602,6 +602,22 @@ class TestWorkflowStepLooping(unittest.TestCase):
         assert session is not None
         assert len(session.steps) == 2
 
+    def test_start_step_auto_completes_prior_steps(self) -> None:
+        """Starting a new step auto-completes any prior in-progress steps."""
+        session = self.manager.create_session("s1", "Test", steps=["build", "audit"])
+        self.manager.start_step("s1", session.steps[0].step_id)
+
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert session.steps[0].state.value == "started"
+
+        self.manager.start_step("s1", session.steps[1].step_id)
+
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert session.steps[0].state.value == "completed"
+        assert session.steps[1].state.value == "started"
+
     def test_findings_go_to_correct_step_by_id(self) -> None:
         """Findings are routed to the correct step via step_id."""
         session = self.manager.create_session("s1", "Test", steps=["review", "review"])
