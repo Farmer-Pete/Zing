@@ -164,7 +164,8 @@ def _create_completed_session(
         elif finding.type == "choice":
             responses.append(UserResponse(selected="Option A"))
         else:
-            responses.append(UserResponse())
+            msg = f"Unhandled finding type in test helper: {finding.type}"
+            raise ValueError(msg)
     manager.submit_responses(session_id, step_id, responses)
     return step_id
 
@@ -671,17 +672,16 @@ def test_step_state_badges_in_review_page(server: _ServerInfo, page: Page) -> No
 
 
 def test_downgrade_button_saves_and_toggles(server: _ServerInfo, page: Page) -> None:
-    """Clicking Downgrade toggles the selected class on the button."""
-    # BUG: save-response POST returns 400 due to Datastar RC.8 signal merging —
-    # the request body is missing finding_id. Client-side CSS toggling still works.
-    _create_ready_session(server, session_id="downgrade-test")
+    """Clicking Downgrade fires save-response POST and toggles the selected class."""
+    step_id = _create_ready_session(server, session_id="downgrade-test")
 
     page.goto(f"{server.base_url}/downgrade-test")
     _wait_for_datastar(page)
 
     downgrade_btn = page.locator("#finding-triage-1 .action-btn[data-action='downgrade']")
-    downgrade_btn.click()
-    page.wait_for_timeout(500)
+    with page.expect_response("**/save-response", timeout=3000) as resp_info:
+        downgrade_btn.click()
+    assert resp_info.value.status == 200
 
     # Downgrade should be selected, Accept and Drop should not
     expect(downgrade_btn).to_have_class(re.compile("selected"), timeout=3000)
@@ -690,19 +690,24 @@ def test_downgrade_button_saves_and_toggles(server: _ServerInfo, page: Page) -> 
     drop_btn = page.locator("#finding-triage-1 .action-btn", has_text="Drop")
     expect(drop_btn).not_to_have_class(re.compile("selected"), timeout=3000)
 
+    # Verify server state
+    _, step = server.manager.get_step_by_id(step_id)
+    triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
+    assert step.responses is not None
+    assert step.responses[triage_idx].action == ResponseAction.DOWNGRADE
+
 
 def test_discuss_button_saves_and_toggles(server: _ServerInfo, page: Page) -> None:
-    """Clicking Discuss toggles the selected class on the button."""
-    # BUG: save-response POST returns 400 due to Datastar RC.8 signal merging —
-    # the request body is missing finding_id. Client-side CSS toggling still works.
-    _create_ready_session(server, session_id="discuss-test")
+    """Clicking Discuss fires save-response POST and toggles the selected class."""
+    step_id = _create_ready_session(server, session_id="discuss-test")
 
     page.goto(f"{server.base_url}/discuss-test")
     _wait_for_datastar(page)
 
     discuss_btn = page.locator("#finding-triage-1 .action-btn[data-action='discuss']")
-    discuss_btn.click()
-    page.wait_for_timeout(500)
+    with page.expect_response("**/save-response", timeout=3000) as resp_info:
+        discuss_btn.click()
+    assert resp_info.value.status == 200
 
     # Discuss should be selected, Accept and Drop should not
     expect(discuss_btn).to_have_class(re.compile("selected"), timeout=3000)
@@ -711,11 +716,18 @@ def test_discuss_button_saves_and_toggles(server: _ServerInfo, page: Page) -> No
     drop_btn = page.locator("#finding-triage-1 .action-btn", has_text="Drop")
     expect(drop_btn).not_to_have_class(re.compile("selected"), timeout=3000)
 
+    # Verify server state
+    _, step = server.manager.get_step_by_id(step_id)
+    triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
+    assert step.responses is not None
+    assert step.responses[triage_idx].action == ResponseAction.DISCUSS
+
 
 def test_completed_step_renders_disabled_submit(server: _ServerInfo, page: Page) -> None:
-    """Completed step shows disabled submit button and success banner."""
-    # BUG: Datastar RC.8 throws a SyntaxError on completed pages due to
-    # malformed signal expressions. Console errors are expected here.
+    """Completed step shows disabled submit button and success banner without console errors."""
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
     _create_completed_session(server)
 
     page.goto(f"{server.base_url}/completed-test")
@@ -729,50 +741,49 @@ def test_completed_step_renders_disabled_submit(server: _ServerInfo, page: Page)
     # Banner should show success message
     expect(page.locator("#review-status")).to_contain_text("Review submitted", timeout=3000)
 
+    _assert_no_console_errors(console_errors)
+
 
 def test_completed_step_save_response_accepted(server: _ServerInfo, page: Page) -> None:
-    """Buttons on completed steps don't fire save-response due to Datastar crash."""
-    # BUG: Datastar RC.8 throws a SyntaxError on completed pages, so @post
-    # bindings never fire. Additionally, save_response has no step-state guard.
+    """save-response POST on completed steps returns 200 (no step-state guard)."""
     console_errors: list[str] = []
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
-    _create_completed_session(server, session_id="completed-save")
+    step_id = _create_completed_session(server, session_id="completed-save")
 
     page.goto(f"{server.base_url}/completed-save")
     _wait_for_datastar(page)
 
-    # Button exists and is visible
+    # Click Accept on triage finding — should succeed
     accept_btn = page.locator("#finding-triage-1 .action-btn", has_text="Accept")
-    expect(accept_btn).to_be_visible(timeout=3000)
+    with page.expect_response("**/save-response", timeout=3000) as resp_info:
+        accept_btn.click()
+    assert resp_info.value.status == 200
 
-    # Click does not fire a POST because Datastar crashed
-    accept_btn.click()
-    page.wait_for_timeout(500)
+    # Verify server state was updated
+    _, step = server.manager.get_step_by_id(step_id)
+    triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
+    assert step.responses is not None
+    assert step.responses[triage_idx].action == ResponseAction.ACCEPT
 
-    # Confirm Datastar error is present
-    assert any("SyntaxError" in e for e in console_errors), (
-        "Expected Datastar SyntaxError on completed page"
-    )
+    _assert_no_console_errors(console_errors)
 
 
 def test_triage_other_approach_saves_custom_text(server: _ServerInfo, page: Page) -> None:
-    """Triage 'Other' approach shows textarea when clicked."""
-    # BUG: save-response POST returns 400 due to Datastar RC.8 signal merging.
-    # This test verifies the client-side UI behavior only.
-    _create_session_with_all_finding_types(server, session_id="triage-other")
+    """Triage 'Other' approach shows textarea and saves custom text to server."""
+    step_id = _create_session_with_all_finding_types(server, session_id="triage-other")
 
     page.goto(f"{server.base_url}/triage-other")
     _wait_for_datastar(page)
 
-    # Click Accept first (client-side toggle)
-    page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
-    page.wait_for_timeout(500)
+    # Click Accept first
+    with page.expect_response("**/save-response", timeout=3000):
+        page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
 
     # Click "Other" radio in triage options
     other_radio = page.locator("#finding-triage-1 input[value='__other__']")
-    other_radio.click()
-    page.wait_for_timeout(500)
+    with page.expect_response("**/save-response", timeout=3000):
+        other_radio.click()
 
     # Conditional textarea should become visible
     other_textarea = page.locator(
@@ -780,39 +791,54 @@ def test_triage_other_approach_saves_custom_text(server: _ServerInfo, page: Page
     )
     expect(other_textarea).to_be_visible(timeout=3000)
 
-    # Fill textarea (client-side binding)
+    # Fill and blur to trigger save
     other_textarea.fill("Custom approach")
-    page.wait_for_timeout(500)
+    with page.expect_response("**/save-response", timeout=3000) as resp_info:
+        page.locator("#finding-text-1").click()  # blur
+    assert resp_info.value.status == 200
+
+    # Verify server state
+    _, step = server.manager.get_step_by_id(step_id)
+    triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
+    assert step.responses is not None
+    assert step.responses[triage_idx].action == ResponseAction.ACCEPT
+    assert step.responses[triage_idx].selected == "__other__"
+    assert step.responses[triage_idx].other_text == "Custom approach"
 
 
 def test_completed_step_responses_restore_on_load(server: _ServerInfo, page: Page) -> None:
-    """Completed step page renders but Datastar crash prevents signal-based restoration."""
-    # BUG: Datastar RC.8 throws a SyntaxError on completed pages, so signal-based
-    # bindings (data-class:selected, data-bind) never apply. Saved responses are
-    # present in data-signals but never processed.
+    """Completed step restores saved responses when the page loads."""
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
     _create_completed_session(server, session_id="restore-completed")
 
     page.goto(f"{server.base_url}/restore-completed")
     _wait_for_datastar(page)
 
-    # HTML-rendered elements work (not Datastar-dependent)
-    expect(page.locator(".submit-btn")).to_be_disabled(timeout=3000)
-    expect(page.locator("#review-status")).to_contain_text("Review submitted", timeout=3000)
-
-    # Finding containers are present (server-rendered)
-    expect(page.locator("#finding-triage-1")).to_be_visible(timeout=3000)
-    expect(page.locator("#finding-text-1")).to_be_visible(timeout=3000)
-    expect(page.locator("#finding-choice-1")).to_be_visible(timeout=3000)
-
-    # Triage Accept button does NOT have 'selected' class due to Datastar crash
+    # Triage: Accept button should have 'selected' class
     accept_btn = page.locator("#finding-triage-1 .action-btn", has_text="Accept")
-    expect(accept_btn).not_to_have_class(re.compile("selected"), timeout=3000)
+    expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
+
+    # Text: textarea should have the saved value
+    textarea = page.locator("#finding-text-1 textarea")
+    expect(textarea).to_have_value("Test answer", timeout=3000)
+
+    # Choice: Option A radio should be checked
+    radio = page.locator("#finding-choice-1 input[value='Option A']")
+    expect(radio).to_be_checked(timeout=3000)
+
+    # Submit button should be disabled
+    expect(page.locator(".submit-btn")).to_be_disabled(timeout=3000)
+
+    _assert_no_console_errors(console_errors)
 
 
 def test_multi_step_mixed_state_navigation(server: _ServerInfo, page: Page) -> None:
     """Multi-step session with mixed states shows correct badges and submit states."""
-    # BUG: Datastar RC.8 throws a SyntaxError on completed step tabs.
-    # Console error assertions are skipped.
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
     manager = server.manager
     session = manager.create_session(
         session_id="mixed-steps", title="Mixed Steps", steps=["audit", "review"]
@@ -871,3 +897,5 @@ def test_multi_step_mixed_state_navigation(server: _ServerInfo, page: Page) -> N
     _wait_for_datastar(page)
     submit_btn = page.locator(".submit-btn")
     expect(submit_btn).to_be_enabled(timeout=3000)
+
+    _assert_no_console_errors(console_errors)

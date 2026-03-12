@@ -77,10 +77,10 @@ def finding_fragment(finding: Finding, session_id: str) -> str:
 
 @router.post("/{session_id}/save-response")
 async def post_save_response(session_id: str, request: Request) -> JSONResponse:
-    """Auto-save a single finding response on blur/change events.
+    """Auto-save finding responses on blur/change events.
 
-    Accepts JSON with ``step_id``, ``finding_id``, and response fields
-    (``action``, ``selected``, ``answer``, ``other_text``).
+    Accepts the Datastar signal store containing ``step_id`` and a
+    ``responses`` dict mapping finding IDs to response values.
     """
     manager = request.app.state.session_manager
     if manager.get_session(session_id) is None:
@@ -95,60 +95,58 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
         )
 
     step_id = body.get("step_id")
-    finding_id = body.get("finding_id")
-    if not step_id or not finding_id:
+    if not step_id:
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "missing_fields",
-                "message": "step_id and finding_id are required",
-            },
+            content={"error": "missing_fields", "message": "step_id is required"},
         )
 
-    # Build a UserResponse from the remaining fields
-    try:
-        response = UserResponse(
-            action=body.get("action"),
-            selected=body.get("selected"),
-            answer=body.get("answer"),
-            other_text=body.get("other_text"),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "invalid_response", "message": str(exc)},
-        )
-
-    # Merge with existing response to preserve fields from earlier saves
-    # (e.g. selecting an approach shouldn't clear a previously-set action)
     try:
         _, step = manager.get_step_by_id(step_id)
-        idx = next(i for i, f in enumerate(step.findings) if f.id == finding_id)
-        if step.responses and idx < len(step.responses):
-            existing = step.responses[idx]
-            response = UserResponse(
-                action=response.action if response.action is not None else existing.action,
-                selected=response.selected if response.selected is not None else existing.selected,
-                answer=response.answer if response.answer is not None else existing.answer,
-                other_text=response.other_text if response.other_text is not None else existing.other_text,
-            )
-    except (KeyError, StopIteration):
-        pass  # No existing response to merge with; proceed with new one
-
-    try:
-        manager.save_response(session_id, step_id, finding_id, response)
     except KeyError as exc:
         return JSONResponse(
             status_code=404,
             content={"error": "not_found", "message": str(exc)},
         )
-    except ValueError as exc:
+
+    # Datastar sends the signal store: {step_id: "...", responses: {...}}
+    raw_responses = body.get("responses", {})
+    if not isinstance(raw_responses, dict):
         return JSONResponse(
             status_code=400,
-            content={"error": "invalid_request", "message": str(exc)},
+            content={"error": "invalid_responses", "message": "responses must be an object"},
         )
 
-    return JSONResponse(status_code=200, content={"status": "ok"})
+    # Map the signal store to UserResponse objects using the same logic as submit
+    mapped = _map_signals_to_responses(step.findings, raw_responses)
+
+    # Save each non-empty response
+    saved_count = 0
+    for finding, response in zip(step.findings, mapped, strict=True):
+        if response.action is not None or response.selected is not None or response.answer is not None:
+            # Merge with existing response to preserve fields from earlier saves
+            if step.responses and finding.id:
+                idx = next(
+                    (i for i, f in enumerate(step.findings) if f.id == finding.id), None
+                )
+                if idx is not None and idx < len(step.responses):
+                    existing = step.responses[idx]
+                    response = UserResponse(
+                        action=response.action if response.action is not None else existing.action,
+                        selected=response.selected if response.selected is not None else existing.selected,
+                        answer=response.answer if response.answer is not None else existing.answer,
+                        other_text=response.other_text if response.other_text is not None else existing.other_text,
+                    )
+            try:
+                manager.save_response(session_id, step_id, finding.id, response)
+                saved_count += 1
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid_request", "message": str(exc)},
+                )
+
+    return JSONResponse(status_code=200, content={"status": "ok", "saved": saved_count})
 
 
 @router.post("/{session_id}/submit")

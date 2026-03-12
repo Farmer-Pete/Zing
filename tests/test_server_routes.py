@@ -59,7 +59,7 @@ class TestSaveResponse(ServerTestBase):
         step_id, finding_id = self._create_session_with_finding()
         resp = self.client.post(
             "/test-session/save-response",
-            json={"step_id": step_id, "finding_id": finding_id, "answer": "Lots of stuff"},
+            json={"step_id": step_id, "responses": {finding_id: "Lots of stuff"}},
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["status"], "ok")
@@ -69,7 +69,7 @@ class TestSaveResponse(ServerTestBase):
         step_id, finding_id = self._create_session_with_finding()
         self.client.post(
             "/test-session/save-response",
-            json={"step_id": step_id, "finding_id": finding_id, "answer": "Saved text"},
+            json={"step_id": step_id, "responses": {finding_id: "Saved text"}},
         )
         session = self.manager.get_session("test-session")
         assert session is not None
@@ -77,12 +77,12 @@ class TestSaveResponse(ServerTestBase):
         assert step.responses is not None
         self.assertEqual(step.responses[0].answer, "Saved text")
 
-    def test_save_response_missing_fields(self) -> None:
-        """Missing step_id or finding_id returns 400."""
+    def test_save_response_missing_step_id(self) -> None:
+        """Missing step_id returns 400."""
         self._create_session()
         resp = self.client.post(
             "/test-session/save-response",
-            json={"step_id": self.step_id},
+            json={"responses": {}},
         )
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "missing_fields")
@@ -91,18 +91,19 @@ class TestSaveResponse(ServerTestBase):
         """Auto-save to nonexistent session returns 404."""
         resp = self.client.post(
             "/no-such-session/save-response",
-            json={"step_id": "x", "finding_id": "y", "answer": "z"},
+            json={"step_id": "x", "responses": {"y": "z"}},
         )
         self.assertEqual(resp.status_code, 404)
 
-    def test_save_response_invalid_finding(self) -> None:
-        """Auto-save with unknown finding_id returns 400."""
-        self._create_session()
+    def test_save_response_empty_responses(self) -> None:
+        """Empty responses dict saves nothing."""
+        step_id, _finding_id = self._create_session_with_finding()
         resp = self.client.post(
             "/test-session/save-response",
-            json={"step_id": self.step_id, "finding_id": "bad-id", "answer": "z"},
+            json={"step_id": step_id, "responses": {}},
         )
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["saved"], 0)
 
 
 class TestSubmit(ServerTestBase):

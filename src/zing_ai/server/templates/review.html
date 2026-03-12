@@ -30,7 +30,7 @@
     {% include "fragments/markdown_tab.html" %}
 {% elif step and step.state.value in ("ready", "completed") %}
 <div id="review-root"
-     data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}">
+     data-signals='{{ {"responses": saved_responses, "step_id": current_step} | tojson }}'>
 
     {% include "fragments/agent_status.html" %}
 
@@ -45,7 +45,7 @@
 </div>
 {% else %}
 <div id="review-root"
-     data-signals="{responses: {{ saved_responses | tojson }}, step_id: '{{ current_step }}'}"
+     data-signals='{{ {"responses": saved_responses, "step_id": current_step} | tojson }}'
      data-init="@get('/{{ session.session_id }}/stream?step={{ current_step }}&active_tab=step')">
 
     {% if step %}{% include "fragments/agent_status.html" %}{% else %}<div id="agents-container"></div>{% endif %}
