@@ -64,10 +64,6 @@ async def session_create(title: str, steps: list[str] | None = None) -> dict:
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}
     url = f"http://localhost:{_port}/{session_id}"
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass  # Headless/CI environments may not have a browser
     step_map = {s.step_name: s.step_id for s in session.steps}
     return {"session_id": session_id, "steps": step_map, "url": url}
 

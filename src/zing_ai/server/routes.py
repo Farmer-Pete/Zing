@@ -377,14 +377,13 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if target_step is None:
                     return
 
-                # Backfill existing findings
-                for finding in target_step.findings:
-                    yield SSE.patch_elements(
-                        finding_fragment(finding, session_id),
-                        selector="#findings-container",
-                        mode="append",
-                    )
-                    seen += 1
+                # Backfill existing findings as a single morph (safe on reconnect)
+                if target_step.findings:
+                    container_html = '<div id="findings-container">' + "".join(
+                        finding_fragment(f, session_id) for f in target_step.findings
+                    ) + "</div>"
+                    yield SSE.patch_elements(container_html)
+                    seen = len(target_step.findings)
 
                 # Backfill agent status and logs
                 if target_step.agents:
