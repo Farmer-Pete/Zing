@@ -31,6 +31,9 @@ Each stage feeds into the next. The plan audit catches problems before they're b
 ### Parallelism is a first-class concept.
 Codebase exploration, plan evaluation, and code review all fan out across multiple specialized agents working simultaneously. This isn't just faster. It produces better results because each agent has a focused lens.
 
+### A real-time review dashboard.
+Zing includes a built-in MCP server and web UI. When review agents run, they stream findings to a live dashboard in your browser via Server-Sent Events. You see agents spin up, watch findings arrive in real time, and triage them without leaving the browser — accept, drop, downgrade, or discuss each finding, pick from suggested approaches, or write your own. Responses auto-save as you go. The MCP server coordinates the whole workflow: agents submit findings through it, and your AI coding assistant blocks until you submit your responses in the browser, then picks up exactly where you left off.
+
 ### Humans stay in the loop.
 Zing doesn't disappear into a corner and come back with a PR. It checks in at every stage, confirming the spec, walking through plan improvements, discussing review findings one by one. You make the decisions. Zing does the legwork.
 
@@ -42,7 +45,7 @@ The build phase has strict anti-patterns: no deviations from the plan, no bonus 
 
 ## What Zing Does
 
-Zing is a pipeline of eight specialized AI tools that integrate with one another:
+Zing is a pipeline of specialized AI tools backed by a live review dashboard:
 
 ### 1. Capture (`/zing`)
 Zing starts with a conversation or a Linear ticket URL. It listens, asks the right questions, and saves a structured spec to your `.zing/` directory. No templates to fill out. Just talk about what you want to build.
@@ -74,7 +77,7 @@ Four parallel review agents examine your branch's changes like senior developers
 - **Quality & Style**: Naming, readability, idiomatic code
 - **Coverage & Performance**: Test gaps, bottleneck risks
 
-Findings come with severity and confidence ratings. Zing walks you through each one individually, discusses fixes, and writes a full review report.
+Findings stream into a **live review dashboard** in your browser. You can watch agents work in real time — spinners show which agents are running, notification dots flag new findings on each tab, and build logs are available for diagnostics. When agents finish, you triage each finding directly in the browser: accept, drop, downgrade, or discuss. Choose from suggested fix approaches or write your own. Text responses and selections auto-save as you go. When you're ready, hit Submit and Zing picks up where it left off — applying fixes, writing a review report, and moving to the next stage.
 
 ### 7. Ship
 When the review is clean, Zing offers to open your pull request. Draft by default, because you're still in control.
@@ -112,7 +115,7 @@ These servers give Zing's agents deeper insight into your codebase during planni
 
 ### Permissions
 
-Zing's review commands use an MCP server and `curl` to coordinate reviews. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:
+Zing includes a built-in MCP server that powers the live review dashboard — it's automatically registered during installation. The review commands use this MCP server and `curl` to coordinate agent workflows. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:
 
 ```json
 "Bash(curl:*)",
