@@ -51,7 +51,10 @@ class _PygmentsRenderer(mistune.HTMLRenderer):
 
 
 _renderer = _PygmentsRenderer()
-_markdown = mistune.create_markdown(renderer=_renderer)
+_markdown = mistune.create_markdown(
+    renderer=_renderer,
+    plugins=["table", "strikethrough", "task_lists", "footnotes"],
+)
 
 
 def _render_markdown(text: str | None) -> markupsafe.Markup:

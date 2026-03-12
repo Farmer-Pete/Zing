@@ -44,6 +44,10 @@ Key principles:
 
 Run Playwright tests with: `uv run pytest tests/test_ui/ -m ui`
 
+## Issue tracking
+
+Issues and tickets are tracked in GitHub Issues on this repository. Use `gh issue create` to file new issues.
+
 ## Design system
 
 See `src/zing_ai/server/DESIGN_SYSTEM.md` for UI design standards (colors, typography, components, interactions).

@@ -113,9 +113,21 @@ It also benefits from having the **[GitHub CLI (`gh`)](https://cli.github.com/)*
 
 These servers give Zing's agents deeper insight into your codebase during planning, building, and reviewing.
 
+### Start the dashboard
+
+Before using any review command, start the Zing server in a separate terminal:
+
+```
+zing-ai mcp
+```
+
+This launches the MCP server and review dashboard on `http://127.0.0.1:9876`. The dashboard is available at `http://127.0.0.1:9876/dashboard`. Leave this running while you work — review commands won't function without it.
+
+The MCP connection is automatically registered with Claude Code during installation (via `mcp-remote`), so Claude Code will connect to the running server when review tools are invoked.
+
 ### Permissions
 
-Zing includes a built-in MCP server that powers the live review dashboard — it's automatically registered during installation. The review commands use this MCP server and `curl` to coordinate agent workflows. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:
+The review commands use the MCP server and `curl` to coordinate agent workflows. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:
 
 ```json
 "Bash(curl:*)",

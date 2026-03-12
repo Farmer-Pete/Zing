@@ -10,7 +10,31 @@
     <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.8/bundles/datastar.js"></script>
     <script type="module">
         import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-        mermaid.initialize({ startOnLoad: true });
+        const s = getComputedStyle(document.documentElement);
+        const v = (name) => s.getPropertyValue(name).trim();
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'base',
+            themeVariables: {
+                primaryColor: v('--navy'),
+                primaryTextColor: v('--text-primary'),
+                primaryBorderColor: v('--navy-mid'),
+                lineColor: v('--orange'),
+                secondaryColor: v('--gray-100'),
+                tertiaryColor: v('--off-white'),
+                background: v('--off-white'),
+                fontFamily: 'Inter, system-ui, sans-serif',
+                fontSize: '14px',
+                actorBkg: v('--navy'),
+                actorTextColor: '#ffffff',
+                actorBorder: v('--navy-mid'),
+                signalColor: v('--orange'),
+                signalTextColor: v('--text-primary'),
+                noteBkgColor: v('--gold'),
+                noteTextColor: v('--text-primary'),
+                noteBorderColor: v('--amber'),
+            },
+        });
     </script>
     <style>
         /* === Foundation === */
