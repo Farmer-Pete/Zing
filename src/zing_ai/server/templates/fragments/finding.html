@@ -51,10 +51,10 @@
         Category: {{ finding.category }}
     </div>
     <div class="action-group">
-        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept'})" type="button">Accept</button>
-        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'drop'" data-on:click="$responses.{{ finding.id }} = 'drop'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'drop'})" type="button">Drop</button>
-        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'downgrade'" data-on:click="$responses.{{ finding.id }} = 'downgrade'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'downgrade'})" type="button">Downgrade</button>
-        <button class="action-btn" data-class:selected="$responses.{{ finding.id }} === 'discuss'" data-on:click="$responses.{{ finding.id }} = 'discuss'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'discuss'})" type="button">Discuss</button>
+        <button class="action-btn" data-action="accept" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept'})" type="button">Accept</button>
+        <button class="action-btn" data-action="drop" data-class:selected="$responses.{{ finding.id }} === 'drop'" data-on:click="$responses.{{ finding.id }} = 'drop'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'drop'})" type="button">Drop</button>
+        <button class="action-btn" data-action="downgrade" data-class:selected="$responses.{{ finding.id }} === 'downgrade'" data-on:click="$responses.{{ finding.id }} = 'downgrade'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'downgrade'})" type="button">Downgrade</button>
+        <button class="action-btn" data-action="discuss" data-class:selected="$responses.{{ finding.id }} === 'discuss'" data-on:click="$responses.{{ finding.id }} = 'discuss'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'discuss'})" type="button">Discuss</button>
     </div>
     {% if finding.options %}
     <div class="triage-options">

@@ -260,8 +260,7 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
         )
         yield SSE.patch_elements(
             '<div id="submit-section">'
-            '<button class="submit-btn"'
-            ' style="background: #059669; cursor: default;"'
+            '<button class="submit-btn submit-btn--done"'
             " disabled>Review submitted</button></div>",
         )
 

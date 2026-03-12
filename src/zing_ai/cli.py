@@ -152,7 +152,7 @@ def mcp_cmd(port: int) -> None:
     app = create_app(port=port)
     click.echo(f"Starting Zing server on http://127.0.0.1:{port}")
     click.echo(f"Dashboard: http://127.0.0.1:{port}/dashboard")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=3)
 
 
 def main() -> None:

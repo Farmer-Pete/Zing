@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import pathlib
 from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from zing_ai.server.mcp_tools import configure, mcp_server
 from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
 from zing_ai.server.sessions import SessionManager
+
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 
 def create_app(
@@ -70,6 +74,7 @@ def create_app(
     )
     fastapi_app.state.session_manager = sm
     configure(sm, port=port)
+    fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]

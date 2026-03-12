@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
+from zing_ai.server.models import UserResponse
+
 from tests.test_ui.conftest import _ServerInfo
 
 pytestmark = pytest.mark.ui
@@ -27,13 +29,13 @@ def test_dashboard_empty_state(server: _ServerInfo, page: Page) -> None:
     """Dashboard shows empty message when no sessions exist."""
     page.goto(f"{server.base_url}/dashboard")
 
-    expect(page.locator("text=No sessions found.")).to_be_visible(timeout=3000)
+    expect(page.locator("text=No sessions yet")).to_be_visible(timeout=3000)
 
 
 def test_dashboard_reflects_new_session_on_reload(server: _ServerInfo, page: Page) -> None:
     """Dashboard shows newly created sessions after page reload."""
     page.goto(f"{server.base_url}/dashboard")
-    expect(page.locator("text=No sessions found.")).to_be_visible(timeout=3000)
+    expect(page.locator("text=No sessions yet")).to_be_visible(timeout=3000)
 
     # Create a session server-side
     manager = server.manager
@@ -73,3 +75,77 @@ def test_dashboard_status_badges(server: _ServerInfo, page: Page) -> None:
     badge = page.locator(".status-badge.status-started")
     expect(badge).to_be_visible(timeout=3000)
     expect(badge).to_have_text("started", timeout=3000)
+
+
+def test_dashboard_session_state_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Dashboard badges update when session state changes between page loads."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="state-reload", title="State Reload", steps=["review"]
+    )
+    step = session.steps[0]
+    step_id = step.step_id
+    manager.start_step("state-reload", step_id)
+
+    # Add a finding so submit works
+    manager.add_finding("state-reload", step_id, {
+        "type": "triage",
+        "id": "t1",
+        "title": "Finding",
+        "category": "security",
+        "severity": "high",
+        "confidence": "high",
+    })
+    manager.mark_step_ready("state-reload", step_id)
+
+    page.goto(f"{server.base_url}/dashboard")
+    expect(page.locator(".status-badge.status-ready")).to_be_visible(timeout=3000)
+
+    # Submit responses server-side to transition to completed
+    manager.submit_responses("state-reload", step_id, [UserResponse()])
+
+    page.reload()
+    expect(page.locator(".status-badge.status-completed")).to_be_visible(timeout=3000)
+
+
+def test_404_for_nonexistent_session(server: _ServerInfo, page: Page) -> None:
+    """Navigating to a nonexistent session returns 404."""
+    response = page.goto(f"{server.base_url}/nonexistent-session-id")
+    assert response is not None
+    assert response.status == 404
+
+
+def test_submit_to_completed_step_is_disabled(server: _ServerInfo, page: Page) -> None:
+    """Submit button is disabled after completion; forced POST returns 409."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="completed-submit", title="Completed Submit", steps=["review"]
+    )
+    step = session.steps[0]
+    step_id = step.step_id
+    manager.start_step("completed-submit", step_id)
+
+    manager.add_finding("completed-submit", step_id, {
+        "type": "triage",
+        "id": "t1",
+        "title": "Finding",
+        "category": "security",
+        "severity": "high",
+        "confidence": "high",
+    })
+    manager.mark_step_ready("completed-submit", step_id)
+
+    page.goto(f"{server.base_url}/completed-submit")
+    page.wait_for_load_state("networkidle", timeout=3000)
+
+    # Submit via UI
+    with page.expect_response("**/submit", timeout=3000):
+        page.locator(".submit-btn").click()
+    expect(page.locator(".submit-btn")).to_be_disabled(timeout=3000)
+
+    # Force a POST to the submit endpoint — should get 409
+    api_response = page.request.post(
+        f"{server.base_url}/completed-submit/submit",
+        data={"step_id": step_id, "responses": []},
+    )
+    assert api_response.status == 409
