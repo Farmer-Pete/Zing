@@ -645,10 +645,17 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                         resp = s.responses[i]
                         if resp.action is not None:
                             saved_responses[finding.id] = resp.action.value
-                        elif resp.selected is not None:
-                            saved_responses[finding.id] = resp.selected
-                            if resp.other_text is not None:
-                                saved_responses[f"{finding.id}_other"] = resp.other_text
+                        if resp.selected is not None:
+                            if finding.type == "triage":
+                                saved_responses[f"{finding.id}_approach"] = resp.selected
+                                if resp.other_text is not None:
+                                    saved_responses[f"{finding.id}_approach_other"] = (
+                                        resp.other_text
+                                    )
+                            else:
+                                saved_responses[finding.id] = resp.selected
+                                if resp.other_text is not None:
+                                    saved_responses[f"{finding.id}_other"] = resp.other_text
                         elif resp.answer is not None:
                             saved_responses[finding.id] = resp.answer
                 break

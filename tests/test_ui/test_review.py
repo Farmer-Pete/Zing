@@ -899,3 +899,131 @@ def test_multi_step_mixed_state_navigation(server: _ServerInfo, page: Page) -> N
     expect(submit_btn).to_be_enabled(timeout=3000)
 
     _assert_no_console_errors(console_errors)
+
+
+# ---------------------------------------------------------------------------
+# Batch 6: Reload restore gaps — triage approach, other text, choice other
+# ---------------------------------------------------------------------------
+
+
+def test_triage_approach_restores_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Triage approach radio is re-selected when the page reloads with saved state."""
+    step_id = _create_session_with_all_finding_types(server, session_id="approach-reload")
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    _save_and_reload(
+        server, page, "approach-reload", step_id,
+        {
+            "triage-1": UserResponse(
+                action=ResponseAction.ACCEPT,
+                selected="Parameterize queries",
+            ),
+        },
+    )
+    _wait_for_datastar(page)
+
+    # Action button should be selected
+    accept_btn = page.locator("#finding-triage-1 .action-btn", has_text="Accept")
+    expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
+
+    # Approach radio should be checked
+    approach_radio = page.locator(
+        "#finding-triage-1 input[value='Parameterize queries']"
+    )
+    expect(approach_radio).to_be_checked(timeout=3000)
+
+    _assert_no_console_errors(console_errors)
+
+
+def test_triage_other_approach_restores_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Triage 'Other' approach radio and custom text are restored on reload."""
+    step_id = _create_session_with_all_finding_types(server, session_id="triage-other-reload")
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    _save_and_reload(
+        server, page, "triage-other-reload", step_id,
+        {
+            "triage-1": UserResponse(
+                action=ResponseAction.ACCEPT,
+                selected="__other__",
+                other_text="Custom approach text",
+            ),
+        },
+    )
+    _wait_for_datastar(page)
+
+    # Action button should be selected
+    accept_btn = page.locator("#finding-triage-1 .action-btn", has_text="Accept")
+    expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
+
+    # "Other" radio should be checked
+    other_radio = page.locator("#finding-triage-1 input[value='__other__']")
+    expect(other_radio).to_be_checked(timeout=3000)
+
+    # Custom textarea should be visible and pre-filled
+    other_textarea = page.locator("#finding-triage-1 div[data-show] textarea")
+    expect(other_textarea).to_be_visible(timeout=3000)
+    expect(other_textarea).to_have_value("Custom approach text", timeout=3000)
+
+    _assert_no_console_errors(console_errors)
+
+
+def test_choice_other_restores_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Choice 'Other' radio and custom text are restored on reload."""
+    step_id = _create_ready_session(server, session_id="choice-other-reload")
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    _save_and_reload(
+        server, page, "choice-other-reload", step_id,
+        {
+            "choice-1": UserResponse(selected="__other__", other_text="My custom choice"),
+        },
+    )
+    _wait_for_datastar(page)
+
+    # "Other" radio should be checked
+    other_radio = page.locator("#finding-choice-1 input[value='__other__']")
+    expect(other_radio).to_be_checked(timeout=3000)
+
+    # Custom textarea should be visible and pre-filled
+    other_textarea = page.locator("#finding-choice-1 div[data-show] textarea")
+    expect(other_textarea).to_be_visible(timeout=3000)
+    expect(other_textarea).to_have_value("My custom choice", timeout=3000)
+
+    _assert_no_console_errors(console_errors)
+
+
+def test_submit_captures_triage_action_and_approach(server: _ServerInfo, page: Page) -> None:
+    """Submit captures both triage action AND selected approach in a single response."""
+    step_id = _create_session_with_all_finding_types(server, session_id="submit-approach")
+
+    page.goto(f"{server.base_url}/submit-approach")
+    _wait_for_datastar(page)
+
+    # Select Accept action
+    page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
+
+    # Select an approach
+    page.locator("#finding-triage-1 input[value='Parameterize queries']").click()
+
+    # Fill text finding (required for submit)
+    page.locator("#finding-text-1 textarea").fill("Test plan")
+
+    # Select choice finding (required for submit)
+    page.locator("#finding-choice-1 input[value='Option A']").click()
+
+    with page.expect_response("**/submit", timeout=3000):
+        page.locator(".submit-btn").click()
+
+    expect(page.locator("#review-status")).to_contain_text("Review submitted", timeout=3000)
+
+    # Verify server state has BOTH action and approach
+    _, step = server.manager.get_step_by_id(step_id)
+    assert step.responses is not None
+
+    triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
+    assert step.responses[triage_idx].action == ResponseAction.ACCEPT
+    assert step.responses[triage_idx].selected == "Parameterize queries"

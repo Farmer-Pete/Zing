@@ -79,10 +79,13 @@ Findings come with severity and confidence ratings. Zing walks you through each 
 ### 7. Ship
 When the review is clean, Zing offers to open your pull request. Draft by default, because you're still in control.
 
-### 8. PR Review (`/zing-pr-audit`)
+### 8. PR Respond (`/zing-pr-respond`)
+Given a PR link or number, Zing checks out the branch, fetches all unresolved review comments, and walks you through each one. It analyzes whether the comment needs a code fix, a reply, or is already addressed. When there's one clear fix it proposes the change; when there are multiple approaches it asks you to pick. After all comments are handled, it commits and pushes the changes, posts replies on GitHub, and resolves the threads. Then it polls CI with increasing backoff until all checks complete. If any checks fail, Zing investigates the logs, fixes the failures, pushes again, and loops back to check for any new unresolved comments — repeating the full cycle until CI is green. Finally, it re-requests reviews from stale reviewers so the PR is ready for another look.
+
+### 9. PR Review (`/zing-pr-audit`)
 Once a PR is open, Zing can review it the way a senior developer would — on GitHub, with line-level comments. It checks out the PR branch, reads every changed file in full, fans out four parallel review agents (the same ones from the build review), and walks you through each finding before submitting. The final review is posted via the GitHub API with inline comments on the exact lines that matter, severity ratings, and code suggestions where the fix is obvious. The review action (approve, comment, or request changes) is your call. A local markdown report is also saved so you can feed findings straight back into `/zing-plan` if fixes are needed.
 
-### 9. Code Audit (`/zing-custom-audit`)
+### 10. Code Audit (`/zing-custom-audit`)
 Point Zing at any area of your codebase — files, directories, or just a description like "the authentication module" — and it performs a focused audit. Zing resolves your description to concrete files, confirms the scope with you, then fans out six parallel review agents to analyze the code as it stands today. Each finding is walked through one by one so you can validate, discuss, or dismiss it. Confirmed findings are written to a markdown report you can feed into `/zing-plan` to start fixing them.
 
 ---
@@ -124,10 +127,21 @@ uv tool install zing-ai
 ```
 -->
 
-### Install bleeding edge from GitHub
+### Install from GitHub
 
+**Stable (recommended):**
 ```
 uv tool install git+https://github.com/Farmer-Pete/Zing
+```
+
+**Bleeding edge / unstable** (latest features, may have rough edges):
+```
+uv tool install --force git+https://github.com/Farmer-Pete/Zing@zing-next
+```
+
+To switch back to stable:
+```
+uv tool install --force git+https://github.com/Farmer-Pete/Zing
 ```
 
 ### Set up commands for your AI coding assistant
@@ -156,8 +170,15 @@ zing-ai install --all
 
 ## Updating
 
+**Stable:**
 ```
 uv tool upgrade zing-ai
+zing-ai install --claude   # or --opencode or --all
+```
+
+**Bleeding edge** (reinstall to pull latest from `zing-next`):
+```
+uv tool install --force git+https://github.com/Farmer-Pete/Zing@zing-next
 zing-ai install --claude   # or --opencode or --all
 ```
 
@@ -179,6 +200,7 @@ After installation, the zing commands are available as slash commands in your AI
 - `/zing:build` — Execute the plan step by step
 - `/zing:build-audit` — Review the code changes
 - `/zing:custom-audit` — Audit existing code for issues
+- `/zing:pr-respond` — Address unresolved PR review comments
 - `/zing:pr-audit` — Review a pull request on GitHub
 - `/zing:plan-linear` — Create Linear tickets from the plan
 
