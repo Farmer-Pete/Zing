@@ -500,7 +500,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     if event == "agents_done":
                         yield SSE.patch_elements(
                             '<div id="review-status" class="submit-banner">'
-                            "All agents complete — submitting findings\u2026</div>",
+                            "All agents complete</div>",
                         )
 
                     # Check terminal states
