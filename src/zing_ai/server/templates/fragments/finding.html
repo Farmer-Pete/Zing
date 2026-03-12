@@ -11,6 +11,9 @@
 <div id="finding-{{ finding.id }}" class="finding">
     <div class="finding-header">{{ finding.title }}</div>
     {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    {% if finding.context %}
+    <div class="finding-meta">{{ finding.context }}</div>
+    {% endif %}
     <div class="radio-group">
         {% for option in finding.options %}
         <label class="option-card">

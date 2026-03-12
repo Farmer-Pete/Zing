@@ -209,6 +209,31 @@ class TestSessionLifecycle(unittest.TestCase):
         })
         assert finding.type == "triage"
 
+    def test_duplicate_findings_are_deduplicated(self) -> None:
+        """Submitting two findings with the same type and title stores only one."""
+        step = self._create_session_with_step()
+        self.manager.add_finding("s1", step.step_id, {
+            "type": "choice",
+            "title": "Improve error handling",
+            "options": [
+                {"label": "Try/except", "description": "Wrap in try/except"},
+                {"label": "Result type", "description": "Use a Result type"},
+            ],
+        })
+        self.manager.add_finding("s1", step.step_id, {
+            "type": "choice",
+            "title": "Improve error handling",
+            "options": [
+                {"label": "Try/except", "description": "Wrap in try/except"},
+                {"label": "Result type", "description": "Use a Result type"},
+            ],
+        })
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert len(session.steps[0].findings) == 1, (
+            f"Expected 1 finding after dedup, got {len(session.steps[0].findings)}"
+        )
+
     def test_full_lifecycle(self) -> None:
         """Full lifecycle: create → start step → add findings → agents complete → submit."""
         step = self._create_session_with_step()

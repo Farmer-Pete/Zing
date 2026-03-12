@@ -322,6 +322,19 @@ class SessionManager:
 
         adapter = TypeAdapter(Finding)
         finding = adapter.validate_python(finding_data)
+
+        # Deduplicate by (type, title) — skip if an identical pair already exists
+        for existing in step.findings:
+            if existing.type == finding.type and existing.title == finding.title:
+                logger.info(
+                    "Skipped duplicate %s finding '%s' on step '%s' (id=%s)",
+                    finding.type,
+                    finding.title,
+                    step.step_name,
+                    step_id,
+                )
+                return existing
+
         step.findings.append(finding)
         self._persist(session)
         self._notify("finding_added", session_id)

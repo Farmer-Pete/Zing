@@ -103,6 +103,7 @@ class ChoiceFinding(BaseModel):
     type: Literal["choice"] = "choice"
     title: str
     body: str = ""
+    context: str | None = None
     options: list[ChoiceOption]
 
 

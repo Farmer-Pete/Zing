@@ -84,6 +84,33 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("data-show", html)
         self.assertIn("ch2_other", html)
 
+    def test_choice_finding_preserves_context(self) -> None:
+        """ChoiceFinding stores context field when provided."""
+        finding = ChoiceFinding(
+            id="ch_ctx",
+            title="Improvement suggestion",
+            body="Consider this change",
+            context="Referenced in plan section 3.2",
+            options=[
+                ChoiceOption(label="A", description="Option A"),
+                ChoiceOption(label="B", description="Option B"),
+            ],
+        )
+        self.assertEqual(finding.context, "Referenced in plan section 3.2")
+
+    def test_choice_finding_renders_context(self) -> None:
+        """Choice finding renders context when provided."""
+        finding = ChoiceFinding(
+            id="ch_ctx2",
+            title="Pick an approach",
+            context="From plan section: Error Handling",
+            options=[
+                ChoiceOption(label="A", description="Option A"),
+            ],
+        )
+        html = finding_fragment(finding, "test-session")
+        self.assertIn("From plan section: Error Handling", html)
+
     def test_triage_finding_renders_action_buttons(self) -> None:
         """Triage finding renders action buttons with data-bind."""
         finding = TriageFinding(
