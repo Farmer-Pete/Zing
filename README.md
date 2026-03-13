@@ -234,8 +234,10 @@ flowchart LR
     zing["/zing"] --> new["/zing:new"]
     new --> plan["/zing:plan"]
     plan --> planaudit["/zing:plan-audit"]
+    plan -.->|"optional"| planlinear["/zing:plan-linear"]
     planaudit --> build["/zing:build"]
     build --> buildaudit["/zing:build-audit"]
+    buildaudit -.->|"fix findings"| zing
 ```
 
 ### All Command Flows
