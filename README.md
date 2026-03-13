@@ -312,14 +312,14 @@ All audit commands (`build-audit`, `custom-audit`, `pr-audit`) fan out six paral
 ```mermaid
 flowchart TD
     audit["Audit Command"] --> fan{"Fan out"}
-    fan --> a1["Architecture\n& Design"]
-    fan --> a2["Correctness\n& State"]
+    fan --> a1["Architecture<br/>& Design"]
+    fan --> a2["Correctness<br/>& State"]
     fan --> a3["Security"]
-    fan --> a4["UI &\nReadability"]
+    fan --> a4["UI &<br/>Readability"]
     fan --> a5["Performance"]
-    fan --> a6["Testing &\nObservability"]
+    fan --> a6["Testing &<br/>Observability"]
 
-    a1 --> dedup["Deduplicate\n(by type + title)"]
+    a1 --> dedup["Deduplicate<br/>(by type + title)"]
     a2 --> dedup
     a3 --> dedup
     a4 --> dedup
@@ -341,11 +341,11 @@ The zing file frontmatter is the glue that connects all pipeline stages to a sin
 ```mermaid
 flowchart LR
     subgraph "Zing File (.zing/my-feature.md)"
-        fm["session: abc123\nsteps:\n  plan: step-1\n  plan-audit: step-2\n  build: step-3\n  build-audit: step-4"]
+        fm["session: abc123<br/>steps:<br/>  plan: step-1<br/>  plan-audit: step-2<br/>  build: step-3<br/>  build-audit: step-4"]
     end
 
-    fm -->|"reads session + step IDs"| plan["/zing:plan\nstep_start(step-1)"]
-    fm -->|"reads session + step IDs"| pa["/zing:plan-audit\nstep_start(step-2)"]
-    fm -->|"reads session + step IDs"| build["/zing:build\nstep_start(step-3)"]
-    fm -->|"reads session + step IDs"| ba["/zing:build-audit\nstep_start(step-4)"]
+    fm -->|"reads session + step IDs"| plan["/zing:plan<br/>step_start(step-1)"]
+    fm -->|"reads session + step IDs"| pa["/zing:plan-audit<br/>step_start(step-2)"]
+    fm -->|"reads session + step IDs"| build["/zing:build<br/>step_start(step-3)"]
+    fm -->|"reads session + step IDs"| ba["/zing:build-audit<br/>step_start(step-4)"]
 ```
