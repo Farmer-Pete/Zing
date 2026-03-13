@@ -220,3 +220,130 @@ After installation, the zing commands are available as slash commands in your AI
 - `/zing:plan-linear` — Create Linear tickets from the plan
 
 In OpenCode, use flat naming: `/zing-plan`, `/zing-build`, etc.
+
+---
+
+## Architecture
+
+### Primary Pipeline
+
+The main flow chains each stage into the next automatically:
+
+```mermaid
+flowchart LR
+    zing["/zing"] --> new["/zing:new"]
+    new --> plan["/zing:plan"]
+    plan --> planaudit["/zing:plan-audit"]
+    planaudit --> build["/zing:build"]
+    build --> buildaudit["/zing:build-audit"]
+```
+
+### All Command Flows
+
+Commands can also be invoked independently. Audit commands optionally feed findings back into planning:
+
+```mermaid
+flowchart TD
+    zing["/zing"] --> new["/zing:new"]
+    new --> plan["/zing:plan"]
+    plan --> planaudit["/zing:plan-audit"]
+    planaudit --> build["/zing:build"]
+    build --> buildaudit["/zing:build-audit"]
+
+    plan --> planlinear["/zing:plan-linear"]
+    planlinear -.->|"Start build"| build
+
+    buildaudit -.->|"Fix findings"| plan
+    customaudit["/zing:custom-audit"] -.->|"Fix findings"| plan
+    praudit["/zing:pr-audit"] -.->|"Fix findings"| plan
+
+    prrespond["/zing:pr-respond"]
+
+    style zing fill:#4a9eff,color:#fff
+    style prrespond fill:#6c757d,color:#fff
+    style customaudit fill:#6c757d,color:#fff
+    style praudit fill:#6c757d,color:#fff
+    style planlinear fill:#6c757d,color:#fff
+```
+
+### MCP Tool Lifecycle
+
+The Zing MCP server tracks sessions and steps across the entire pipeline via a shared dashboard:
+
+```mermaid
+sequenceDiagram
+    participant New as /zing:new
+    participant MCP as Zing MCP Server
+    participant Dashboard as Review Dashboard
+    participant Plan as /zing:plan
+    participant Audit as Audit Commands
+
+    New->>MCP: session_create(title, steps)
+    MCP-->>New: session_id + step IDs
+    Note over New: Stores IDs in zing file frontmatter
+
+    Plan->>MCP: session_update(session_id)
+    Plan->>MCP: step_start(session_id, step_id)
+    loop Subagents
+        Plan->>MCP: agent_start(session_id, step_id, name)
+        Plan->>MCP: step_log(session_id, step_id, name, message)
+        Plan->>MCP: agent_stop(session_id, step_id, name)
+    end
+
+    Audit->>MCP: session_update(session_id)
+    Audit->>MCP: step_start(session_id, step_id)
+    loop Review Agents (×6 parallel)
+        Audit->>MCP: agent_start(session_id, step_id, name)
+        Audit->>MCP: finding_submit(session_id, step_id, finding)
+        Audit->>MCP: agent_stop(session_id, step_id, name)
+    end
+    Audit->>MCP: review_wait(session_id, step_id)
+    MCP-->>Dashboard: Stream findings via SSE
+    Dashboard-->>MCP: User triage responses
+    MCP-->>Audit: Review complete
+```
+
+### Review Agent Architecture
+
+All audit commands (`build-audit`, `custom-audit`, `pr-audit`) fan out six parallel review agents:
+
+```mermaid
+flowchart TD
+    audit["Audit Command"] --> fan{"Fan out"}
+    fan --> a1["Architecture\n& Design"]
+    fan --> a2["Correctness\n& State"]
+    fan --> a3["Security"]
+    fan --> a4["UI &\nReadability"]
+    fan --> a5["Performance"]
+    fan --> a6["Testing &\nObservability"]
+
+    a1 --> dedup["Deduplicate\n(by type + title)"]
+    a2 --> dedup
+    a3 --> dedup
+    a4 --> dedup
+    a5 --> dedup
+    a6 --> dedup
+
+    dedup --> submit["finding_submit() → Dashboard"]
+    submit --> wait["review_wait()"]
+    wait --> user["User triages in browser"]
+
+    style audit fill:#4a9eff,color:#fff
+    style user fill:#28a745,color:#fff
+```
+
+### Session Continuity
+
+The zing file frontmatter is the glue that connects all pipeline stages to a single session:
+
+```mermaid
+flowchart LR
+    subgraph "Zing File (.zing/my-feature.md)"
+        fm["session: abc123\nsteps:\n  plan: step-1\n  plan-audit: step-2\n  build: step-3\n  build-audit: step-4"]
+    end
+
+    fm -->|"reads session + step IDs"| plan["/zing:plan\nstep_start(step-1)"]
+    fm -->|"reads session + step IDs"| pa["/zing:plan-audit\nstep_start(step-2)"]
+    fm -->|"reads session + step IDs"| build["/zing:build\nstep_start(step-3)"]
+    fm -->|"reads session + step IDs"| ba["/zing:build-audit\nstep_start(step-4)"]
+```
