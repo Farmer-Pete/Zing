@@ -1,6 +1,6 @@
 
 <objective>
-Address unresolved GitHub PR review comments, fix valid issues, commit and push changes, reply to comments on GitHub marking them resolved, then check CI status and offer to re-check or exit.
+Address all GitHub PR feedback — unresolved review threads, top-level review summaries, and issue comments — fix valid issues, commit and push changes, reply to comments on GitHub (resolving threads where applicable), then check CI status and offer to re-check or exit.
 </objective>
 
 <process>
@@ -30,7 +30,7 @@ After resolving the PR, create top-level phase tasks to track progress:
 
 ```
 TaskCreate: "Merge latest base branch" (description: "Merge latest {baseRefName} into the PR branch and resolve conflicts")
-TaskCreate: "Fetch unresolved comments" (description: "Query GitHub for unresolved review threads on PR #{number}")
+TaskCreate: "Fetch unresolved comments" (description: "Query GitHub for unresolved review threads, review summaries, and issue comments on PR #{number}")
 TaskCreate: "Address review comments" (description: "Analyze and fix each unresolved comment")
 TaskCreate: "Commit & push" (description: "Stage, commit, and push code changes")
 TaskCreate: "Reply & resolve on GitHub" (description: "Post replies and resolve threads via GitHub API")
@@ -130,34 +130,89 @@ From the returned list, identify **unresolved** threads — those where `isResol
 
 Only consider threads where the issue has NOT already been addressed (look at the thread replies — if someone already pushed a fix or the original reviewer said "resolved", skip it).
 
+### Fetch top-level review bodies
+
+Fetch reviews that contain a summary body (the text submitted alongside a review, not inline comments):
+
+```
+gh api repos/{owner}/{repo}/pulls/{number}/reviews --paginate
+```
+
+Filter to reviews where:
+- `body` is non-empty (after trimming whitespace)
+- `state` is not `DISMISSED`
+- `user.login` is not the PR author
+- `user.login` does not end in `[bot]`
+
+For each matching review, note:
+- `id` — the review's REST API ID
+- `body` — the review summary text
+- `user.login` — who wrote it
+- `state` — the review state (e.g., `CHANGES_REQUESTED`, `COMMENTED`)
+- `html_url` — link to the review on GitHub
+
+**Detecting "already addressed":** Check if a later review or issue comment by the PR author exists that references or responds to this review. If uncertain, include it — the user can skip.
+
+### Fetch issue comments
+
+Fetch general PR conversation comments (not inline code comments):
+
+```
+gh api repos/{owner}/{repo}/issues/{number}/comments --paginate
+```
+
+Filter to comments where:
+- `user.login` is not the PR author
+- `user.login` does not end in `[bot]`
+
+For each matching comment, note:
+- `id` — the comment's REST API ID
+- `body` — the comment text
+- `user.login` — who wrote it
+- `created_at` — when it was posted
+- `html_url` — link to the comment on GitHub
+
+**Detecting "already addressed":** Check if a later issue comment by the PR author exists that appears to respond to this comment. If uncertain, include it — the user can skip.
+
+### Finish fetch step
+
 Mark the "Fetch unresolved comments" phase task as `completed` using TaskUpdate.
 
-If there are no unresolved comments, tell the user:
+If all three lists are empty (no unresolved review threads, no review summaries, and no issue comments), tell the user:
 ```
-No unresolved review comments found on PR #{number}.
+No unresolved comments found on PR #{number}.
 ```
 Mark the "Address review comments", "Commit & push", and "Reply & resolve on GitHub" phase tasks as `completed` (nothing to do). Then skip directly to the **check_ci** step.
 </step>
 
 <step name="present_comments">
-Present the unresolved comments to the user as a numbered list:
+Present all comments to the user, grouped by type, as a single numbered list with continuous numbering:
 
 ```
-Found {count} unresolved review comment(s) on PR #{number}:
+Found {total_count} unresolved comment(s) on PR #{number}:
 
+Review threads ({thread_count}):
 1. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
 2. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
+
+Review summaries ({summary_count}):
+3. [Review: {state}] @{reviewer}: "{comment_body_truncated}"
+
+General comments ({issue_comment_count}):
+4. [Comment] @{author}: "{comment_body_truncated}"
 ...
 ```
 
-Truncate long comment bodies to ~100 characters with "..." for the summary view.
+Omit any group header if that group has zero items. Truncate long comment bodies to ~100 characters with "..." for the summary view.
 
 ### Create comment-level tasks
 
-Create one task per unresolved comment to track individual progress:
+Create one task per comment to track individual progress, with type-appropriate labels:
 
 ```
-TaskCreate: "[{file_path}:{line}] @{reviewer}: '{comment_body_truncated}'"
+TaskCreate: "[{file_path}:{line}] @{reviewer}: '{comment_body_truncated}'"          # review threads
+TaskCreate: "[Review: {state}] @{reviewer}: '{comment_body_truncated}'"              # review summaries
+TaskCreate: "[Comment] @{author}: '{comment_body_truncated}'"                        # issue comments
 ```
 
 All comment tasks start as pending.
@@ -168,17 +223,35 @@ Then say: "Will address each comment one at a time."
 <step name="address_comments">
 Mark the "Address review comments" phase task as `in_progress` using TaskUpdate.
 
-For each unresolved comment, in order — marking the corresponding comment task as `in_progress` when starting it:
+For each comment, in order — marking the corresponding comment task as `in_progress` when starting it:
 
-1. **Show the comment** in full:
+1. **Show the comment** in full, with a type-appropriate header:
+
+   For **review threads**:
    ```
-   --- Comment {N}/{total} ---
+   --- Comment {N}/{total} [Review Thread] ---
    File: {file_path}:{line}
    Reviewer: @{reviewer}
    Comment: {full_comment_body}
    ```
 
-2. **Read the relevant code** around the commented line. Use Serena or Read to understand the context — read at least 20 lines around the target line, plus any related code the comment references.
+   For **review summaries**:
+   ```
+   --- Comment {N}/{total} [Review Summary: {state}] ---
+   Reviewer: @{reviewer}
+   Comment: {full_comment_body}
+   ```
+
+   For **issue comments**:
+   ```
+   --- Comment {N}/{total} [General Comment] ---
+   Author: @{author}
+   Comment: {full_comment_body}
+   ```
+
+2. **Read the relevant code:**
+   - **Review threads:** Read at least 20 lines around the commented line in the specified file, plus any related code the comment references.
+   - **Review summaries and issue comments:** Parse the comment body for file references, code blocks, or function/class names. Read whatever files or symbols the comment references. If the comment is general (e.g., architectural feedback), read the most relevant files.
 
 3. **Analyze the comment.** Determine whether it is:
    - A **valid finding** that requires a code change
@@ -210,6 +283,7 @@ For each unresolved comment, in order — marking the corresponding comment task
 
 After addressing each comment, mark its comment task as `completed` using TaskUpdate, and record:
 - The comment ID
+- The comment type: `review_thread`, `review_body`, or `issue_comment`
 - What was done (code change, reply only, skipped)
 - The reply text to post on GitHub
 
@@ -236,7 +310,11 @@ Mark the "Commit & push" phase task as `completed` using TaskUpdate.
 
 <step name="reply_and_resolve">
 Mark the "Reply & resolve on GitHub" phase task as `in_progress` using TaskUpdate.
-For each comment that was addressed, post a reply on GitHub and resolve the thread.
+For each comment that was addressed, post a reply on GitHub using the appropriate method for the comment type.
+
+The reply text should be concise and professional. For code fixes, mention what was changed (e.g., "Fixed — added null check as suggested." or "Updated to use `const` instead of `let`."). For questions, provide the answer. For non-actionable comments, acknowledge them (e.g., "Thanks for the feedback!" or "Acknowledged.").
+
+### For `review_thread` comments:
 
 **Reply to the comment:**
 ```
@@ -245,8 +323,6 @@ gh api repos/{owner}/{repo}/pulls/{number}/comments \
   -f body='{reply_text}' \
   -F in_reply_to={comment_id}
 ```
-
-The reply text should be concise and professional. For code fixes, mention what was changed (e.g., "Fixed — added null check as suggested." or "Updated to use `const` instead of `let`."). For questions, provide the answer. For non-actionable comments, acknowledge them (e.g., "Thanks for the feedback!" or "Acknowledged.").
 
 **Resolve the thread** using the GraphQL API:
 ```
@@ -263,11 +339,37 @@ gh api graphql -f query='
 
 Use the thread's GraphQL node ID (`id`) that was already fetched in the **fetch_unresolved_comments** step. Each thread's `id` was stored alongside its comment data — use it directly in the `resolveReviewThread` mutation.
 
-After all replies and resolutions are done, mark the "Reply & resolve on GitHub" phase task as `completed` using TaskUpdate.
+### For `review_body` comments:
+
+Post an issue comment that references the original review:
+```
+gh api repos/{owner}/{repo}/issues/{number}/comments \
+  -X POST \
+  -f body='Re: @{reviewer}'\''s [review]({html_url})
+
+{reply_text}'
+```
+
+There is no resolve step — review bodies do not have a resolution concept.
+
+### For `issue_comment` comments:
+
+Post an issue comment that mentions the original author:
+```
+gh api repos/{owner}/{repo}/issues/{number}/comments \
+  -X POST \
+  -f body='@{author} {reply_text}'
+```
+
+There is no resolve step — issue comments do not have a resolution concept.
+
+### Finish reply step
+
+After all replies (and resolutions, where applicable) are done, mark the "Reply & resolve on GitHub" phase task as `completed` using TaskUpdate.
 
 Tell the user:
 ```
-Replied to {count} comment(s) and resolved their threads on PR #{number}.
+Replied to {count} comment(s) on PR #{number}. Resolved {resolved_count} review thread(s).
 ```
 </step>
 
@@ -394,6 +496,8 @@ Mark the "Re-request reviews" phase task as `completed` using TaskUpdate.
 - NEVER guess at what a reviewer meant — if a comment is ambiguous, ask the user
 - NEVER reply to comments with AI-generated fluff — keep replies concise and specific
 - NEVER combine unrelated fixes into one commit — if addressing comments requires changes across different concerns, make separate commits
+- NEVER include bot comments (users whose login ends in `[bot]`) — always filter them out
+- NEVER reply to the same comment twice — before posting a reply to a review body or issue comment, check if a reply has already been posted in the current run
 </anti_patterns>
 
 <success_criteria>
@@ -401,12 +505,15 @@ The skill is complete when:
 
 - [ ] PR was identified (from argument, URL, or user input)
 - [ ] PR branch was checked out locally
-- [ ] All unresolved review comments were fetched and presented
+- [ ] All unresolved review threads were fetched and presented
+- [ ] All top-level review bodies (summaries) were fetched and presented
+- [ ] All issue comments were fetched and presented
+- [ ] Bot comments were filtered out from all three sources
 - [ ] Each comment was analyzed and addressed (fixed, answered, or acknowledged)
 - [ ] When multiple fix approaches existed, the user was given a choice
 - [ ] Code changes were committed and pushed
-- [ ] Replies were posted to all addressed comments on GitHub
-- [ ] Comment threads were resolved via the GraphQL API
+- [ ] Replies were posted to all addressed comments on GitHub (using the correct API per type)
+- [ ] Review thread comments were resolved via the GraphQL API
 - [ ] CI status was checked and reported
 - [ ] Failed CI checks were investigated and fixed (if any)
 - [ ] Pending CI checks were polled with backoff until completion
