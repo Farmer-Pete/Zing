@@ -155,6 +155,14 @@ def mcp_cmd(port: int) -> None:
     uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=3)
 
 
+def _register_sim() -> None:
+    """Lazy-register the sim command group to avoid loading MCP SDK eagerly."""
+    from zing_ai.sim import sim
+
+    cli.add_command(sim)
+
+
 def main() -> None:
     """CLI entry point."""
+    _register_sim()
     cli()
