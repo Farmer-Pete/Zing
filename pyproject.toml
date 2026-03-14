@@ -13,8 +13,8 @@ dependencies = [
 zing-ai = "zing_ai.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.10.2,<0.11.0"]
-build-backend = "uv_build"
+ requires = ["hatchling", "uv-dynamic-versioning"]
+ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
@@ -24,6 +24,21 @@ dev = [
     "pyright>=1.1",
     "pyleft>=1.1",
 ]
+
+ [tool.hatch.version]
+ source = "uv-dynamic-versioning"
+ 
+ [tool.uv-dynamic-versioning]
+ vcs = "git"
+ style = "pep440"
+ fallback-version = "0.0.0"
+ 
+ [tool.hatch.build.targets.wheel]
+ packages = ["src/zing_ai"]
+ 
+ [tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
+ 
 
 [tool.ruff]
 target-version = "py312"
