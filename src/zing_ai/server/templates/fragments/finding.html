@@ -44,7 +44,8 @@
     </div>
 </div>
 {% elif finding.type == "triage" %}
-<div id="finding-{{ finding.id }}" class="finding">
+<div id="finding-{{ finding.id }}" class="finding"
+     data-signals='{{ {"responses": {finding.id ~ "_complexity": finding.complexity.value}} | tojson }}'>
     <div class="finding-header">{{ finding.title }}</div>
     {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
     <div class="finding-meta">
@@ -52,6 +53,12 @@
         Severity: <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span> |
         Confidence: <span class="badge">{{ finding.confidence }}</span> |
         Category: {{ finding.category }}
+    </div>
+    <div class="complexity-selector">
+        <span class="complexity-label">Complexity:</span>
+        <button class="complexity-btn" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'simple'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'simple'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'simple'})" type="button">Simple</button>
+        <button class="complexity-btn" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'standard'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'standard'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'standard'})" type="button">Standard</button>
+        <button class="complexity-btn" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'complex'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'complex'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'complex'})" type="button">Complex</button>
     </div>
     <div class="action-group">
         <button class="action-btn" data-action="accept" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept'})" type="button">Accept</button>
