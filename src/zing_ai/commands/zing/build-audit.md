@@ -130,12 +130,28 @@ If zero valid findings, write a short file noting "Nothing to flag — changes l
 <step name="create_pr">
 End your review summary with: "Zing! Review complete."
 
-After writing the review report, use AskUserQuestion to ask: "What next?"
-- Options:
-  - "Create a PR" (description: "Create a GitHub PR from the current branch")
-  - "Fix with chat" (description: "Walk through each finding interactively — faster, fix as you go")
-  - "Build a plan to fix" (description: "Systematically plan and build a fix for each finding — slower but more thorough")
-  - "I'm done" (description: "Stop here")
+### Determine the recommended option
+
+After writing the review report, examine the complexity of all accepted/downgraded findings from the `review_wait()` response. For each finding, use `response.complexity or finding.complexity` (user override first, then agent classification).
+
+Count the findings by complexity and determine the default:
+- If **all** accepted/downgraded findings have `complexity == "simple"`: recommend **"Auto-apply all fixes"**
+- If accepted/downgraded findings are a mix of simple and standard (but **no** complex): recommend **"Fix with chat"**
+- If **any** accepted/downgraded finding has `complexity == "complex"`: recommend **"Build a plan to fix"**
+
+### Present the "What next?" question
+
+Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
+
+- "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
+- "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
+- "Build a plan to fix" (description: "Full plan → audit → build pipeline. Most rigorous, slowest.")
+- "Create a PR" (description: "Create a GitHub PR from the current branch")
+- "I'm done" (description: "Stop here")
+
+### Handling each choice
+
+If "Auto-apply all fixes": proceed to the `auto_apply` step.
 
 If "Fix with chat": proceed to the `discuss_findings` step.
 
@@ -152,6 +168,42 @@ If "Create a PR":
 Follow the `attribution_rule` from the shared review reference.
 
 If "I'm done" at the initial question, exit normally.
+</step>
+
+<step name="auto_apply">
+Automatically apply fixes for all accepted/downgraded findings without interactive prompts. This step is self-contained — no separate skill or server-side code is needed.
+
+### Process
+
+1. **Iterate through each accepted/downgraded finding** in the order they appear in the report.
+
+2. **For each finding:**
+   a. Read the finding's body (the detailed explanation from the report) and the selected approach option (from `response.selected` / `response.other_text`).
+   b. Read the relevant source file(s) referenced in the finding.
+   c. Apply the fix directly using Edit/Write tools. For simple findings the fix should be obvious from the finding description and selected approach. For standard findings, use the approach option to guide the implementation.
+   d. After applying the fix, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+   e. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), **fall back to interactive "fix with chat" mode for that finding only**: show the finding to the user, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+3. **After all findings are processed**, show a summary:
+   ```
+   Auto-apply complete:
+   - {applied_count} fixes applied successfully
+   - {fallback_count} required interactive resolution
+   - {skipped_count} skipped
+   ```
+
+4. **Stage and commit all changes** with a descriptive commit message listing the findings addressed:
+   ```
+   Fix code review findings: {brief list of finding titles}
+
+   Applied {applied_count} fixes from code review ({report_file}).
+   Findings addressed:
+   - #{n}: {finding title}
+   - #{n}: {finding title}
+   ...
+   ```
+
+5. After committing, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Build a plan to fix", and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
 </step>
 
 <step name="discuss_findings">
