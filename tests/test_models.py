@@ -33,7 +33,7 @@ class TestComplexityEnum(unittest.TestCase):
         assert set(Complexity) == {Complexity.SIMPLE, Complexity.STANDARD, Complexity.COMPLEX}
 
 
-class TestTriageFindinComplexity(unittest.TestCase):
+class TestTriageFindingComplexity(unittest.TestCase):
     """Test TriageFinding complexity field behavior."""
 
     def _make_triage(self, **overrides: object) -> TriageFinding:

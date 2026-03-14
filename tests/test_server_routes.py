@@ -197,6 +197,41 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(step.responses[0].action, "drop")
         self.assertIsNone(step.responses[0].complexity)
 
+    def test_save_response_invalid_complexity_ignored(self) -> None:
+        """An invalid complexity value is silently discarded (complexity stays None)."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        resp = self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {f"{finding_id}_complexity": "urgent"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        # No response should have been saved since the only field was invalid
+        if step.responses:
+            self.assertIsNone(step.responses[0].complexity)
+
+    def test_save_response_empty_complexity_ignored(self) -> None:
+        """An empty string complexity value is silently discarded."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        resp = self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {f"{finding_id}_complexity": ""},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        if step.responses:
+            self.assertIsNone(step.responses[0].complexity)
+
 
 class TestSubmit(ServerTestBase):
     """Tests for POST /{session_id}/submit."""
@@ -390,6 +425,77 @@ class TestSubmit(ServerTestBase):
         assert step.responses is not None
         self.assertEqual(step.responses[0].selected, "__other__")
         self.assertEqual(step.responses[0].other_text, "My custom answer")
+
+    def test_submit_with_complexity(self) -> None:
+        """Submitting Datastar signals with complexity propagates it correctly."""
+        self._create_session()
+        f_triage = self.manager.add_finding(
+            "test-session", self.step_id,
+            {
+                "type": "triage", "title": "Unused import",
+                "category": "style", "severity": "low", "confidence": "high",
+            },
+        )
+        self.manager.start_agent("test-session", self.step_id, "test-agent")
+        self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
+
+        resp = self.client.post(
+            "/test-session/submit",
+            json={
+                "step_id": self.step_id,
+                "responses": {
+                    f_triage.id: "accept",
+                    f"{f_triage.id}_complexity": "complex",
+                },
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].action, "accept")
+        self.assertEqual(step.responses[0].complexity.value, "complex")
+
+    def test_submit_merges_with_auto_saved_complexity(self) -> None:
+        """Submit merges with auto-saved responses, preserving complexity not in signals."""
+        self._create_session()
+        f_triage = self.manager.add_finding(
+            "test-session", self.step_id,
+            {
+                "type": "triage", "title": "Unused import",
+                "category": "style", "severity": "low", "confidence": "high",
+            },
+        )
+        # Auto-save complexity before submit
+        self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": self.step_id,
+                "responses": {f"{f_triage.id}_complexity": "complex"},
+            },
+        )
+        self.manager.start_agent("test-session", self.step_id, "test-agent")
+        self.manager.stop_agent("test-session", self.step_id, "test-agent")
+        self.manager.mark_step_ready("test-session", self.step_id)
+
+        # Submit with only action — no complexity in signals
+        resp = self.client.post(
+            "/test-session/submit",
+            json={
+                "step_id": self.step_id,
+                "responses": {f_triage.id: "accept"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].action, "accept")
+        # Complexity should be preserved from auto-save
+        self.assertEqual(step.responses[0].complexity.value, "complex")
 
 
 class TestSSEStream(ServerTestBase):

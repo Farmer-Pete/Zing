@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
+from datastar_py.consts import ElementPatchMode
 from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -62,17 +63,25 @@ def _notify_dashboard_connections(event: str) -> None:
         queue.put_nowait(event)
 
 
-def finding_fragment(finding: Finding, session_id: str) -> str:
+def finding_fragment(
+    finding: Finding,
+    session_id: str,
+    saved_responses: dict[str, str] | None = None,
+) -> str:
     """Render a single finding as an HTML fragment.
 
     Args:
         finding: The finding model to render.
         session_id: The session ID for auto-save POST URLs.
+        saved_responses: Optional dict of saved response values for signal initialization.
 
     Returns:
         Rendered HTML string for the finding.
     """
-    return render("fragments/finding.html", finding=finding, session_id=session_id)
+    kwargs: dict[str, object] = {"finding": finding, "session_id": session_id}
+    if saved_responses is not None:
+        kwargs["saved_responses"] = saved_responses
+    return render("fragments/finding.html", **kwargs)
 
 
 @router.post("/{session_id}/save-response")
@@ -131,13 +140,7 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
                 )
                 if idx is not None and idx < len(step.responses):
                     existing = step.responses[idx]
-                    response = UserResponse(
-                        action=response.action if response.action is not None else existing.action,
-                        selected=response.selected if response.selected is not None else existing.selected,
-                        answer=response.answer if response.answer is not None else existing.answer,
-                        other_text=response.other_text if response.other_text is not None else existing.other_text,
-                        complexity=response.complexity if response.complexity is not None else existing.complexity,
-                    )
+                    response = response.merge_over(existing)
             try:
                 manager.save_response(session_id, step_id, finding.id, response)
                 saved_count += 1
@@ -236,6 +239,13 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
                 "message": "responses must be a list or object",
             },
         )
+
+    # Merge with auto-saved responses to preserve fields not in the signal store
+    if step.responses:
+        responses = [
+            resp.merge_over(existing)
+            for resp, existing in zip(responses, step.responses, strict=False)
+        ]
 
     try:
         review = manager.submit_responses(session_id, step_id, responses)
@@ -456,7 +466,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         if s.step_id != step_id or active_tab == "plan":
                             yield SSE.patch_elements(
                                 _notification_dot_html(f"step-tab-{s.step_id}"),
-                                mode="morph",
+                                mode=ElementPatchMode.OUTER,
                             )
 
                 # If zing_file was updated, show dot on the Plan tab (unless viewing it)
@@ -467,7 +477,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 ):
                     yield SSE.patch_elements(
                         _notification_dot_html("step-tab-plan"),
-                        mode="morph",
+                        mode=ElementPatchMode.OUTER,
                     )
 
                 # If viewing a step tab, also stream findings for the active step
@@ -485,7 +495,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         yield SSE.patch_elements(
                             finding_fragment(finding, session_id),
                             selector="#findings-container",
-                            mode="append",
+                            mode=ElementPatchMode.APPEND,
                         )
                         seen += 1
 
@@ -588,7 +598,7 @@ async def dashboard_events(request: Request):  # noqa: ANN201
                     manager.list_sessions(), key=lambda s: s.created_at, reverse=True,
                 )
                 html = render("dashboard.html", sessions=sessions)
-                yield SSE.patch_elements(html, selector="body", mode="innerHTML")
+                yield SSE.patch_elements(html, selector="body", mode=ElementPatchMode.INNER)
         finally:
             if queue in _dashboard_queues:
                 _dashboard_queues.remove(queue)
@@ -664,6 +674,10 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                                     saved_responses[f"{finding.id}_other"] = resp.other_text
                         elif resp.answer is not None:
                             saved_responses[finding.id] = resp.answer
+                        if resp.complexity is not None:
+                            saved_responses[f"{finding.id}_complexity"] = (
+                                resp.complexity.value
+                            )
                 break
 
     # Resolve the active step object for agent/log display in templates
@@ -681,7 +695,8 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     submit_html = ""
     if active_step and active_step.state.value in ("ready", "completed"):
         rendered_findings = [
-            finding_fragment(f, session_id) for f in active_step.findings
+            finding_fragment(f, session_id, saved_responses=saved_responses)
+            for f in active_step.findings
         ]
         if active_step.state.value == "completed":
             review_status_html = (

@@ -194,6 +194,17 @@ class UserResponse(BaseModel):
     other_text: str | None = None
     complexity: Complexity | None = None
 
+    def merge_over(self, existing: UserResponse) -> UserResponse:
+        """Merge self over existing, keeping existing values where self is None."""
+        return UserResponse(**{
+            field: (
+                getattr(self, field)
+                if getattr(self, field) is not None
+                else getattr(existing, field)
+            )
+            for field in self.__class__.model_fields
+        })
+
 
 class WorkflowStep(BaseModel):
     """A single workflow step within a session.
