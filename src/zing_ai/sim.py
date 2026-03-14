@@ -77,3 +77,20 @@ def sim(ctx: click.Context, *, url: str | None) -> None:
         except click.ClickException:
             url = "http://localhost:9876/mcp"
     ctx.obj["url"] = url
+
+
+@sim.command()
+@click.argument("title")
+@click.option("--steps", default=None, help="Comma-separated list of step names.")
+@click.pass_context
+def create(ctx: click.Context, title: str, steps: str | None) -> None:
+    """Create a new session on the MCP server."""
+    url = ctx.obj["url"]
+    parsed_steps: list[str] | None = steps.split(",") if steps else None
+    result = _call_mcp(url, "session_create", {"title": title, "steps": parsed_steps})
+    _save_state({
+        "session_id": result["session_id"],
+        "steps": result["steps"],
+        "url": url,
+    })
+    click.echo(json.dumps(result, indent=2))

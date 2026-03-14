@@ -156,13 +156,15 @@ def mcp_cmd(port: int) -> None:
 
 
 def _register_sim() -> None:
-    """Lazy-register the sim command group to avoid loading MCP SDK eagerly."""
+    """Register the sim command group. MCP SDK is imported lazily inside sim subcommands."""
     from zing_ai.sim import sim
 
     cli.add_command(sim)
 
 
+_register_sim()
+
+
 def main() -> None:
     """CLI entry point."""
-    _register_sim()
     cli()
