@@ -64,11 +64,32 @@ def test_sim_update(mock_mcp_call, mock_state_file, sample_state):
     )
 
 
+def test_sim_update_with_zing_file(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "update", "--zing-file", "/tmp/spec.md"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "session_update",
+        {"session_id": "test-session-abc123", "zing_file": "/tmp/spec.md"},
+    )
+
+
 def test_sim_update_no_state_file(mock_mcp_call, mock_state_file):
     runner = CliRunner()
     result = runner.invoke(cli, ["sim", "update", "--title", "New Title"])
     assert result.exit_code != 0
     assert "No active sim session" in result.output
+
+
+def test_sim_update_corrupted_state_file(mock_mcp_call, mock_state_file):
+    mock_state_file.write_text("not valid json{{{")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "update", "--title", "New Title"])
+    assert result.exit_code != 0
+    assert "Corrupted state file" in result.output
 
 
 # -- sim start ----------------------------------------------------------------
@@ -103,7 +124,7 @@ def test_sim_agent_start(mock_mcp_call, mock_state_file, sample_state):
     mock_mcp_call.return_value = {"status": "started", "agent_name": "Analyzer"}
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["sim", "agent-start", "plan", "Analyzer", "--desc", "Scanning code"]
+        cli, ["sim", "agent-start", "plan", "Analyzer", "--description", "Scanning code"]
     )
     assert result.exit_code == 0, result.output
     mock_mcp_call.assert_called_once_with(

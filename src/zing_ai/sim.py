@@ -8,6 +8,8 @@ from pathlib import Path
 
 import click
 
+from zing_ai.server.models import Category, Complexity, Confidence, Rating, Severity
+
 _STATE_FILE = Path.home() / ".zing-ai-sim.json"
 
 
@@ -15,9 +17,13 @@ def _load_state() -> dict:
     """Read and parse the sim state file."""
     try:
         return json.loads(_STATE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         raise click.ClickException(
             "No active sim session. Run 'zing-ai sim create' first."
+        ) from None
+    except json.JSONDecodeError:
+        raise click.ClickException(
+            f"Corrupted state file at {_STATE_FILE}. Delete it and run 'zing-ai sim create'."
         ) from None
 
 
@@ -47,6 +53,8 @@ async def _call_mcp_async(url: str, tool_name: str, arguments: dict) -> dict:
     ):
         await session.initialize()
         result = await session.call_tool(tool_name, arguments=arguments)
+        if not result.content:
+            raise click.ClickException("Server returned empty response.")
         content = result.content[0]
         if not isinstance(content, TextContent):
             msg = f"Unexpected content type: {type(content)}"
@@ -64,6 +72,10 @@ def _call_mcp(url: str, tool_name: str, arguments: dict, *, timeout: int | None 
     except TimeoutError:
         raise click.ClickException(
             f"Timed out waiting for review after {timeout}s"
+        ) from None
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"Server returned non-JSON response: {exc.doc[:200] if exc.doc else '(empty)'}"
         ) from None
     except (ConnectionRefusedError, OSError) as exc:
         raise click.ClickException(
@@ -95,6 +107,8 @@ def create(ctx: click.Context, title: str, steps: str | None) -> None:
     url = ctx.obj["url"]
     parsed_steps: list[str] | None = steps.split(",") if steps else None
     result = _call_mcp(url, "session_create", {"title": title, "steps": parsed_steps})
+    if "error" in result:
+        raise click.ClickException(result["error"])
     _save_state({
         "session_id": result["session_id"],
         "steps": result["steps"],
@@ -136,9 +150,9 @@ def start(ctx: click.Context, step: str) -> None:
 @sim.command("agent-start")
 @click.argument("step")
 @click.argument("name")
-@click.option("--desc", default="", help="Agent description.")
+@click.option("--description", default="", help="Agent description.")
 @click.pass_context
-def agent_start_cmd(ctx: click.Context, step: str, name: str, desc: str) -> None:
+def agent_start_cmd(ctx: click.Context, step: str, name: str, description: str) -> None:
     """Register a running agent for a step."""
     state = _load_state()
     step_id = _resolve_step(state, step)
@@ -146,7 +160,7 @@ def agent_start_cmd(ctx: click.Context, step: str, name: str, desc: str) -> None
         "session_id": state["session_id"],
         "step_id": step_id,
         "name": name,
-        "description": desc,
+        "description": description,
     })
     click.echo(json.dumps(result, indent=2))
 
@@ -187,12 +201,11 @@ def log(ctx: click.Context, step: str, name: str, message: str) -> None:
 
 # -- finding subcommands ------------------------------------------------------
 
-CATEGORIES = (
-    "architecture", "correctness", "security", "readability", "performance", "testing", "style"
-)
-SEVERITIES = ("critical", "high", "medium", "low", "info")
-CONFIDENCES = ("high", "medium", "low")
-RATINGS = ("strong", "adequate", "weak", "missing")
+CATEGORIES = tuple(e.value for e in Category)
+SEVERITIES = tuple(e.value for e in Severity)
+CONFIDENCES = tuple(e.value for e in Confidence)
+COMPLEXITIES = tuple(e.value for e in Complexity)
+RATINGS = tuple(e.value for e in Rating)
 
 
 @sim.group()
@@ -238,6 +251,9 @@ def text(ctx: click.Context, step: str, title: str, body: str, context_str: str 
 @click.option(
     "--confidence", type=click.Choice(CONFIDENCES), default="medium", help="Confidence."
 )
+@click.option(
+    "--complexity", type=click.Choice(COMPLEXITIES), default="standard", help="Complexity."
+)
 @click.option("--file", "file_path", default=None, help="File path for location.")
 @click.option("--line", default=None, type=int, help="Line number for location.")
 @click.pass_context
@@ -249,6 +265,7 @@ def triage(
     category: str,
     severity: str,
     confidence: str,
+    complexity: str,
     file_path: str | None,
     line: int | None,
 ) -> None:
@@ -260,6 +277,7 @@ def triage(
         "category": category,
         "severity": severity,
         "confidence": confidence,
+        "complexity": complexity,
     }
     if file_path is not None:
         location: dict = {"file": file_path}
@@ -364,7 +382,7 @@ def wait(ctx: click.Context, step: str, timeout: int | None) -> None:
             "session_id": state["session_id"],
             "step_id": step_id,
         }, timeout=timeout)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         click.echo("\nCancelled.", err=True)
         raise SystemExit(130) from None
     click.echo(json.dumps(result, indent=2))
