@@ -371,3 +371,54 @@ class TestTriageEnumValidation(ServerTestBase):
         )
         html = finding_fragment(finding, "test-session")
         self.assertIn("badge-info", html)
+
+    def test_triage_finding_renders_complexity_selector(self) -> None:
+        """Triage finding renders complexity selector with three buttons."""
+        self._create_session()
+        finding = self.manager.add_finding(
+            "test-session", self.step_id,
+            {
+                "type": "triage", "title": "Needs refactoring",
+                "category": "readability", "severity": "medium", "confidence": "high",
+            },
+        )
+        html = finding_fragment(finding, "test-session")
+        self.assertIn("complexity-selector", html)
+        self.assertIn("complexity-btn", html)
+        self.assertIn('data-complexity="simple"', html)
+        self.assertIn('data-complexity="standard"', html)
+        self.assertIn('data-complexity="complex"', html)
+        # Labels
+        self.assertIn("Simple", html)
+        self.assertIn("Standard", html)
+        self.assertIn("Complex", html)
+
+    def test_triage_finding_complexity_default_standard(self) -> None:
+        """Triage finding defaults to 'standard' complexity in its data-signals."""
+        self._create_session()
+        finding = self.manager.add_finding(
+            "test-session", self.step_id,
+            {
+                "type": "triage", "title": "Default complexity",
+                "category": "style", "severity": "low", "confidence": "high",
+            },
+        )
+        html = finding_fragment(finding, "test-session")
+        # The data-signals attribute should contain the default complexity value
+        self.assertIn("_complexity", html)
+        self.assertIn("standard", html)
+
+    def test_triage_finding_custom_complexity_in_signals(self) -> None:
+        """Triage finding with explicit complexity renders that value in data-signals."""
+        self._create_session()
+        finding = self.manager.add_finding(
+            "test-session", self.step_id,
+            {
+                "type": "triage", "title": "Complex fix",
+                "category": "architecture", "severity": "high", "confidence": "high",
+                "complexity": "complex",
+            },
+        )
+        html = finding_fragment(finding, "test-session")
+        # The data-signals should contain the specified complexity
+        self.assertIn('"complex"', html)

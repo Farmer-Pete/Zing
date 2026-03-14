@@ -105,6 +105,98 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["saved"], 0)
 
+    def _create_session_with_triage_finding(self) -> tuple[str, str]:
+        """Create a session with a triage finding and return (step_id, finding_id)."""
+        self._create_session()
+        finding = self.manager.add_finding(
+            "test-session",
+            self.step_id,
+            {
+                "type": "triage", "title": "Unused import",
+                "category": "style", "severity": "low", "confidence": "high",
+            },
+        )
+        return self.step_id, finding.id
+
+    def test_save_response_complexity(self) -> None:
+        """Auto-saving a complexity value via the _complexity signal key persists it."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        resp = self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {f"{finding_id}_complexity": "simple"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["saved"], 1)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].complexity.value, "simple")
+
+    def test_save_response_complexity_complex(self) -> None:
+        """Auto-saving complexity='complex' persists correctly."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        resp = self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {f"{finding_id}_complexity": "complex"},
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].complexity.value, "complex")
+
+    def test_save_response_complexity_preserves_action(self) -> None:
+        """Saving complexity after action preserves the previously saved action."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        # First save an action
+        self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {finding_id: "accept"},
+            },
+        )
+        # Then save complexity
+        self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {f"{finding_id}_complexity": "complex"},
+            },
+        )
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].action, "accept")
+        self.assertEqual(step.responses[0].complexity.value, "complex")
+
+    def test_save_response_complexity_default_when_missing(self) -> None:
+        """When no complexity is sent, the UserResponse.complexity remains None."""
+        step_id, finding_id = self._create_session_with_triage_finding()
+        # Save only an action, no complexity
+        self.client.post(
+            "/test-session/save-response",
+            json={
+                "step_id": step_id,
+                "responses": {finding_id: "drop"},
+            },
+        )
+        session = self.manager.get_session("test-session")
+        assert session is not None
+        step = session.steps[0]
+        assert step.responses is not None
+        self.assertEqual(step.responses[0].action, "drop")
+        self.assertIsNone(step.responses[0].complexity)
+
 
 class TestSubmit(ServerTestBase):
     """Tests for POST /{session_id}/submit."""
