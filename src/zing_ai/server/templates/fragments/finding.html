@@ -7,53 +7,19 @@
     {% endif %}
     <textarea data-bind="responses.{{ finding.id }}" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', answer: $responses['{{ finding.id }}']})" placeholder="Type your answer..."></textarea>
 </div>
-{% elif finding.type == "choice" %}
-<div id="finding-{{ finding.id }}" class="finding">
-    <div class="finding-header">{{ finding.title }}</div>
-    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
-    {% if finding.context %}
-    <div class="finding-meta">{{ finding.context }}</div>
-    {% endif %}
-    <div class="radio-group">
-        {% for option in finding.options %}
-        <label class="option-card">
-            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="{{ option.label }}" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}']})">
-            <div class="option-content">
-                <div class="option-label">{{ option.label }}</div>
-                <div class="option-description">{{ option.description }}</div>
-            </div>
-        </label>
-        {% endfor %}
-        <label class="option-card">
-            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="__other__" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}']})">
-            <div class="option-content">
-                <div class="option-label">Other</div>
-                <div class="option-description">Enter a custom response</div>
-            </div>
-        </label>
-        <div data-show="$responses['{{ finding.id }}'] === '__other__'" style="margin-top: 0.5rem;">
-            <textarea data-bind="responses.{{ finding.id }}_other" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}'], other_text: $responses['{{ finding.id }}_other']})" placeholder="Type your response..."></textarea>
-        </div>
-        <label class="option-card">
-            <input type="radio" name="finding-{{ finding.id }}" data-bind="responses.{{ finding.id }}" value="skip" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}']})">
-            <div class="option-content">
-                <div class="option-label">Skip</div>
-                <div class="option-description">Not important enough to address now</div>
-            </div>
-        </label>
-    </div>
-</div>
 {% elif finding.type == "triage" %}
 <div id="finding-{{ finding.id }}" class="finding"
      data-signals='{{ {"responses": {finding.id ~ "_complexity": saved_responses.get(finding.id ~ "_complexity", finding.complexity.value) if saved_responses is defined else finding.complexity.value}} | tojson }}'>
     <div class="finding-header">{{ finding.title }}</div>
     {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    {% if finding.severity or finding.confidence or finding.category %}
     <div class="finding-meta">
         {% if finding.location %}<code>{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</code> | {% endif %}
         Severity: <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span> |
         Confidence: <span class="badge">{{ finding.confidence }}</span> |
         Category: {{ finding.category }}
     </div>
+    {% endif %}
     <div class="complexity-selector" role="radiogroup" aria-label="Fix complexity">
         <span class="complexity-label">Complexity:</span>
         <button class="complexity-btn" data-complexity="simple" data-attr:aria-pressed="$responses['{{ finding.id }}_complexity'] === 'simple'" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'simple'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'simple'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'simple'})" type="button">Simple</button>

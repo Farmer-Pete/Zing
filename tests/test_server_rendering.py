@@ -50,65 +50,32 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("<strong>bold</strong>", html)
         self.assertIn("<code>inline code</code>", html)
 
-    def test_choice_finding_renders_radio_buttons(self) -> None:
-        """Choice finding renders radio buttons with data-bind for each option."""
-        finding = ChoiceFinding(
-            id="ch1",
-            title="Pick one",
-            body="Some context about the choice",
-            options=[
-                ChoiceOption(label="A", description="Option A"),
-                ChoiceOption(label="B", description="Option B"),
-            ],
+    def test_triage_finding_without_metadata_hides_meta_bar(self) -> None:
+        """Triage finding without category/severity/confidence hides the meta bar."""
+        finding = TriageFinding(
+            type="triage",
+            title="Design question",
+            body="Should we use pattern X?",
+            options=[ChoiceOption(label="A", description="Use pattern X")],
+            category=None,
+            severity=None,
+            confidence=None,
         )
         html = finding_fragment(finding, "test-session")
-        self.assertIn("finding-ch1", html)
-        self.assertIn('type="radio"', html)
-        self.assertIn('data-bind="responses.ch1"', html)
-        self.assertIn("Option A", html)
-        self.assertIn("Option B", html)
-        # Should have skip and other options
-        self.assertIn('value="skip"', html)
-        self.assertIn('value="__other__"', html)
-
-    def test_choice_finding_has_other_textarea(self) -> None:
-        """Choice finding renders an 'Other' option with conditional textarea."""
-        finding = ChoiceFinding(
-            id="ch2",
-            title="Pick one",
-            options=[ChoiceOption(label="A", description="Option A")],
-        )
-        html = finding_fragment(finding, "test-session")
-        self.assertIn("__other__", html)
-        self.assertIn("data-show", html)
-        self.assertIn("ch2_other", html)
-
-    def test_choice_finding_preserves_context(self) -> None:
-        """ChoiceFinding stores context field when provided."""
-        finding = ChoiceFinding(
-            id="ch_ctx",
-            title="Improvement suggestion",
-            body="Consider this change",
-            context="Referenced in plan section 3.2",
-            options=[
-                ChoiceOption(label="A", description="Option A"),
-                ChoiceOption(label="B", description="Option B"),
-            ],
-        )
-        self.assertEqual(finding.context, "Referenced in plan section 3.2")
-
-    def test_choice_finding_renders_context(self) -> None:
-        """Choice finding renders context when provided."""
-        finding = ChoiceFinding(
-            id="ch_ctx2",
-            title="Pick an approach",
-            context="From plan section: Error Handling",
-            options=[
-                ChoiceOption(label="A", description="Option A"),
-            ],
-        )
-        html = finding_fragment(finding, "test-session")
-        self.assertIn("From plan section: Error Handling", html)
+        # Meta bar should NOT be present
+        self.assertNotIn("finding-meta", html)
+        # Action buttons should be present
+        self.assertIn("action-btn", html)
+        self.assertIn("accept", html)
+        self.assertIn("drop", html)
+        self.assertIn("downgrade", html)
+        self.assertIn("discuss", html)
+        # Complexity selector should be present
+        self.assertIn("complexity-selector", html)
+        # Suggested approaches should be present
+        self.assertIn("triage-options", html)
+        self.assertIn("Suggested approaches:", html)
+        self.assertIn("Use pattern X", html)
 
     def test_triage_finding_renders_action_buttons(self) -> None:
         """Triage finding renders action buttons with data-bind."""
