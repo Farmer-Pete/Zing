@@ -384,7 +384,7 @@ List specific, actionable changes to improve the design, ordered by priority. If
 <step name="propose_improvements">
 If the verdict is **Strong Design**, skip this step and say "No improvements needed — the design looks solid."
 
-Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. This opens the review UI in the browser where the user can see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
+Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
 
 When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's selected option. For each choice the user made (excluding "Skip"):
 - Apply the corresponding edit to the zing file using the Edit tool

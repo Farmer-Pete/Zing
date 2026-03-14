@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
-
 from zing_ai.server.mcp_tools import (
     agent_start,
     agent_stop,
@@ -27,8 +25,7 @@ class TestSessionCreate(ServerTestBase):
     def test_session_create_creates_session_and_returns_url(self) -> None:
         """session_create creates a session with default steps and returns a URL."""
         configure(self.manager, port=9876)
-        with patch("zing_ai.server.mcp_tools.webbrowser.open") as mock_open:
-            result = asyncio.run(session_create(title="MCP Review"))
+        result = asyncio.run(session_create(title="MCP Review"))
         self.assertIn("session_id", result)
         self.assertIn("steps", result)
         self.assertIn("url", result)
@@ -37,7 +34,6 @@ class TestSessionCreate(ServerTestBase):
             list(result["steps"].keys()),
             ["plan", "plan-audit", "build", "build-audit"],
         )
-        mock_open.assert_called_once()
 
         session = self.manager.get_session(result["session_id"])
         self.assertIsNotNone(session)
@@ -47,17 +43,15 @@ class TestSessionCreate(ServerTestBase):
     def test_session_create_custom_steps(self) -> None:
         """session_create with custom steps creates only those steps."""
         configure(self.manager, port=9876)
-        with patch("zing_ai.server.mcp_tools.webbrowser.open"):
-            result = asyncio.run(
-                session_create(title="Custom Steps", steps=["code-review", "docs"])
-            )
+        result = asyncio.run(
+            session_create(title="Custom Steps", steps=["code-review", "docs"])
+        )
         self.assertEqual(list(result["steps"].keys()), ["code-review", "docs"])
 
     def test_session_create_generates_slugified_id(self) -> None:
         """session_create generates a slugified session_id from the title."""
         configure(self.manager, port=9876)
-        with patch("zing_ai.server.mcp_tools.webbrowser.open"):
-            result = asyncio.run(session_create(title="My Great Review"))
+        result = asyncio.run(session_create(title="My Great Review"))
         self.assertTrue(result["session_id"].startswith("my-great-review-"))
 
 
@@ -194,10 +188,9 @@ class TestReviewWait(ServerTestBase):
         )
 
         # Now review_wait should return immediately since the event is already set
-        with patch("zing_ai.server.mcp_tools.webbrowser.open"):
-            result = asyncio.run(
-                review_wait(session_id="wait-session", step_id=self.step_id)
-            )
+        result = asyncio.run(
+            review_wait(session_id="wait-session", step_id=self.step_id)
+        )
 
         self.assertEqual(result["session_id"], "wait-session")
         self.assertEqual(result["step_name"], _STEP)
@@ -223,22 +216,21 @@ class TestReviewWait(ServerTestBase):
                 completed = True
                 return result
 
-            with patch("zing_ai.server.mcp_tools.webbrowser.open"):
-                task = asyncio.create_task(do_wait())
+            task = asyncio.create_task(do_wait())
 
-                # Yield control briefly — review_wait should NOT have completed yet
-                await asyncio.sleep(0.05)
-                self.assertFalse(completed, "review_wait should block until submission")
+            # Yield control briefly — review_wait should NOT have completed yet
+            await asyncio.sleep(0.05)
+            self.assertFalse(completed, "review_wait should block until submission")
 
-                # Submit responses to unblock
-                self.manager.submit_responses(
-                    "block-session", self.step_id,
-                    [UserResponse(answer="Looks good")],
-                )
+            # Submit responses to unblock
+            self.manager.submit_responses(
+                "block-session", self.step_id,
+                [UserResponse(answer="Looks good")],
+            )
 
-                result = await task
-                self.assertTrue(completed)
-                self.assertEqual(result["session_id"], "block-session")
+            result = await task
+            self.assertTrue(completed)
+            self.assertEqual(result["session_id"], "block-session")
 
         asyncio.run(_test_blocking())
 

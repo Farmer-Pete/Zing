@@ -128,6 +128,23 @@ Step back from the implementation details and evaluate whether the approach itse
 - Does similar functionality already exist in the codebase? If yes, why isn't it reused? Could the existing solution be extended instead of rolling a new one?
 - Is there duplicated or near-duplicated logic across the changed files? Look for copy-pasted blocks, similar functions that differ only slightly, or multiple places solving the same problem in inconsistent ways. These should be consolidated into a shared abstraction or at least made consistent.
 
+### 3. Root Cause vs. Surface Fix
+Step back from the specific lines changed and ask whether this PR is solving the actual problem or just patching the symptom that was reported.
+
+**Partial migrations and incomplete consistency**
+- If the PR updates N instances of a pattern but the same pattern exists in other files, is this a partial fix that leaves the codebase in an inconsistent intermediate state? Use Serena to search for other instances of the same pattern across the codebase. A fix that touches 3 of 14 call sites may be stable today by coincidence but will break the moment someone touches a 4th.
+- If the change introduces a new convention (naming scheme, key format, configuration pattern), are all existing usages migrated in this PR? If not, is the incomplete state documented and safe, or is it a trap for the next developer who follows the new convention without realizing the old one still exists?
+
+**Defensive guards masking deeper problems**
+- If the PR adds null checks, type guards, try/catch wrappers, or fallback defaults, ask *why* the value can be null/wrong in the first place. Defensive code that prevents a crash is fine as a stopgap, but if the data should never be in that state, the real fix is upstream. Flag cases where guards are treating symptoms of a broken invariant rather than restoring the invariant.
+
+**Latent traps for follow-up work**
+- Could a natural, reasonable follow-up change (extending the same pattern, adding a similar feature, continuing a migration) reintroduce the original bug? If the system is only stable because two incomplete halves happen to not overlap yet, that's a time bomb.
+- Are there cross-references (cache keys and invalidation keys, schema definitions and serializers, event producers and consumers) that need to stay in sync? If the PR updates one side, check whether the other side still matches.
+
+**Scattered hardcoded values**
+- If the fix involves changing a hardcoded value (string key, config constant, magic number), search for that value across the codebase. Are there other copies that need the same change? Would a single source of truth (constant, config, shared builder) prevent this class of bug entirely?
+
 ---
 
 ## Agent 2 (Correctness & State)
@@ -381,7 +398,7 @@ Launch all 6 agents in parallel using 6 `Task` tool calls in a single message wi
 1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
 Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls only.
-- Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
+- Agent 1 (Architecture & Design): Design, Implementation, Root Cause vs. Surface Fix — reviews design, abstraction, and coupling across all changed files. For Root Cause analysis, **must use Serena** to search for other instances of patterns being modified in the PR (e.g., if the PR changes a hardcoded key in 3 files, search for that key across the codebase to find unmigrated instances).
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
 - Agent 4 (UI & Readability): Naming, Readability, Language-Specific, Usability and Accessibility, UI Layout Robustness — reviews all changed files for naming, readability, code style, and UI layout issues. Rarely needs Serena.
@@ -409,7 +426,7 @@ If the tool returns an error:
 - `KeyError` = abort with FATAL error (wrong session/step ID)
 - `RuntimeError` = abort immediately (step already completed)
 
-**5. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The tool returns JSON — each item contains the full original finding alongside the user's response (accepted, dropped, or discuss).
+**5. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. The tool returns JSON that includes a `review_url` field — display this URL to the user so they can open the review dashboard (e.g. "Review dashboard ready: http://localhost:PORT/SESSION_ID"). This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The returned JSON also contains each item with the full original finding alongside the user's response (accepted, dropped, or discuss).
 
 **6. Process the returned JSON:**
 - **Accepted findings**: Include in the output (the calling skill defines how — e.g., report file, PR line comments).
@@ -421,7 +438,7 @@ If the tool returns an error:
 </step>
 
 <walk_through_findings>
-This step is handled by the browser-based review UI. The user reviews findings there and submits decisions (accept, drop, or discuss). The `check_and_review` step calls `review_wait(session_id, step_id)` which blocks until the user is done.
+This step is handled by the browser-based review UI. The `check_and_review` step calls `review_wait(session_id, step_id)` which returns a `review_url` — display this URL to the user so they can open the dashboard. The call blocks until the user reviews findings and submits decisions (accept, drop, or discuss).
 
 For findings marked "discuss", walk through each one conversationally with the user:
 

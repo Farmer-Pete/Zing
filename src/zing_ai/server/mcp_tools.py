@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import webbrowser
 from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
@@ -138,14 +137,12 @@ async def review_wait(session_id: str, step_id: str) -> dict:
     sm = _get_session_manager()
     url = f"http://localhost:{_port}/{session_id}"
     try:
-        webbrowser.open(url)
-    except Exception:
-        pass  # Headless/CI environments may not have a browser
-    try:
         review_response = await sm.wait_for_review(session_id, step_id)
     except KeyError as exc:
         return {"error": str(exc)}
-    return review_response.model_dump()
+    result = review_response.model_dump()
+    result["review_url"] = url
+    return result
 
 
 @mcp_server.tool()

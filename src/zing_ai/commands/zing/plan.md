@@ -119,7 +119,7 @@ Otherwise, collect and deduplicate findings from all subagents:
 
 3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the plan step ID and `finding_data` is the parsed JSON object.
 
-4. **Wait for review:** Call `review_wait(session_id, step_id)` where `step_id` is the plan step ID. This opens the review UI in the browser where the user can see all the planning questions and answer them all at once. When the user submits the review, `review_wait` returns a list of items — each containing the original question, context, and the user's answer.
+4. **Wait for review:** Call `review_wait(session_id, step_id)` where `step_id` is the plan step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and answer all planning questions at once. When the user submits the review, `review_wait` returns a list of items — each containing the original question, context, and the user's answer.
 
 5. **Merge findings:** Combine all subagent findings (from the bulleted text above the `---JSONL---` marker in each subagent's output) into a single understanding of the codebase state.
 
