@@ -150,7 +150,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
-**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
 **Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
@@ -212,7 +212,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
-**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
 **Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
@@ -280,7 +280,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
-**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
 **Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 
@@ -324,7 +324,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
 
-**Prefer `choice` type** — provide 2-3 concrete improvement options based on what you found, plus "Skip". Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
 
 **Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
 

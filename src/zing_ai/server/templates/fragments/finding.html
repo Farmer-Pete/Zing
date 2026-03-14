@@ -19,6 +19,10 @@
         Confidence: <span class="badge">{{ finding.confidence }}</span> |
         Category: {{ finding.category }}
     </div>
+    {% elif finding.location %}
+    <div class="finding-meta">
+        <code>{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</code>
+    </div>
     {% endif %}
     <div class="complexity-selector" role="radiogroup" aria-label="Fix complexity">
         <span class="complexity-label">Complexity:</span>

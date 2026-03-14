@@ -287,7 +287,7 @@ def triage(
     _submit_finding(ctx, step, data)
 
 
-@finding.command()
+@finding.command("triage-options")
 @click.argument("step")
 @click.option("--title", default="Test triage options", help="Finding title.")
 @click.option("--body", default="Pick one", help="Finding body.")
@@ -318,6 +318,28 @@ def triage_options(
         "body": body,
         "options": parsed_options,
     })
+
+
+@finding.command("choice", hidden=True, deprecated=True)
+@click.argument("step")
+@click.option("--title", default="Test triage options", help="Finding title.")
+@click.option("--body", default="Pick one", help="Finding body.")
+@click.option(
+    "--option",
+    "options",
+    multiple=True,
+    help="Option in 'Label:Description' format. At least 2 required.",
+)
+@click.pass_context
+def choice_deprecated(
+    ctx: click.Context, step: str, title: str, body: str, options: tuple[str, ...]
+) -> None:
+    """Deprecated alias for triage-options."""
+    click.echo(
+        "Warning: 'sim finding choice' is deprecated, use 'sim finding triage-options' instead.",
+        err=True,
+    )
+    ctx.invoke(triage_options, step=step, title=title, body=body, options=options)
 
 
 @finding.command()

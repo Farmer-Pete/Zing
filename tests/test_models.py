@@ -165,8 +165,15 @@ class TestTriageMetadataValidation(unittest.TestCase):
 
     def test_triage_partial_metadata_rejected(self) -> None:
         """Partial metadata (only some of category/severity/confidence) is rejected."""
+        # One of three set
         with self.assertRaises(ValidationError):
             TriageFinding(type="triage", title="Test", severity="low")  # type: ignore[arg-type]
+        # Two of three set (severity + category, missing confidence)
+        with self.assertRaises(ValidationError):
+            TriageFinding(type="triage", title="Test", severity="low", category="correctness")  # type: ignore[arg-type]
+        # Two of three set (severity + confidence, missing category)
+        with self.assertRaises(ValidationError):
+            TriageFinding(type="triage", title="Test", severity="low", confidence="high")  # type: ignore[arg-type]
 
     def test_choice_migration_shim(self) -> None:
         """Persisted type:'choice' findings are migrated to type:'triage'."""
@@ -194,6 +201,71 @@ class TestTriageMetadataValidation(unittest.TestCase):
         assert "Referenced in plan section 3.2" in finding.body
         assert "Some body" in finding.body
         assert len(finding.options) == 2  # type: ignore[arg-type]
+
+    def test_choice_migration_shim_context_only(self) -> None:
+        """Legacy choice finding with context but no body uses context as body."""
+        step_data = {
+            "step_name": "review",
+            "sequence": 0,
+            "findings": [
+                {
+                    "type": "choice",
+                    "title": "Pick one",
+                    "context": "Some context",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"},
+                    ],
+                }
+            ],
+        }
+        step = WorkflowStep.model_validate(step_data)
+        finding = step.findings[0]
+        assert isinstance(finding, TriageFinding)
+        assert finding.body == "Some context"
+
+    def test_choice_migration_shim_body_only(self) -> None:
+        """Legacy choice finding with body but no context preserves body."""
+        step_data = {
+            "step_name": "review",
+            "sequence": 0,
+            "findings": [
+                {
+                    "type": "choice",
+                    "title": "Pick one",
+                    "body": "Just a body",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"},
+                    ],
+                }
+            ],
+        }
+        step = WorkflowStep.model_validate(step_data)
+        finding = step.findings[0]
+        assert isinstance(finding, TriageFinding)
+        assert finding.body == "Just a body"
+
+    def test_choice_migration_shim_no_body_no_context(self) -> None:
+        """Legacy choice finding with neither body nor context gets empty body."""
+        step_data = {
+            "step_name": "review",
+            "sequence": 0,
+            "findings": [
+                {
+                    "type": "choice",
+                    "title": "Pick one",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"},
+                    ],
+                }
+            ],
+        }
+        step = WorkflowStep.model_validate(step_data)
+        finding = step.findings[0]
+        assert isinstance(finding, TriageFinding)
+        assert finding.body == ""
 
 
 if __name__ == "__main__":

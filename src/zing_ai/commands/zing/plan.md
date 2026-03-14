@@ -86,7 +86,7 @@ Each subagent receives a prompt with:
 >
 > The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide.
 >
-> **Prefer `choice` type** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
+> **Prefer `triage` type with `options`** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
 >
 > **Do NOT call `finding_submit` directly.** Instead, format each finding as a JSON line and return them all at the end of your task output using this exact format:
 >

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Annotated, Any, Literal
@@ -105,7 +106,12 @@ class TextFinding(BaseModel):
 
 
 class TriageFinding(BaseModel):
-    """A code review finding for triage (accept/drop/downgrade/discuss)."""
+    """A finding that supports triage actions and/or option selection.
+
+    Used for code review findings (with category/severity/confidence metadata
+    and accept/drop/downgrade/discuss actions) and for plan audit improvements
+    or design decisions (with options but no metadata).
+    """
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     type: Literal["triage"] = "triage"
@@ -243,6 +249,10 @@ class WorkflowStep(BaseModel):
         # Migrate legacy type:"choice" findings to type:"triage"
         for finding in data.get("findings", []):
             if isinstance(finding, dict) and finding.get("type") == "choice":
+                logging.getLogger(__name__).warning(
+                    "Migrating legacy choice finding to triage format: %s",
+                    finding.get("title", "<untitled>"),
+                )
                 finding["type"] = "triage"
                 context = finding.pop("context", None)
                 if context:
