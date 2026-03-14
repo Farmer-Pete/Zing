@@ -17,8 +17,8 @@
             startOnLoad: true,
             theme: 'base',
             themeVariables: {
-                primaryColor: v('--navy'),
-                primaryTextColor: v('--text-primary'),
+                primaryColor: v('--gray-100'),
+                primaryTextColor: v('--navy'),
                 primaryBorderColor: v('--navy-mid'),
                 lineColor: v('--orange'),
                 secondaryColor: v('--gray-100'),
@@ -324,6 +324,35 @@
         .action-btn[data-action="drop"].selected { border-color: var(--gray-300); background: var(--gray-50); color: var(--gray-500); }
         .action-btn[data-action="downgrade"].selected { border-color: var(--amber); background: #fffbeb; color: #92400e; }
         .action-btn[data-action="discuss"].selected { border-color: var(--cyan); background: #ecfeff; color: var(--cyan-dim); }
+
+        /* === Complexity Selector === */
+        .complexity-selector {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.375rem;
+            margin-top: 0.375rem;
+        }
+        .complexity-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--gray-500);
+            margin-right: 0.125rem;
+        }
+        .complexity-btn {
+            padding: 0.1875rem 0.5rem;
+            border: 1.5px solid var(--gray-200);
+            border-radius: 4px;
+            background: #fff;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--gray-700);
+            transition: all 0.15s ease;
+        }
+        .complexity-btn:hover { border-color: var(--gray-500); }
+        .complexity-btn[data-complexity="simple"].selected { border-color: #51cf66; background: #f0fff4; color: #2b8a3e; }
+        .complexity-btn[data-complexity="standard"].selected { border-color: #ffd43b; background: #fffde6; color: #92400e; }
+        .complexity-btn[data-complexity="complex"].selected { border-color: #ff6b6b; background: #fff0f0; color: #c92a2a; }
 
         /* === Submit / CTA Buttons === */
         .submit-banner {
