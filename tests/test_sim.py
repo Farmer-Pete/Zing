@@ -47,3 +47,26 @@ def test_sim_create_with_steps(mock_mcp_call, mock_state_file):
         "session_create",
         {"title": "My Title", "steps": ["plan", "build"]},
     )
+
+
+# -- sim update ---------------------------------------------------------------
+
+
+def test_sim_update(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "update", "--title", "New Title"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "session_update",
+        {"session_id": "test-session-abc123", "title": "New Title"},
+    )
+
+
+def test_sim_update_no_state_file(mock_mcp_call, mock_state_file):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "update", "--title", "New Title"])
+    assert result.exit_code != 0
+    assert "No active sim session" in result.output

@@ -94,3 +94,19 @@ def create(ctx: click.Context, title: str, steps: str | None) -> None:
         "url": url,
     })
     click.echo(json.dumps(result, indent=2))
+
+
+@sim.command()
+@click.option("--title", default=None, help="New session title.")
+@click.option("--zing-file", default=None, help="Path to zing file.")
+@click.pass_context
+def update(ctx: click.Context, title: str | None, zing_file: str | None) -> None:
+    """Update an existing session on the MCP server."""
+    state = _load_state()
+    args: dict = {"session_id": state["session_id"]}
+    if title is not None:
+        args["title"] = title
+    if zing_file is not None:
+        args["zing_file"] = zing_file
+    result = _call_mcp(ctx.obj["url"], "session_update", args)
+    click.echo(json.dumps(result, indent=2))
