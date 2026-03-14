@@ -8,7 +8,6 @@ from click.testing import CliRunner
 
 from zing_ai.cli import cli
 
-
 # -- sim create ---------------------------------------------------------------
 
 
@@ -158,3 +157,99 @@ def test_sim_log(mock_mcp_call, mock_state_file, sample_state):
             "message": "Found 3 issues",
         },
     )
+
+
+# -- sim finding text ---------------------------------------------------------
+
+
+def test_sim_finding_text(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "finding_id": "f1"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "finding", "text", "plan"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "finding_submit",
+        {
+            "session_id": "test-session-abc123",
+            "step_id": "step-plan-id",
+            "finding": {"type": "text", "title": "Test finding", "body": "Test body"},
+        },
+    )
+
+
+# -- sim finding triage -------------------------------------------------------
+
+
+def test_sim_finding_triage_defaults(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "finding_id": "f2"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "finding", "triage", "plan"])
+    assert result.exit_code == 0, result.output
+    finding = mock_mcp_call.call_args[0][2]["finding"]
+    assert finding["category"] == "correctness"
+    assert finding["severity"] == "medium"
+    assert finding["confidence"] == "medium"
+    assert "location" not in finding
+
+
+def test_sim_finding_triage_with_location(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "finding_id": "f3"}
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["sim", "finding", "triage", "plan", "--file", "src/db.py", "--line", "42"],
+    )
+    assert result.exit_code == 0, result.output
+    finding = mock_mcp_call.call_args[0][2]["finding"]
+    assert finding["location"] == {"file": "src/db.py", "line": 42}
+
+
+# -- sim finding choice -------------------------------------------------------
+
+
+def test_sim_finding_choice(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "finding_id": "f4"}
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["sim", "finding", "choice", "plan", "--option", "Yes:Accept", "--option", "No:Reject"],
+    )
+    assert result.exit_code == 0, result.output
+    finding = mock_mcp_call.call_args[0][2]["finding"]
+    assert finding["options"] == [
+        {"label": "Yes", "description": "Accept"},
+        {"label": "No", "description": "Reject"},
+    ]
+
+
+def test_sim_finding_choice_requires_two_options(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["sim", "finding", "choice", "plan", "--option", "Yes:Accept"]
+    )
+    assert result.exit_code != 0
+    assert "At least 2" in result.output
+
+
+# -- sim finding evaluation ---------------------------------------------------
+
+
+def test_sim_finding_evaluation(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "finding_id": "f5"}
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["sim", "finding", "evaluation", "plan", "--criterion", "Clarity:strong:Well written"],
+    )
+    assert result.exit_code == 0, result.output
+    finding = mock_mcp_call.call_args[0][2]["finding"]
+    assert finding["criteria"] == [
+        {"name": "Clarity", "rating": "strong", "justification": "Well written"},
+    ]

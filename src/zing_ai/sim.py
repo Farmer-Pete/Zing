@@ -176,3 +176,160 @@ def log(ctx: click.Context, step: str, name: str, message: str) -> None:
         "message": message,
     })
     click.echo(json.dumps(result, indent=2))
+
+
+# -- finding subcommands ------------------------------------------------------
+
+CATEGORIES = (
+    "architecture", "correctness", "security", "readability", "performance", "testing", "style"
+)
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+CONFIDENCES = ("high", "medium", "low")
+RATINGS = ("strong", "adequate", "weak", "missing")
+
+
+@sim.group()
+@click.pass_context
+def finding(ctx: click.Context) -> None:
+    """Submit findings to the MCP server."""
+
+
+def _submit_finding(ctx: click.Context, step: str, finding_data: dict) -> None:
+    """Shared helper to resolve step and submit a finding."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    result = _call_mcp(ctx.obj["url"], "finding_submit", {
+        "session_id": state["session_id"],
+        "step_id": step_id,
+        "finding": finding_data,
+    })
+    click.echo(json.dumps(result, indent=2))
+
+
+@finding.command()
+@click.argument("step")
+@click.option("--title", default="Test finding", help="Finding title.")
+@click.option("--body", default="Test body", help="Finding body.")
+@click.option("--context", "context_str", default=None, help="Optional context.")
+@click.pass_context
+def text(ctx: click.Context, step: str, title: str, body: str, context_str: str | None) -> None:
+    """Submit a text finding."""
+    data: dict = {"type": "text", "title": title, "body": body}
+    if context_str is not None:
+        data["context"] = context_str
+    _submit_finding(ctx, step, data)
+
+
+@finding.command()
+@click.argument("step")
+@click.option("--title", default="Test triage", help="Finding title.")
+@click.option("--body", default="Test body", help="Finding body.")
+@click.option(
+    "--category", type=click.Choice(CATEGORIES), default="correctness", help="Category."
+)
+@click.option("--severity", type=click.Choice(SEVERITIES), default="medium", help="Severity.")
+@click.option(
+    "--confidence", type=click.Choice(CONFIDENCES), default="medium", help="Confidence."
+)
+@click.option("--file", "file_path", default=None, help="File path for location.")
+@click.option("--line", default=None, type=int, help="Line number for location.")
+@click.pass_context
+def triage(
+    ctx: click.Context,
+    step: str,
+    title: str,
+    body: str,
+    category: str,
+    severity: str,
+    confidence: str,
+    file_path: str | None,
+    line: int | None,
+) -> None:
+    """Submit a triage finding."""
+    data: dict = {
+        "type": "triage",
+        "title": title,
+        "body": body,
+        "category": category,
+        "severity": severity,
+        "confidence": confidence,
+    }
+    if file_path is not None:
+        location: dict = {"file": file_path}
+        if line is not None:
+            location["line"] = line
+        data["location"] = location
+    _submit_finding(ctx, step, data)
+
+
+@finding.command()
+@click.argument("step")
+@click.option("--title", default="Test choice", help="Finding title.")
+@click.option("--body", default="Pick one", help="Finding body.")
+@click.option(
+    "--option",
+    "options",
+    multiple=True,
+    help="Option in 'Label:Description' format. At least 2 required.",
+)
+@click.pass_context
+def choice(ctx: click.Context, step: str, title: str, body: str, options: tuple[str, ...]) -> None:
+    """Submit a choice finding."""
+    if len(options) < 2:
+        raise click.ClickException("At least 2 --option flags are required.")
+    parsed_options = []
+    for opt in options:
+        if ":" not in opt:
+            raise click.ClickException(
+                f"Invalid option format '{opt}'. Expected 'Label:Description'."
+            )
+        label, description = opt.split(":", 1)
+        parsed_options.append({"label": label, "description": description})
+    _submit_finding(ctx, step, {
+        "type": "choice",
+        "title": title,
+        "body": body,
+        "options": parsed_options,
+    })
+
+
+@finding.command()
+@click.argument("step")
+@click.option("--title", default="Test evaluation", help="Finding title.")
+@click.option("--body", default="Evaluation", help="Finding body.")
+@click.option(
+    "--criterion",
+    "criteria",
+    multiple=True,
+    help="Criterion in 'Name:rating:explanation' format. At least 1 required.",
+)
+@click.pass_context
+def evaluation(
+    ctx: click.Context, step: str, title: str, body: str, criteria: tuple[str, ...]
+) -> None:
+    """Submit an evaluation finding."""
+    if len(criteria) < 1:
+        raise click.ClickException("At least 1 --criterion flag is required.")
+    parsed_criteria = []
+    for crit in criteria:
+        parts = crit.split(":", 2)
+        if len(parts) != 3:
+            raise click.ClickException(
+                f"Invalid criterion format '{crit}'. Expected 'Name:rating:explanation'."
+            )
+        name, rating, justification = parts
+        if rating not in RATINGS:
+            raise click.ClickException(
+                f"Invalid rating '{rating}'. Must be one of: {', '.join(RATINGS)}"
+            )
+        parsed_criteria.append({
+            "name": name,
+            "rating": rating,
+            "justification": justification,
+        })
+    _submit_finding(ctx, step, {
+        "type": "evaluation",
+        "title": title,
+        "body": body,
+        "criteria": parsed_criteria,
+    })
