@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from zing_ai.server.models import (
     Category,
@@ -14,6 +14,7 @@ from zing_ai.server.models import (
     Severity,
     TriageFinding,
     UserResponse,
+    WorkflowStep,
 )
 
 
@@ -144,6 +145,55 @@ class TestUserResponseComplexity(unittest.TestCase):
     def test_string_coercion(self) -> None:
         resp = UserResponse(complexity="complex")  # type: ignore[arg-type]
         assert resp.complexity == Complexity.COMPLEX
+
+
+class TestTriageMetadataValidation(unittest.TestCase):
+    """Test TriageFinding optional metadata and validation."""
+
+    def test_triage_without_metadata_defaults(self) -> None:
+        """TriageFinding without category/severity/confidence defaults all to None."""
+        adapter = TypeAdapter(Finding)
+        finding = adapter.validate_python({
+            "type": "triage",
+            "title": "Pick an approach",
+            "options": [{"label": "A", "description": "Option A"}],
+        })
+        assert isinstance(finding, TriageFinding)
+        assert finding.category is None
+        assert finding.severity is None
+        assert finding.confidence is None
+
+    def test_triage_partial_metadata_rejected(self) -> None:
+        """Partial metadata (only some of category/severity/confidence) is rejected."""
+        with self.assertRaises(ValidationError):
+            TriageFinding(type="triage", title="Test", severity="low")  # type: ignore[arg-type]
+
+    def test_choice_migration_shim(self) -> None:
+        """Persisted type:'choice' findings are migrated to type:'triage'."""
+        step_data = {
+            "step_name": "review",
+            "sequence": 0,
+            "findings": [
+                {
+                    "type": "choice",
+                    "title": "Pick one",
+                    "body": "Some body",
+                    "context": "Referenced in plan section 3.2",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"},
+                    ],
+                }
+            ],
+        }
+        step = WorkflowStep.model_validate(step_data)
+        assert len(step.findings) == 1
+        finding = step.findings[0]
+        assert isinstance(finding, TriageFinding)
+        assert finding.type == "triage"
+        assert "Referenced in plan section 3.2" in finding.body
+        assert "Some body" in finding.body
+        assert len(finding.options) == 2  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

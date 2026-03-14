@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import patch
 
 from zing_ai.server.models import (
-    ChoiceFinding,
     ChoiceOption,
     CriterionRating,
     EvaluationFinding,

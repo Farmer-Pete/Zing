@@ -104,17 +104,6 @@ class TextFinding(BaseModel):
     context: str | None = None
 
 
-class ChoiceFinding(BaseModel):
-    """A multiple-choice question (plan audit improvements, design decisions)."""
-
-    id: str = Field(default_factory=lambda: uuid4().hex[:8])
-    type: Literal["choice"] = "choice"
-    title: str
-    body: str = ""
-    context: str | None = None
-    options: list[ChoiceOption]
-
-
 class TriageFinding(BaseModel):
     """A code review finding for triage (accept/drop/downgrade/discuss)."""
 
@@ -122,12 +111,20 @@ class TriageFinding(BaseModel):
     type: Literal["triage"] = "triage"
     title: str
     body: str = ""
-    category: Category
-    severity: Severity
-    confidence: Confidence
+    category: Category | None = None
+    severity: Severity | None = None
+    confidence: Confidence | None = None
     complexity: Complexity = Complexity.STANDARD
     location: Location | None = None
     options: list[ChoiceOption] | None = None
+
+    @model_validator(mode="after")
+    def _validate_metadata_consistency(self) -> TriageFinding:
+        metadata = (self.category, self.severity, self.confidence)
+        if any(f is not None for f in metadata) and not all(f is not None for f in metadata):
+            msg = "category, severity, and confidence must be either all set or all None"
+            raise ValueError(msg)
+        return self
 
 
 class EvaluationFinding(BaseModel):
@@ -143,7 +140,7 @@ class EvaluationFinding(BaseModel):
 
 
 Finding = Annotated[
-    TextFinding | ChoiceFinding | TriageFinding | EvaluationFinding,
+    TextFinding | TriageFinding | EvaluationFinding,
     Field(discriminator="type"),
 ]
 
@@ -243,6 +240,14 @@ class WorkflowStep(BaseModel):
             valid_states = {s.value for s in SessionState}
             if state not in valid_states:
                 data["state"] = SessionState.PENDING.value
+        # Migrate legacy type:"choice" findings to type:"triage"
+        for finding in data.get("findings", []):
+            if isinstance(finding, dict) and finding.get("type") == "choice":
+                finding["type"] = "triage"
+                context = finding.pop("context", None)
+                if context:
+                    body = finding.get("body", "")
+                    finding["body"] = f"{body}\n\n{context}".strip() if body else context
         return data
 
 
