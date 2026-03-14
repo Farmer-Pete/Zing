@@ -124,3 +124,55 @@ def start(ctx: click.Context, step: str) -> None:
         "step_id": step_id,
     })
     click.echo(json.dumps(result, indent=2))
+
+
+@sim.command("agent-start")
+@click.argument("step")
+@click.argument("name")
+@click.option("--desc", default="", help="Agent description.")
+@click.pass_context
+def agent_start_cmd(ctx: click.Context, step: str, name: str, desc: str) -> None:
+    """Register a running agent for a step."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    result = _call_mcp(ctx.obj["url"], "agent_start", {
+        "session_id": state["session_id"],
+        "step_id": step_id,
+        "name": name,
+        "description": desc,
+    })
+    click.echo(json.dumps(result, indent=2))
+
+
+@sim.command("agent-stop")
+@click.argument("step")
+@click.argument("name")
+@click.pass_context
+def agent_stop_cmd(ctx: click.Context, step: str, name: str) -> None:
+    """Mark an agent as completed."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    result = _call_mcp(ctx.obj["url"], "agent_stop", {
+        "session_id": state["session_id"],
+        "step_id": step_id,
+        "name": name,
+    })
+    click.echo(json.dumps(result, indent=2))
+
+
+@sim.command()
+@click.argument("step")
+@click.argument("name")
+@click.argument("message")
+@click.pass_context
+def log(ctx: click.Context, step: str, name: str, message: str) -> None:
+    """Log a message from an agent."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    result = _call_mcp(ctx.obj["url"], "step_log", {
+        "session_id": state["session_id"],
+        "step_id": step_id,
+        "agent_name": name,
+        "message": message,
+    })
+    click.echo(json.dumps(result, indent=2))

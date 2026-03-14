@@ -94,3 +94,67 @@ def test_sim_start_invalid_step(mock_mcp_call, mock_state_file, sample_state):
     result = runner.invoke(cli, ["sim", "start", "nonexistent"])
     assert result.exit_code != 0
     assert "Unknown step 'nonexistent'" in result.output
+
+
+# -- sim agent-start ----------------------------------------------------------
+
+
+def test_sim_agent_start(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "started", "agent_name": "Analyzer"}
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["sim", "agent-start", "plan", "Analyzer", "--desc", "Scanning code"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "agent_start",
+        {
+            "session_id": "test-session-abc123",
+            "step_id": "step-plan-id",
+            "name": "Analyzer",
+            "description": "Scanning code",
+        },
+    )
+
+
+# -- sim agent-stop -----------------------------------------------------------
+
+
+def test_sim_agent_stop(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "stopped"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "agent-stop", "plan", "Analyzer"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "agent_stop",
+        {
+            "session_id": "test-session-abc123",
+            "step_id": "step-plan-id",
+            "name": "Analyzer",
+        },
+    )
+
+
+# -- sim log ------------------------------------------------------------------
+
+
+def test_sim_log(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "log", "plan", "Analyzer", "Found 3 issues"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "step_log",
+        {
+            "session_id": "test-session-abc123",
+            "step_id": "step-plan-id",
+            "agent_name": "Analyzer",
+            "message": "Found 3 issues",
+        },
+    )
