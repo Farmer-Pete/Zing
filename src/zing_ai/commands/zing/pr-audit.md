@@ -191,6 +191,7 @@ The `line` value must be a line number in the **new version** of the file that f
 **Format each comment body** to be a good PR comment:
 - Prefix with severity as an emoji: `🔴` critical, `🟠` high, `🟡` medium, `⚪` low (use the adjusted severity for downgraded findings)
 - Write the explanation naturally, as you would in a real review
+- Include the user's selected approach at the end of the comment. Use the same logic as the `write_report` step: if `response.selected` is set and is NOT `"__other__"`, append `\n\n**Approach:** {selected} — {matching option description}`. If `response.selected` is `"__other__"` and `response.other_text` is set, append `\n\n**Approach:** {other_text}`. If no approach was chosen, omit it.
 - Include a short code suggestion if the fix is obvious (using GitHub's suggestion syntax if applicable):
   ````
   ```suggestion

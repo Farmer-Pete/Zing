@@ -98,7 +98,7 @@ This is the core execution loop. The parent agent owns the step loop but delegat
 
 6. **After the subagent returns**, the parent:
    - Calls `agent_stop(session_id, step_id, name)` where `name` is the same agent name used in `agent_start` (e.g. `"Step {N}: {description}"`)
-   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `Co-Authored-By: Zing <zing@farmerpete.net>` trailer. Do NOT push to remote. Follow the `attribution_rule` from the shared review reference — never use Claude/Codex/OpenCode in the co-author line.
+   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `Co-Authored-By: Zing <zing@farmerpete.net>` trailer. Do NOT push to remote. **Immediately after every commit**, verify that `Co-Authored-By: Zing <zing@farmerpete.net>` is present in the commit message by running `git log -1 --format=%B`. If it is missing, amend the commit to append it: `git commit --amend -m "$(git log -1 --format=%B)" -m "Co-Authored-By: Zing <zing@farmerpete.net>"`. This verification is mandatory and must never be skipped.
    - Updates the Progress section in the zing file (`- [ ]` → `- [x]`) using Edit
    - Marks the task as completed using TaskUpdate
 
@@ -135,5 +135,5 @@ No file path argument is needed — build-audit uses git diff.
 - NEVER mark a step complete if acceptance criteria are not met
 - NEVER work on steps out of order unless a step is explicitly marked as independent
 - NEVER combine multiple steps into one commit — one commit per step
-- NEVER use Claude/Codex/OpenCode in commit co-author lines — always use `Co-Authored-By: Zing <zing@farmerpete.net>`
+- NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
 </anti_patterns>

@@ -173,16 +173,19 @@ After all questions are answered, update the zing document so it can be handed t
 <step name="next_steps">
 After saving the updated document, print a brief summary of what was added (Relevant Files, Action Plan, Progress sections).
 
-End your summary with: "Zing! Plan complete — handing off to audit."
+End your summary with: "Zing! Plan complete."
 
-Before chaining to audit, use AskUserQuestion to ask the user:
-- "View the plan in a markdown viewer before continuing?"
-  - "Yes, open it" — open the file for viewing (see instructions below), then proceed to chain to plan-audit
-  - "No, continue" — proceed directly to plan-audit
+Then show the user the dashboard link where they can view the rendered plan:
 
-**Opening the markdown file:** Run `open -a Typora "{file_path}"`. If Typora is not installed (the command fails), fall back to `open "{file_path}"` to use the system default handler.
+> View the plan: {url}?tab=plan
 
-Then invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+Where `{url}` is the session URL returned by `session_create` (e.g., `http://localhost:{port}/{session_id}`).
+
+Then ask the user: "Want to make any modifications to the plan before handing off to audit? If so, describe what to change. When you're done, say **DONE**."
+
+If the user requests modifications, make the requested changes to the zing document, save it, and ask again if there's anything else to change. Continue this conversation loop until the user says "DONE" (case-insensitive).
+
+Once the user says DONE (or declines to make modifications), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
 </step>
 
 </process>

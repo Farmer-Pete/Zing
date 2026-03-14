@@ -1188,7 +1188,7 @@ requires-dist = [
     { name = "datastar-py", specifier = ">=0.4" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "jinja2" },
-    { name = "mcp", specifier = ">=1.26" },
+    { name = "mcp", specifier = ">=1.26,<2" },
     { name = "mistune", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygments", specifier = ">=2.17" },
