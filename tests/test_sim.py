@@ -253,3 +253,34 @@ def test_sim_finding_evaluation(mock_mcp_call, mock_state_file, sample_state):
     assert finding["criteria"] == [
         {"name": "Clarity", "rating": "strong", "justification": "Well written"},
     ]
+
+
+# -- sim wait -----------------------------------------------------------------
+
+
+def test_sim_wait(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {
+        "session_id": "test-session-abc123",
+        "step_name": "plan",
+        "items": [{"title": "Q1", "answer": "A1"}],
+    }
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "wait", "plan"])
+    assert result.exit_code == 0, result.output
+    assert '"step_name": "plan"' in result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "review_wait",
+        {"session_id": "test-session-abc123", "step_id": "step-plan-id"},
+        timeout=None,
+    )
+
+
+def test_sim_wait_prints_waiting_message(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"session_id": "test-session-abc123", "items": []}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "wait", "plan"])
+    assert result.exit_code == 0, result.output
+    assert "Waiting for review" in result.stderr

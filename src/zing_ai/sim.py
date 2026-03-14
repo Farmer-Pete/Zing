@@ -54,10 +54,17 @@ async def _call_mcp_async(url: str, tool_name: str, arguments: dict) -> dict:
         return json.loads(content.text)
 
 
-def _call_mcp(url: str, tool_name: str, arguments: dict) -> dict:
+def _call_mcp(url: str, tool_name: str, arguments: dict, *, timeout: int | None = None) -> dict:
     """Sync wrapper around the async MCP client."""
     try:
-        return asyncio.run(_call_mcp_async(url, tool_name, arguments))
+        coro = _call_mcp_async(url, tool_name, arguments)
+        if timeout is not None:
+            coro = asyncio.wait_for(coro, timeout=timeout)
+        return asyncio.run(coro)
+    except TimeoutError:
+        raise click.ClickException(
+            f"Timed out waiting for review after {timeout}s"
+        ) from None
     except (ConnectionRefusedError, OSError) as exc:
         raise click.ClickException(
             f"Could not connect to Zing server at {url}. Is 'zing-ai mcp' running?"
@@ -333,3 +340,31 @@ def evaluation(
         "body": body,
         "criteria": parsed_criteria,
     })
+
+
+# -- wait subcommand ----------------------------------------------------------
+
+
+@sim.command()
+@click.argument("step")
+@click.option("--timeout", default=None, type=int, help="Timeout in seconds.")
+@click.pass_context
+def wait(ctx: click.Context, step: str, timeout: int | None) -> None:
+    """Wait for review submission, then print the response."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    url = ctx.obj["url"]
+    # Extract base URL for dashboard link
+    base_url = url.rsplit("/mcp", 1)[0] if "/mcp" in url else url
+    click.echo(
+        f"Waiting for review at {base_url}/{state['session_id']}...", err=True
+    )
+    try:
+        result = _call_mcp(url, "review_wait", {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+        }, timeout=timeout)
+    except KeyboardInterrupt:
+        click.echo("\nCancelled.", err=True)
+        raise SystemExit(130) from None
+    click.echo(json.dumps(result, indent=2))
