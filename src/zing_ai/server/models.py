@@ -192,6 +192,7 @@ class UserResponse(BaseModel):
     selected: str | None = None
     answer: str | None = None
     other_text: str | None = None
+    complexity: Complexity | None = None
 
 
 class WorkflowStep(BaseModel):

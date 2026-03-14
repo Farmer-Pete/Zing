@@ -15,7 +15,7 @@ from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from zing_ai.server.models import Finding, ResponseAction, UserResponse
+from zing_ai.server.models import Complexity, Finding, ResponseAction, UserResponse
 from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger("zing_ai.server")
@@ -123,7 +123,7 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
     # Save each non-empty response
     saved_count = 0
     for finding, response in zip(step.findings, mapped, strict=True):
-        if response.action is not None or response.selected is not None or response.answer is not None:
+        if response.action is not None or response.selected is not None or response.answer is not None or response.complexity is not None:
             # Merge with existing response to preserve fields from earlier saves
             if step.responses and finding.id:
                 idx = next(
@@ -136,6 +136,7 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
                         selected=response.selected if response.selected is not None else existing.selected,
                         answer=response.answer if response.answer is not None else existing.answer,
                         other_text=response.other_text if response.other_text is not None else existing.other_text,
+                        complexity=response.complexity if response.complexity is not None else existing.complexity,
                     )
             try:
                 manager.save_response(session_id, step_id, finding.id, response)
@@ -306,8 +307,14 @@ def _map_signals_to_responses(
                 raw_other = signals.get(other_key)
                 if isinstance(raw_other, str) and raw_other.strip():
                     other_text = raw_other.strip()
+            # Extract complexity override (if any)
+            complexity_key = f"{finding.id}_complexity"
+            raw_complexity = signals.get(complexity_key)
+            complexity = None
+            if isinstance(raw_complexity, str) and raw_complexity in {c.value for c in Complexity}:
+                complexity = Complexity(raw_complexity)
             responses.append(
-                UserResponse(action=action, selected=selected, other_text=other_text)
+                UserResponse(action=action, selected=selected, other_text=other_text, complexity=complexity)
             )
         elif finding.type == "evaluation":
             responses.append(UserResponse())
