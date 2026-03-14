@@ -125,6 +125,7 @@ class TriageFinding(BaseModel):
     category: Category
     severity: Severity
     confidence: Confidence
+    complexity: Complexity = Complexity.STANDARD
     location: Location | None = None
     options: list[ChoiceOption] | None = None
 
