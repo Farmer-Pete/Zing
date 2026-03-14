@@ -251,6 +251,92 @@ If the API call fails (e.g., a line comment targets a line the API rejects), ret
 
 End your review summary with: "Zing! Review complete."
 
+### Determine the recommended option
+
+After submitting the review, examine the complexity of all accepted/downgraded findings from the `review_wait()` response. For each finding, use `response.complexity or finding.complexity` (user override first, then agent classification).
+
+Count the findings by complexity and determine the default:
+- If **all** accepted/downgraded findings have `complexity == "simple"`: recommend **"Auto-apply all fixes"**
+- If accepted/downgraded findings are a mix of simple and standard (but **no** complex): recommend **"Fix with chat"**
+- If **any** accepted/downgraded finding has `complexity == "complex"`: recommend **"Build a plan to fix"**
+
+### Present the "What next?" question
+
+Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
+
+- "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
+- "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
+- "Build a plan to fix" (description: "Full plan → audit → build pipeline. Most rigorous, slowest.")
+- "I'm done" (description: "Stop here")
+
+### Handling each choice
+
+If "Auto-apply all fixes": proceed to the `auto_apply` step.
+
+If "Fix with chat": proceed to the `discuss_findings` step.
+
+If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/pr-review-123-2025-06-15-1423.md`). Do NOT embed the current session token in the new zing file — it gets its own session when `/zing:plan` picks it up.
+
+If "I'm done": exit normally.
+
+</step>
+
+<step name="auto_apply">
+Automatically apply fixes for all accepted/downgraded findings without interactive prompts. This step is self-contained — no separate skill or server-side code is needed.
+
+### Process
+
+1. **Iterate through each accepted/downgraded finding** in the order they appear in the report.
+
+2. **For each finding:**
+   a. Read the finding's body (the detailed explanation from the report) and the selected approach option (from `response.selected` / `response.other_text`).
+   b. Read the relevant source file(s) referenced in the finding.
+   c. Apply the fix directly using Edit/Write tools. For simple findings the fix should be obvious from the finding description and selected approach. For standard findings, use the approach option to guide the implementation.
+   d. After applying the fix, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+   e. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), **fall back to interactive "fix with chat" mode for that finding only**: show the finding to the user, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+3. **After all findings are processed**, show a summary:
+   ```
+   Auto-apply complete:
+   - {applied_count} fixes applied successfully
+   - {fallback_count} required interactive resolution
+   - {skipped_count} skipped
+   ```
+
+4. **Stage and commit all changes** with a descriptive commit message listing the findings addressed:
+   ```
+   Fix PR review findings: {brief list of finding titles}
+
+   Applied {applied_count} fixes from PR review ({report_file}).
+   Findings addressed:
+   - #{n}: {finding title}
+   - #{n}: {finding title}
+   ...
+   ```
+
+5. After committing, return to the `submit_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
+</step>
+
+<step name="discuss_findings">
+Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
+
+"What would you like to do with this one? You can ask me to fix it, suggest a different approach, or just say **next** to move on."
+
+Then enter a conversational loop. The user drives the interaction using natural language — there are no menus or structured prompts. Respond naturally to whatever they say:
+
+- **"fix this" / "fix it"** — Write a fix for the current finding. Show what you're changing and why, then apply it with the Edit tool. After applying, confirm what changed and present the next finding.
+- **"try X instead" / "what about X?" / "I'd rather do Y"** — The user is steering toward a different solution. Discuss the approach, and if it makes sense, apply it. If it has trade-offs worth knowing, explain them before applying.
+- **"next" / "skip"** — Move to the next finding without changes.
+- **"done" / "that's enough"** — End the walkthrough early.
+- **"why?" / "explain" / "tell me more"** — Go deeper into why this matters — failure modes, examples, what could go wrong in production. Then wait for the user's next input on the same finding.
+- **"show me more context"** — Read more of the surrounding code and show it. Then wait for the user's next input.
+- **Any other input** — The user might ask a question, disagree, suggest something, or want to explore a tangent. Engage naturally, then continue with the current finding until they say next/fix/done.
+
+After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
+
+After the walkthrough is complete, return to the `submit_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Fix with chat" option again).
 </step>
 
 </process>
