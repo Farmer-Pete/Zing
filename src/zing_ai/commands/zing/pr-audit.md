@@ -278,7 +278,7 @@ Review is complete when:
 - [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] PR review was submitted via GitHub API with line-level comments
-- [ ] Review body and comments do not mention Claude/Codex/OpenCode — only Zing attribution if any
+- [ ] Review body, comments, and any generated content do not mention Claude/Codex/OpenCode — only Zing attribution if any
 - [ ] PR URL was shown to the user
 - [ ] "Zing! Review complete." signoff was displayed
 </success_criteria>
