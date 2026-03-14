@@ -369,6 +369,12 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 s.step_id: len(s.findings) for s in current_session.steps
             }
 
+            # Track step states for badge updates
+            step_states: dict[str, str] = {
+                s.step_id: s.state.value for s in current_session.steps
+            }
+            session_state: str = current_session.state.value
+
             # Count of findings already sent for the active step
             seen = 0
 
@@ -469,6 +475,26 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     yield SSE.patch_elements(
                         _notification_dot_html("step-tab-plan"),
                         mode=ElementPatchMode.OUTER,
+                    )
+
+                # Update step tab badges and session header when state changes
+                states_changed = False
+                for s in current_session.steps:
+                    if step_states.get(s.step_id) != s.state.value:
+                        step_states[s.step_id] = s.state.value
+                        states_changed = True
+                        yield SSE.patch_elements(
+                            f'<span id="step-badge-{html.escape(s.step_id)}" '
+                            f'class="status-badge status-{html.escape(s.state.value)}">'
+                            f"{html.escape(s.state.value)}</span>",
+                        )
+                if states_changed or session_state != current_session.state.value:
+                    session_state = current_session.state.value
+                    yield SSE.patch_elements(
+                        f'<span id="session-status-badge" '
+                        f'class="status-badge status-'
+                        f'{html.escape(current_session.state.value)}">'
+                        f"{html.escape(current_session.state.value)}</span>",
                     )
 
                 # If viewing a step tab, also stream findings for the active step
@@ -581,15 +607,29 @@ async def dashboard_events(request: Request):  # noqa: ANN201
         try:
             while True:
                 try:
-                    await asyncio.wait_for(queue.get(), timeout=30.0)
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
                 except TimeoutError:
                     continue
 
                 sessions = sorted(
                     manager.list_sessions(), key=lambda s: s.created_at, reverse=True,
                 )
-                html = render("dashboard.html", sessions=sessions)
-                yield SSE.patch_elements(html, selector="body", mode=ElementPatchMode.INNER)
+
+                if event in ("created", "cleaned_up"):
+                    # Structural change — full re-render
+                    page_html = render("dashboard.html", sessions=sessions)
+                    yield SSE.patch_elements(
+                        page_html, selector="body", mode=ElementPatchMode.INNER,
+                    )
+                else:
+                    # State-only change — targeted per-card patches
+                    for s in sessions:
+                        card_html = render("fragments/session_card.html", s=s)
+                        yield SSE.patch_elements(
+                            card_html,
+                            selector=f"#session-card-{s.session_id}",
+                            mode=ElementPatchMode.OUTER,
+                        )
         finally:
             if queue in _dashboard_queues:
                 _dashboard_queues.remove(queue)

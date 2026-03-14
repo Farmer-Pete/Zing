@@ -7,9 +7,8 @@ import re
 import pytest
 from playwright.sync_api import Page, expect
 
-from zing_ai.server.models import ResponseAction, UserResponse
-
 from tests.test_ui.conftest import _ServerInfo
+from zing_ai.server.models import ResponseAction, UserResponse
 
 pytestmark = pytest.mark.ui
 
@@ -1046,3 +1045,62 @@ def test_submit_captures_triage_action_and_approach(server: _ServerInfo, page: P
     triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
     assert step.responses[triage_idx].action == ResponseAction.ACCEPT
     assert step.responses[triage_idx].selected == "Parameterize queries"
+
+
+def test_step_tab_badges_update_live(server: _ServerInfo, page: Page) -> None:
+    """Step tab badges update via SSE when another step starts."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="tab-badge", title="Tab Badge Test", steps=["step1", "step2"]
+    )
+    step1 = session.steps[0]
+    step2 = session.steps[1]
+
+    # Start step1 so we have an active SSE connection
+    manager.start_step("tab-badge", step1.step_id)
+
+    page.goto(f"{server.base_url}/tab-badge?step={step1.step_id}")
+
+    # Step2 badge should initially be "pending"
+    step2_badge = page.locator(f"#step-badge-{step2.step_id}")
+    expect(step2_badge).to_have_text("pending", timeout=5000)
+
+    # Start step2 server-side (auto-completes step1) — step2 badge should
+    # update to "started" and step1 badge should update to "completed"
+    # via the same SSE event, before the stream terminates.
+    manager.start_step("tab-badge", step2.step_id)
+    expect(step2_badge).to_have_text("started", timeout=5000)
+
+    step1_badge = page.locator(f"#step-badge-{step1.step_id}")
+    expect(step1_badge).to_have_text("completed", timeout=5000)
+
+
+def test_session_header_badge_updates_live(server: _ServerInfo, page: Page) -> None:
+    """Session header and step tab badges update via SSE through the step lifecycle."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="hdr-badge", title="Header Badge Test", steps=["review"]
+    )
+    step = session.steps[0]
+
+    page.goto(f"{server.base_url}/hdr-badge")
+
+    header_badge = page.locator("#session-status-badge")
+    step_badge = page.locator(f"#step-badge-{step.step_id}")
+    expect(header_badge).to_have_text("pending", timeout=5000)
+    expect(step_badge).to_have_text("pending", timeout=5000)
+
+    # Start step — badges should update to "started"
+    manager.start_step("hdr-badge", step.step_id)
+    expect(header_badge).to_have_text("started", timeout=5000)
+    expect(step_badge).to_have_text("started", timeout=5000)
+
+    # Mark ready — badges should update to "ready"
+    manager.add_finding("hdr-badge", step.step_id, {
+        "type": "text", "id": "f1", "title": "Note",
+    })
+    manager.start_agent("hdr-badge", step.step_id, "test-agent")
+    manager.stop_agent("hdr-badge", step.step_id, "test-agent")
+    manager.mark_step_ready("hdr-badge", step.step_id)
+    expect(header_badge).to_have_text("ready", timeout=5000)
+    expect(step_badge).to_have_text("ready", timeout=5000)

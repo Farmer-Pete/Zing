@@ -5,9 +5,8 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
-from zing_ai.server.models import UserResponse
-
 from tests.test_ui.conftest import _ServerInfo
+from zing_ai.server.models import UserResponse
 
 pytestmark = pytest.mark.ui
 
@@ -113,6 +112,35 @@ def test_404_for_nonexistent_session(server: _ServerInfo, page: Page) -> None:
     response = page.goto(f"{server.base_url}/nonexistent-session-id")
     assert response is not None
     assert response.status == 404
+
+
+def test_dashboard_live_status_update(server: _ServerInfo, page: Page) -> None:
+    """Dashboard badges update in real time via SSE without page reload."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="live-dash", title="Live Dashboard", steps=["review"]
+    )
+    step = session.steps[0]
+    step_id = step.step_id
+    manager.start_step("live-dash", step_id)
+
+    page.goto(f"{server.base_url}/dashboard")
+    # Badge should show "started" from the SSE connection
+    badge = page.locator("#session-card-live-dash .status-badge")
+    expect(badge).to_have_text("started", timeout=5000)
+
+    # Mark step ready server-side — badge should update without reload
+    manager.add_finding("live-dash", step_id, {
+        "type": "text", "id": "f1", "title": "Note",
+    })
+    manager.start_agent("live-dash", step_id, "test-agent")
+    manager.stop_agent("live-dash", step_id, "test-agent")
+    manager.mark_step_ready("live-dash", step_id)
+    expect(badge).to_have_text("ready", timeout=5000)
+
+    # Submit responses server-side — badge should update to completed
+    manager.submit_responses("live-dash", step_id, [UserResponse()])
+    expect(badge).to_have_text("completed", timeout=5000)
 
 
 def test_submit_to_completed_step_is_disabled(server: _ServerInfo, page: Page) -> None:

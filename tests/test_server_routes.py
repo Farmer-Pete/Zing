@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import unittest
 from unittest.mock import patch
 
+from tests.test_server_base import _STEP, ServerTestBase
 from zing_ai.server.mcp_tools import configure, review_wait
 from zing_ai.server.routes import _dashboard_queues
-
-from tests.test_server_base import ServerTestBase, _STEP
 
 
 class TestRemovedEndpoints(ServerTestBase):
@@ -755,6 +753,43 @@ class TestDashboardSSE(ServerTestBase):
             self.client.post("/sessions/sse-clean/cleanup")
             event = queue.get_nowait()
             self.assertEqual(event, "cleaned_up")
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_dashboard_notified_on_step_ready(self) -> None:
+        """Dashboard SSE queues receive step_ready when a step is marked ready."""
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            self._create_session(session_id="sse-ready", title="Ready Test")
+            self.manager.add_finding(
+                "sse-ready", self.step_id,
+                {"type": "text", "title": "Note"},
+            )
+            self.manager.start_agent("sse-ready", self.step_id, "test-agent")
+            self.manager.stop_agent("sse-ready", self.step_id, "test-agent")
+            # Drain all earlier events
+            self._drain_queue(queue)
+
+            self.manager.mark_step_ready("sse-ready", self.step_id)
+            events = self._drain_queue(queue)
+            self.assertIn("step_ready", events)
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_dashboard_notified_on_agents_done(self) -> None:
+        """Dashboard SSE queues receive agents_done when all agents complete."""
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            self._create_session(session_id="sse-agents", title="Agents Done Test")
+            self.manager.start_agent("sse-agents", self.step_id, "agent-1")
+            # Drain events from creation, step start, and agent start
+            self._drain_queue(queue)
+
+            self.manager.stop_agent("sse-agents", self.step_id, "agent-1")
+            events = self._drain_queue(queue)
+            self.assertIn("agents_done", events)
         finally:
             _dashboard_queues.remove(queue)
 

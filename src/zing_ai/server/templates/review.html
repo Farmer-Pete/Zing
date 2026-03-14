@@ -6,7 +6,7 @@
 <h1>{{ session.title }}</h1>
 <div class="session-meta">
     <span class="session-meta-id">{{ session.session_id }}</span>
-    <span class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span>
+    <span id="session-status-badge" class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span>
 </div>
 
 <nav class="step-nav">
@@ -20,7 +20,7 @@
     <a href="/{{ session.session_id }}?step={{ step.step_id }}" id="step-tab-{{ step.step_id }}"
        class="step-link {% if step.step_id == current_step and current_tab != 'plan' %}active{% endif %}">
         {{ step.step_name }}
-        <span class="status-badge status-{{ step.state.value }}">{{ step.state.value }}</span>
+        <span id="step-badge-{{ step.step_id }}" class="status-badge status-{{ step.state.value }}">{{ step.state.value }}</span>
     </a>
     {% endfor %}
 </nav>

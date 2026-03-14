@@ -54,6 +54,8 @@ def create_app(
         dashboard_events = {
             "session_created": "created",
             "step_started": "step_started",
+            "step_ready": "step_ready",
+            "agents_done": "agents_done",
             "agent_started": "agent_started",
             "agent_stopped": "agent_stopped",
             "review_submitted": "review_submitted",

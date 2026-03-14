@@ -6,7 +6,7 @@
 <h1>Dashboard</h1>
 
 {% if sessions %}
-<div data-signals="{_d: true}">
+<div data-signals="{_d: true}" data-init="@get('/dashboard/events')">
 <div class="timeline">
     {% set current_day = namespace(value="") %}
     {% for s in sessions %}
@@ -15,25 +15,7 @@
         {% set current_day.value = day %}
         <div class="timeline-day">{{ day }}</div>
     {% endif %}
-    <div class="timeline-item">
-        <div class="timeline-dot status-dot-{{ s.state.value }}"></div>
-        <a href="/{{ s.session_id }}" class="timeline-card">
-            <div class="timeline-card-header">
-                <span class="timeline-title">{{ s.title }}</span>
-                <span class="status-badge status-{{ s.state.value }}">{{ s.state.value }}</span>
-            </div>
-            <div class="timeline-meta">
-                <code>{{ s.zing_file or "—" }}</code>
-                {% if s.current_step_name %} · Step: <strong>{{ s.current_step_name }}</strong>{% endif %}
-                · {{ s.total_findings }} finding{{ "s" if s.total_findings != 1 else "" }}
-            </div>
-            <div class="timeline-footer">
-                <span class="timeline-time">{{ s.created_at.strftime('%H:%M') }}</span>
-                <button class="cleanup-btn" type="button"
-                        data-on:click="event.stopPropagation(); event.preventDefault(); @post('/sessions/{{ s.session_id }}/cleanup')">Delete</button>
-            </div>
-        </a>
-    </div>
+    {% include "fragments/session_card.html" %}
     {% endfor %}
 </div>
 </div>

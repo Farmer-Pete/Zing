@@ -1,0 +1,19 @@
+<div class="timeline-item" id="session-card-{{ s.session_id }}">
+    <div class="timeline-dot status-dot-{{ s.state.value }}"></div>
+    <a href="/{{ s.session_id }}" class="timeline-card">
+        <div class="timeline-card-header">
+            <span class="timeline-title">{{ s.title }}</span>
+            <span class="status-badge status-{{ s.state.value }}">{{ s.state.value }}</span>
+        </div>
+        <div class="timeline-meta">
+            <code>{{ s.zing_file or "—" }}</code>
+            {% if s.current_step_name %} · Step: <strong>{{ s.current_step_name }}</strong>{% endif %}
+            · {{ s.total_findings }} finding{{ "s" if s.total_findings != 1 else "" }}
+        </div>
+        <div class="timeline-footer">
+            <span class="timeline-time">{{ s.created_at.strftime('%H:%M') }}</span>
+            <button class="cleanup-btn" type="button"
+                    data-on:click="event.stopPropagation(); event.preventDefault(); @post('/sessions/{{ s.session_id }}/cleanup')">Delete</button>
+        </div>
+    </a>
+</div>
