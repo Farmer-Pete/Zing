@@ -70,3 +70,27 @@ def test_sim_update_no_state_file(mock_mcp_call, mock_state_file):
     result = runner.invoke(cli, ["sim", "update", "--title", "New Title"])
     assert result.exit_code != 0
     assert "No active sim session" in result.output
+
+
+# -- sim start ----------------------------------------------------------------
+
+
+def test_sim_start(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    mock_mcp_call.return_value = {"status": "ok", "step_id": "step-plan-id", "step_name": "plan"}
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "start", "plan"])
+    assert result.exit_code == 0, result.output
+    mock_mcp_call.assert_called_once_with(
+        "http://localhost:9876/mcp",
+        "step_start",
+        {"session_id": "test-session-abc123", "step_id": "step-plan-id"},
+    )
+
+
+def test_sim_start_invalid_step(mock_mcp_call, mock_state_file, sample_state):
+    mock_state_file.write_text(json.dumps(sample_state))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sim", "start", "nonexistent"])
+    assert result.exit_code != 0
+    assert "Unknown step 'nonexistent'" in result.output

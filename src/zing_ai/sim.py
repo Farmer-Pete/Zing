@@ -110,3 +110,17 @@ def update(ctx: click.Context, title: str | None, zing_file: str | None) -> None
         args["zing_file"] = zing_file
     result = _call_mcp(ctx.obj["url"], "session_update", args)
     click.echo(json.dumps(result, indent=2))
+
+
+@sim.command()
+@click.argument("step")
+@click.pass_context
+def start(ctx: click.Context, step: str) -> None:
+    """Start a step on the MCP server."""
+    state = _load_state()
+    step_id = _resolve_step(state, step)
+    result = _call_mcp(ctx.obj["url"], "step_start", {
+        "session_id": state["session_id"],
+        "step_id": step_id,
+    })
+    click.echo(json.dumps(result, indent=2))
