@@ -184,18 +184,18 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session is not None
         assert session.total_findings == 1
 
-    def test_add_finding_choice(self) -> None:
-        """Adding a choice finding appends it to the step."""
+    def test_add_finding_triage_without_metadata(self) -> None:
+        """Adding a triage finding without metadata appends it to the step."""
         step = self._create_session_with_step()
         finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "choice",
+            "type": "triage",
             "title": "Pick one",
             "options": [
                 {"label": "A", "description": "Option A"},
                 {"label": "B", "description": "Option B"},
             ],
         })
-        assert finding.type == "choice"
+        assert finding.type == "triage"
 
     def test_add_finding_triage(self) -> None:
         """Adding a triage finding appends it to the step."""
@@ -213,7 +213,7 @@ class TestSessionLifecycle(unittest.TestCase):
         """Submitting two findings with the same type and title stores only one."""
         step = self._create_session_with_step()
         self.manager.add_finding("s1", step.step_id, {
-            "type": "choice",
+            "type": "triage",
             "title": "Improve error handling",
             "options": [
                 {"label": "Try/except", "description": "Wrap in try/except"},
@@ -221,7 +221,7 @@ class TestSessionLifecycle(unittest.TestCase):
             ],
         })
         self.manager.add_finding("s1", step.step_id, {
-            "type": "choice",
+            "type": "triage",
             "title": "Improve error handling",
             "options": [
                 {"label": "Try/except", "description": "Wrap in try/except"},
