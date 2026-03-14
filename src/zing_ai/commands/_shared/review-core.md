@@ -152,6 +152,8 @@ Step back from the specific lines changed and ask whether this PR is solving the
 **Scattered hardcoded values**
 - If the fix involves changing a hardcoded value (string key, config constant, magic number), search for that value across the codebase. Are there other copies that need the same change? Would a single source of truth (constant, config, shared builder) prevent this class of bug entirely?
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 ---
 
 ## Agent 2 (Correctness & State)
@@ -195,6 +197,8 @@ Step back from the specific lines changed and ask whether this PR is solving the
 - When adding retry logic, verify there is a maximum retry count with backoff. Infinite retries on a permanently failing operation will back up the queue and flood logs. Consider circuit-breaker patterns for operations that fail repeatedly for the same input.
 - When classes are used in log messages or error reports, verify they produce meaningful string representations — not raw object references. Log messages containing `<Object at 0x7f...>` or `[object Object]` are useless for debugging.
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 ---
 
 ## Agent 3 (Security & API Surface)
@@ -223,6 +227,8 @@ Step back from the specific lines changed and ask whether this PR is solving the
 - When a new endpoint is added, verify it has complete API documentation including response schemas for all status codes. Missing or commented-out schema decorators are a red flag — they indicate the endpoint is invisible to generated clients.
 - When custom headers are introduced, verify they are added to CORS allowed headers and correctly marked as optional vs required. A required header that consumers can't always provide will break every request.
 - When a serializer changes a field's representation (e.g., from nested object to ID, from string to enum, from required to nullable), verify API consumers are aware and coordinated. Silent response shape changes are the most common cause of frontend breakage from backend PRs.
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 ---
 
@@ -258,6 +264,8 @@ Step back from the specific lines changed and ask whether this PR is solving the
 - When removing or refactoring CSS, search for all elements that depend on the changed styles. A removed class or modified rule may affect components beyond the one being changed.
 - When a PR adds or modifies a visual component, spot-check at least one other instance of the same component pattern elsewhere in the application to verify styling consistency. Inconsistent styling between sibling components (different font sizes, weights, colors, alignment) is a frequent source of UI bugs.
 - When a third-party library is configured with multiple interacting options (e.g., chart libraries, map libraries, rich text editors), check the library's docs for known incompatibilities between the specific option combination being used. Config option interactions are a common source of crashes that only surface with specific data.
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 ---
 
@@ -323,6 +331,8 @@ If the changed code allocates data structures, manages caches, or handles large 
 - When constructing strongly-typed data structures (DataFrames, typed arrays, typed collections) from external data, ensure type coercion or lenient parsing is configured. External data routinely contains mixed types in the same field (integers in string columns, strings in integer columns).
 - When external data is stored in the database, verify the storage layer can handle edge cases: null bytes in strings (rejected by PostgreSQL text/jsonb), integers exceeding column range, special Unicode characters, and deeply nested or oversized JSON.
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 ---
 
 ## Agent 6 (Testing & Observability)
@@ -351,6 +361,8 @@ If the changed code allocates data structures, manages caches, or handles large 
 ### 3. Experts' Opinion
 - Should a specific expert (security, usability, accessibility, etc.) look at this before it ships?
 - Will this change impact other teams who should review it?
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 </review_categories>
 
