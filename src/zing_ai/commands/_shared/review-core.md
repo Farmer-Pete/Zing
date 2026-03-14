@@ -88,6 +88,13 @@ The `body` field is rendered as GitHub-flavored markdown with syntax-highlighted
 **What NOT to do**: Don't just say "on line 42, the null check is missing" without showing the code. Don't dump a huge code block and leave the reader to find the issue — highlight the specific problematic lines in your explanation.
 
 **Suggested approaches (`options`)**: Include 1-3 options when there are distinct approaches to fixing the issue. Each option needs a concrete `label` naming the action ("Use `Optional` return type", "Add circuit breaker", "Extract to helper") and a `description` explaining the trade-off or rationale. Skip options for trivial fixes with only one obvious solution. Don't restate the problem in the option — the body already covers that. The reviewer can select an approach from the dashboard or type a custom one.
+
+**Fix complexity (`complexity`)**: How difficult the fix is to implement. One of:
+- `"simple"` — adding tests, simple code refactor, small focused change. The fix is obvious and can be applied without planning.
+- `"standard"` — a moderate fix that benefits from interactive walkthrough but doesn't need a full plan.
+- `"complex"` — a large architectural change that does not have an obvious solution and needs further clarification, discussion, or a detailed plan before implementation.
+
+Default to `"standard"` when unsure. Classify as `"simple"` only when the fix is a clear one-liner or trivially obvious. Classify as `"complex"` only when the fix requires multi-file architectural changes or has multiple viable approaches with significant trade-offs.
 </finding_body_format>
 
 <review_categories>
@@ -371,7 +378,7 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 
 2. **Collect findings:** Review the diff using the assigned checklist. **NEVER call `mcp__zing-ai__finding_submit`** — this is forbidden for agents. The parent process collects all agent findings, deduplicates them, and submits them. Agents must only return findings as text. Format each finding as a single JSON object on one line (JSONL format). The `body` field supports GitHub-flavored markdown — follow the `finding_body_format` guidelines above for writing rich, self-contained bodies with embedded code snippets and optional mermaid diagrams:
    ```
-   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","complexity":"simple","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
    ```
 
 3. **Stop:** Call the `mcp__zing-ai__agent_stop` MCP tool when done:
@@ -382,8 +389,8 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 4. **Return findings:** After calling `agent_stop`, return all findings in the task output using the `---JSONL---` delimiter. Each `body` should be a rich, self-contained markdown explanation following the `finding_body_format` guidelines — include code snippets and mermaid diagrams where appropriate:
    ```
    ---JSONL---
-   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/foo.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
-   {"type":"triage","title":"Session token in URL query parameter","body":"The session token is passed as a query parameter, which means it gets logged in server access logs, browser history, and any proxy logs along the way.\n\n```python\ndef build_auth_url(token: str) -> str:\n    return f\"/dashboard?session={token}\"\n```\n\nMove the token to an `Authorization` header or a `Set-Cookie` with `HttpOnly` and `Secure` flags instead.","category":"security","severity":"medium","confidence":"medium","location":{"file":"src/bar.py","line":17},"options":[{"label":"Move token to HttpOnly cookie","description":"Use Set-Cookie with HttpOnly and Secure flags — keeps tokens out of JS and logs"}]}
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","complexity":"simple","location":{"file":"src/foo.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
+   {"type":"triage","title":"Session token in URL query parameter","body":"The session token is passed as a query parameter, which means it gets logged in server access logs, browser history, and any proxy logs along the way.\n\n```python\ndef build_auth_url(token: str) -> str:\n    return f\"/dashboard?session={token}\"\n```\n\nMove the token to an `Authorization` header or a `Set-Cookie` with `HttpOnly` and `Secure` flags instead.","category":"security","severity":"medium","confidence":"medium","complexity":"standard","location":{"file":"src/bar.py","line":17},"options":[{"label":"Move token to HttpOnly cookie","description":"Use Set-Cookie with HttpOnly and Secure flags — keeps tokens out of JS and logs"}]}
    ```
    If the agent has no findings, still call `agent_stop` and return an empty JSONL section:
    ```
@@ -407,6 +414,16 @@ Each agent must also receive the **session ID** and **step ID** for the `agent_s
 
 **After all 6 agents return**, the parent proceeds to the `check_and_review` step.
 </step>
+
+### Smart Defaults (Complexity-Based Recommendations)
+
+After `review_wait()` returns, examine the `complexity` of all accepted/downgraded findings (using `response.complexity or finding.complexity` for each). Determine the recommended "What next?" option:
+
+- **All simple** — recommend "Auto-apply all fixes"
+- **Mix of simple and standard (no complex)** — recommend "Fix with chat"
+- **Any complex** — recommend "Build a plan to fix"
+
+Mark the recommended option with a note explaining why (e.g., "Recommended — all 5 findings are simple fixes").
 
 <step name="check_and_review">
 This step collects agent results, submits findings for user triage, and returns the triaged findings list to the calling skill.
