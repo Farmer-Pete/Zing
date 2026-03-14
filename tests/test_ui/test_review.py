@@ -1104,3 +1104,156 @@ def test_session_header_badge_updates_live(server: _ServerInfo, page: Page) -> N
     manager.mark_step_ready("hdr-badge", step.step_id)
     expect(header_badge).to_have_text("ready", timeout=5000)
     expect(step_badge).to_have_text("ready", timeout=5000)
+
+
+# ---------------------------------------------------------------------------
+# Notification dot tests
+# ---------------------------------------------------------------------------
+
+
+def test_notification_dot_on_non_active_step(server: _ServerInfo, page: Page) -> None:
+    """Adding a finding to a non-active step shows a notification dot on its tab."""
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    manager = server.manager
+    session = manager.create_session(
+        session_id="notif-dot", title="Notif Dot Test", steps=["step1", "step2"]
+    )
+    step1 = session.steps[0]
+    step2 = session.steps[1]
+
+    # Only start step1 — keep it in "started" state so the SSE stream stays open
+    manager.start_step("notif-dot", step1.step_id)
+
+    page.goto(f"{server.base_url}/notif-dot?step={step1.step_id}")
+    # Don't use networkidle — SSE keeps connection open; wait for tab to render
+    step2_tab = page.locator(f"#step-tab-{step2.step_id}")
+    expect(step2_tab).to_be_visible(timeout=5000)
+
+    # Step2 tab should NOT have notification-dot initially
+    expect(step2_tab).not_to_have_class(re.compile("notification-dot"), timeout=3000)
+
+    # Start step2 (auto-completes step1) and add a finding — triggers SSE notification dot
+    manager.start_step("notif-dot", step2.step_id)
+    manager.add_finding("notif-dot", step2.step_id, {
+        "type": "text", "id": "f1", "title": "New finding",
+    })
+
+    # Step2 tab should gain notification-dot class
+    expect(step2_tab).to_have_class(re.compile("notification-dot"), timeout=5000)
+
+    # The tab should still have its step name text and badge span
+    # (verifies the OUTER patch didn't destroy inner content)
+    expect(step2_tab).to_contain_text("step2", timeout=3000)
+    expect(step2_tab.locator(".status-badge")).to_be_visible(timeout=3000)
+
+    _assert_no_console_errors(console_errors)
+
+
+def test_no_notification_dot_on_active_step(server: _ServerInfo, page: Page) -> None:
+    """Adding a finding to the active step does NOT show a notification dot."""
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    manager = server.manager
+    session = manager.create_session(
+        session_id="notif-no-dot", title="No Dot Test", steps=["step1"]
+    )
+    step1 = session.steps[0]
+
+    manager.start_step("notif-no-dot", step1.step_id)
+
+    page.goto(f"{server.base_url}/notif-no-dot?step={step1.step_id}")
+    # Don't use networkidle — SSE keeps connection open
+    step1_tab = page.locator(f"#step-tab-{step1.step_id}")
+    expect(step1_tab).to_be_visible(timeout=5000)
+
+    # Add a finding to the active step
+    manager.add_finding("notif-no-dot", step1.step_id, {
+        "type": "text", "id": "f1", "title": "Active finding",
+    })
+
+    # Wait a moment for any SSE events to arrive, then assert no dot
+    page.wait_for_timeout(2000)
+    expect(step1_tab).not_to_have_class(re.compile("notification-dot"), timeout=3000)
+
+    _assert_no_console_errors(console_errors)
+
+
+def test_notification_dot_cleared_on_navigation(server: _ServerInfo, page: Page) -> None:
+    """Notification dot is cleared when navigating to the step with the dot."""
+    console_errors: list[str] = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+    manager = server.manager
+    session = manager.create_session(
+        session_id="notif-clear", title="Clear Dot Test", steps=["step1", "step2"]
+    )
+    step1 = session.steps[0]
+    step2 = session.steps[1]
+
+    # Only start step1 so the SSE stream stays open
+    manager.start_step("notif-clear", step1.step_id)
+
+    page.goto(f"{server.base_url}/notif-clear?step={step1.step_id}")
+    # Don't use networkidle — SSE keeps connection open
+    step2_tab = page.locator(f"#step-tab-{step2.step_id}")
+    expect(step2_tab).to_be_visible(timeout=5000)
+
+    # Start step2 and add a finding to trigger notification dot
+    manager.start_step("notif-clear", step2.step_id)
+    manager.add_finding("notif-clear", step2.step_id, {
+        "type": "text", "id": "f1", "title": "New finding",
+    })
+
+    expect(step2_tab).to_have_class(re.compile("notification-dot"), timeout=5000)
+
+    # Click step2 tab to navigate to it — dot should be cleared on page reload
+    step2_tab.click()
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    step2_tab = page.locator(f"#step-tab-{step2.step_id}")
+    expect(step2_tab).not_to_have_class(re.compile("notification-dot"), timeout=5000)
+
+    _assert_no_console_errors(console_errors)
+
+
+# ---------------------------------------------------------------------------
+# Default tab selection tests
+# ---------------------------------------------------------------------------
+
+
+def test_default_tab_is_most_recent_active_step(server: _ServerInfo, page: Page) -> None:
+    """Opening a session without ?step= defaults to the most recent started/ready step."""
+    manager = server.manager
+    session = manager.create_session(
+        session_id="default-tab", title="Default Tab Test", steps=["step1", "step2", "step3"]
+    )
+    step1 = session.steps[0]
+    step2 = session.steps[1]
+    step3 = session.steps[2]
+
+    # Start and complete step1, then start step2 (step3 stays pending)
+    manager.start_step("default-tab", step1.step_id)
+    manager.add_finding("default-tab", step1.step_id, {
+        "type": "text", "id": "f1", "title": "Note",
+    })
+    manager.mark_step_ready("default-tab", step1.step_id)
+    manager.submit_responses("default-tab", step1.step_id, [UserResponse(answer="done")])
+    manager.start_step("default-tab", step2.step_id)
+
+    # Navigate without ?step= param
+    page.goto(f"{server.base_url}/default-tab")
+    # Wait for step2 tab to render (SSE stays open for started step)
+    step2_tab = page.locator(f"#step-tab-{step2.step_id}")
+    expect(step2_tab).to_be_visible(timeout=5000)
+
+    # Step2 should be the active tab, not step3 (pending) or step1 (completed)
+    expect(step2_tab).to_have_class(re.compile(r"\bactive\b"), timeout=3000)
+
+    step3_tab = page.locator(f"#step-tab-{step3.step_id}")
+    expect(step3_tab).not_to_have_class(re.compile(r"\bactive\b"), timeout=3000)
+
+    step1_tab = page.locator(f"#step-tab-{step1.step_id}")
+    expect(step1_tab).not_to_have_class(re.compile(r"\bactive\b"), timeout=3000)

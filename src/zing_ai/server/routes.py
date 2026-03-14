@@ -324,16 +324,42 @@ def _map_signals_to_responses(
     return responses
 
 
-def _notification_dot_html(tab_id: str) -> str:
+def _notification_dot_html(
+    tab_id: str,
+    href: str,
+    label: str,
+    badge_html: str = "",
+) -> str:
     """Return a Datastar-compatible element that adds the notification-dot class to a tab.
+
+    The returned ``<a>`` must include the full inner content (label, badge span)
+    because ``ElementPatchMode.OUTER`` replaces the entire element.
 
     Args:
         tab_id: The DOM id of the tab link element (e.g. "step-tab-<step_id>").
+        href: The link target for the tab.
+        label: The visible text label for the tab.
+        badge_html: Optional pre-built HTML for the status badge ``<span>``.
 
     Returns:
-        An HTML snippet that patches the tab element's class via SSE.
+        An HTML snippet that patches the tab element via SSE.
     """
-    return f'<a id="{html.escape(tab_id)}" class="step-link notification-dot"></a>'
+    return (
+        f'<a id="{html.escape(tab_id)}" '
+        f'href="{html.escape(href)}" '
+        f'class="step-link notification-dot">'
+        f"{html.escape(label)}"
+        f"{badge_html}"
+        f"</a>"
+    )
+
+
+def _default_step_id(steps: list[Any]) -> str | None:
+    """Pick the best default step: last started/ready step, else last step."""
+    for step in reversed(steps):
+        if step.state.value in ("started", "ready"):
+            return step.step_id
+    return steps[-1].step_id if steps else None
 
 
 @router.get("/{session_id}/stream")
@@ -349,8 +375,8 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
 
     # Determine which step to stream (by step_id)
     step_id = request.query_params.get("step")
-    if not step_id and session.steps:
-        step_id = session.steps[-1].step_id
+    if not step_id:
+        step_id = _default_step_id(session.steps)
 
     # Track which tab is active so we can send notification dots for other tabs
     active_tab = request.query_params.get("active_tab", "step")
@@ -462,7 +488,16 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         # Only show dot if this is NOT the currently viewed step
                         if s.step_id != step_id or active_tab == "plan":
                             yield SSE.patch_elements(
-                                _notification_dot_html(f"step-tab-{s.step_id}"),
+                                _notification_dot_html(
+                                    tab_id=f"step-tab-{s.step_id}",
+                                    href=f"/{session_id}?step={s.step_id}",
+                                    label=s.step_name,
+                                    badge_html=(
+                                        f'<span id="step-badge-{s.step_id}"'
+                                        f' class="status-badge status-{s.state.value}">'
+                                        f"{s.state.value}</span>"
+                                    ),
+                                ),
                                 mode=ElementPatchMode.OUTER,
                             )
 
@@ -473,7 +508,11 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                     and current_session.zing_file
                 ):
                     yield SSE.patch_elements(
-                        _notification_dot_html("step-tab-plan"),
+                        _notification_dot_html(
+                            tab_id="step-tab-plan",
+                            href=f"/{session_id}?tab=plan",
+                            label="Plan",
+                        ),
                         mode=ElementPatchMode.OUTER,
                     )
 
@@ -679,8 +718,8 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
 
     # Determine which step to display (by step_id)
     step_id = request.query_params.get("step")
-    if not step_id and session.steps:
-        step_id = session.steps[-1].step_id
+    if not step_id:
+        step_id = _default_step_id(session.steps)
 
     # Build saved responses dict for Datastar signal initialization
     saved_responses: dict[str, str] = {}
