@@ -261,15 +261,15 @@ class TestMCPFindingSubmit(ServerTestBase):
         self.assertEqual(session.steps[0].findings[0].type, "text")
         self.assertEqual(session.steps[0].findings[0].title, "What do you think?")
 
-    def test_submit_choice_finding(self) -> None:
-        """finding_submit with a choice finding preserves options."""
-        self._create_session(session_id="sf-choice")
+    def test_submit_triage_finding_without_metadata(self) -> None:
+        """finding_submit with a triage finding (no metadata) preserves options."""
+        self._create_session(session_id="sf-triage-no-meta")
         result = asyncio.run(
             finding_submit(
-                session_id="sf-choice",
+                session_id="sf-triage-no-meta",
                 step_id=self.step_id,
                 finding={
-                    "type": "choice",
+                    "type": "triage",
                     "title": "Pick an approach",
                     "options": [
                         {"label": "Option A", "description": "First approach"},
@@ -280,10 +280,10 @@ class TestMCPFindingSubmit(ServerTestBase):
         )
         self.assertEqual(result["status"], "ok")
 
-        session = self.manager.get_session("sf-choice")
+        session = self.manager.get_session("sf-triage-no-meta")
         assert session is not None
         finding = session.steps[0].findings[0]
-        self.assertEqual(finding.type, "choice")
+        self.assertEqual(finding.type, "triage")
         self.assertEqual(len(finding.options), 2)
         self.assertEqual(finding.options[0].label, "Option A")
         self.assertEqual(finding.options[1].label, "Option B")

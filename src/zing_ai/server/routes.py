@@ -294,15 +294,6 @@ def _map_signals_to_responses(
         value = signals.get(finding.id)
         if finding.type == "text":
             responses.append(UserResponse(answer=value if isinstance(value, str) else None))
-        elif finding.type == "choice":
-            selected = value if isinstance(value, str) else None
-            other_text = None
-            if selected == "__other__":
-                other_key = f"{finding.id}_other"
-                raw_other = signals.get(other_key)
-                if isinstance(raw_other, str) and raw_other.strip():
-                    other_text = raw_other.strip()
-            responses.append(UserResponse(selected=selected, other_text=other_text))
         elif finding.type == "triage":
             action = None
             if isinstance(value, str) and value in {a.value for a in ResponseAction}:
@@ -662,16 +653,11 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                         if resp.action is not None:
                             saved_responses[finding.id] = resp.action.value
                         if resp.selected is not None:
-                            if finding.type == "triage":
-                                saved_responses[f"{finding.id}_approach"] = resp.selected
-                                if resp.other_text is not None:
-                                    saved_responses[f"{finding.id}_approach_other"] = (
-                                        resp.other_text
-                                    )
-                            else:
-                                saved_responses[finding.id] = resp.selected
-                                if resp.other_text is not None:
-                                    saved_responses[f"{finding.id}_other"] = resp.other_text
+                            saved_responses[f"{finding.id}_approach"] = resp.selected
+                            if resp.other_text is not None:
+                                saved_responses[f"{finding.id}_approach_other"] = (
+                                    resp.other_text
+                                )
                         elif resp.answer is not None:
                             saved_responses[finding.id] = resp.answer
                         if resp.complexity is not None:

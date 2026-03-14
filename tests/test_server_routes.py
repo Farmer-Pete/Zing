@@ -281,10 +281,10 @@ class TestSubmit(ServerTestBase):
                 "category": "style", "severity": "low", "confidence": "high",
             },
         )
-        f_choice = self.manager.add_finding(
+        f_triage_no_meta = self.manager.add_finding(
             "test-session", self.step_id,
             {
-                "type": "choice", "title": "Pick one",
+                "type": "triage", "title": "Pick one",
                 "options": [
                     {"label": "A", "description": "Option A"},
                     {"label": "B", "description": "Option B"},
@@ -304,7 +304,7 @@ class TestSubmit(ServerTestBase):
                 "responses": {
                     f_text.id: "Looks good",
                     f_triage.id: "accept",
-                    f_choice.id: "A",
+                    f"{f_triage_no_meta.id}_approach": "A",
                 },
             },
         )
@@ -394,13 +394,13 @@ class TestSubmit(ServerTestBase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["detail"]["error"], "session_not_found")
 
-    def test_submit_other_choice(self) -> None:
-        """Submitting __other__ choice captures freeform text."""
+    def test_submit_other_triage_approach(self) -> None:
+        """Submitting __other__ triage approach captures freeform text."""
         self._create_session()
-        f_choice = self.manager.add_finding(
+        f_triage = self.manager.add_finding(
             "test-session", self.step_id,
             {
-                "type": "choice", "title": "Pick one",
+                "type": "triage", "title": "Pick one",
                 "options": [{"label": "A", "description": "Option A"}],
             },
         )
@@ -413,8 +413,8 @@ class TestSubmit(ServerTestBase):
             json={
                 "step_id": self.step_id,
                 "responses": {
-                    f_choice.id: "__other__",
-                    f"{f_choice.id}_other": "My custom answer",
+                    f"{f_triage.id}_approach": "__other__",
+                    f"{f_triage.id}_approach_other": "My custom answer",
                 },
             },
         )
