@@ -46,8 +46,8 @@ def _create_ready_session(
         "body": "How will you test this change?",
     })
     manager.add_finding(session_id, step_id, {
-        "type": "choice",
-        "id": "choice-1",
+        "type": "triage",
+        "id": "triage-2",
         "title": "Pick an approach",
         "options": [
             {"label": "Option A", "description": "First approach"},
@@ -64,7 +64,7 @@ def _create_session_with_all_finding_types(
     session_id: str = "all-types",
     title: str = "All Finding Types",
 ) -> str:
-    """Create a READY session with all 4 finding types. Returns step_id."""
+    """Create a READY session with all finding types (triage, text, triage-with-options, evaluation). Returns step_id."""
     manager = server.manager
     session = manager.create_session(
         session_id=session_id, title=title, steps=[_STEP]
@@ -92,8 +92,8 @@ def _create_session_with_all_finding_types(
         "body": "How will you test this change?",
     })
     manager.add_finding(session_id, step_id, {
-        "type": "choice",
-        "id": "choice-1",
+        "type": "triage",
+        "id": "triage-2",
         "title": "Pick an approach",
         "options": [
             {"label": "Option A", "description": "First approach"},
@@ -157,12 +157,12 @@ def _create_completed_session(
     _, step = manager.get_step_by_id(step_id)
     responses = []
     for finding in step.findings:
-        if finding.type == "triage":
+        if finding.type == "triage" and finding.options:
+            responses.append(UserResponse(action=ResponseAction.ACCEPT, selected="Option A"))
+        elif finding.type == "triage":
             responses.append(UserResponse(action=ResponseAction.ACCEPT))
         elif finding.type == "text":
             responses.append(UserResponse(answer="Test answer"))
-        elif finding.type == "choice":
-            responses.append(UserResponse(selected="Option A"))
         else:
             msg = f"Unhandled finding type in test helper: {finding.type}"
             raise ValueError(msg)
@@ -178,7 +178,7 @@ def test_review_page_shows_findings(server: _ServerInfo, page: Page) -> None:
 
     expect(page.locator("#finding-triage-1")).to_be_visible(timeout=3000)
     expect(page.locator("#finding-text-1")).to_be_visible(timeout=3000)
-    expect(page.locator("#finding-choice-1")).to_be_visible(timeout=3000)
+    expect(page.locator("#finding-triage-2")).to_be_visible(timeout=3000)
     expect(page.locator("text=SQL Injection Risk")).to_be_visible(timeout=3000)
 
 
@@ -215,15 +215,15 @@ def test_text_finding_textarea_binding(server: _ServerInfo, page: Page) -> None:
     expect(textarea).to_have_value("My testing strategy is comprehensive.", timeout=3000)
 
 
-def test_choice_radio_selection(server: _ServerInfo, page: Page) -> None:
-    """Selecting a radio button in a choice finding updates Datastar signals."""
+def test_triage_approach_selection(server: _ServerInfo, page: Page) -> None:
+    """Selecting an approach radio in a triage finding updates Datastar signals."""
     _create_ready_session(server)
 
     page.goto(f"{server.base_url}/rev-test")
-    expect(page.locator("#finding-choice-1")).to_be_visible(timeout=3000)
+    expect(page.locator("#finding-triage-2")).to_be_visible(timeout=3000)
     _wait_for_datastar(page)
 
-    radio = page.locator("#finding-choice-1 input[value='Option A']")
+    radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option A']")
     radio.click()
     expect(radio).to_be_checked(timeout=3000)
 
@@ -259,8 +259,8 @@ def test_submit_captures_triage_response(server: _ServerInfo, page: Page) -> Non
     # Select "Accept" on the triage finding
     page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
 
-    # Select "Option A" on the choice finding
-    page.locator("#finding-choice-1 input[value='Option A']").click()
+    # Select "Option A" on the triage-2 approach finding
+    page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option A']").click()
 
     # Submit
     with page.expect_response("**/submit", timeout=3000):
@@ -278,9 +278,9 @@ def test_submit_captures_triage_response(server: _ServerInfo, page: Page) -> Non
     assert step.responses[triage_idx].action is not None
     assert step.responses[triage_idx].action.value == "accept"
 
-    # Choice finding: selected should be "Option A"
-    choice_idx = next(i for i, f in enumerate(step.findings) if f.id == "choice-1")
-    assert step.responses[choice_idx].selected == "Option A"
+    # Triage-2 finding: selected approach should be "Option A"
+    triage2_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-2")
+    assert step.responses[triage2_idx].selected == "Option A"
 
 
 def test_sse_streams_findings_into_dom(server: _ServerInfo, page: Page) -> None:
@@ -345,7 +345,7 @@ def test_saved_responses_restore_on_page_load(server: _ServerInfo, page: Page) -
         {
             "triage-1": UserResponse(action=ResponseAction.ACCEPT),
             "text-1": UserResponse(answer="Integration tests with fixtures"),
-            "choice-1": UserResponse(selected="Option A"),
+            "triage-2": UserResponse(action=ResponseAction.ACCEPT, selected="Option A"),
         },
     )
     _wait_for_datastar(page)
@@ -358,8 +358,12 @@ def test_saved_responses_restore_on_page_load(server: _ServerInfo, page: Page) -
     textarea = page.locator("#finding-text-1 textarea")
     expect(textarea).to_have_value("Integration tests with fixtures", timeout=3000)
 
-    # Choice: Option A radio should be checked
-    radio = page.locator("#finding-choice-1 input[value='Option A']")
+    # Triage-2 (approach): Accept button should have 'selected' class
+    accept_btn_2 = page.locator("#finding-triage-2 .action-btn", has_text="Accept")
+    expect(accept_btn_2).to_have_class(re.compile("selected"), timeout=3000)
+
+    # Triage-2 (approach): Option A radio should be checked
+    radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option A']")
     expect(radio).to_be_checked(timeout=3000)
 
     _assert_no_console_errors(console_errors)
@@ -416,21 +420,21 @@ def test_auto_save_text_on_blur(server: _ServerInfo, page: Page) -> None:
     assert step.responses[text_idx].answer == "My test answer"
 
 
-def test_auto_save_choice_on_change(server: _ServerInfo, page: Page) -> None:
-    """Choice finding auto-saves on radio change by posting to /save-response."""
-    step_id = _create_ready_session(server, session_id="choice-change")
+def test_auto_save_triage_approach_on_change(server: _ServerInfo, page: Page) -> None:
+    """Triage approach auto-saves on radio change by posting to /save-response."""
+    step_id = _create_ready_session(server, session_id="approach-change")
 
-    page.goto(f"{server.base_url}/choice-change")
+    page.goto(f"{server.base_url}/approach-change")
     _wait_for_datastar(page)
 
     with page.expect_response("**/save-response", timeout=3000) as resp_info:
-        page.locator("#finding-choice-1 input[value='Option B']").click()
+        page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option B']").click()
     assert resp_info.value.status == 200
 
     _, step = server.manager.get_step_by_id(step_id)
-    choice_idx = next(i for i, f in enumerate(step.findings) if f.id == "choice-1")
+    triage2_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-2")
     assert step.responses is not None
-    assert step.responses[choice_idx].selected == "Option B"
+    assert step.responses[triage2_idx].selected == "Option B"
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +489,7 @@ def test_triage_with_suggested_approaches(server: _ServerInfo, page: Page) -> No
 
 
 def test_submit_captures_all_finding_types(server: _ServerInfo, page: Page) -> None:
-    """Submit captures responses for triage, text, and choice findings."""
+    """Submit captures responses for triage, text, and triage-with-approach findings."""
     step_id = _create_ready_session(server, session_id="submit-all")
 
     page.goto(f"{server.base_url}/submit-all")
@@ -494,7 +498,8 @@ def test_submit_captures_all_finding_types(server: _ServerInfo, page: Page) -> N
     # Fill all three finding types
     page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
     page.locator("#finding-text-1 textarea").fill("Comprehensive test plan")
-    page.locator("#finding-choice-1 input[value='Option B']").click()
+    page.locator("#finding-triage-2 .action-btn", has_text="Accept").click()
+    page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option B']").click()
 
     with page.expect_response("**/submit", timeout=3000):
         page.locator(".submit-btn").click()
@@ -512,25 +517,26 @@ def test_submit_captures_all_finding_types(server: _ServerInfo, page: Page) -> N
     text_idx = next(i for i, f in enumerate(step.findings) if f.id == "text-1")
     assert step.responses[text_idx].answer == "Comprehensive test plan"
 
-    choice_idx = next(i for i, f in enumerate(step.findings) if f.id == "choice-1")
-    assert step.responses[choice_idx].selected == "Option B"
+    triage2_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-2")
+    assert step.responses[triage2_idx].action == ResponseAction.ACCEPT
+    assert step.responses[triage2_idx].selected == "Option B"
 
 
-def test_choice_other_flow(server: _ServerInfo, page: Page) -> None:
-    """Selecting 'Other' in a choice finding shows textarea and saves custom answer."""
-    step_id = _create_ready_session(server, session_id="choice-other")
+def test_triage_approach_other_flow(server: _ServerInfo, page: Page) -> None:
+    """Selecting 'Other' approach in a triage finding shows textarea and saves custom answer."""
+    step_id = _create_ready_session(server, session_id="approach-other")
 
-    page.goto(f"{server.base_url}/choice-other")
+    page.goto(f"{server.base_url}/approach-other")
     _wait_for_datastar(page)
 
-    # Click the "Other" radio
-    other_radio = page.locator("#finding-choice-1 input[value='__other__']")
+    # Click the "Other" approach radio
+    other_radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='__other__']")
     with page.expect_response("**/save-response", timeout=3000):
         other_radio.click()
 
     # Conditional textarea should become visible
     other_textarea = page.locator(
-        "#finding-choice-1 div[data-show] textarea"
+        "#finding-triage-2 div[data-show] textarea"
     )
     expect(other_textarea).to_be_visible(timeout=3000)
 
@@ -541,10 +547,10 @@ def test_choice_other_flow(server: _ServerInfo, page: Page) -> None:
     assert resp_info.value.status == 200
 
     _, step = server.manager.get_step_by_id(step_id)
-    choice_idx = next(i for i, f in enumerate(step.findings) if f.id == "choice-1")
+    triage2_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-2")
     assert step.responses is not None
-    assert step.responses[choice_idx].selected == "__other__"
-    assert step.responses[choice_idx].other_text == "Custom answer"
+    assert step.responses[triage2_idx].selected == "__other__"
+    assert step.responses[triage2_idx].other_text == "Custom answer"
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +830,12 @@ def test_completed_step_responses_restore_on_load(server: _ServerInfo, page: Pag
     textarea = page.locator("#finding-text-1 textarea")
     expect(textarea).to_have_value("Test answer", timeout=3000)
 
-    # Choice: Option A radio should be checked
-    radio = page.locator("#finding-choice-1 input[value='Option A']")
+    # Triage-2 (approach): Accept button should have 'selected' class
+    accept_btn_2 = page.locator("#finding-triage-2 .action-btn", has_text="Accept")
+    expect(accept_btn_2).to_have_class(re.compile("selected"), timeout=3000)
+
+    # Triage-2 (approach): Option A radio should be checked
+    radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option A']")
     expect(radio).to_be_checked(timeout=3000)
 
     # Submit button should be disabled
@@ -902,7 +912,7 @@ def test_multi_step_mixed_state_navigation(server: _ServerInfo, page: Page) -> N
 
 
 # ---------------------------------------------------------------------------
-# Batch 6: Reload restore gaps — triage approach, other text, choice other
+# Batch 6: Reload restore gaps — triage approach, other text
 # ---------------------------------------------------------------------------
 
 
@@ -970,26 +980,34 @@ def test_triage_other_approach_restores_on_reload(server: _ServerInfo, page: Pag
     _assert_no_console_errors(console_errors)
 
 
-def test_choice_other_restores_on_reload(server: _ServerInfo, page: Page) -> None:
-    """Choice 'Other' radio and custom text are restored on reload."""
-    step_id = _create_ready_session(server, session_id="choice-other-reload")
+def test_triage_approach_other_restores_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Triage 'Other' approach radio and custom text are restored on reload."""
+    step_id = _create_ready_session(server, session_id="approach-other-reload")
     console_errors: list[str] = []
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
     _save_and_reload(
-        server, page, "choice-other-reload", step_id,
+        server, page, "approach-other-reload", step_id,
         {
-            "choice-1": UserResponse(selected="__other__", other_text="My custom choice"),
+            "triage-2": UserResponse(
+                action=ResponseAction.ACCEPT,
+                selected="__other__",
+                other_text="My custom choice",
+            ),
         },
     )
     _wait_for_datastar(page)
 
+    # Accept button should have 'selected' class
+    accept_btn = page.locator("#finding-triage-2 .action-btn", has_text="Accept")
+    expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
+
     # "Other" radio should be checked
-    other_radio = page.locator("#finding-choice-1 input[value='__other__']")
+    other_radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='__other__']")
     expect(other_radio).to_be_checked(timeout=3000)
 
     # Custom textarea should be visible and pre-filled
-    other_textarea = page.locator("#finding-choice-1 div[data-show] textarea")
+    other_textarea = page.locator("#finding-triage-2 div[data-show] textarea")
     expect(other_textarea).to_be_visible(timeout=3000)
     expect(other_textarea).to_have_value("My custom choice", timeout=3000)
 
@@ -1012,8 +1030,9 @@ def test_submit_captures_triage_action_and_approach(server: _ServerInfo, page: P
     # Fill text finding (required for submit)
     page.locator("#finding-text-1 textarea").fill("Test plan")
 
-    # Select choice finding (required for submit)
-    page.locator("#finding-choice-1 input[value='Option A']").click()
+    # Select triage-2 approach (required for submit)
+    page.locator("#finding-triage-2 .action-btn", has_text="Accept").click()
+    page.locator("#finding-triage-2 input[name='approach-triage-2'][value='Option A']").click()
 
     with page.expect_response("**/submit", timeout=3000):
         page.locator(".submit-btn").click()
