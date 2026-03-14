@@ -289,7 +289,7 @@ def triage(
 
 @finding.command()
 @click.argument("step")
-@click.option("--title", default="Test choice", help="Finding title.")
+@click.option("--title", default="Test triage options", help="Finding title.")
 @click.option("--body", default="Pick one", help="Finding body.")
 @click.option(
     "--option",
@@ -298,8 +298,10 @@ def triage(
     help="Option in 'Label:Description' format. At least 2 required.",
 )
 @click.pass_context
-def choice(ctx: click.Context, step: str, title: str, body: str, options: tuple[str, ...]) -> None:
-    """Submit a choice finding."""
+def triage_options(
+    ctx: click.Context, step: str, title: str, body: str, options: tuple[str, ...]
+) -> None:
+    """Submit a triage finding with options (no metadata)."""
     if len(options) < 2:
         raise click.ClickException("At least 2 --option flags are required.")
     parsed_options = []
@@ -311,7 +313,7 @@ def choice(ctx: click.Context, step: str, title: str, body: str, options: tuple[
         label, description = opt.split(":", 1)
         parsed_options.append({"label": label, "description": description})
     _submit_finding(ctx, step, {
-        "type": "choice",
+        "type": "triage",
         "title": title,
         "body": body,
         "options": parsed_options,

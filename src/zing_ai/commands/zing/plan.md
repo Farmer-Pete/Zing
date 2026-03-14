@@ -95,8 +95,8 @@ Each subagent receives a prompt with:
 > ...bulleted findings text...
 >
 > ---JSONL---
-> {"type":"choice","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"},{"label":"Skip","description":"Not important enough to decide now"}],"context":"routes.py /{session_id} catch-all; MCP SDK streamable_http_app() /mcp route"}
-> {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?","context":"No existing convention found"}
+> {"type":"triage","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"}]}
+> {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?"}
 > ```
 >
 > Each line after `---JSONL---` must be a single valid JSON object. If you have no findings that require user decisions, omit the `---JSONL---` section entirely.

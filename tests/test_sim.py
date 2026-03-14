@@ -229,30 +229,34 @@ def test_sim_finding_triage_with_location(mock_mcp_call, mock_state_file, sample
     assert finding["location"] == {"file": "src/db.py", "line": 42}
 
 
-# -- sim finding choice -------------------------------------------------------
+# -- sim finding triage-options ------------------------------------------------
 
 
-def test_sim_finding_choice(mock_mcp_call, mock_state_file, sample_state):
+def test_sim_finding_triage_options(mock_mcp_call, mock_state_file, sample_state):
     mock_state_file.write_text(json.dumps(sample_state))
     mock_mcp_call.return_value = {"status": "ok", "finding_id": "f4"}
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["sim", "finding", "choice", "plan", "--option", "Yes:Accept", "--option", "No:Reject"],
+        [
+            "sim", "finding", "triage-options", "plan",
+            "--option", "Yes:Accept", "--option", "No:Reject",
+        ],
     )
     assert result.exit_code == 0, result.output
     finding = mock_mcp_call.call_args[0][2]["finding"]
+    assert finding["type"] == "triage"
     assert finding["options"] == [
         {"label": "Yes", "description": "Accept"},
         {"label": "No", "description": "Reject"},
     ]
 
 
-def test_sim_finding_choice_requires_two_options(mock_mcp_call, mock_state_file, sample_state):
+def test_sim_finding_triage_options_requires_two_options(mock_mcp_call, mock_state_file, sample_state):
     mock_state_file.write_text(json.dumps(sample_state))
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["sim", "finding", "choice", "plan", "--option", "Yes:Accept"]
+        cli, ["sim", "finding", "triage-options", "plan", "--option", "Yes:Accept"]
     )
     assert result.exit_code != 0
     assert "At least 2" in result.output
