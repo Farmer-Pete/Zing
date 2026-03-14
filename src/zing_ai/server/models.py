@@ -47,6 +47,14 @@ class Category(StrEnum):
     STYLE = "style"
 
 
+class Complexity(StrEnum):
+    """Fix complexity classification for triage findings."""
+
+    SIMPLE = "simple"
+    STANDARD = "standard"
+    COMPLEX = "complex"
+
+
 class Rating(StrEnum):
     """Rating levels for plan evaluation criteria."""
 
