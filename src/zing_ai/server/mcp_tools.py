@@ -11,7 +11,7 @@ from zing_ai.server.sessions import SessionManager
 
 _DEFAULT_PORT = 9876
 
-mcp_server = FastMCP("Zing Review")
+mcp_server = FastMCP("Zing Review", stateless_http=True)
 
 _session_manager: SessionManager | None = None
 _port: int = _DEFAULT_PORT

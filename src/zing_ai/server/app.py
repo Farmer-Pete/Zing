@@ -71,7 +71,7 @@ def create_app(
         async with mcp_server.session_manager.run():
             yield
 
-    mcp_starlette = mcp_server.streamable_http_app(stateless_http=True)
+    mcp_starlette = mcp_server.streamable_http_app()
 
     class MCPDebugMiddleware:
         """Log request/response details for /mcp requests."""
