@@ -134,27 +134,15 @@ The review commands use the MCP server and `curl` to coordinate agent workflows.
 "mcp__zing-ai__*"
 ```
 
-<!--
 ### Install from PyPI
 
 ```
 uv tool install zing-ai
 ```
--->
 
 ### Install from GitHub
 
-**Stable (recommended):**
-```
-uv tool install git+https://github.com/Farmer-Pete/Zing
-```
-
-**Bleeding edge / unstable** (latest features, may have rough edges):
-```
-uv tool install --force git+https://github.com/Farmer-Pete/Zing@zing-next
-```
-
-To switch back to stable:
+**Bleeding edge** (latest features, may have rough edges):
 ```
 uv tool install --force git+https://github.com/Farmer-Pete/Zing
 ```
@@ -185,15 +173,15 @@ zing-ai install --all
 
 ## Updating
 
-**Stable:**
+**From PyPI:**
 ```
 uv tool upgrade zing-ai
 zing-ai install --claude   # or --opencode or --all
 ```
 
-**Bleeding edge** (reinstall to pull latest from `zing-next`):
+**From GitHub** (reinstall to pull latest):
 ```
-uv tool install --force git+https://github.com/Farmer-Pete/Zing@zing-next
+uv tool install --force git+https://github.com/Farmer-Pete/Zing
 zing-ai install --claude   # or --opencode or --all
 ```
 

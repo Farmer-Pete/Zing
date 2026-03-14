@@ -120,8 +120,6 @@ Reviewed on {YYYY-MM-DD} against `{base_branch}`. {count} files changed across {
 After writing, tell the user:
 ```
 Wrote {valid_count} findings to {file_path}
-
-To start working on these fixes, run: /zing:plan {file_path}
 ```
 
 If zero valid findings, write a short file noting "Nothing to flag — changes looked good." and tell the user.
@@ -136,8 +134,7 @@ After writing the review report, examine the complexity of all accepted/downgrad
 
 Count the findings by complexity and determine the default:
 - If **all** accepted/downgraded findings have `complexity == "simple"`: recommend **"Auto-apply all fixes"**
-- If accepted/downgraded findings are a mix of simple and standard (but **no** complex): recommend **"Fix with chat"**
-- If **any** accepted/downgraded finding has `complexity == "complex"`: recommend **"Build a plan to fix"**
+- Otherwise (any standard or complex findings): recommend **"Fix with chat"**
 
 ### Present the "What next?" question
 
@@ -145,7 +142,6 @@ Use AskUserQuestion to ask: "What next?" with these options. Append a recommenda
 
 - "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
 - "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
-- "Build a plan to fix" (description: "Full plan → audit → build pipeline. Most rigorous, slowest.")
 - "Create a PR" (description: "Create a GitHub PR from the current branch")
 - "I'm done" (description: "Stop here")
 
@@ -154,8 +150,6 @@ Use AskUserQuestion to ask: "What next?" with these options. Append a recommenda
 If "Auto-apply all fixes": proceed to the `auto_apply` step.
 
 If "Fix with chat": proceed to the `discuss_findings` step.
-
-If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`). Do NOT embed the current session token in the new zing file — it gets its own session when `/zing:plan` picks it up.
 
 If "Create a PR":
 1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
@@ -203,7 +197,7 @@ Automatically apply fixes for all accepted/downgraded findings without interacti
    ...
    ```
 
-5. After committing, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Build a plan to fix", and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
+5. After committing, return to the `create_pr` step's AskUserQuestion — offer "Create a PR" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
 </step>
 
 <step name="discuss_findings">
@@ -225,7 +219,7 @@ Then enter a conversational loop. The user drives the interaction using natural 
 
 After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
 
-After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Build a plan to fix", and "I'm done" (without the "Fix with chat" option again).
+After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR" and "I'm done" (without the "Fix with chat" option again).
 </step>
 
 </process>
@@ -248,6 +242,6 @@ Review is complete when:
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
 - [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
-- [ ] File path was shown to the user with instruction to run `/zing:plan` on it
+- [ ] File path was shown to the user
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>
