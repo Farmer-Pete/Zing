@@ -3,7 +3,7 @@
 Two modes:
 
 1. **Linear mode**: If the user provides a Linear filter URL (`https://linear.app/...`), use the Linear MCP to fetch tickets from that filter, find a good one to work on, and save it as a zing file.
-2. **Conversation mode**: Collect zing information from the user through a free-form conversation. Act as a listener — do not try to understand, interpret, analyze, or ask clarifying questions about the zing spec. Simply collect what the user tells you. When the user says SAVE or DONE, write everything to a markdown file in the `.zing/` directory.
+2. **Conversation mode**: Collect zing information from the user through a free-form conversation. Act as a listener — do not try to understand, interpret, analyze, or ask clarifying questions about the zing spec. Simply collect what the user tells you. When the user says DONE, write everything to a markdown file in the `.zing/` directory.
 </objective>
 
 <process>
@@ -89,7 +89,7 @@ Say exactly:
 
 Tell me about what you'd like to build. Share anything you want captured — goals, features, constraints, tech stack, architecture, user stories, notes, whatever is on your mind.
 
-I'll listen and collect everything. When you're ready, say **SAVE** or **DONE** and I'll write it all to a zing file.
+I'll listen and collect everything. When you're ready, say **DONE** and I'll write it all to a zing file.
 
 If you have questions or want me to research something, just ask — I'll look it up and ask whether to include it.
 
@@ -97,10 +97,10 @@ If you have questions or want me to research something, just ask — I'll look i
 </step>
 
 <step name="conversation_loop">
-This is the core loop. Repeat until the user says SAVE or DONE:
+This is the core loop. Repeat until the user says DONE:
 
 **If the user provides zing information:**
-- Respond with a positive emoji (e.g. 👍, ✅, 📝) followed by a short acknowledgment like "Got it" or "Noted", then remind them: "Keep going, or say **SAVE** / **DONE** to create the zing file."
+- Respond with a positive emoji (e.g. 👍, ✅, 📝) followed by a short acknowledgment like "Got it" or "Noted", then remind them: "Keep going, or say **DONE** to create the zing file."
 - Do NOT ask follow-up questions
 - Do NOT suggest improvements or alternatives
 - Do NOT try to organize or restructure what they said
@@ -113,7 +113,8 @@ This is the core loop. Repeat until the user says SAVE or DONE:
 - Then ask: "Should I include this in the zing file?"
 - If yes, note it for inclusion. If no, move on.
 
-**If the user says SAVE or DONE (case-insensitive, can be part of a larger message):**
+**If the user says DONE (case-insensitive):**
+
 - Proceed to the next step
 </step>
 

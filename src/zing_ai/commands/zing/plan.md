@@ -197,7 +197,7 @@ Then use `AskUserQuestion` to ask if the user wants to make modifications before
 
 If the user chooses to proceed, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
 
-If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says exactly "DONE" (all caps), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive) invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 </step>
 
 </process>

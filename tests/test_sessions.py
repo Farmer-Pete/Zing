@@ -324,6 +324,34 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session is not None
         assert session.state == SessionState.COMPLETED
 
+    def test_session_not_completed_until_all_steps_done(self) -> None:
+        """Session state is COMPLETED only when all steps are COMPLETED."""
+        session = self.manager.create_session("s1", "Multi-step", steps=["build", "audit"])
+        step1 = self.manager.start_step("s1", session.steps[0].step_id)
+
+        # Start and complete first step's agent
+        self.manager.start_agent("s1", step1.step_id, "a1")
+        self.manager.stop_agent("s1", step1.step_id, "a1")
+        self.manager.mark_step_ready("s1", step1.step_id)
+        self.manager.submit_responses("s1", step1.step_id, [])
+
+        # Session should NOT be completed — second step is still pending
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert session.state != SessionState.COMPLETED
+
+        # Complete second step
+        step2 = self.manager.start_step("s1", session.steps[1].step_id)
+        self.manager.start_agent("s1", step2.step_id, "a1")
+        self.manager.stop_agent("s1", step2.step_id, "a1")
+        self.manager.mark_step_ready("s1", step2.step_id)
+        self.manager.submit_responses("s1", step2.step_id, [])
+
+        # Now session should be completed
+        session = self.manager.get_session("s1")
+        assert session is not None
+        assert session.state == SessionState.COMPLETED
+
 
 class TestConcurrentSessions(unittest.TestCase):
     """Test that two sessions don't interfere with each other."""
@@ -593,6 +621,7 @@ class TestPersistence(unittest.TestCase):
         assert session.total_findings == 1
         assert len(session.steps[0].agents) == 1
         assert session.steps[0].state == SessionState.STARTED
+        assert session.state == SessionState.STARTED
 
     def test_step_id_survives_persistence(self) -> None:
         """step_id index is rebuilt on reload."""
@@ -633,6 +662,7 @@ class TestPersistence(unittest.TestCase):
         assert len(session.steps[0].findings) == 1
         # Legacy counter fields are stripped by migration; agents list is empty
         assert session.steps[0].agents == []
+        assert session.state == SessionState.PENDING
 
 
 class TestWorkflowStepLooping(unittest.TestCase):

@@ -55,6 +55,16 @@ Once you have the session ID and step IDs, resolve the zing file path to an abso
 Then call `step_start(session_id, steps.build)` where `steps.build` is the build step ID from the frontmatter. This transitions the build step from PENDING to STARTED.
 
 The session ID and build step ID will be used for agent lifecycle tracking and logging throughout the build.
+
+### Branch setup
+
+Check the current git branch by running `git branch --show-current`. If the branch is `main` or `master`, create a new feature branch before starting the build:
+
+1. Derive a branch name from the zing document title (the `# Title` heading): lowercase it, replace spaces and special characters with hyphens, strip leading/trailing hyphens, and truncate to 60 characters. Prefix with `zing/` (e.g., `zing/recipe-app`, `zing/add-user-authentication`).
+2. Run `git checkout -b {branch_name}` to create and switch to the new branch.
+3. Tell the user: `Created branch: {branch_name}`
+
+If the branch is anything other than `main`/`master`, assume the user is already on the correct branch and skip this step.
 </step>
 
 <step name="create_tasklist">

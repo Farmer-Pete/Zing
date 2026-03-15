@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Location(BaseModel):
@@ -160,6 +160,13 @@ class SessionState(StrEnum):
     COMPLETED = "completed"
 
 
+_STATE_PRIORITY: dict[str, int] = {
+    SessionState.PENDING: 0,
+    SessionState.STARTED: 1,
+    SessionState.READY: 2,
+}
+
+
 class AgentState(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
@@ -276,12 +283,13 @@ class WorkflowStep(BaseModel):
 class Session(BaseModel):
     """A review session containing workflow steps with findings and responses."""
 
+    model_config = ConfigDict(extra="ignore")
+
     session_id: str
     title: str
     zing_file: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     notifications: list[Notification] = Field(default_factory=list)
-    state: SessionState = SessionState.PENDING
     created_at: datetime = Field(default_factory=datetime.now)
 
     @model_validator(mode="before")
@@ -306,6 +314,21 @@ class Session(BaseModel):
             data.pop("findings", None)
             data.pop("responses", None)
         return data
+
+    @property
+    def state(self) -> SessionState:
+        """Compute session state from step states.
+
+        The session is COMPLETED only when all steps are COMPLETED.
+        Otherwise, the highest-priority non-COMPLETED state is used.
+        """
+        if not self.steps:
+            return SessionState.PENDING
+        if all(s.state == SessionState.COMPLETED for s in self.steps):
+            return SessionState.COMPLETED
+        non_completed = [s for s in self.steps if s.state != SessionState.COMPLETED]
+        highest_priority_step = max(non_completed, key=lambda s: _STATE_PRIORITY.get(s.state, 0))
+        return highest_priority_step.state
 
     @property
     def current_step_name(self) -> str | None:
