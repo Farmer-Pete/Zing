@@ -239,8 +239,14 @@ def test_sim_finding_triage_options(mock_mcp_call, mock_state_file, sample_state
     result = runner.invoke(
         cli,
         [
-            "sim", "finding", "triage-options", "plan",
-            "--option", "Yes:Accept", "--option", "No:Reject",
+            "sim",
+            "finding",
+            "triage-options",
+            "plan",
+            "--option",
+            "Yes:Accept",
+            "--option",
+            "No:Reject",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -253,7 +259,9 @@ def test_sim_finding_triage_options(mock_mcp_call, mock_state_file, sample_state
 
 
 def test_sim_finding_triage_options_requires_two_options(
-    mock_mcp_call, mock_state_file, sample_state,
+    mock_mcp_call,
+    mock_state_file,
+    sample_state,
 ):
     mock_state_file.write_text(json.dumps(sample_state))
     runner = CliRunner()

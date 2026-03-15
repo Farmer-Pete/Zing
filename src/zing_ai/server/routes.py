@@ -55,8 +55,7 @@ def _submitted_button_html() -> str:
 def _ready_status_html() -> str:
     """Return the 'ready for review' banner HTML."""
     return (
-        '<div id="review-status" class="submit-banner">'
-        "All agents complete — ready for review</div>"
+        '<div id="review-status" class="submit-banner">All agents complete — ready for review</div>'
     )
 
 
@@ -201,15 +200,12 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
     saved_count = 0
     for finding, response in zip(step.findings, mapped, strict=True):
         has_data = any(
-            getattr(response, f) is not None
-            for f in ("action", "selected", "answer", "complexity")
+            getattr(response, f) is not None for f in ("action", "selected", "answer", "complexity")
         )
         if has_data:
             # Merge with existing response to preserve fields from earlier saves
             if step.responses and finding.id:
-                idx = next(
-                    (i for i, f in enumerate(step.findings) if f.id == finding.id), None
-                )
+                idx = next((i for i, f in enumerate(step.findings) if f.id == finding.id), None)
                 if idx is not None and idx < len(step.responses):
                     existing = step.responses[idx]
                     response = response.merge_over(existing)
@@ -316,9 +312,7 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     if step.responses:
         responses = [
             resp.merge_over(existing)
-            for resp, existing in zip_longest(
-                responses, step.responses, fillvalue=UserResponse()
-            )
+            for resp, existing in zip_longest(responses, step.responses, fillvalue=UserResponse())
         ]
 
     try:
@@ -383,8 +377,10 @@ def _map_signals_to_responses(
                 complexity = Complexity(raw_complexity)
             responses.append(
                 UserResponse(
-                    action=action, selected=selected,
-                    other_text=other_text, complexity=complexity,
+                    action=action,
+                    selected=selected,
+                    other_text=other_text,
+                    complexity=complexity,
                 )
             )
         elif finding.type == "evaluation":
@@ -440,7 +436,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
     session = manager.get_session(session_id)
     if session is None:
         return SSE.patch_elements(
-            f'<div id="error">Session \'{html.escape(session_id)}\' not found</div>'
+            f"<div id=\"error\">Session '{html.escape(session_id)}' not found</div>"
         )
 
     # Determine which step to stream (by step_id)
@@ -466,9 +462,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
             }
 
             # Track step states for badge updates
-            step_states: dict[str, str] = {
-                s.step_id: s.state.value for s in current_session.steps
-            }
+            step_states: dict[str, str] = {s.step_id: s.state.value for s in current_session.steps}
             session_state: str = current_session.state.value
 
             # Count of findings already sent for the active step
@@ -489,9 +483,11 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
 
                 # Backfill existing findings as a single morph (safe on reconnect)
                 if target_step.findings:
-                    container_html = '<div id="findings-container">' + "".join(
-                        finding_fragment(f, session_id) for f in target_step.findings
-                    ) + "</div>"
+                    container_html = (
+                        '<div id="findings-container">'
+                        + "".join(finding_fragment(f, session_id) for f in target_step.findings)
+                        + "</div>"
+                    )
                     yield SSE.patch_elements(container_html)
                     seen = len(target_step.findings)
 
@@ -541,9 +537,7 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                             None,
                         )
                         if notif is not None:
-                            script = _build_notification_script(
-                                notif, "window.focus(); n.close();"
-                            )
+                            script = _build_notification_script(notif, "window.focus(); n.close();")
                             yield SSE.execute_script(script)
                         # Re-render the notification timeline on the session page
                         timeline_html = render(
@@ -727,14 +721,18 @@ async def dashboard_events(request: Request):  # noqa: ANN201
                     continue
 
                 sessions = sorted(
-                    manager.list_sessions(), key=lambda s: s.created_at, reverse=True,
+                    manager.list_sessions(),
+                    key=lambda s: s.created_at,
+                    reverse=True,
                 )
 
                 if event in ("created", "cleaned_up"):
                     # Structural change — full re-render
                     page_html = render("dashboard.html", sessions=sessions)
                     yield SSE.patch_elements(
-                        page_html, selector="body", mode=ElementPatchMode.INNER,
+                        page_html,
+                        selector="body",
+                        mode=ElementPatchMode.INNER,
                     )
                 else:
                     # State-only change — targeted per-card patches
@@ -755,7 +753,8 @@ async def dashboard_events(request: Request):  # noqa: ANN201
 @router.post("/sessions/{session_id}/cleanup", response_model=None)
 @datastar_response
 async def post_cleanup(
-    session_id: str, request: Request,
+    session_id: str,
+    request: Request,
 ):  # noqa: ANN201
     """Remove a session from the manager.
 
@@ -771,7 +770,6 @@ async def post_cleanup(
     manager.cleanup_session(session_id)
     logger.info("Session %s cleaned up via dashboard", session_id)
     return SSE.redirect("/dashboard")
-
 
 
 @router.get("/{session_id}", response_model=None)
@@ -810,15 +808,11 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
                         if resp.selected is not None:
                             saved_responses[f"{finding.id}_approach"] = resp.selected
                             if resp.other_text is not None:
-                                saved_responses[f"{finding.id}_approach_other"] = (
-                                    resp.other_text
-                                )
+                                saved_responses[f"{finding.id}_approach_other"] = resp.other_text
                         elif resp.answer is not None:
                             saved_responses[finding.id] = resp.answer
                         if resp.complexity is not None:
-                            saved_responses[f"{finding.id}_complexity"] = (
-                                resp.complexity.value
-                            )
+                            saved_responses[f"{finding.id}_complexity"] = resp.complexity.value
                 break
 
     # Resolve the active step object for agent/log display in templates

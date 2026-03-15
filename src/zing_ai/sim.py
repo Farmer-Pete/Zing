@@ -70,9 +70,7 @@ def _call_mcp(url: str, tool_name: str, arguments: dict, *, timeout: int | None 
             coro = asyncio.wait_for(coro, timeout=timeout)
         return asyncio.run(coro)
     except TimeoutError:
-        raise click.ClickException(
-            f"Timed out waiting for review after {timeout}s"
-        ) from None
+        raise click.ClickException(f"Timed out waiting for review after {timeout}s") from None
     except json.JSONDecodeError as exc:
         raise click.ClickException(
             f"Server returned non-JSON response: {exc.doc[:200] if exc.doc else '(empty)'}"
@@ -109,11 +107,13 @@ def create(ctx: click.Context, title: str, steps: str | None) -> None:
     result = _call_mcp(url, "session_create", {"title": title, "steps": parsed_steps})
     if "error" in result:
         raise click.ClickException(result["error"])
-    _save_state({
-        "session_id": result["session_id"],
-        "steps": result["steps"],
-        "url": url,
-    })
+    _save_state(
+        {
+            "session_id": result["session_id"],
+            "steps": result["steps"],
+            "url": url,
+        }
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -140,10 +140,14 @@ def start(ctx: click.Context, step: str) -> None:
     """Start a step on the MCP server."""
     state = _load_state()
     step_id = _resolve_step(state, step)
-    result = _call_mcp(ctx.obj["url"], "step_start", {
-        "session_id": state["session_id"],
-        "step_id": step_id,
-    })
+    result = _call_mcp(
+        ctx.obj["url"],
+        "step_start",
+        {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+        },
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -156,12 +160,16 @@ def agent_start_cmd(ctx: click.Context, step: str, name: str, description: str) 
     """Register a running agent for a step."""
     state = _load_state()
     step_id = _resolve_step(state, step)
-    result = _call_mcp(ctx.obj["url"], "agent_start", {
-        "session_id": state["session_id"],
-        "step_id": step_id,
-        "name": name,
-        "description": description,
-    })
+    result = _call_mcp(
+        ctx.obj["url"],
+        "agent_start",
+        {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+            "name": name,
+            "description": description,
+        },
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -173,11 +181,15 @@ def agent_stop_cmd(ctx: click.Context, step: str, name: str) -> None:
     """Mark an agent as completed."""
     state = _load_state()
     step_id = _resolve_step(state, step)
-    result = _call_mcp(ctx.obj["url"], "agent_stop", {
-        "session_id": state["session_id"],
-        "step_id": step_id,
-        "name": name,
-    })
+    result = _call_mcp(
+        ctx.obj["url"],
+        "agent_stop",
+        {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+            "name": name,
+        },
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -190,12 +202,16 @@ def log(ctx: click.Context, step: str, name: str, message: str) -> None:
     """Log a message from an agent."""
     state = _load_state()
     step_id = _resolve_step(state, step)
-    result = _call_mcp(ctx.obj["url"], "step_log", {
-        "session_id": state["session_id"],
-        "step_id": step_id,
-        "agent_name": name,
-        "message": message,
-    })
+    result = _call_mcp(
+        ctx.obj["url"],
+        "step_log",
+        {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+            "agent_name": name,
+            "message": message,
+        },
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -218,11 +234,15 @@ def _submit_finding(ctx: click.Context, step: str, finding_data: dict) -> None:
     """Shared helper to resolve step and submit a finding."""
     state = _load_state()
     step_id = _resolve_step(state, step)
-    result = _call_mcp(ctx.obj["url"], "finding_submit", {
-        "session_id": state["session_id"],
-        "step_id": step_id,
-        "finding": finding_data,
-    })
+    result = _call_mcp(
+        ctx.obj["url"],
+        "finding_submit",
+        {
+            "session_id": state["session_id"],
+            "step_id": step_id,
+            "finding": finding_data,
+        },
+    )
     click.echo(json.dumps(result, indent=2))
 
 
@@ -244,13 +264,9 @@ def text(ctx: click.Context, step: str, title: str, body: str, context_str: str 
 @click.argument("step")
 @click.option("--title", default="Test triage", help="Finding title.")
 @click.option("--body", default="Test body", help="Finding body.")
-@click.option(
-    "--category", type=click.Choice(CATEGORIES), default="correctness", help="Category."
-)
+@click.option("--category", type=click.Choice(CATEGORIES), default="correctness", help="Category.")
 @click.option("--severity", type=click.Choice(SEVERITIES), default="medium", help="Severity.")
-@click.option(
-    "--confidence", type=click.Choice(CONFIDENCES), default="medium", help="Confidence."
-)
+@click.option("--confidence", type=click.Choice(CONFIDENCES), default="medium", help="Confidence.")
 @click.option(
     "--complexity", type=click.Choice(COMPLEXITIES), default="standard", help="Complexity."
 )
@@ -312,12 +328,16 @@ def triage_options(
             )
         label, description = opt.split(":", 1)
         parsed_options.append({"label": label, "description": description})
-    _submit_finding(ctx, step, {
-        "type": "triage",
-        "title": title,
-        "body": body,
-        "options": parsed_options,
-    })
+    _submit_finding(
+        ctx,
+        step,
+        {
+            "type": "triage",
+            "title": title,
+            "body": body,
+            "options": parsed_options,
+        },
+    )
 
 
 @finding.command("choice", hidden=True, deprecated=True)
@@ -371,17 +391,23 @@ def evaluation(
             raise click.ClickException(
                 f"Invalid rating '{rating}'. Must be one of: {', '.join(RATINGS)}"
             )
-        parsed_criteria.append({
-            "name": name,
-            "rating": rating,
-            "justification": justification,
-        })
-    _submit_finding(ctx, step, {
-        "type": "evaluation",
-        "title": title,
-        "body": body,
-        "criteria": parsed_criteria,
-    })
+        parsed_criteria.append(
+            {
+                "name": name,
+                "rating": rating,
+                "justification": justification,
+            }
+        )
+    _submit_finding(
+        ctx,
+        step,
+        {
+            "type": "evaluation",
+            "title": title,
+            "body": body,
+            "criteria": parsed_criteria,
+        },
+    )
 
 
 # -- wait subcommand ----------------------------------------------------------
@@ -398,14 +424,17 @@ def wait(ctx: click.Context, step: str, timeout: int | None) -> None:
     url = ctx.obj["url"]
     # Extract base URL for dashboard link
     base_url = url.rsplit("/mcp", 1)[0] if "/mcp" in url else url
-    click.echo(
-        f"Waiting for review at {base_url}/{state['session_id']}...", err=True
-    )
+    click.echo(f"Waiting for review at {base_url}/{state['session_id']}...", err=True)
     try:
-        result = _call_mcp(url, "review_wait", {
-            "session_id": state["session_id"],
-            "step_id": step_id,
-        }, timeout=timeout)
+        result = _call_mcp(
+            url,
+            "review_wait",
+            {
+                "session_id": state["session_id"],
+                "step_id": step_id,
+            },
+            timeout=timeout,
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         click.echo("\nCancelled.", err=True)
         raise SystemExit(130) from None

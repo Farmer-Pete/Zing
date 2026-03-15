@@ -111,8 +111,11 @@ class TestSaveResponse(ServerTestBase):
             "test-session",
             self.step_id,
             {
-                "type": "triage", "title": "Unused import",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         return self.step_id, finding.id
@@ -236,7 +239,9 @@ class TestSubmit(ServerTestBase):
     """Tests for POST /{session_id}/submit."""
 
     def _add_finding_and_ready(
-        self, session_id: str = "test-session", finding_data: dict | None = None,
+        self,
+        session_id: str = "test-session",
+        finding_data: dict | None = None,
     ) -> str:
         """Add a finding via manager, transition step to ready, return finding_id."""
         if finding_data is None:
@@ -270,20 +275,27 @@ class TestSubmit(ServerTestBase):
         self._create_session()
         # Add findings of each type via manager
         f_text = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {"type": "text", "title": "What do you think?"},
         )
         f_triage = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Unused import",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         f_triage_no_meta = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Pick one",
+                "type": "triage",
+                "title": "Pick one",
                 "options": [
                     {"label": "A", "description": "Option A"},
                     {"label": "B", "description": "Option B"},
@@ -324,16 +336,19 @@ class TestSubmit(ServerTestBase):
         """Evaluation findings are auto-acknowledged with empty UserResponse."""
         self._create_session()
         self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "evaluation", "title": "Pass 1",
+                "type": "evaluation",
+                "title": "Pass 1",
                 "criteria": [
                     {"name": "Clarity", "rating": "strong", "justification": "Good"},
                 ],
             },
         )
         f_text = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {"type": "text", "title": "Any thoughts?"},
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
@@ -397,9 +412,11 @@ class TestSubmit(ServerTestBase):
         """Submitting __other__ triage approach captures freeform text."""
         self._create_session()
         f_triage = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Pick one",
+                "type": "triage",
+                "title": "Pick one",
                 "options": [{"label": "A", "description": "Option A"}],
             },
         )
@@ -429,10 +446,14 @@ class TestSubmit(ServerTestBase):
         """Submitting Datastar signals with complexity propagates it correctly."""
         self._create_session()
         f_triage = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Unused import",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
@@ -461,10 +482,14 @@ class TestSubmit(ServerTestBase):
         """Submit merges with auto-saved responses, preserving complexity not in signals."""
         self._create_session()
         f_triage = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Unused import",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         # Auto-save complexity before submit
@@ -501,13 +526,18 @@ class TestSSEStream(ServerTestBase):
     """Tests for GET /{session_id}/stream."""
 
     def _add_finding_and_ready(
-        self, session_id: str = "test-session", finding_data: dict | None = None,
+        self,
+        session_id: str = "test-session",
+        finding_data: dict | None = None,
     ) -> str:
         """Add a finding via manager, transition step to ready, return finding_id."""
         if finding_data is None:
             finding_data = {
-                "type": "triage", "title": "Old finding",
-                "category": "correctness", "severity": "high", "confidence": "high",
+                "type": "triage",
+                "title": "Old finding",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
             }
         finding = self.manager.add_finding(session_id, self.step_id, finding_data)
         self.manager.start_agent(session_id, self.step_id, "test-agent")
@@ -533,7 +563,8 @@ class TestSSEStream(ServerTestBase):
         """SSE stream receives findings that are added after connection starts."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {"type": "text", "title": "Added after connect?"},
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
@@ -550,7 +581,8 @@ class TestSSEStream(ServerTestBase):
         """SSE stream sends submit button HTML when all agents complete."""
         self._create_session()
         self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {"type": "text", "title": "Quick question"},
         )
         self.manager.start_agent("test-session", self.step_id, "test-agent")
@@ -568,10 +600,14 @@ class TestSSEStream(ServerTestBase):
         configure(self.manager, port=9876)
         self._create_session(session_id="unblock-session")
         finding = self.manager.add_finding(
-            "unblock-session", self.step_id,
+            "unblock-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Test finding",
-                "category": "correctness", "severity": "high", "confidence": "high",
+                "type": "triage",
+                "title": "Test finding",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
             },
         )
         self.manager.start_agent("unblock-session", self.step_id, "test-agent")
@@ -585,9 +621,7 @@ class TestSSEStream(ServerTestBase):
         )
 
         # review_wait should return immediately since step is completed
-        result = asyncio.run(
-            review_wait(session_id="unblock-session", step_id=self.step_id)
-        )
+        result = asyncio.run(review_wait(session_id="unblock-session", step_id=self.step_id))
         self.assertEqual(result["session_id"], "unblock-session")
         self.assertEqual(result["step_name"], _STEP)
         self.assertEqual(len(result["items"]), 1)
@@ -605,7 +639,8 @@ class TestHTMLEndpoints(ServerTestBase):
         step_id_s2 = self.step_id
         # Transition second session's step to READY via SessionManager
         self.manager.add_finding(
-            "s2", step_id_s2,
+            "s2",
+            step_id_s2,
             {"type": "text", "title": "How is it?"},
         )
         self.manager.start_agent("s2", step_id_s2, "test-agent")
@@ -653,9 +688,15 @@ class TestHTMLEndpoints(ServerTestBase):
         """Completed review page includes findings in the initial HTML."""
         self._create_session(session_id="s1", title="Completed Review")
         finding = self.manager.add_finding(
-            "s1", self.step_id,
-            {"type": "triage", "title": "Bug in auth module",
-             "category": "correctness", "severity": "high", "confidence": "high"},
+            "s1",
+            self.step_id,
+            {
+                "type": "triage",
+                "title": "Bug in auth module",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
+            },
         )
         self.manager.start_agent("s1", self.step_id, "test-agent")
         self.manager.stop_agent("s1", self.step_id, "test-agent")
@@ -703,12 +744,14 @@ class TestDashboardSSE(ServerTestBase):
         _dashboard_queues.append(queue)
         try:
             self._create_session(
-                session_id="sse-dash", title="SSE Dashboard Test",
+                session_id="sse-dash",
+                title="SSE Dashboard Test",
             )
             # Drain observer events from session creation and step start
             self._drain_queue(queue)
             self.manager.add_finding(
-                "sse-dash", self.step_id,
+                "sse-dash",
+                self.step_id,
                 {"type": "text", "title": "Test?"},
             )
             # finding_added is not currently mapped to dashboard events,
@@ -723,10 +766,12 @@ class TestDashboardSSE(ServerTestBase):
         _dashboard_queues.append(queue)
         try:
             self._create_session(
-                session_id="sse-sub", title="Submit Test",
+                session_id="sse-sub",
+                title="Submit Test",
             )
             self.manager.add_finding(
-                "sse-sub", self.step_id,
+                "sse-sub",
+                self.step_id,
                 {"type": "text", "title": "How?"},
             )
             self.manager.start_agent("sse-sub", self.step_id, "test-agent")
@@ -765,7 +810,8 @@ class TestDashboardSSE(ServerTestBase):
         try:
             self._create_session(session_id="sse-ready", title="Ready Test")
             self.manager.add_finding(
-                "sse-ready", self.step_id,
+                "sse-ready",
+                self.step_id,
                 {"type": "text", "title": "Note"},
             )
             self.manager.start_agent("sse-ready", self.step_id, "test-agent")
@@ -807,14 +853,19 @@ class TestConcurrentSessions(ServerTestBase):
         step_id_b = self.step_id
 
         self.manager.add_finding(
-            "session-a", step_id_a,
+            "session-a",
+            step_id_a,
             {"type": "text", "title": "Question for A"},
         )
         self.manager.add_finding(
-            "session-b", step_id_b,
+            "session-b",
+            step_id_b,
             {
-                "type": "triage", "title": "Finding for B",
-                "category": "performance", "severity": "medium", "confidence": "medium",
+                "type": "triage",
+                "title": "Finding for B",
+                "category": "performance",
+                "severity": "medium",
+                "confidence": "medium",
             },
         )
 
@@ -918,7 +969,8 @@ class TestNotificationSSEOutput(ServerTestBase):
         from zing_ai.server.routes import stream_findings
 
         request = TestNotificationSSEOutput._mock_request(
-            manager, f"step={step_id}",
+            manager,
+            f"step={step_id}",
         )
 
         # Pre-load the queue.  The generator creates its own queue via
@@ -956,6 +1008,7 @@ class TestNotificationSSEOutput(ServerTestBase):
                 return _real_render(template_name, **kwargs)
 
             import zing_ai.server.routes as _routes_mod
+
             _real_render = _routes_mod.render
 
             with (
@@ -1002,6 +1055,7 @@ class TestNotificationSSEOutput(ServerTestBase):
             return _real_render(template_name, **kwargs)
 
         import zing_ai.server.routes as _routes_mod
+
         _real_render = _routes_mod.render
 
         with patch("zing_ai.server.routes.asyncio.Queue", return_value=queue):
@@ -1039,12 +1093,16 @@ class TestNotificationSSEOutput(ServerTestBase):
         """stream_findings yields execute_script with Notification JS on notification event."""
         self._create_session(session_id="notif-stream")
         notif = self.manager.add_notification(
-            "notif-stream", "Build started", body="Step 1 running",
+            "notif-stream",
+            "Build started",
+            body="Step 1 running",
         )
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-stream", self.step_id,
+                self.manager,
+                "notif-stream",
+                self.step_id,
                 [f"notification:{notif.id}"],
             ),
         )
@@ -1057,12 +1115,16 @@ class TestNotificationSSEOutput(ServerTestBase):
         """stream_findings yields patch_elements for notification timeline."""
         self._create_session(session_id="notif-tl")
         notif = self.manager.add_notification(
-            "notif-tl", "Build started", body="Step 1 running",
+            "notif-tl",
+            "Build started",
+            body="Step 1 running",
         )
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-tl", self.step_id,
+                self.manager,
+                "notif-tl",
+                self.step_id,
                 [f"notification:{notif.id}"],
             ),
         )
@@ -1075,7 +1137,9 @@ class TestNotificationSSEOutput(ServerTestBase):
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-nobody", self.step_id,
+                self.manager,
+                "notif-nobody",
+                self.step_id,
                 [f"notification:{notif.id}"],
             ),
         )
@@ -1088,12 +1152,15 @@ class TestNotificationSSEOutput(ServerTestBase):
         session_id = "dash-notif"
         self._create_session(session_id=session_id)
         notif = self.manager.add_notification(
-            session_id, "Review ready", body="Please check",
+            session_id,
+            "Review ready",
+            body="Please check",
         )
 
         body = asyncio.run(
             self._collect_dashboard_events(
-                self.manager, [f"notification:{notif.id}:{session_id}"],
+                self.manager,
+                [f"notification:{notif.id}:{session_id}"],
             ),
         )
         self.assertIn("Notification(", body)
@@ -1111,7 +1178,9 @@ class TestNotificationSSEOutput(ServerTestBase):
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "empty-notif", self.step_id,
+                self.manager,
+                "empty-notif",
+                self.step_id,
                 ["notification:nonexistent"],
             ),
         )
@@ -1127,7 +1196,8 @@ class TestNotificationSSEOutput(ServerTestBase):
 
         body = asyncio.run(
             self._collect_dashboard_events(
-                self.manager, [f"notification:nonexistent:{session_id}"],
+                self.manager,
+                [f"notification:nonexistent:{session_id}"],
             ),
         )
         self.assertNotIn("new Notification(", body)

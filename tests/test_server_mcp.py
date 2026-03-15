@@ -44,9 +44,7 @@ class TestSessionCreate(ServerTestBase):
     def test_session_create_custom_steps(self) -> None:
         """session_create with custom steps creates only those steps."""
         configure(self.manager, port=9876)
-        result = asyncio.run(
-            session_create(title="Custom Steps", steps=["code-review", "docs"])
-        )
+        result = asyncio.run(session_create(title="Custom Steps", steps=["code-review", "docs"]))
         self.assertEqual(list(result["steps"].keys()), ["code-review", "docs"])
 
     def test_session_create_generates_slugified_id(self) -> None:
@@ -63,18 +61,14 @@ class TestSessionUpdate(ServerTestBase):
         """session_update can update the title."""
         configure(self.manager, port=9876)
         self.manager.create_session("upd-test", "Original Title")
-        result = asyncio.run(
-            session_update(session_id="upd-test", title="New Title")
-        )
+        result = asyncio.run(session_update(session_id="upd-test", title="New Title"))
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["title"], "New Title")
 
     def test_session_update_unknown_session(self) -> None:
         """session_update with unknown session returns error."""
         configure(self.manager, port=9876)
-        result = asyncio.run(
-            session_update(session_id="nonexistent", title="Nope")
-        )
+        result = asyncio.run(session_update(session_id="nonexistent", title="Nope"))
         self.assertIn("error", result)
 
 
@@ -85,12 +79,12 @@ class TestStepStart(ServerTestBase):
         """step_start MCP tool transitions a pre-created step to STARTED."""
         configure(self.manager, port=9876)
         session = self.manager.create_session(
-            session_id="step-test", title="Step Test", steps=["code-review"],
+            session_id="step-test",
+            title="Step Test",
+            steps=["code-review"],
         )
         step_id = session.steps[0].step_id
-        result = asyncio.run(
-            step_start(session_id="step-test", step_id=step_id)
-        )
+        result = asyncio.run(step_start(session_id="step-test", step_id=step_id))
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["step_name"], "code-review")
         self.assertEqual(result["step_id"], step_id)
@@ -105,8 +99,10 @@ class TestAgentStartStop(ServerTestBase):
         self._create_session(session_id="agent-test")
         result = asyncio.run(
             agent_start(
-                session_id="agent-test", step_id=self.step_id,
-                name="lint-agent", description="Runs linting",
+                session_id="agent-test",
+                step_id=self.step_id,
+                name="lint-agent",
+                description="Runs linting",
             )
         )
         self.assertEqual(result["status"], "started")
@@ -119,7 +115,8 @@ class TestAgentStartStop(ServerTestBase):
         self._create_session(session_id="stop-test")
         asyncio.run(
             agent_start(
-                session_id="stop-test", step_id=self.step_id,
+                session_id="stop-test",
+                step_id=self.step_id,
                 name="lint-agent",
             )
         )
@@ -134,7 +131,9 @@ class TestAgentStartStop(ServerTestBase):
         self._create_session(session_id="unknown-agent")
         result = asyncio.run(
             agent_stop(
-                session_id="unknown-agent", step_id=self.step_id, name="nonexistent",
+                session_id="unknown-agent",
+                step_id=self.step_id,
+                name="nonexistent",
             )
         )
         self.assertIn("error", result)
@@ -149,8 +148,10 @@ class TestStepLog(ServerTestBase):
         self._create_session(session_id="log-test")
         result = asyncio.run(
             step_log(
-                session_id="log-test", step_id=self.step_id,
-                agent_name="build-agent", message="Starting build...",
+                session_id="log-test",
+                step_id=self.step_id,
+                agent_name="build-agent",
+                message="Starting build...",
             )
         )
         self.assertEqual(result["status"], "ok")
@@ -172,7 +173,8 @@ class TestReviewWait(ServerTestBase):
 
         # Add a finding, complete agent lifecycle, then submit responses
         self.manager.add_finding(
-            "wait-session", self.step_id,
+            "wait-session",
+            self.step_id,
             {
                 "type": "triage",
                 "title": "Unused import",
@@ -185,13 +187,13 @@ class TestReviewWait(ServerTestBase):
         self.manager.stop_agent("wait-session", self.step_id, "test-agent")
 
         self.manager.submit_responses(
-            "wait-session", self.step_id, [UserResponse(action="accept")],
+            "wait-session",
+            self.step_id,
+            [UserResponse(action="accept")],
         )
 
         # Now review_wait should return immediately since the event is already set
-        result = asyncio.run(
-            review_wait(session_id="wait-session", step_id=self.step_id)
-        )
+        result = asyncio.run(review_wait(session_id="wait-session", step_id=self.step_id))
 
         self.assertEqual(result["session_id"], "wait-session")
         self.assertEqual(result["step_name"], _STEP)
@@ -229,7 +231,8 @@ class TestReviewWait(ServerTestBase):
 
             # Submit responses to unblock
             self.manager.submit_responses(
-                "block-session", self.step_id,
+                "block-session",
+                self.step_id,
                 [UserResponse(answer="Looks good")],
             )
 
@@ -315,9 +318,7 @@ class TestMCPFindingSubmit(ServerTestBase):
         self.manager.start_agent("sf-completed", self.step_id, "test-agent")
         self.manager.stop_agent("sf-completed", self.step_id, "test-agent")
 
-        self.manager.submit_responses(
-            "sf-completed", self.step_id, [UserResponse(answer="ok")]
-        )
+        self.manager.submit_responses("sf-completed", self.step_id, [UserResponse(answer="ok")])
         # Step is now COMPLETED — submitting a new finding should return error
         result = asyncio.run(
             finding_submit(
@@ -339,17 +340,13 @@ class TestNotificationSend(ServerTestBase):
     def test_notification_send_valid_session(self) -> None:
         """notification_send with a valid session returns status sent and notification_id."""
         self._create_session(session_id="notif-valid")
-        result = asyncio.run(
-            notification_send(session_id="notif-valid", title="Build complete")
-        )
+        result = asyncio.run(notification_send(session_id="notif-valid", title="Build complete"))
         self.assertEqual(result["status"], "sent")
         self.assertIn("notification_id", result)
 
     def test_notification_send_invalid_session(self) -> None:
         """notification_send with an invalid session_id returns an error dict."""
-        result = asyncio.run(
-            notification_send(session_id="nonexistent", title="Oops")
-        )
+        result = asyncio.run(notification_send(session_id="nonexistent", title="Oops"))
         self.assertIn("error", result)
 
     def test_notification_send_body_and_url_stored(self) -> None:

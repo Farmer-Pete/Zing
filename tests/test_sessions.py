@@ -27,7 +27,9 @@ class TestSessionLifecycle(unittest.TestCase):
         self._tmp.cleanup()
 
     def _create_session_with_step(
-        self, session_id: str = "s1", title: str = "Test",
+        self,
+        session_id: str = "s1",
+        title: str = "Test",
     ) -> WorkflowStep:
         session = self.manager.create_session(session_id, title, steps=[_STEP])
         return self.manager.start_step(session_id, session.steps[0].step_id)
@@ -74,7 +76,9 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session.zing_file is None
 
         updated = self.manager.update_session(
-            "s1", zing_file=self.zing_file, title="New Title",
+            "s1",
+            zing_file=self.zing_file,
+            title="New Title",
         )
         assert updated.title == "New Title"
         assert updated.zing_file == self.zing_file
@@ -162,10 +166,14 @@ class TestSessionLifecycle(unittest.TestCase):
     def test_add_finding_text(self) -> None:
         """Adding a text finding appends it to the step."""
         step = self._create_session_with_step()
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "text",
-            "title": "What is the meaning of life?",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "What is the meaning of life?",
+            },
+        )
         assert finding.type == "text"
         session = self.manager.get_session("s1")
         assert session is not None
@@ -175,19 +183,23 @@ class TestSessionLifecycle(unittest.TestCase):
     def test_add_finding_evaluation(self) -> None:
         """Adding an evaluation finding appends it to the step."""
         step = self._create_session_with_step()
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "evaluation",
-            "title": "Pass 1: Design Fundamentals",
-            "criteria": [
-                {"name": "Clarity", "rating": "strong", "justification": "Clear"},
-            ],
-            "litmus_tests": [
-                {"name": "Simplest thing?", "result": "Yes"},
-            ],
-            "warnings": [
-                {"name": "Future flexibility", "found": False},
-            ],
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "evaluation",
+                "title": "Pass 1: Design Fundamentals",
+                "criteria": [
+                    {"name": "Clarity", "rating": "strong", "justification": "Clear"},
+                ],
+                "litmus_tests": [
+                    {"name": "Simplest thing?", "result": "Yes"},
+                ],
+                "warnings": [
+                    {"name": "Future flexibility", "found": False},
+                ],
+            },
+        )
         assert finding.type == "evaluation"
         session = self.manager.get_session("s1")
         assert session is not None
@@ -196,47 +208,63 @@ class TestSessionLifecycle(unittest.TestCase):
     def test_add_finding_triage_without_metadata(self) -> None:
         """Adding a triage finding without metadata appends it to the step."""
         step = self._create_session_with_step()
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "triage",
-            "title": "Pick one",
-            "options": [
-                {"label": "A", "description": "Option A"},
-                {"label": "B", "description": "Option B"},
-            ],
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "triage",
+                "title": "Pick one",
+                "options": [
+                    {"label": "A", "description": "Option A"},
+                    {"label": "B", "description": "Option B"},
+                ],
+            },
+        )
         assert finding.type == "triage"
 
     def test_add_finding_triage(self) -> None:
         """Adding a triage finding appends it to the step."""
         step = self._create_session_with_step()
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "triage",
-            "title": "Unused import",
-            "category": "style",
-            "severity": "low",
-            "confidence": "high",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "triage",
+                "title": "Unused import",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
+            },
+        )
         assert finding.type == "triage"
 
     def test_duplicate_findings_are_deduplicated(self) -> None:
         """Submitting two findings with the same type and title stores only one."""
         step = self._create_session_with_step()
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "triage",
-            "title": "Improve error handling",
-            "options": [
-                {"label": "Try/except", "description": "Wrap in try/except"},
-                {"label": "Result type", "description": "Use a Result type"},
-            ],
-        })
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "triage",
-            "title": "Improve error handling",
-            "options": [
-                {"label": "Try/except", "description": "Wrap in try/except"},
-                {"label": "Result type", "description": "Use a Result type"},
-            ],
-        })
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "triage",
+                "title": "Improve error handling",
+                "options": [
+                    {"label": "Try/except", "description": "Wrap in try/except"},
+                    {"label": "Result type", "description": "Use a Result type"},
+                ],
+            },
+        )
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "triage",
+                "title": "Improve error handling",
+                "options": [
+                    {"label": "Try/except", "description": "Wrap in try/except"},
+                    {"label": "Result type", "description": "Use a Result type"},
+                ],
+            },
+        )
         session = self.manager.get_session("s1")
         assert session is not None
         assert len(session.steps[0].findings) == 1, (
@@ -247,17 +275,25 @@ class TestSessionLifecycle(unittest.TestCase):
         """Full lifecycle: create → start step → add findings → agents complete → submit."""
         step = self._create_session_with_step()
 
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "text",
-            "title": "Is this correct?",
-        })
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "triage",
-            "title": "Bug found",
-            "category": "correctness",
-            "severity": "high",
-            "confidence": "medium",
-        })
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Is this correct?",
+            },
+        )
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "triage",
+                "title": "Bug found",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "medium",
+            },
+        )
 
         # Start two agents
         self.manager.start_agent("s1", step.step_id, "agent-1")
@@ -307,17 +343,25 @@ class TestConcurrentSessions(unittest.TestCase):
         s2 = self.manager.create_session("s2", "Session 2", steps=[_STEP])
         step2 = self.manager.start_step("s2", s2.steps[0].step_id)
 
-        self.manager.add_finding("s1", step1.step_id, {
-            "type": "text",
-            "title": "Question for s1",
-        })
-        self.manager.add_finding("s2", step2.step_id, {
-            "type": "triage",
-            "title": "Finding for s2",
-            "category": "correctness",
-            "severity": "high",
-            "confidence": "high",
-        })
+        self.manager.add_finding(
+            "s1",
+            step1.step_id,
+            {
+                "type": "text",
+                "title": "Question for s1",
+            },
+        )
+        self.manager.add_finding(
+            "s2",
+            step2.step_id,
+            {
+                "type": "triage",
+                "title": "Finding for s2",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
+            },
+        )
 
         s1 = self.manager.get_session("s1")
         s2 = self.manager.get_session("s2")
@@ -531,10 +575,14 @@ class TestPersistence(unittest.TestCase):
         mgr1 = SessionManager(data_dir=self.data_dir)
         session = mgr1.create_session("s1", "Persistent", steps=[_STEP])
         step = mgr1.start_step("s1", session.steps[0].step_id)
-        mgr1.add_finding("s1", step.step_id, {
-            "type": "text",
-            "title": "Will this persist?",
-        })
+        mgr1.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Will this persist?",
+            },
+        )
         mgr1.start_agent("s1", step.step_id, "agent-1")
 
         # Create a new manager pointing at the same data dir
@@ -661,18 +709,26 @@ class TestWaitForReview(unittest.TestCase):
         async def _run() -> None:
             session = self.manager.create_session("s1", "Async Test", steps=[_STEP])
             step = self.manager.start_step("s1", session.steps[0].step_id)
-            self.manager.add_finding("s1", step.step_id, {
-                "type": "text",
-                "title": "Async question",
-            })
+            self.manager.add_finding(
+                "s1",
+                step.step_id,
+                {
+                    "type": "text",
+                    "title": "Async question",
+                },
+            )
             self.manager.start_agent("s1", step.step_id, "agent-1")
             self.manager.stop_agent("s1", step.step_id, "agent-1")
 
             async def _submit_later() -> None:
                 await asyncio.sleep(0.05)
-                self.manager.submit_responses("s1", step.step_id, [
-                    UserResponse(answer="async answer"),
-                ])
+                self.manager.submit_responses(
+                    "s1",
+                    step.step_id,
+                    [
+                        UserResponse(answer="async answer"),
+                    ],
+                )
 
             submit_task = asyncio.create_task(_submit_later())
             review = await self.manager.wait_for_review("s1", step.step_id)
@@ -691,10 +747,14 @@ class TestWaitForReview(unittest.TestCase):
         async def _run() -> None:
             session = self.manager.create_session("s1", "Test", steps=[_STEP])
             step = self.manager.start_step("s1", session.steps[0].step_id)
-            self.manager.add_finding("s1", step.step_id, {
-                "type": "text",
-                "title": "Q",
-            })
+            self.manager.add_finding(
+                "s1",
+                step.step_id,
+                {
+                    "type": "text",
+                    "title": "Q",
+                },
+            )
             self.manager.start_agent("s1", step.step_id, "agent-1")
             self.manager.stop_agent("s1", step.step_id, "agent-1")
             self.manager.submit_responses("s1", step.step_id, [UserResponse(answer="A")])
@@ -796,15 +856,30 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Finding 1",
-        })
-        f2 = self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Finding 2",
-        })
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Finding 3",
-        })
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Finding 1",
+            },
+        )
+        f2 = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Finding 2",
+            },
+        )
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Finding 3",
+            },
+        )
 
         response = UserResponse(answer="my answer")
         self.manager.save_response("s1", step.step_id, f2.id, response)
@@ -825,15 +900,26 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Q1",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Q1",
+            },
+        )
 
         self.manager.save_response(
-            "s1", step.step_id, finding.id, UserResponse(answer="first"),
+            "s1",
+            step.step_id,
+            finding.id,
+            UserResponse(answer="first"),
         )
         self.manager.save_response(
-            "s1", step.step_id, finding.id, UserResponse(answer="second"),
+            "s1",
+            step.step_id,
+            finding.id,
+            UserResponse(answer="second"),
         )
 
         _, updated_step = self.manager.get_step_by_id(step.step_id)
@@ -845,16 +931,24 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Q1",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Q1",
+            },
+        )
 
         # Before save, responses should be None
         _, pre_step = self.manager.get_step_by_id(step.step_id)
         assert pre_step.responses is None
 
         self.manager.save_response(
-            "s1", step.step_id, finding.id, UserResponse(answer="hello"),
+            "s1",
+            step.step_id,
+            finding.id,
+            UserResponse(answer="hello"),
         )
 
         _, post_step = self.manager.get_step_by_id(step.step_id)
@@ -865,12 +959,20 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Q1",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Q1",
+            },
+        )
 
         self.manager.save_response(
-            "s1", step.step_id, finding.id, UserResponse(answer="test"),
+            "s1",
+            step.step_id,
+            finding.id,
+            UserResponse(answer="test"),
         )
 
         _, updated_step = self.manager.get_step_by_id(step.step_id)
@@ -881,13 +983,21 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Q1",
-        })
+        self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Q1",
+            },
+        )
 
         with self.assertRaises(ValueError):
             self.manager.save_response(
-                "s1", step.step_id, "nonexistent", UserResponse(answer="x"),
+                "s1",
+                step.step_id,
+                "nonexistent",
+                UserResponse(answer="x"),
             )
 
     def test_save_response_wrong_session_id(self) -> None:
@@ -895,13 +1005,21 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        finding = self.manager.add_finding("s1", step.step_id, {
-            "type": "text", "title": "Q1",
-        })
+        finding = self.manager.add_finding(
+            "s1",
+            step.step_id,
+            {
+                "type": "text",
+                "title": "Q1",
+            },
+        )
 
         with self.assertRaises(ValueError):
             self.manager.save_response(
-                "wrong-session", step.step_id, finding.id, UserResponse(answer="x"),
+                "wrong-session",
+                step.step_id,
+                finding.id,
+                UserResponse(answer="x"),
             )
 
 
@@ -1034,7 +1152,8 @@ class TestNotifications(unittest.TestCase):
 
         notif = self.manager.add_notification("s1", "Alert")
         matching = [
-            (et, sid) for et, sid in events
+            (et, sid)
+            for et, sid in events
             if et == f"notification_added:{notif.id}" and sid == "s1"
         ]
         assert len(matching) == 1

@@ -22,37 +22,47 @@ def _create_ready_session(
 ) -> str:
     """Create a session in READY state with sample findings. Returns step_id."""
     manager = server.manager
-    session = manager.create_session(
-        session_id=session_id, title=title, steps=[_STEP]
-    )
+    session = manager.create_session(session_id=session_id, title=title, steps=[_STEP])
     step_id = session.steps[0].step_id
     manager.start_step(session_id, step_id)
 
     # Add one of each finding type
-    manager.add_finding(session_id, step_id, {
-        "type": "triage",
-        "id": "triage-1",
-        "title": "SQL Injection Risk",
-        "body": "Potential SQL injection in query builder.",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-    })
-    manager.add_finding(session_id, step_id, {
-        "type": "text",
-        "id": "text-1",
-        "title": "Describe your testing strategy",
-        "body": "How will you test this change?",
-    })
-    manager.add_finding(session_id, step_id, {
-        "type": "triage",
-        "id": "triage-2",
-        "title": "Pick an approach",
-        "options": [
-            {"label": "Option A", "description": "First approach"},
-            {"label": "Option B", "description": "Second approach"},
-        ],
-    })
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "triage",
+            "id": "triage-1",
+            "title": "SQL Injection Risk",
+            "body": "Potential SQL injection in query builder.",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+        },
+    )
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "text",
+            "id": "text-1",
+            "title": "Describe your testing strategy",
+            "body": "How will you test this change?",
+        },
+    )
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "triage",
+            "id": "triage-2",
+            "title": "Pick an approach",
+            "options": [
+                {"label": "Option A", "description": "First approach"},
+                {"label": "Option B", "description": "Second approach"},
+            ],
+        },
+    )
 
     manager.mark_step_ready(session_id, step_id)
     return step_id
@@ -65,56 +75,70 @@ def _create_session_with_all_finding_types(
 ) -> str:
     """Create a READY session with all finding types. Returns step_id."""
     manager = server.manager
-    session = manager.create_session(
-        session_id=session_id, title=title, steps=[_STEP]
-    )
+    session = manager.create_session(session_id=session_id, title=title, steps=[_STEP])
     step_id = session.steps[0].step_id
     manager.start_step(session_id, step_id)
 
-    manager.add_finding(session_id, step_id, {
-        "type": "triage",
-        "id": "triage-1",
-        "title": "SQL Injection Risk",
-        "body": "Potential SQL injection in query builder.",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-        "options": [
-            {"label": "Parameterize queries", "description": "Use parameterized queries"},
-            {"label": "Use ORM", "description": "Switch to ORM layer"},
-        ],
-    })
-    manager.add_finding(session_id, step_id, {
-        "type": "text",
-        "id": "text-1",
-        "title": "Describe your testing strategy",
-        "body": "How will you test this change?",
-    })
-    manager.add_finding(session_id, step_id, {
-        "type": "triage",
-        "id": "triage-2",
-        "title": "Pick an approach",
-        "options": [
-            {"label": "Option A", "description": "First approach"},
-            {"label": "Option B", "description": "Second approach"},
-        ],
-    })
-    manager.add_finding(session_id, step_id, {
-        "type": "evaluation",
-        "id": "eval-1",
-        "title": "Plan Quality Assessment",
-        "body": "Overall evaluation of the implementation plan.",
-        "criteria": [
-            {"name": "Completeness", "rating": "strong", "justification": "All cases covered"},
-            {"name": "Clarity", "rating": "adequate", "justification": "Mostly clear"},
-        ],
-        "litmus_tests": [
-            {"name": "Can a junior dev follow it?", "result": "Yes"},
-        ],
-        "warnings": [
-            {"name": "Missing error handling", "found": True, "details": "No retry logic"},
-        ],
-    })
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "triage",
+            "id": "triage-1",
+            "title": "SQL Injection Risk",
+            "body": "Potential SQL injection in query builder.",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+            "options": [
+                {"label": "Parameterize queries", "description": "Use parameterized queries"},
+                {"label": "Use ORM", "description": "Switch to ORM layer"},
+            ],
+        },
+    )
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "text",
+            "id": "text-1",
+            "title": "Describe your testing strategy",
+            "body": "How will you test this change?",
+        },
+    )
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "triage",
+            "id": "triage-2",
+            "title": "Pick an approach",
+            "options": [
+                {"label": "Option A", "description": "First approach"},
+                {"label": "Option B", "description": "Second approach"},
+            ],
+        },
+    )
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "evaluation",
+            "id": "eval-1",
+            "title": "Plan Quality Assessment",
+            "body": "Overall evaluation of the implementation plan.",
+            "criteria": [
+                {"name": "Completeness", "rating": "strong", "justification": "All cases covered"},
+                {"name": "Clarity", "rating": "adequate", "justification": "Mostly clear"},
+            ],
+            "litmus_tests": [
+                {"name": "Can a junior dev follow it?", "result": "Yes"},
+            ],
+            "warnings": [
+                {"name": "Missing error handling", "found": True, "details": "No retry logic"},
+            ],
+        },
+    )
 
     manager.mark_step_ready(session_id, step_id)
     return step_id
@@ -295,14 +319,18 @@ def test_sse_streams_findings_into_dom(server: _ServerInfo, page: Page) -> None:
     page.goto(f"{server.base_url}/sse-stream")
 
     # Now add a finding server-side — it should appear via SSE
-    manager.add_finding("sse-stream", step_id, {
-        "type": "triage",
-        "id": "sse-finding-1",
-        "title": "SSE Streamed Finding",
-        "category": "correctness",
-        "severity": "medium",
-        "confidence": "high",
-    })
+    manager.add_finding(
+        "sse-stream",
+        step_id,
+        {
+            "type": "triage",
+            "id": "sse-finding-1",
+            "title": "SSE Streamed Finding",
+            "category": "correctness",
+            "severity": "medium",
+            "confidence": "high",
+        },
+    )
 
     expect(page.locator("#finding-sse-finding-1")).to_be_visible(timeout=3000)
     expect(page.locator("text=SSE Streamed Finding")).to_be_visible(timeout=3000)
@@ -311,9 +339,7 @@ def test_sse_streams_findings_into_dom(server: _ServerInfo, page: Page) -> None:
 def test_tab_navigation(server: _ServerInfo, page: Page) -> None:
     """Tab navigation works between workflow steps."""
     manager = server.manager
-    manager.create_session(
-        session_id="tab-test", title="Tab Test", steps=["audit", "review"]
-    )
+    manager.create_session(session_id="tab-test", title="Tab Test", steps=["audit", "review"])
 
     page.goto(f"{server.base_url}/tab-test")
 
@@ -340,7 +366,10 @@ def test_saved_responses_restore_on_page_load(server: _ServerInfo, page: Page) -
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
     _save_and_reload(
-        server, page, "restore-test", step_id,
+        server,
+        page,
+        "restore-test",
+        step_id,
         {
             "triage-1": UserResponse(action=ResponseAction.ACCEPT),
             "text-1": UserResponse(answer="Integration tests with fixtures"),
@@ -472,9 +501,7 @@ def test_triage_with_suggested_approaches(server: _ServerInfo, page: Page) -> No
         page.locator("#finding-triage-1 .action-btn", has_text="Accept").click()
 
     # Select an approach radio
-    approach_radio = page.locator(
-        "#finding-triage-1 input[value='Parameterize queries']"
-    )
+    approach_radio = page.locator("#finding-triage-1 input[value='Parameterize queries']")
     with page.expect_response("**/save-response", timeout=3000) as resp_info:
         approach_radio.click()
     assert resp_info.value.status == 200
@@ -535,9 +562,7 @@ def test_triage_approach_other_flow(server: _ServerInfo, page: Page) -> None:
         other_radio.click()
 
     # Conditional textarea should become visible
-    other_textarea = page.locator(
-        "#finding-triage-2 div[data-show] textarea"
-    )
+    other_textarea = page.locator("#finding-triage-2 div[data-show] textarea")
     expect(other_textarea).to_be_visible(timeout=3000)
 
     # Fill and blur to trigger save
@@ -583,9 +608,7 @@ def test_evaluation_finding_renders_tables(server: _ServerInfo, page: Page) -> N
 def test_sse_streams_agent_status_and_logs(server: _ServerInfo, page: Page) -> None:
     """SSE streams agent status and log entries into the DOM."""
     manager = server.manager
-    session = manager.create_session(
-        session_id="sse-agent", title="SSE Agent Test", steps=[_STEP]
-    )
+    session = manager.create_session(session_id="sse-agent", title="SSE Agent Test", steps=[_STEP])
     step_id = session.steps[0].step_id
     manager.start_step("sse-agent", step_id)
     manager.start_agent("sse-agent", step_id, "test-agent", "Running analysis")
@@ -607,9 +630,7 @@ def test_sse_streams_agent_status_and_logs(server: _ServerInfo, page: Page) -> N
 
     # Add another log entry via SSE — should appear in the log output
     manager.add_log("sse-agent", step_id, "test-agent", "Found 3 issues")
-    expect(page.locator("#log-viewer .log-output")).to_contain_text(
-        "Found 3 issues", timeout=5000
-    )
+    expect(page.locator("#log-viewer .log-output")).to_contain_text("Found 3 issues", timeout=5000)
 
     # Stop the agent — should get completed class
     manager.stop_agent("sse-agent", step_id, "test-agent")
@@ -792,9 +813,7 @@ def test_triage_other_approach_saves_custom_text(server: _ServerInfo, page: Page
         other_radio.click()
 
     # Conditional textarea should become visible
-    other_textarea = page.locator(
-        "#finding-triage-1 div[data-show] textarea"
-    )
+    other_textarea = page.locator("#finding-triage-1 div[data-show] textarea")
     expect(other_textarea).to_be_visible(timeout=3000)
 
     # Fill and blur to trigger save
@@ -858,32 +877,41 @@ def test_multi_step_mixed_state_navigation(server: _ServerInfo, page: Page) -> N
 
     # Drive audit through STARTED → READY → COMPLETED
     manager.start_step("mixed-steps", audit_step.step_id)
-    manager.add_finding("mixed-steps", audit_step.step_id, {
-        "type": "triage",
-        "id": "triage-1",
-        "title": "Audit Finding",
-        "body": "Audit finding body.",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-    })
+    manager.add_finding(
+        "mixed-steps",
+        audit_step.step_id,
+        {
+            "type": "triage",
+            "id": "triage-1",
+            "title": "Audit Finding",
+            "body": "Audit finding body.",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+        },
+    )
     manager.mark_step_ready("mixed-steps", audit_step.step_id)
     manager.submit_responses(
-        "mixed-steps", audit_step.step_id,
+        "mixed-steps",
+        audit_step.step_id,
         [UserResponse(action=ResponseAction.ACCEPT)],
     )
 
     # Drive review through STARTED → READY
     manager.start_step("mixed-steps", review_step.step_id)
-    manager.add_finding("mixed-steps", review_step.step_id, {
-        "type": "triage",
-        "id": "triage-1",
-        "title": "Review Finding",
-        "body": "Review finding body.",
-        "category": "correctness",
-        "severity": "medium",
-        "confidence": "medium",
-    })
+    manager.add_finding(
+        "mixed-steps",
+        review_step.step_id,
+        {
+            "type": "triage",
+            "id": "triage-1",
+            "title": "Review Finding",
+            "body": "Review finding body.",
+            "category": "correctness",
+            "severity": "medium",
+            "confidence": "medium",
+        },
+    )
     manager.mark_step_ready("mixed-steps", review_step.step_id)
 
     page.goto(f"{server.base_url}/mixed-steps")
@@ -923,7 +951,10 @@ def test_triage_approach_restores_on_reload(server: _ServerInfo, page: Page) -> 
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
     _save_and_reload(
-        server, page, "approach-reload", step_id,
+        server,
+        page,
+        "approach-reload",
+        step_id,
         {
             "triage-1": UserResponse(
                 action=ResponseAction.ACCEPT,
@@ -938,9 +969,7 @@ def test_triage_approach_restores_on_reload(server: _ServerInfo, page: Page) -> 
     expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
 
     # Approach radio should be checked
-    approach_radio = page.locator(
-        "#finding-triage-1 input[value='Parameterize queries']"
-    )
+    approach_radio = page.locator("#finding-triage-1 input[value='Parameterize queries']")
     expect(approach_radio).to_be_checked(timeout=3000)
 
     _assert_no_console_errors(console_errors)
@@ -953,7 +982,10 @@ def test_triage_other_approach_restores_on_reload(server: _ServerInfo, page: Pag
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
     _save_and_reload(
-        server, page, "triage-other-reload", step_id,
+        server,
+        page,
+        "triage-other-reload",
+        step_id,
         {
             "triage-1": UserResponse(
                 action=ResponseAction.ACCEPT,
@@ -987,7 +1019,10 @@ def test_triage_approach_other_restores_on_reload(server: _ServerInfo, page: Pag
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
     _save_and_reload(
-        server, page, "approach-other-reload", step_id,
+        server,
+        page,
+        "approach-other-reload",
+        step_id,
         {
             "triage-2": UserResponse(
                 action=ResponseAction.ACCEPT,
@@ -1098,9 +1133,15 @@ def test_session_header_badge_updates_live(server: _ServerInfo, page: Page) -> N
     expect(step_badge).to_have_text("started", timeout=5000)
 
     # Mark ready — badges should update to "ready"
-    manager.add_finding("hdr-badge", step.step_id, {
-        "type": "text", "id": "f1", "title": "Note",
-    })
+    manager.add_finding(
+        "hdr-badge",
+        step.step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "Note",
+        },
+    )
     manager.start_agent("hdr-badge", step.step_id, "test-agent")
     manager.stop_agent("hdr-badge", step.step_id, "test-agent")
     manager.mark_step_ready("hdr-badge", step.step_id)
@@ -1138,9 +1179,15 @@ def test_notification_dot_on_non_active_step(server: _ServerInfo, page: Page) ->
 
     # Start step2 (auto-completes step1) and add a finding — triggers SSE notification dot
     manager.start_step("notif-dot", step2.step_id)
-    manager.add_finding("notif-dot", step2.step_id, {
-        "type": "text", "id": "f1", "title": "New finding",
-    })
+    manager.add_finding(
+        "notif-dot",
+        step2.step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "New finding",
+        },
+    )
 
     # Step2 tab should gain notification-dot class
     expect(step2_tab).to_have_class(re.compile("notification-dot"), timeout=5000)
@@ -1172,9 +1219,15 @@ def test_no_notification_dot_on_active_step(server: _ServerInfo, page: Page) -> 
     expect(step1_tab).to_be_visible(timeout=5000)
 
     # Add a finding to the active step
-    manager.add_finding("notif-no-dot", step1.step_id, {
-        "type": "text", "id": "f1", "title": "Active finding",
-    })
+    manager.add_finding(
+        "notif-no-dot",
+        step1.step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "Active finding",
+        },
+    )
 
     # Wait a moment for any SSE events to arrive, then assert no dot
     page.wait_for_timeout(2000)
@@ -1205,9 +1258,15 @@ def test_notification_dot_cleared_on_navigation(server: _ServerInfo, page: Page)
 
     # Start step2 and add a finding to trigger notification dot
     manager.start_step("notif-clear", step2.step_id)
-    manager.add_finding("notif-clear", step2.step_id, {
-        "type": "text", "id": "f1", "title": "New finding",
-    })
+    manager.add_finding(
+        "notif-clear",
+        step2.step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "New finding",
+        },
+    )
 
     expect(step2_tab).to_have_class(re.compile("notification-dot"), timeout=5000)
 
@@ -1238,9 +1297,15 @@ def test_default_tab_is_most_recent_active_step(server: _ServerInfo, page: Page)
 
     # Start and complete step1, then start step2 (step3 stays pending)
     manager.start_step("default-tab", step1.step_id)
-    manager.add_finding("default-tab", step1.step_id, {
-        "type": "text", "id": "f1", "title": "Note",
-    })
+    manager.add_finding(
+        "default-tab",
+        step1.step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "Note",
+        },
+    )
     manager.mark_step_ready("default-tab", step1.step_id)
     manager.submit_responses("default-tab", step1.step_id, [UserResponse(answer="done")])
     manager.start_step("default-tab", step2.step_id)

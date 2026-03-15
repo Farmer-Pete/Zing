@@ -66,9 +66,7 @@ def test_dashboard_delete_removes_session(server: _ServerInfo, page: Page) -> No
 def test_dashboard_status_badges(server: _ServerInfo, page: Page) -> None:
     """Status badges reflect session state correctly."""
     manager = server.manager
-    session = manager.create_session(
-        session_id="badge-1", title="Badge Test", steps=["review"]
-    )
+    session = manager.create_session(session_id="badge-1", title="Badge Test", steps=["review"])
     step = session.steps[0]
     manager.start_step("badge-1", step.step_id)
 
@@ -90,14 +88,18 @@ def test_dashboard_session_state_on_reload(server: _ServerInfo, page: Page) -> N
     manager.start_step("state-reload", step_id)
 
     # Add a finding so submit works
-    manager.add_finding("state-reload", step_id, {
-        "type": "triage",
-        "id": "t1",
-        "title": "Finding",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-    })
+    manager.add_finding(
+        "state-reload",
+        step_id,
+        {
+            "type": "triage",
+            "id": "t1",
+            "title": "Finding",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+        },
+    )
     manager.mark_step_ready("state-reload", step_id)
 
     page.goto(f"{server.base_url}/dashboard")
@@ -133,9 +135,15 @@ def test_dashboard_live_status_update(server: _ServerInfo, page: Page) -> None:
     expect(badge).to_have_text("started", timeout=5000)
 
     # Mark step ready server-side — badge should update without reload
-    manager.add_finding("live-dash", step_id, {
-        "type": "text", "id": "f1", "title": "Note",
-    })
+    manager.add_finding(
+        "live-dash",
+        step_id,
+        {
+            "type": "text",
+            "id": "f1",
+            "title": "Note",
+        },
+    )
     manager.start_agent("live-dash", step_id, "test-agent")
     manager.stop_agent("live-dash", step_id, "test-agent")
     manager.mark_step_ready("live-dash", step_id)
@@ -156,14 +164,18 @@ def test_submit_to_completed_step_is_disabled(server: _ServerInfo, page: Page) -
     step_id = step.step_id
     manager.start_step("completed-submit", step_id)
 
-    manager.add_finding("completed-submit", step_id, {
-        "type": "triage",
-        "id": "t1",
-        "title": "Finding",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-    })
+    manager.add_finding(
+        "completed-submit",
+        step_id,
+        {
+            "type": "triage",
+            "id": "t1",
+            "title": "Finding",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+        },
+    )
     manager.mark_step_ready("completed-submit", step_id)
 
     page.goto(f"{server.base_url}/completed-submit")
@@ -182,9 +194,7 @@ def test_submit_to_completed_step_is_disabled(server: _ServerInfo, page: Page) -
     assert api_response.status == 409
 
 
-def test_notif_opt_in_visible_when_permission_default(
-    server: _ServerInfo, page: Page
-) -> None:
+def test_notif_opt_in_visible_when_permission_default(server: _ServerInfo, page: Page) -> None:
     """Notification opt-in button is visible when permission is 'default'."""
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
@@ -202,9 +212,7 @@ def test_notif_opt_in_visible_when_permission_default(
     assert errors == [], f"JS console errors: {errors}"
 
 
-def test_notif_opt_in_hidden_when_permission_granted(
-    server: _ServerInfo, page: Page
-) -> None:
+def test_notif_opt_in_hidden_when_permission_granted(server: _ServerInfo, page: Page) -> None:
     """Notification opt-in button is hidden when permission is already 'granted'."""
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
@@ -222,9 +230,7 @@ def test_notif_opt_in_hidden_when_permission_granted(
     assert errors == [], f"JS console errors: {errors}"
 
 
-def test_notif_opt_in_click_hides_button(
-    server: _ServerInfo, page: Page
-) -> None:
+def test_notif_opt_in_click_hides_button(server: _ServerInfo, page: Page) -> None:
     """Clicking the opt-in button calls requestPermission and hides the button on 'granted'."""
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
@@ -244,9 +250,7 @@ def test_notif_opt_in_click_hides_button(
     assert errors == [], f"JS console errors: {errors}"
 
 
-def test_notification_timeline_appears_with_notifications(
-    server: _ServerInfo, page: Page
-) -> None:
+def test_notification_timeline_appears_with_notifications(server: _ServerInfo, page: Page) -> None:
     """Notification timeline appears under session card when notifications exist."""
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
@@ -283,7 +287,8 @@ def test_notification_timeline_live_update(server: _ServerInfo, page: Page) -> N
     manager.add_notification("live-tl", title="Agent finished", body="Review is ready")
     expect(entries).to_have_count(2, timeout=5000)
     notif_title = page.locator(
-        "#notifications-live-tl .notification-title", has_text="Agent finished",
+        "#notifications-live-tl .notification-title",
+        has_text="Agent finished",
     )
     expect(notif_title).to_be_visible(timeout=3000)
     assert errors == [], f"JS console errors: {errors}"

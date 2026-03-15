@@ -37,8 +37,7 @@ class MCPDebugMiddleware:
         method = scope.get("method", "?")
         # Decode header keys/values for logging
         header_strs = {
-            k.decode("latin-1"): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
+            k.decode("latin-1"): v.decode("latin-1") for k, v in scope.get("headers", [])
         }
         # Mask authorization header value to avoid leaking tokens
         logged_headers = {}
@@ -74,14 +73,16 @@ class MCPDebugMiddleware:
             if message["type"] == "http.response.start":
                 response_status = message["status"]
                 response_headers = {
-                    k.decode("latin-1"): v.decode("latin-1")
-                    for k, v in message.get("headers", [])
+                    k.decode("latin-1"): v.decode("latin-1") for k, v in message.get("headers", [])
                 }
                 logger.info(
                     "MCP <<< %d headers=%s",
                     response_status,
-                    {k: v for k, v in response_headers.items()
-                     if k in ("content-type", "mcp-session-id")},
+                    {
+                        k: v
+                        for k, v in response_headers.items()
+                        if k in ("content-type", "mcp-session-id")
+                    },
                 )
             elif message["type"] == "http.response.body":
                 body = message.get("body", b"")
@@ -139,9 +140,7 @@ def create_app(
         if event_type.startswith("notification_added:"):
             notif_id = event_type.split(":", 1)[1]
             _notify_sse_connections(session_id, f"notification:{notif_id}")
-            _notify_dashboard_connections(
-                f"notification:{notif_id}", session_id=session_id
-            )
+            _notify_dashboard_connections(f"notification:{notif_id}", session_id=session_id)
             return
         if event_type in sse_events:
             _notify_sse_connections(session_id, sse_events[event_type])

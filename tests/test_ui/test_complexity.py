@@ -24,22 +24,24 @@ def _create_triage_session(
 ) -> str:
     """Create a READY session with a single triage finding. Returns step_id."""
     manager = server.manager
-    session = manager.create_session(
-        session_id=session_id, title=title, steps=[_STEP]
-    )
+    session = manager.create_session(session_id=session_id, title=title, steps=[_STEP])
     step_id = session.steps[0].step_id
     manager.start_step(session_id, step_id)
 
-    manager.add_finding(session_id, step_id, {
-        "type": "triage",
-        "id": "triage-1",
-        "title": "Test Finding",
-        "body": "A test triage finding.",
-        "category": "security",
-        "severity": "high",
-        "confidence": "high",
-        "complexity": complexity.value,
-    })
+    manager.add_finding(
+        session_id,
+        step_id,
+        {
+            "type": "triage",
+            "id": "triage-1",
+            "title": "Test Finding",
+            "body": "A test triage finding.",
+            "category": "security",
+            "severity": "high",
+            "confidence": "high",
+            "complexity": complexity.value,
+        },
+    )
 
     manager.mark_step_ready(session_id, step_id)
     return step_id
@@ -175,7 +177,9 @@ def test_complexity_default_shows_after_reload_with_saved_responses(
 
     # Save a triage action server-side (the common pre-existing state scenario)
     server.manager.save_response(
-        "cx-reload", step_id, "triage-1",
+        "cx-reload",
+        step_id,
+        "triage-1",
         UserResponse(action=ResponseAction.ACCEPT),
     )
 

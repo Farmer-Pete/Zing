@@ -358,11 +358,16 @@ def _register_mcp_claude() -> None:
     try:
         subprocess.run(
             [
-                "claude", "mcp", "add",
-                "-s", "user",
+                "claude",
+                "mcp",
+                "add",
+                "-s",
+                "user",
                 "zing-ai",
                 "--",
-                "npx", "mcp-remote", "http://127.0.0.1:9876/mcp",
+                "npx",
+                "mcp-remote",
+                "http://127.0.0.1:9876/mcp",
             ],
             check=True,
             capture_output=True,

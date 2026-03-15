@@ -106,7 +106,6 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("discuss", html)
         self.assertIn("data-class:selected=\"$responses.tri1 === 'accept'\"", html)
 
-
     def test_evaluation_finding_renders_tables(self) -> None:
         """Evaluation finding renders structured tables with badges."""
         finding = EvaluationFinding(
@@ -221,10 +220,14 @@ class TestTriageEnumValidation(ServerTestBase):
         self._create_session()
         with self.assertRaises(ValidationError):
             self.manager.add_finding(
-                "test-session", self.step_id,
+                "test-session",
+                self.step_id,
                 {
-                    "type": "triage", "title": "Some finding",
-                    "category": "style", "severity": "invalid", "confidence": "high",
+                    "type": "triage",
+                    "title": "Some finding",
+                    "category": "style",
+                    "severity": "invalid",
+                    "confidence": "high",
                 },
             )
 
@@ -235,10 +238,14 @@ class TestTriageEnumValidation(ServerTestBase):
         self._create_session()
         with self.assertRaises(ValidationError):
             self.manager.add_finding(
-                "test-session", self.step_id,
+                "test-session",
+                self.step_id,
                 {
-                    "type": "triage", "title": "Some finding",
-                    "category": "style", "severity": "low", "confidence": "invalid",
+                    "type": "triage",
+                    "title": "Some finding",
+                    "category": "style",
+                    "severity": "low",
+                    "confidence": "invalid",
                 },
             )
 
@@ -249,10 +256,14 @@ class TestTriageEnumValidation(ServerTestBase):
         self._create_session()
         with self.assertRaises(ValidationError):
             self.manager.add_finding(
-                "test-session", self.step_id,
+                "test-session",
+                self.step_id,
                 {
-                    "type": "triage", "title": "Some finding",
-                    "category": "invalid", "severity": "low", "confidence": "high",
+                    "type": "triage",
+                    "title": "Some finding",
+                    "category": "invalid",
+                    "severity": "low",
+                    "confidence": "high",
                 },
             )
 
@@ -260,10 +271,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage with structured location stores and renders correctly."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Missing null check",
-                "category": "correctness", "severity": "high", "confidence": "high",
+                "type": "triage",
+                "title": "Missing null check",
+                "category": "correctness",
+                "severity": "high",
+                "confidence": "high",
                 "location": {"file": "src/main.py", "line": 42},
             },
         )
@@ -277,10 +292,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage with location without line works correctly."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "File-level issue",
-                "category": "architecture", "severity": "medium", "confidence": "medium",
+                "type": "triage",
+                "title": "File-level issue",
+                "category": "architecture",
+                "severity": "medium",
+                "confidence": "medium",
                 "location": {"file": "src/main.py"},
             },
         )
@@ -293,10 +312,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage with options renders both action buttons and options text."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Consider refactoring",
-                "category": "readability", "severity": "medium", "confidence": "medium",
+                "type": "triage",
+                "title": "Consider refactoring",
+                "category": "readability",
+                "severity": "medium",
+                "confidence": "medium",
                 "options": [
                     {"label": "Extract method", "description": "Pull the loop into a helper"},
                     {"label": "Inline comments", "description": "Add comments to clarify intent"},
@@ -318,10 +341,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage without options renders only action buttons, no options div."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Simple finding",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Simple finding",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         html = finding_fragment(finding, "test-session")
@@ -332,10 +359,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage with severity info renders badge-info class."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Informational note",
-                "category": "architecture", "severity": "info", "confidence": "low",
+                "type": "triage",
+                "title": "Informational note",
+                "category": "architecture",
+                "severity": "info",
+                "confidence": "low",
             },
         )
         html = finding_fragment(finding, "test-session")
@@ -345,10 +376,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage finding renders complexity selector with three buttons."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Needs refactoring",
-                "category": "readability", "severity": "medium", "confidence": "high",
+                "type": "triage",
+                "title": "Needs refactoring",
+                "category": "readability",
+                "severity": "medium",
+                "confidence": "high",
             },
         )
         html = finding_fragment(finding, "test-session")
@@ -366,10 +401,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage finding defaults to 'standard' complexity in its data-signals."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Default complexity",
-                "category": "style", "severity": "low", "confidence": "high",
+                "type": "triage",
+                "title": "Default complexity",
+                "category": "style",
+                "severity": "low",
+                "confidence": "high",
             },
         )
         html = finding_fragment(finding, "test-session")
@@ -381,10 +420,14 @@ class TestTriageEnumValidation(ServerTestBase):
         """Triage finding with explicit complexity renders that value in data-signals."""
         self._create_session()
         finding = self.manager.add_finding(
-            "test-session", self.step_id,
+            "test-session",
+            self.step_id,
             {
-                "type": "triage", "title": "Complex fix",
-                "category": "architecture", "severity": "high", "confidence": "high",
+                "type": "triage",
+                "title": "Complex fix",
+                "category": "architecture",
+                "severity": "high",
+                "confidence": "high",
                 "complexity": "complex",
             },
         )

@@ -69,7 +69,9 @@ async def session_create(title: str, steps: list[str] | None = None) -> dict:
 
 @mcp_server.tool()
 async def session_update(
-    session_id: str, zing_file: str | None = None, title: str | None = None,
+    session_id: str,
+    zing_file: str | None = None,
+    title: str | None = None,
 ) -> dict:
     """Update session title and/or zing file path."""
     sm = _get_session_manager()
@@ -98,7 +100,10 @@ async def step_start(session_id: str, step_id: str) -> dict:
 
 @mcp_server.tool()
 async def agent_start(
-    session_id: str, step_id: str, name: str, description: str = "",
+    session_id: str,
+    step_id: str,
+    name: str,
+    description: str = "",
 ) -> dict:
     """Register a running agent for a step. Dashboard shows it with a spinner."""
     sm = _get_session_manager()

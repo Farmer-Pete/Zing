@@ -328,9 +328,7 @@ class SessionManager:
         session = self._get_session_or_raise(session_id)
         return session, session.steps[step_index]
 
-    def add_finding(
-        self, session_id: str, step_id: str, finding_data: dict[str, Any]
-    ) -> Finding:
+    def add_finding(self, session_id: str, step_id: str, finding_data: dict[str, Any]) -> Finding:
         """Append a finding to a workflow step.
 
         Args:
@@ -348,10 +346,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
         if step.state in (SessionState.READY, SessionState.COMPLETED):
             msg = (
@@ -386,9 +381,7 @@ class SessionManager:
         )
         return finding
 
-    def add_log(
-        self, session_id: str, step_id: str, agent_name: str, message: str
-    ) -> LogEntry:
+    def add_log(self, session_id: str, step_id: str, agent_name: str, message: str) -> LogEntry:
         """Append a log entry to a workflow step.
 
         Args:
@@ -406,10 +399,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
 
         entry = LogEntry(agent_name=agent_name, message=message)
@@ -451,10 +441,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
         agent = Agent(name=name, description=description, state=AgentState.RUNNING)
         step.agents.append(agent)
@@ -497,10 +484,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
         agent = None
         for a in step.agents:
@@ -534,7 +518,6 @@ class SessionManager:
             self._notify("agents_done", session_id)
         return step
 
-
     def mark_step_ready(self, session_id: str, step_id: str) -> WorkflowStep:
         """Transition a step from STARTED to READY.
 
@@ -555,10 +538,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
         if step.state != SessionState.STARTED:
             msg = (
@@ -607,10 +587,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
 
         # Find the index of the matching finding
@@ -620,10 +597,7 @@ class SessionManager:
                 finding_index = i
                 break
         if finding_index is None:
-            msg = (
-                f"No finding with id '{finding_id}' in step '{step.step_name}' "
-                f"(id={step_id})"
-            )
+            msg = f"No finding with id '{finding_id}' in step '{step.step_name}' (id={step_id})"
             raise ValueError(msg)
 
         # Lazily initialize responses list with empty UserResponse objects
@@ -670,10 +644,7 @@ class SessionManager:
         """
         session, step = self.get_step_by_id(step_id)
         if session.session_id != session_id:
-            msg = (
-                f"Step '{step_id}' belongs to session '{session.session_id}', "
-                f"not '{session_id}'"
-            )
+            msg = f"Step '{step_id}' belongs to session '{session.session_id}', not '{session_id}'"
             raise ValueError(msg)
 
         if len(responses) != len(step.findings):
@@ -775,7 +746,9 @@ class SessionManager:
         self._auto_completed_steps.discard(step_id)
 
         return self._build_review_response(
-            session_id, step, auto_completed=was_auto_completed,
+            session_id,
+            step,
+            auto_completed=was_auto_completed,
         )
 
     def get_session(self, session_id: str) -> Session | None:

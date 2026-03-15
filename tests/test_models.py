@@ -154,11 +154,13 @@ class TestTriageMetadataValidation(unittest.TestCase):
     def test_triage_without_metadata_defaults(self) -> None:
         """TriageFinding without category/severity/confidence defaults all to None."""
         adapter = TypeAdapter(Finding)
-        finding = adapter.validate_python({
-            "type": "triage",
-            "title": "Pick an approach",
-            "options": [{"label": "A", "description": "Option A"}],
-        })
+        finding = adapter.validate_python(
+            {
+                "type": "triage",
+                "title": "Pick an approach",
+                "options": [{"label": "A", "description": "Option A"}],
+            }
+        )
         assert isinstance(finding, TriageFinding)
         assert finding.category is None
         assert finding.severity is None
