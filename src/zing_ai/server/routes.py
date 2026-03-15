@@ -53,14 +53,18 @@ def _notify_sse_connections(session_id: str, event: str) -> None:
         queue.put_nowait(event)
 
 
-def _notify_dashboard_connections(event: str) -> None:
+def _notify_dashboard_connections(event: str, session_id: str | None = None) -> None:
     """Push an event to all active dashboard SSE queues.
 
     Args:
         event: An event type string (e.g. "created", "completed", "cleaned_up").
+        session_id: Optional session identifier. When provided, the event is
+            pushed as ``"{event}:{session_id}"`` so consumers can determine
+            which session the event belongs to.
     """
+    message = f"{event}:{session_id}" if session_id is not None else event
     for queue in _dashboard_queues:
-        queue.put_nowait(event)
+        queue.put_nowait(message)
 
 
 def finding_fragment(
