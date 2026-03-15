@@ -681,6 +681,33 @@ async def dashboard_events(request: Request):  # noqa: ANN201
                 except TimeoutError:
                     continue
 
+                if event.startswith("notification:"):
+                    notif_session_id = event.split(":", 1)[1]
+                    session = manager.get_session(notif_session_id)
+                    if session and session.notifications:
+                        notif = session.notifications[-1]
+                        title_js = json.dumps(notif.title)
+                        opts = {}
+                        if notif.body:
+                            opts["body"] = notif.body
+                        opts_js = json.dumps(opts)
+                        session_url = json.dumps(f"/{notif_session_id}")
+                        script = (
+                            f"if (Notification.permission === 'granted') {{"
+                            f"  const n = new Notification({title_js}, {opts_js});"
+                            f"  n.onclick = () => {{ window.location.href = {session_url}; n.close(); }};"
+                            f"}}"
+                        )
+                        yield SSE.execute_script(script)
+                        # Re-render the notification timeline for the affected session card
+                        timeline_html = render("fragments/notification_timeline.html", s=session)
+                        yield SSE.patch_elements(
+                            timeline_html,
+                            selector=f"#notifications-{notif_session_id}",
+                            mode=ElementPatchMode.OUTER,
+                        )
+                    continue
+
                 sessions = sorted(
                     manager.list_sessions(), key=lambda s: s.created_at, reverse=True,
                 )
