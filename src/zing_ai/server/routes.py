@@ -755,7 +755,7 @@ async def dashboard_events(request: Request):  # noqa: ANN201
 async def post_cleanup(
     session_id: str,
     request: Request,
-):  # noqa: ANN201
+) -> Any:  # noqa: ANN401
     """Remove a session from the manager.
 
     Args:
