@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 from tests.test_server_base import _STEP, ServerTestBase
 from zing_ai.server.mcp_tools import configure, review_wait
@@ -879,3 +880,245 @@ class TestNotificationRouting(ServerTestBase):
             _sse_queues[session_id].remove(queue)
             if not _sse_queues[session_id]:
                 _sse_queues.pop(session_id, None)
+
+
+class TestNotificationSSEOutput(ServerTestBase):
+    """Tests that SSE generators yield correct directives for notification events.
+
+    These tests call the route handler functions directly with mocked
+    ``Request`` objects, then iterate the returned async generator to
+    collect SSE output.  ``asyncio.wait_for`` is patched so that the
+    pre-loaded queue events are consumed immediately and the generator
+    terminates cleanly after processing them.
+    """
+
+    @staticmethod
+    def _mock_request(manager, query_string: str = "") -> MagicMock:  # noqa: ANN001
+        """Build a fake Starlette Request with the given manager and query params."""
+        from starlette.datastructures import QueryParams
+
+        app_state = MagicMock()
+        app_state.session_manager = manager
+        app_mock = MagicMock()
+        app_mock.state = app_state
+        request = MagicMock()
+        request.app = app_mock
+        request.query_params = QueryParams(query_string)
+        return request
+
+    @staticmethod
+    async def _collect_stream_findings(
+        manager,  # noqa: ANN001
+        session_id: str,
+        step_id: str,
+        events: list[str],
+    ) -> str:
+        """Call stream_findings, push events via queue, and return joined SSE text."""
+        from zing_ai.server.routes import stream_findings
+
+        request = TestNotificationSSEOutput._mock_request(
+            manager, f"step={step_id}",
+        )
+
+        # Pre-load the queue.  The generator creates its own queue via
+        # asyncio.Queue() and appends it to _sse_queues[session_id].
+        # We patch asyncio.Queue to return a pre-loaded queue.
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        for ev in events:
+            queue.put_nowait(ev)
+
+        # Patch asyncio.Queue to return our pre-loaded queue
+        with patch("zing_ai.server.routes.asyncio.Queue", return_value=queue):
+            # Patch wait_for: deliver queued events, then clean up session
+            real_wait_for = asyncio.wait_for
+            delivery_count = 0
+
+            async def _fast_wait_for(coro, *, timeout=None):  # noqa: ANN001,ANN201
+                nonlocal delivery_count
+                delivery_count += 1
+                if delivery_count <= len(events):
+                    return await real_wait_for(coro, timeout=0.1)
+                # After all events consumed, remove session to exit generator
+                coro.close()
+                manager.cleanup_session(session_id)
+                raise TimeoutError
+
+            # Mock render for notification_timeline.html (template created
+            # in a later step) to return a placeholder.
+            _real_render = None
+
+            def _mock_render(template_name, **kwargs):  # noqa: ANN001,ANN201,ANN003
+                if template_name == "fragments/notification_timeline.html":
+                    s = kwargs.get("s")
+                    sid = s.session_id if s else "unknown"
+                    return f'<div id="notifications-{sid}">timeline</div>'
+                return _real_render(template_name, **kwargs)
+
+            import zing_ai.server.routes as _routes_mod
+            _real_render = _routes_mod.render
+
+            with (
+                patch("zing_ai.server.routes.asyncio.wait_for", _fast_wait_for),
+                patch("zing_ai.server.routes.render", side_effect=_mock_render),
+            ):
+                response = await stream_findings(session_id, request)
+                chunks: list[str] = []
+                async for chunk in response.body_iterator:
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode()
+                    chunks.append(chunk)
+
+        # Clean up queue registration
+        queues = _sse_queues.get(session_id, [])
+        if queue in queues:
+            queues.remove(queue)
+        if not queues:
+            _sse_queues.pop(session_id, None)
+
+        return "".join(chunks)
+
+    @staticmethod
+    async def _collect_dashboard_events(
+        manager,  # noqa: ANN001
+        events: list[str],
+    ) -> str:
+        """Call dashboard_events, push events via queue, and return joined SSE text."""
+        from zing_ai.server.routes import dashboard_events
+
+        request = TestNotificationSSEOutput._mock_request(manager)
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        for ev in events:
+            queue.put_nowait(ev)
+
+        _real_render = None
+
+        def _mock_render(template_name, **kwargs):  # noqa: ANN001,ANN201,ANN003
+            if template_name == "fragments/notification_timeline.html":
+                s = kwargs.get("s")
+                sid = s.session_id if s else "unknown"
+                return f'<div id="notifications-{sid}">timeline</div>'
+            return _real_render(template_name, **kwargs)
+
+        import zing_ai.server.routes as _routes_mod
+        _real_render = _routes_mod.render
+
+        with patch("zing_ai.server.routes.asyncio.Queue", return_value=queue):
+            real_wait_for = asyncio.wait_for
+            delivery_count = 0
+
+            async def _fast_wait_for(coro, *, timeout=None):  # noqa: ANN001,ANN201
+                nonlocal delivery_count
+                delivery_count += 1
+                if delivery_count <= len(events):
+                    return await real_wait_for(coro, timeout=0.1)
+                coro.close()
+                raise asyncio.CancelledError
+
+            chunks: list[str] = []
+            with (
+                patch("zing_ai.server.routes.asyncio.wait_for", _fast_wait_for),
+                patch("zing_ai.server.routes.render", side_effect=_mock_render),
+            ):
+                try:
+                    response = await dashboard_events(request)
+                    async for chunk in response.body_iterator:
+                        if isinstance(chunk, bytes):
+                            chunk = chunk.decode()
+                        chunks.append(chunk)
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+
+        if queue in _dashboard_queues:
+            _dashboard_queues.remove(queue)
+
+        return "".join(chunks)
+
+    def test_stream_findings_notification_yields_execute_script(self) -> None:
+        """stream_findings yields execute_script with Notification JS on notification event."""
+        self._create_session(session_id="notif-stream")
+        self.manager.add_notification(
+            "notif-stream", "Build started", body="Step 1 running",
+        )
+
+        body = asyncio.run(
+            self._collect_stream_findings(
+                self.manager, "notif-stream", self.step_id, ["notification"],
+            ),
+        )
+        # The SSE output should contain a script element with Notification constructor
+        self.assertIn("Notification(", body)
+        self.assertIn("Build started", body)
+        self.assertIn("Step 1 running", body)
+
+    def test_stream_findings_notification_yields_timeline_patch(self) -> None:
+        """stream_findings yields patch_elements for notification timeline."""
+        self._create_session(session_id="notif-tl")
+        self.manager.add_notification("notif-tl", "Build started", body="Step 1 running")
+
+        body = asyncio.run(
+            self._collect_stream_findings(
+                self.manager, "notif-tl", self.step_id, ["notification"],
+            ),
+        )
+        self.assertIn("notifications-notif-tl", body)
+
+    def test_stream_findings_notification_without_body(self) -> None:
+        """stream_findings handles notification with no body (empty opts)."""
+        self._create_session(session_id="notif-nobody")
+        self.manager.add_notification("notif-nobody", "Build started")
+
+        body = asyncio.run(
+            self._collect_stream_findings(
+                self.manager, "notif-nobody", self.step_id, ["notification"],
+            ),
+        )
+        self.assertIn("Notification(", body)
+        self.assertIn("Build started", body)
+        self.assertIn("{}", body)
+
+    def test_dashboard_events_notification_yields_script_and_patch(self) -> None:
+        """dashboard_events parses notification:{session_id} and yields script + timeline."""
+        session_id = "dash-notif"
+        self._create_session(session_id=session_id)
+        self.manager.add_notification(session_id, "Review ready", body="Please check")
+
+        body = asyncio.run(
+            self._collect_dashboard_events(
+                self.manager, [f"notification:{session_id}"],
+            ),
+        )
+        self.assertIn("Notification(", body)
+        self.assertIn("Review ready", body)
+        self.assertIn("Please check", body)
+        self.assertIn(f"notifications-{session_id}", body)
+        self.assertIn(json.dumps(f"/{session_id}"), body)
+
+    def test_stream_findings_notification_empty_notifications_list(self) -> None:
+        """notification event with empty notifications list is handled gracefully."""
+        self._create_session(session_id="empty-notif")
+        session = self.manager.get_session("empty-notif")
+        assert session is not None
+        session.notifications.clear()
+
+        body = asyncio.run(
+            self._collect_stream_findings(
+                self.manager, "empty-notif", self.step_id, ["notification"],
+            ),
+        )
+        self.assertNotIn("new Notification(", body)
+
+    def test_dashboard_events_notification_empty_notifications(self) -> None:
+        """dashboard_events handles notification:{session_id} with no notifications gracefully."""
+        session_id = "dash-empty-notif"
+        self._create_session(session_id=session_id)
+        session = self.manager.get_session(session_id)
+        assert session is not None
+        session.notifications.clear()
+
+        body = asyncio.run(
+            self._collect_dashboard_events(
+                self.manager, [f"notification:{session_id}"],
+            ),
+        )
+        self.assertNotIn("new Notification(", body)
