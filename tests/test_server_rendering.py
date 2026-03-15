@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from zing_ai.server.models import (
@@ -11,11 +12,14 @@ from zing_ai.server.models import (
     EvaluationFinding,
     LitmusTest,
     Location,
+    Notification,
+    Session,
     TextFinding,
     TriageFinding,
     WarningSign,
 )
 from zing_ai.server.routes import finding_fragment
+from zing_ai.server.templates import render
 
 from tests.test_server_base import ServerTestBase
 
@@ -388,3 +392,59 @@ class TestTriageEnumValidation(ServerTestBase):
         html = finding_fragment(finding, "test-session")
         # The data-signals should contain the specified complexity
         self.assertIn('"complex"', html)
+
+
+class TestNotificationTimeline(unittest.TestCase):
+    """Tests for the notification_timeline.html template fragment."""
+
+    def _make_session(self, notifications: list[Notification] | None = None) -> Session:
+        """Create a minimal Session object for template rendering."""
+        return Session(
+            session_id="notif-test",
+            title="Test Session",
+            notifications=notifications or [],
+        )
+
+    def test_notification_timeline_with_notifications(self) -> None:
+        """Timeline renders notification entries when notifications exist."""
+        notifications = [
+            Notification(
+                title="Session created",
+                body="Your session is ready",
+                created_at=datetime(2026, 3, 14, 10, 30),
+            ),
+            Notification(
+                title="Step ready",
+                body="Review step is ready",
+                created_at=datetime(2026, 3, 14, 11, 45),
+            ),
+        ]
+        session = self._make_session(notifications=notifications)
+        html = render("fragments/notification_timeline.html", s=session)
+        self.assertIn('id="notifications-notif-test"', html)
+        self.assertIn("notification-entry", html)
+        self.assertIn("Session created", html)
+        self.assertIn("Step ready", html)
+
+    def test_notification_timeline_empty(self) -> None:
+        """Empty notifications list renders the container div with no entries."""
+        session = self._make_session(notifications=[])
+        html = render("fragments/notification_timeline.html", s=session)
+        self.assertIn('id="notifications-notif-test"', html)
+        self.assertIn("notification-timeline", html)
+        self.assertNotIn("notification-entry", html)
+
+    def test_notification_timeline_correct_time_and_title(self) -> None:
+        """Timeline entries display the correct formatted time and title."""
+        notifications = [
+            Notification(
+                title="Build started",
+                created_at=datetime(2026, 3, 14, 9, 5),
+            ),
+        ]
+        session = self._make_session(notifications=notifications)
+        html = render("fragments/notification_timeline.html", s=session)
+        self.assertIn("notification-time", html)
+        self.assertIn("09:05", html)
+        self.assertIn("notification-title", html)
+        self.assertIn("Build started", html)

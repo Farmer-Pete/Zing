@@ -20,8 +20,8 @@ def test_dashboard_loads_with_session_cards(server: _ServerInfo, page: Page) -> 
     page.goto(f"{server.base_url}/dashboard")
 
     expect(page.locator(".timeline-card")).to_have_count(2, timeout=3000)
-    expect(page.locator("text=First Session")).to_be_visible(timeout=3000)
-    expect(page.locator("text=Second Session")).to_be_visible(timeout=3000)
+    expect(page.locator(".timeline-title", has_text="First Session")).to_be_visible(timeout=3000)
+    expect(page.locator(".timeline-title", has_text="Second Session")).to_be_visible(timeout=3000)
 
 
 def test_dashboard_empty_state(server: _ServerInfo, page: Page) -> None:
@@ -42,7 +42,7 @@ def test_dashboard_reflects_new_session_on_reload(server: _ServerInfo, page: Pag
 
     # Reload to see the new session
     page.reload()
-    expect(page.locator("text=Reload Created")).to_be_visible(timeout=3000)
+    expect(page.locator(".timeline-title", has_text="Reload Created")).to_be_visible(timeout=3000)
 
 
 def test_dashboard_delete_removes_session(server: _ServerInfo, page: Page) -> None:
@@ -51,13 +51,13 @@ def test_dashboard_delete_removes_session(server: _ServerInfo, page: Page) -> No
     manager.create_session(session_id="del-1", title="Delete Me", steps=["review"])
 
     page.goto(f"{server.base_url}/dashboard")
-    expect(page.locator("text=Delete Me")).to_be_visible(timeout=3000)
+    expect(page.locator(".timeline-title", has_text="Delete Me")).to_be_visible(timeout=3000)
 
     page.locator(".cleanup-btn").click()
 
     # After cleanup, the dashboard redirects and session should be gone
     page.wait_for_url("**/dashboard", timeout=3000)
-    expect(page.locator("text=Delete Me")).not_to_be_visible(timeout=3000)
+    expect(page.locator(".timeline-title", has_text="Delete Me")).not_to_be_visible(timeout=3000)
 
 
 def test_dashboard_status_badges(server: _ServerInfo, page: Page) -> None:
@@ -205,3 +205,39 @@ def test_notif_opt_in_hidden_when_permission_granted(
 
     btn = page.locator("#notif-opt-in")
     expect(btn).not_to_be_visible(timeout=3000)
+
+
+def test_notification_timeline_appears_with_notifications(
+    server: _ServerInfo, page: Page
+) -> None:
+    """Notification timeline appears under session card when notifications exist."""
+    manager = server.manager
+    manager.create_session(session_id="timeline-1", title="Timeline Test", steps=["review"])
+    # create_session auto-adds a notification, so timeline should have entries
+    page.goto(f"{server.base_url}/dashboard")
+
+    timeline = page.locator("#notifications-timeline-1")
+    expect(timeline).to_be_visible(timeout=3000)
+    expect(page.locator("#notifications-timeline-1 .notification-entry")).to_have_count(
+        1, timeout=3000
+    )
+
+
+def test_notification_timeline_live_update(server: _ServerInfo, page: Page) -> None:
+    """Timeline updates live when new notification arrives via SSE."""
+    manager = server.manager
+    manager.create_session(session_id="live-tl", title="Live Timeline", steps=["review"])
+
+    page.goto(f"{server.base_url}/dashboard")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    # Should have 1 notification entry from auto-notification on create
+    timeline = page.locator("#notifications-live-tl")
+    expect(timeline).to_be_visible(timeout=3000)
+    entries = page.locator("#notifications-live-tl .notification-entry")
+    expect(entries).to_have_count(1, timeout=3000)
+
+    # Add a notification server-side — timeline should update via SSE
+    manager.add_notification("live-tl", title="Agent finished", body="Review is ready")
+    expect(entries).to_have_count(2, timeout=5000)
+    expect(page.locator("#notifications-live-tl .notification-title", has_text="Agent finished")).to_be_visible(timeout=3000)
