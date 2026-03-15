@@ -179,6 +179,16 @@ class LogEntry(BaseModel):
     message: str = ""
 
 
+class Notification(BaseModel):
+    """A notification record stored per-session."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:8])
+    title: str
+    body: str = ""
+    url: str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class ResponseAction(str, Enum):
     """Actions a user can take on a finding."""
 
