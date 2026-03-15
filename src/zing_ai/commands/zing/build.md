@@ -17,7 +17,10 @@ If no arguments provided:
   No zing files found in .zing/
   Run /zing:new to create one.
   ```
-- If one or more files found, use AskUserQuestion to let the user pick which zing spec to build
+- If one or more files found:
+  Before asking the user, send a browser notification so they know input is needed:
+  Call `notification_send(session_id, title="Input needed", body="Multiple zing files found. Pick which one to build.")` where `session_id` is the session ID from the zing file frontmatter.
+  Use AskUserQuestion to let the user pick which zing spec to build
 - Use the chosen file as the argument going forward
 </step>
 

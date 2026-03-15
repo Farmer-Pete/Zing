@@ -386,9 +386,16 @@ If the verdict is **Strong Design**, skip this step and say "No improvements nee
 
 Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
 
-When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's selected option. For each choice the user made (excluding "Skip"):
-- Apply the corresponding edit to the zing file using the Edit tool
-- The option's `description` field contains the concrete edit to make
+When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's response:
+
+- **Accepted findings** (user selected an option): Apply the corresponding edit to the zing file using the Edit tool. The option's `description` field contains the concrete edit to make.
+- **Skipped findings**: Exclude entirely.
+- **Discuss findings**: Walk through each one conversationally with the user before applying:
+  - Lead with what the agent found, referencing the relevant code naturally
+  - Show a short code snippet so the user can see exactly what's being discussed
+  - Explain the trade-offs or concerns in plain language
+  - Ask the user what they'd like to do and apply their decision
+  - Vary how you introduce each finding — don't start every one the same way
 
 After all improvements have been applied, summarize what was changed.
 </step>
@@ -414,6 +421,9 @@ If the document already has a `## Progress` section, skip this step.
 Tell the user whether you added a Progress section or if one already existed.
 
 End your summary with: "Zing! Audit complete."
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Audit complete", body="Plan audit finished. Choose next step: build, create tickets, or view plan.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Then use AskUserQuestion to ask the user what they'd like to do next:
 - Option 1: "Start build" — invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited

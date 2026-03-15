@@ -10,7 +10,10 @@ Determine which PR to work on:
 
 1. If the user provided a full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/123`), extract the PR number.
 2. If the user provided a PR number (e.g., `123`, `#123`), use that directly.
-3. If neither was provided, use AskUserQuestion to ask the user to provide a PR link or number. Do not proceed until one is given.
+3. If neither was provided:
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="Provide the PR number to respond to.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion to ask the user to provide a PR link or number. Do not proceed until one is given.
 
 Once you have the PR number, run:
 ```
@@ -69,7 +72,10 @@ Merged latest {baseRefName} — no conflicts.
 **If there are merge conflicts**, resolve them:
 1. Run `git diff --name-only --diff-filter=U` to list conflicted files.
 2. For each conflicted file, read it to understand the conflict markers.
-3. Resolve each conflict by analyzing both sides and choosing the correct resolution. If the intent is ambiguous, use AskUserQuestion to let the user decide.
+3. Resolve each conflict by analyzing both sides and choosing the correct resolution. If the intent is ambiguous:
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Merge conflict", body="An ambiguous merge conflict needs manual resolution.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion to let the user decide.
 4. After resolving all conflicts, stage the resolved files (specific files only, NEVER `git add -A` or `git add .`) and complete the merge:
    ```
    git commit --no-edit
@@ -272,7 +278,10 @@ For each comment, in order — marking the corresponding comment task as `in_pro
    ```
    Then make the code change.
 
-6. **If there are multiple valid approaches**, present them as a menu using AskUserQuestion:
+6. **If there are multiple valid approaches**:
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="A PR comment needs your decision on how to address it.")` where `session_id` is the session ID from the zing file frontmatter.
+   Present them as a menu using AskUserQuestion:
    - Question: "How should this be addressed?"
    - Options: List each approach with a short label and description
    - Include an "Other" option so the user can describe their own approach

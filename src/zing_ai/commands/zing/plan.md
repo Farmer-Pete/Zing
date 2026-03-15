@@ -84,7 +84,7 @@ Each subagent receives a prompt with:
 >
 > **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations like "X works fine" or "No changes needed" — those belong in your returned findings text, not in the review UI. Every finding must ask the user to decide something.
 >
-> The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide.
+> The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide. The body supports full markdown — use code snippets, tables, and mermaid diagrams where they help. Always prefer showing code over describing it.
 >
 > **Prefer `triage` type with `options`** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
 >
@@ -123,7 +123,16 @@ Otherwise, collect and deduplicate findings from all subagents:
 
 5. **Merge findings:** Combine all subagent findings (from the bulleted text above the `---JSONL---` marker in each subagent's output) into a single understanding of the codebase state.
 
-6. **Incorporate answers:** Iterate over the returned review items and incorporate the user's answers into your understanding. Use these answers alongside the merged findings when fleshing out the plan in the next step.
+6. **Incorporate answers:** Iterate over the returned review items. Most items will have a direct answer — incorporate those into your understanding.
+
+   For any items the user marked **"Discuss"**, walk through each one conversationally before continuing:
+   - Lead with what the subagent found, referencing the relevant code naturally: "In `auth.py` around line 15, ..."
+   - Show a short code snippet so the user can see exactly what's being discussed
+   - Explain the trade-offs or concerns in plain language
+   - Ask the user what they'd like to do and record their decision
+   - Vary how you introduce each finding — don't start every one the same way
+
+   Use all answers (both direct and discussed) alongside the merged findings when fleshing out the plan in the next step.
 </step>
 
 <step name="flesh_out_document">
@@ -181,11 +190,14 @@ Then show the user the dashboard link where they can view the rendered plan:
 
 Where `{url}` is the session URL returned by `session_create` (e.g., `http://localhost:{port}/{session_id}`).
 
-Then ask the user: "Want to make any modifications to the plan before handing off to audit? If so, describe what to change. When you're done, say **DONE**."
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Plan ready for review", body="The plan is complete. Review and approve or request changes.")` where `session_id` is the session ID from the zing file frontmatter.
 
-If the user requests modifications, make the requested changes to the zing document, save it, and ask again if there's anything else to change. Continue this conversation loop until the user says "DONE" (case-insensitive).
+Then use `AskUserQuestion` to ask if the user wants to make modifications before handing off to audit. Offer two options: one to proceed to audit, and one to make modifications.
 
-Once the user says DONE (or declines to make modifications), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+If the user chooses to proceed, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+
+If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says exactly "DONE" (all caps), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 </step>
 
 </process>

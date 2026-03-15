@@ -147,6 +147,9 @@ After the report has been written, submit a GitHub PR review using the API. Use 
 - If all remaining findings are `medium` or `low`: suggest `COMMENT`
 - If zero findings remain after triage: suggest `APPROVE`
 
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="PR review complete", body="Review findings are ready. Approve, comment, or request changes.")` where `session_id` is the session ID from the zing file frontmatter.
+
 **Ask the user what action to take.** Use AskUserQuestion to present your suggestion and let the user decide. Show your reasoning (e.g. "Found 2 high-severity issues after triage, so I'd suggest requesting changes") and offer all three options — APPROVE, COMMENT, REQUEST_CHANGES — with your suggestion marked as recommended. Use the event the user selects for the submission.
 
 **Get the latest commit SHA** for the PR (needed by the API):
@@ -263,6 +266,9 @@ Count the findings by complexity and determine the default:
 
 ### Present the "What next?" question
 
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="PR audit complete", body="Choose how to proceed with the PR.")` where `session_id` is the session ID from the zing file frontmatter.
+
 Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
 
 - "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
@@ -320,6 +326,9 @@ Automatically apply fixes for all accepted/downgraded findings without interacti
 
 <step name="discuss_findings">
 Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Before presenting findings, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
 

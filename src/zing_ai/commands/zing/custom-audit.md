@@ -12,7 +12,10 @@ Read the shared review reference file at `~/.claude/commands/zing/_shared/review
 <step name="resolve_scope">
 Convert the user's description into a concrete set of files to audit.
 
-1. **If no arguments provided**, use AskUserQuestion to ask: "What code should be audited? You can provide file/directory paths (e.g. `src/auth/`), a description (e.g. 'the authentication module'), or a mix of both."
+1. **If no arguments provided**:
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="Specify which code to audit.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion to ask: "What code should be audited? You can provide file/directory paths (e.g. `src/auth/`), a description (e.g. 'the authentication module'), or a mix of both."
 
 2. **Parse for explicit paths.** Check each whitespace-separated or comma-separated token to see if it resolves to an existing file or directory (via `test -e` or `ls`). Collect hits as "explicit paths." For directories, recursively include all code files within them.
 
@@ -46,6 +49,9 @@ Convert the user's description into a concrete set of files to audit.
 
    5 files, ~387 lines total
    ```
+
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Confirm audit scope", body="Review the proposed audit scope and confirm or adjust.")` where `session_id` is the session ID from the zing file frontmatter.
 
    Use AskUserQuestion:
    - "Looks good, start the audit" (description: "Review these {count} files")
@@ -285,6 +291,9 @@ Count the findings by complexity and determine the default using the `smart_defa
 
 ### Present the "What next?" question
 
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Custom audit complete", body="Review findings are ready. Choose how to proceed.")` where `session_id` is the session ID from the zing file frontmatter.
+
 Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
 
 - "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
@@ -332,6 +341,9 @@ Automatically apply fixes for all accepted/downgraded findings without interacti
 
 <step name="discuss_findings">
 Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Before presenting findings, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
 

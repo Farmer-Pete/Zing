@@ -46,6 +46,9 @@ The user has provided a Linear filter/view URL. The goal is to find a ticket wor
    - The priority
    - A brief summary of what it's about
 
+   If a session has already been created at this point, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Ticket found", body="A suitable Linear ticket was found. Confirm or skip.")` where `session_id` is the session ID from the `session_create` call.
+
    Then use `AskUserQuestion` to ask:
    - Question: "Want to work on this ticket?"
    - Options:

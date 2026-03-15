@@ -39,7 +39,10 @@ Call `mcp__linear__list_teams` to get the available teams.
 
 If there is exactly one team, use it automatically.
 
-If there are multiple teams, use AskUserQuestion to let the user pick which team to create tickets in. Present each team as an option.
+If there are multiple teams:
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Input needed", body="Select a Linear team for ticket creation.")` where `session_id` is the session ID from the zing file frontmatter.
+Use AskUserQuestion to let the user pick which team to create tickets in. Present each team as an option.
 </step>
 
 <step name="confirm_plan">
@@ -49,6 +52,9 @@ Before creating anything in Linear, show the user a summary of what will be crea
 - **Team**: the selected team name
 - **Project**: whether a project will be created (yes if >1 phase, no if single phase)
 - **Tickets**: list each phase name that will become a ticket
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Confirm ticket creation", body="Review the proposed Linear tickets and confirm.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Use AskUserQuestion to confirm: "Create these in Linear?"
 - "Yes, create these" — proceed to the next step
@@ -164,6 +170,9 @@ Print a summary of everything created:
 - Whether the full plan was attached
 
 End with: "Zing! Linear tickets created."
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Tickets created", body="Linear tickets are ready. Choose next step.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Then use AskUserQuestion to ask the user what they'd like to do next:
 - Option 1: "Start build" — invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing plan file

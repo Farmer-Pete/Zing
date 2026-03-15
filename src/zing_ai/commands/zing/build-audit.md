@@ -138,6 +138,9 @@ Count the findings by complexity and determine the default:
 
 ### Present the "What next?" question
 
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Build audit complete", body="Review findings are ready. Choose how to proceed.")` where `session_id` is the session ID from the zing file frontmatter.
+
 Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
 
 - "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
@@ -153,7 +156,9 @@ If "Fix with chat": proceed to the `discuss_findings` step.
 
 If "Create a PR":
 1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
-2. If `gh pr create` fails, show the error message and use AskUserQuestion:
+2. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="PR creation failed", body="The pull request could not be created. Manual intervention needed.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion:
    - "Try again" (description: "Retry gh pr create --draft --fill")
    - "Try without --fill" (description: "Run gh pr create --draft without --fill, letting gh prompt for title/body")
    - "Skip PR creation" (description: "Continue without creating a PR")
@@ -202,6 +207,9 @@ Automatically apply fixes for all accepted/downgraded findings without interacti
 
 <step name="discuss_findings">
 Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Before presenting findings, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
 
