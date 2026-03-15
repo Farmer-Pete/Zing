@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+
+from tests.test_server_base import _STEP, ServerTestBase
 from zing_ai.server.mcp_tools import (
     agent_start,
     agent_stop,
@@ -16,8 +18,6 @@ from zing_ai.server.mcp_tools import (
     step_start,
 )
 from zing_ai.server.models import UserResponse
-
-from tests.test_server_base import ServerTestBase, _STEP
 
 
 class TestSessionCreate(ServerTestBase):

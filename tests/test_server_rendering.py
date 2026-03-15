@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from tests.test_server_base import ServerTestBase
 from zing_ai.server.models import (
     ChoiceOption,
     CriterionRating,
@@ -20,8 +21,6 @@ from zing_ai.server.models import (
 )
 from zing_ai.server.routes import finding_fragment
 from zing_ai.server.templates import render
-
-from tests.test_server_base import ServerTestBase
 
 
 class TestFindingFragment(unittest.TestCase):

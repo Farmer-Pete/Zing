@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import tempfile
 import threading
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 import uvicorn

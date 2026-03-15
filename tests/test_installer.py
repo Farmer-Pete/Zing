@@ -24,6 +24,7 @@ EXPECTED_FILES = [
     "zing/pr-audit.md",
     "zing/plan-linear.md",
     "zing/custom-audit.md",
+    "zing/pr-respond.md",
     "zing/_shared/review-core.md",
 ]
 
@@ -170,6 +171,7 @@ OPENCODE_EXPECTED_FILES = [
     "zing-pr-audit.md",
     "zing-plan-linear.md",
     "zing-custom-audit.md",
+    "zing-pr-respond.md",
     "_shared/review-core.md",
 ]
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from enum import Enum, StrEnum
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -151,7 +151,7 @@ Finding = Annotated[
 ]
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     """Possible states of a review session."""
 
     PENDING = "pending"
@@ -189,7 +189,7 @@ class Notification(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
-class ResponseAction(str, Enum):
+class ResponseAction(StrEnum):
     """Actions a user can take on a finding."""
 
     ACCEPT = "accept"

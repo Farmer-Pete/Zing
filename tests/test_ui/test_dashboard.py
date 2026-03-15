@@ -53,11 +53,14 @@ def test_dashboard_delete_removes_session(server: _ServerInfo, page: Page) -> No
     page.goto(f"{server.base_url}/dashboard")
     expect(page.locator(".timeline-title", has_text="Delete Me")).to_be_visible(timeout=3000)
 
+    # Auto-accept the confirm() dialog triggered by the cleanup button
+    page.on("dialog", lambda dialog: dialog.accept())
     page.locator(".cleanup-btn").click()
 
     # After cleanup, the dashboard redirects and session should be gone
-    page.wait_for_url("**/dashboard", timeout=3000)
-    expect(page.locator(".timeline-title", has_text="Delete Me")).not_to_be_visible(timeout=3000)
+    page.wait_for_url("**/dashboard", timeout=5000)
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+    expect(page.locator(".timeline-title", has_text="Delete Me")).not_to_be_visible(timeout=5000)
 
 
 def test_dashboard_status_badges(server: _ServerInfo, page: Page) -> None:
@@ -186,7 +189,10 @@ def test_notif_opt_in_visible_when_permission_default(
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.add_init_script("""
-        window.Notification = { permission: 'default', requestPermission: () => Promise.resolve('default') };
+        window.Notification = {
+            permission: 'default',
+            requestPermission: () => Promise.resolve('default'),
+        };
     """)
     page.goto(f"{server.base_url}/dashboard")
     page.wait_for_load_state("domcontentloaded", timeout=3000)
@@ -203,7 +209,10 @@ def test_notif_opt_in_hidden_when_permission_granted(
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.add_init_script("""
-        window.Notification = { permission: 'granted', requestPermission: () => Promise.resolve('granted') };
+        window.Notification = {
+            permission: 'granted',
+            requestPermission: () => Promise.resolve('granted'),
+        };
     """)
     page.goto(f"{server.base_url}/dashboard")
     page.wait_for_load_state("domcontentloaded", timeout=3000)
@@ -220,7 +229,10 @@ def test_notif_opt_in_click_hides_button(
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.add_init_script("""
-        window.Notification = { permission: 'default', requestPermission: () => Promise.resolve('granted') };
+        window.Notification = {
+            permission: 'default',
+            requestPermission: () => Promise.resolve('granted'),
+        };
     """)
     page.goto(f"{server.base_url}/dashboard")
     page.wait_for_load_state("domcontentloaded", timeout=3000)
@@ -270,5 +282,8 @@ def test_notification_timeline_live_update(server: _ServerInfo, page: Page) -> N
     # Add a notification server-side — timeline should update via SSE
     manager.add_notification("live-tl", title="Agent finished", body="Review is ready")
     expect(entries).to_have_count(2, timeout=5000)
-    expect(page.locator("#notifications-live-tl .notification-title", has_text="Agent finished")).to_be_visible(timeout=3000)
+    notif_title = page.locator(
+        "#notifications-live-tl .notification-title", has_text="Agent finished",
+    )
+    expect(notif_title).to_be_visible(timeout=3000)
     assert errors == [], f"JS console errors: {errors}"

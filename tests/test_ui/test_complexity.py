@@ -7,9 +7,8 @@ import re
 import pytest
 from playwright.sync_api import Page, expect
 
-from zing_ai.server.models import Complexity, ResponseAction, UserResponse
-
 from tests.test_ui.conftest import _ServerInfo
+from zing_ai.server.models import Complexity, ResponseAction, UserResponse
 
 pytestmark = pytest.mark.ui
 

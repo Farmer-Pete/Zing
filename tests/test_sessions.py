@@ -333,7 +333,7 @@ class TestConcurrentSessions(unittest.TestCase):
         s1 = self.manager.create_session("s1", "Session 1", steps=[_STEP])
         step1 = self.manager.start_step("s1", s1.steps[0].step_id)
         s2 = self.manager.create_session("s2", "Session 2", steps=[_STEP])
-        step2 = self.manager.start_step("s2", s2.steps[0].step_id)
+        self.manager.start_step("s2", s2.steps[0].step_id)
 
         self.manager.start_agent("s1", step1.step_id, "agent-1")
         self.manager.stop_agent("s1", step1.step_id, "agent-1")
@@ -476,7 +476,7 @@ class TestAgentTracking(unittest.TestCase):
         # Add 3 findings
         f1 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q1"})
         f2 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q2"})
-        f3 = self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q3"})
+        self.manager.add_finding("s1", step.step_id, {"type": "text", "title": "Q3"})
 
         # Auto-save 2 of 3 responses (by finding ID)
         self.manager.save_response("s1", step.step_id, f1.id, UserResponse(answer="A1"))
@@ -796,13 +796,13 @@ class TestSaveResponse(unittest.TestCase):
         session = self.manager.create_session("s1", "Test", steps=[_STEP])
         step = self.manager.start_step("s1", session.steps[0].step_id)
 
-        f1 = self.manager.add_finding("s1", step.step_id, {
+        self.manager.add_finding("s1", step.step_id, {
             "type": "text", "title": "Finding 1",
         })
         f2 = self.manager.add_finding("s1", step.step_id, {
             "type": "text", "title": "Finding 2",
         })
-        f3 = self.manager.add_finding("s1", step.step_id, {
+        self.manager.add_finding("s1", step.step_id, {
             "type": "text", "title": "Finding 3",
         })
 

@@ -252,7 +252,9 @@ def test_sim_finding_triage_options(mock_mcp_call, mock_state_file, sample_state
     ]
 
 
-def test_sim_finding_triage_options_requires_two_options(mock_mcp_call, mock_state_file, sample_state):
+def test_sim_finding_triage_options_requires_two_options(
+    mock_mcp_call, mock_state_file, sample_state,
+):
     mock_state_file.write_text(json.dumps(sample_state))
     runner = CliRunner()
     result = runner.invoke(

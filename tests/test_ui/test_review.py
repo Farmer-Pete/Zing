@@ -63,7 +63,7 @@ def _create_session_with_all_finding_types(
     session_id: str = "all-types",
     title: str = "All Finding Types",
 ) -> str:
-    """Create a READY session with all finding types (triage, text, triage-with-options, evaluation). Returns step_id."""
+    """Create a READY session with all finding types. Returns step_id."""
     manager = server.manager
     session = manager.create_session(
         session_id=session_id, title=title, steps=[_STEP]
@@ -529,7 +529,8 @@ def test_triage_approach_other_flow(server: _ServerInfo, page: Page) -> None:
     _wait_for_datastar(page)
 
     # Click the "Other" approach radio
-    other_radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='__other__']")
+    other_sel = "#finding-triage-2 input[name='approach-triage-2'][value='__other__']"
+    other_radio = page.locator(other_sel)
     with page.expect_response("**/save-response", timeout=3000):
         other_radio.click()
 
@@ -1002,7 +1003,8 @@ def test_triage_approach_other_restores_on_reload(server: _ServerInfo, page: Pag
     expect(accept_btn).to_have_class(re.compile("selected"), timeout=3000)
 
     # "Other" radio should be checked
-    other_radio = page.locator("#finding-triage-2 input[name='approach-triage-2'][value='__other__']")
+    other_sel = "#finding-triage-2 input[name='approach-triage-2'][value='__other__']"
+    other_radio = page.locator(other_sel)
     expect(other_radio).to_be_checked(timeout=3000)
 
     # Custom textarea should be visible and pre-filled

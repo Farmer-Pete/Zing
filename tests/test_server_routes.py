@@ -1084,7 +1084,7 @@ class TestNotificationSSEOutput(ServerTestBase):
         self.assertIn("{}", body)
 
     def test_dashboard_events_notification_yields_script_and_patch(self) -> None:
-        """dashboard_events parses notification:{notif_id}:{session_id} and yields script + timeline."""
+        """dashboard_events parses notification and yields script + timeline."""
         session_id = "dash-notif"
         self._create_session(session_id=session_id)
         notif = self.manager.add_notification(

@@ -243,11 +243,11 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
 
     try:
         body: dict[str, Any] = await request.json()
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=400,
             detail={"error": "invalid_json", "message": "Request body is not valid JSON"},
-        )
+        ) from exc
 
     step_id = body.get("step_id")
     if not step_id:
@@ -322,7 +322,7 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
         ]
 
     try:
-        review = manager.submit_responses(session_id, step_id, responses)
+        manager.submit_responses(session_id, step_id, responses)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -382,7 +382,10 @@ def _map_signals_to_responses(
             if isinstance(raw_complexity, str) and raw_complexity in {c.value for c in Complexity}:
                 complexity = Complexity(raw_complexity)
             responses.append(
-                UserResponse(action=action, selected=selected, other_text=other_text, complexity=complexity)
+                UserResponse(
+                    action=action, selected=selected,
+                    other_text=other_text, complexity=complexity,
+                )
             )
         elif finding.type == "evaluation":
             responses.append(UserResponse())
