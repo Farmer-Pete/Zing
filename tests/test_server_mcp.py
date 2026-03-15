@@ -8,6 +8,7 @@ from zing_ai.server.mcp_tools import (
     agent_stop,
     configure,
     finding_submit,
+    notification_send,
     review_wait,
     session_create,
     session_update,
@@ -322,3 +323,47 @@ class TestMCPFindingSubmit(ServerTestBase):
             )
         )
         self.assertIn("error", result)
+
+
+class TestNotificationSend(ServerTestBase):
+    """Tests for the notification_send MCP tool."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        configure(self.manager, port=9876)
+
+    def test_notification_send_valid_session(self) -> None:
+        """notification_send with a valid session returns status sent and notification_id."""
+        self._create_session(session_id="notif-valid")
+        result = asyncio.run(
+            notification_send(session_id="notif-valid", title="Build complete")
+        )
+        self.assertEqual(result["status"], "sent")
+        self.assertIn("notification_id", result)
+
+    def test_notification_send_invalid_session(self) -> None:
+        """notification_send with an invalid session_id returns an error dict."""
+        result = asyncio.run(
+            notification_send(session_id="nonexistent", title="Oops")
+        )
+        self.assertIn("error", result)
+
+    def test_notification_send_body_and_url_stored(self) -> None:
+        """notification_send stores optional body and url on the created notification."""
+        self._create_session(session_id="notif-opts")
+        result = asyncio.run(
+            notification_send(
+                session_id="notif-opts",
+                title="Deploy ready",
+                body="Version 2.1 is staged",
+                url="https://example.com/deploy",
+            )
+        )
+        self.assertEqual(result["status"], "sent")
+
+        session = self.manager.get_session("notif-opts")
+        assert session is not None
+        notification = session.notifications[-1]
+        self.assertEqual(notification.title, "Deploy ready")
+        self.assertEqual(notification.body, "Version 2.1 is staged")
+        self.assertEqual(notification.url, "https://example.com/deploy")
