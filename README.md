@@ -54,19 +54,19 @@ These are all worth checking out. But there's a fundamental philosophical differ
 
 |  | [Zing](https://github.com/Farmer-Pete/Zing) | [GSD](https://github.com/gsd-build/get-shit-done) | [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) | [Taskmaster AI](https://github.com/eyaltoledano/claude-task-master) | [Spec Kit](https://github.com/github/spec-kit) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Capture requirements | Yes | Yes | Yes | Via PRD | Yes | Yes |
-| Plan | Yes | Yes | Yes | Yes | Yes | Yes |
-| Audit plan before build | **Yes** | — | Partial | — | — | — |
-| Build with context isolation | **Yes** | Yes | — | — | — | — |
-| Code review | **Yes** | — | Partial | — | — | — |
-| PR creation & response | **Yes** | — | — | — | — | — |
-| Live review dashboard | **Yes** | — | — | — | — | — |
-| Parallel specialized agents | **Yes** | — | — | — | — | — |
-| Async batch decision UI | **Yes** | — | — | — | — | — |
-| Fresh context per phase | Yes | **Yes** | — | Yes | — | — |
-| Multi-model support | — | **Yes** | — | — | — | — |
-| Task dependency graphs | — | — | — | **Yes** | — | — |
-| Agent-agnostic | — | Partial | — | Yes | **Yes** | Yes |
+| Capture requirements | ✅ | ☑️ | ☑️ | Via PRD | ☑️ | ☑️ |
+| Plan | ✅ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| Audit plan before build | ✅ | — | Partial | — | — | — |
+| Build with context isolation | ✅ | ☑️ | — | — | — | — |
+| Code review | ✅ | — | Partial | — | — | — |
+| PR creation & response | ✅ | — | — | — | — | — |
+| Live review dashboard | ✅ | — | — | — | — | — |
+| Parallel specialized agents | ✅ | — | — | — | — | — |
+| Async batch decision UI | ✅ | — | — | — | — | — |
+| Fresh context per phase | ✅ | ☑️ | — | ☑️ | — | — |
+| Multi-model support | — | ☑️ | — | — | — | — |
+| Task dependency graphs | — | — | — | ☑️ | — | — |
+| Agent-agnostic | — | Partial | — | ☑️ | ☑️ | ☑️ |
 | Runtimes supported | Claude Code, OpenCode | Claude Code, OpenCode, Gemini CLI, Codex | Claude Code, Cursor | 13+ IDEs | Agent-agnostic | 20+ tools |
 | Issue tracker integration | **Linear** | — | — | — | GitHub | — |
 
