@@ -20,6 +20,7 @@ from zing_ai.server.models import (
     AgentState,
     Finding,
     LogEntry,
+    Notification,
     ReviewItem,
     ReviewResponse,
     Session,
@@ -770,3 +771,14 @@ class SessionManager:
         if session is None:
             raise KeyError(f"Session not found: {session_id}")
         return session
+
+    def add_notification(
+        self, session_id: str, title: str, body: str = "", url: str | None = None
+    ) -> Notification:
+        """Create a notification, append it to the session, persist, and notify."""
+        session = self._get_session_or_raise(session_id)
+        notification = Notification(title=title, body=body, url=url)
+        session.notifications.append(notification)
+        self._persist(session)
+        self._notify("notification_added", session_id)
+        return notification
