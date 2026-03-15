@@ -11,6 +11,7 @@ from zing_ai.server.models import (
     Complexity,
     Confidence,
     Finding,
+    Notification,
     Severity,
     TriageFinding,
     UserResponse,
@@ -266,6 +267,70 @@ class TestTriageMetadataValidation(unittest.TestCase):
         finding = step.findings[0]
         assert isinstance(finding, TriageFinding)
         assert finding.body == ""
+
+
+class TestNotificationModel(unittest.TestCase):
+    """Test Notification model creation, defaults, and serialization."""
+
+    def test_required_title(self) -> None:
+        """Notification requires a title."""
+        n = Notification(title="Hello")
+        assert n.title == "Hello"
+
+    def test_id_auto_generated(self) -> None:
+        """id is auto-generated as an 8-char hex string."""
+        n = Notification(title="Test")
+        assert isinstance(n.id, str)
+        assert len(n.id) == 8
+        # Should be valid hex
+        int(n.id, 16)
+
+    def test_id_unique(self) -> None:
+        """Two notifications get different ids."""
+        n1 = Notification(title="A")
+        n2 = Notification(title="B")
+        assert n1.id != n2.id
+
+    def test_body_defaults_to_empty(self) -> None:
+        """body defaults to empty string."""
+        n = Notification(title="Test")
+        assert n.body == ""
+
+    def test_url_defaults_to_none(self) -> None:
+        """url defaults to None."""
+        n = Notification(title="Test")
+        assert n.url is None
+
+    def test_created_at_auto_set(self) -> None:
+        """created_at is auto-set to a datetime."""
+        from datetime import datetime
+
+        n = Notification(title="Test")
+        assert isinstance(n.created_at, datetime)
+
+    def test_explicit_values(self) -> None:
+        """Explicit body and url are preserved."""
+        n = Notification(title="Alert", body="Details here", url="/session/s1")
+        assert n.title == "Alert"
+        assert n.body == "Details here"
+        assert n.url == "/session/s1"
+
+    def test_model_dump(self) -> None:
+        """model_dump() serializes all fields."""
+        n = Notification(title="Alert", body="Details", url="/s1")
+        data = n.model_dump()
+        assert data["title"] == "Alert"
+        assert data["body"] == "Details"
+        assert data["url"] == "/s1"
+        assert "id" in data
+        assert "created_at" in data
+
+    def test_model_dump_defaults(self) -> None:
+        """model_dump() includes default values."""
+        n = Notification(title="Test")
+        data = n.model_dump()
+        assert data["body"] == ""
+        assert data["url"] is None
 
 
 if __name__ == "__main__":

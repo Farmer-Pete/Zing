@@ -949,5 +949,83 @@ class TestAddLog(unittest.TestCase):
             self.manager.add_log("s1", "nonexistent-step-id", "agent", "msg")
 
 
+class TestNotifications(unittest.TestCase):
+    """Tests for notification storage, auto-generation, persistence, and events."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_add_notification_stores_on_session(self) -> None:
+        """add_notification() appends a Notification to session.notifications."""
+        self.manager.create_session("s1", "Test")
+        notif = self.manager.add_notification("s1", "Alert", body="Details", url="/s1")
+        session = self.manager.get_session("s1")
+        # create_session adds one auto-notification, add_notification adds another
+        assert len(session.notifications) == 2
+        assert session.notifications[-1].title == "Alert"
+        assert session.notifications[-1].body == "Details"
+        assert session.notifications[-1].url == "/s1"
+        assert session.notifications[-1].id == notif.id
+
+    def test_add_notification_persists_to_disk(self) -> None:
+        """Notifications added via add_notification() survive a manager restart."""
+        self.manager.create_session("s1", "Test")
+        self.manager.add_notification("s1", "Persisted alert")
+
+        mgr2 = SessionManager(data_dir=self.data_dir)
+        session = mgr2.get_session("s1")
+        titles = [n.title for n in session.notifications]
+        assert "Persisted alert" in titles
+
+    def test_create_session_auto_notification(self) -> None:
+        """create_session() auto-creates a 'New session: {title}' notification."""
+        session = self.manager.create_session("s1", "My Review")
+        assert len(session.notifications) == 1
+        assert session.notifications[0].title == "New session: My Review"
+
+    def test_mark_step_ready_auto_notification(self) -> None:
+        """mark_step_ready() auto-creates a 'Review ready: {step_name}' notification."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
+        self.manager.mark_step_ready("s1", step.step_id)
+
+        session = self.manager.get_session("s1")
+        titles = [n.title for n in session.notifications]
+        assert f"Review ready: {_STEP}" in titles
+
+    def test_notifications_survive_persistence_roundtrip(self) -> None:
+        """Notifications from both auto-generation and add_notification survive save/reload."""
+        session = self.manager.create_session("s1", "Test", steps=[_STEP])
+        step = self.manager.start_step("s1", session.steps[0].step_id)
+        self.manager.start_agent("s1", step.step_id, "agent-1")
+        self.manager.stop_agent("s1", step.step_id, "agent-1")
+        self.manager.mark_step_ready("s1", step.step_id)
+        self.manager.add_notification("s1", "Custom alert")
+
+        mgr2 = SessionManager(data_dir=self.data_dir)
+        session = mgr2.get_session("s1")
+        titles = [n.title for n in session.notifications]
+        assert "New session: Test" in titles
+        assert f"Review ready: {_STEP}" in titles
+        assert "Custom alert" in titles
+        assert len(session.notifications) == 3
+
+    def test_notification_added_event_emitted(self) -> None:
+        """add_notification() emits a 'notification_added' event to listeners."""
+        self.manager.create_session("s1", "Test")
+        events: list[tuple[str, str]] = []
+        self.manager.add_listener(lambda et, sid: events.append((et, sid)))
+
+        self.manager.add_notification("s1", "Alert")
+        assert ("notification_added", "s1") in events
+
+
 if __name__ == "__main__":
     unittest.main()
