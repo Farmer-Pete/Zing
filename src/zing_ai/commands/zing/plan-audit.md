@@ -160,7 +160,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 ---JSONL---
 {"type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":true,"details":"{details}"},{"name":"Only one approach considered","found":false,"details":""},{"name":"Components for future flexibility","found":false,"details":""}]}
-{"type":"triage","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
 
 Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
@@ -222,7 +222,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 ---JSONL---
 {"type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":true,"details":"{details}"},{"name":"Data model is afterthought","found":false,"details":""},{"name":"Deployment strategy deferred","found":false,"details":""},{"name":"No test strategy","found":false,"details":""}]}
-{"type":"triage","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
 
 Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
@@ -290,7 +290,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 ---JSONL---
 {"type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":true,"details":"{details}"},{"name":"Steps missing acceptance criteria","found":false,"details":""},{"name":"Vague or weasel words","found":false,"details":""},{"name":"Unspecified tech choices","found":false,"details":""},{"name":"Missing data models","found":false,"details":""},{"name":"TBD/TODO markers","found":false,"details":""},{"name":"Tests separated from implementation","found":false,"details":""},{"name":"Steps that cannot be verified independently","found":false,"details":""},{"name":"Scaffolding steps without behavior","found":false,"details":""}]}
-{"type":"triage","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
 
 Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
@@ -334,7 +334,7 @@ If `agent_start` or `agent_stop` returns an error:
 
 ---JSONL---
 {"type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}
-{"type":"triage","title":"{short problem title}","body":"{describe the specific problem found and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
 
 Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing"). If you have no improvement findings, the evaluation line alone is sufficient.
