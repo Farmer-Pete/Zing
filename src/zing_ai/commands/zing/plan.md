@@ -10,7 +10,19 @@ Read the provided zing document to understand what the user wants to build.
 </step>
 
 <step name="explore_codebase">
-Before asking any questions, explore the codebase to understand the current state of the zing spec. This step has two phases:
+Before asking any questions, explore the codebase to understand the current state of the zing spec.
+
+### Session setup
+
+After reading the zing doc, parse its YAML frontmatter. Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
+
+If there is no `session` in the frontmatter (or no frontmatter at all), this is a standalone invocation. Call `session_create(title)` to get a new session ID and step IDs, then update the zing doc's frontmatter to include `session: {session_id}` and `steps:` with the returned step ID mapping. Save the file after updating.
+
+Once you have the session ID and step IDs, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title=doc_title)` to associate the zing file with the session.
+
+Then call `step_start(session_id, steps.plan)` where `steps.plan` is the plan step ID from the frontmatter. This transitions the plan step from PENDING to STARTED.
+
+The session ID and plan step ID will be used by subagents for agent lifecycle tracking.
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
@@ -64,28 +76,63 @@ Each subagent receives a prompt with:
 ## Findings: {area name}
 
 {Bulleted list of what exists in the codebase relevant to this area — files found, patterns observed, tech stack details, existing interfaces, gaps identified}
-
-## Proposed Questions
-
-{Numbered list of questions for the user, grounded in specific codebase findings. Each question should reference what was found. Example:
-1. "I see you're using Express with middleware pattern X — should this new feature follow the same pattern?"
-2. "The existing data model has table Y — does this feature extend that or need a new model?"}
 ```
 
-**Important:** Subagents must NOT call AskUserQuestion directly. They only return proposed questions as text in their output.
+**Important:** Subagents must NOT call AskUserQuestion directly. Instead, each subagent tracks its lifecycle via MCP tools and returns its findings as JSONL. Include these instructions verbatim in each subagent prompt:
 
-### Phase C — Centralized Q&A (main thread)
+> **Agent lifecycle:** At the very start of your task, call `agent_start(session_id, step_id, name, description)` where `name` is your area name (e.g. "data-model") and `description` is a short phrase describing what you're investigating. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name)`.
+>
+> **Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations like "X works fine" or "No changes needed" — those belong in your returned findings text, not in the review UI. Every finding must ask the user to decide something.
+>
+> The `title` field should be a short question. The `body` field provides context and analysis, and **must end with a clear question** that tells the user what you need them to decide. The body supports full markdown — use code snippets, tables, and mermaid diagrams where they help. Always prefer showing code over describing it.
+>
+> **Prefer `triage` type with `options`** — provide 2-4 concrete options based on what you found in the codebase. Only use `text` type if the question is truly open-ended and you cannot suggest any reasonable options.
+>
+> **Do NOT call `finding_submit` directly.** Instead, format each finding as a JSON line and return them all at the end of your task output using this exact format:
+>
+> ```
+> ## Findings: {area name}
+> ...bulleted findings text...
+>
+> ---JSONL---
+> {"type":"triage","title":"How should we handle the /mcp route conflict?","body":"The FastAPI router has a `/{session_id}` catch-all that would intercept `/mcp`. I found three viable approaches in the codebase.\n\nWhich approach should we use?","options":[{"label":"Mount at /mcp-server","description":"Use app.mount(\"/mcp-server\", mcp_app) with streamable_http_path=\"/\""},{"label":"Restructure routes","description":"Move /{session_id} to /sessions/{session_id} to avoid conflicts"},{"label":"Extract and insert route","description":"Insert the /mcp route before the catch-all in FastAPI's route list"}]}
+> {"type":"text","title":"What naming convention should we use for the new endpoints?","body":"I couldn't find an existing convention for this type of route in the codebase.\n\nWhat naming pattern would you prefer?"}
+> ```
+>
+> Each line after `---JSONL---` must be a single valid JSON object. If you have no findings that require user decisions, omit the `---JSONL---` section entirely.
+>
+> If `agent_start` or `agent_stop` returns an error:
+> - `KeyError` = abort with FATAL error (wrong session/step ID)
+> - `ValueError` = fix and retry
 
-After all subagents complete, collect their findings and proposed questions. Then:
+Replace `SESSION_ID` and `STEP_ID` in the subagent prompt with the actual session ID and plan step ID values.
 
-1. **Merge findings:** Combine all subagent findings into a single understanding of the codebase state.
-2. **Deduplicate questions:** Remove duplicate or near-duplicate questions from different subagents.
-3. **Prioritize:** Order questions by importance — architecture decisions and ambiguities first, edge cases and nice-to-haves last.
-4. **Ask the user:** Use AskUserQuestion to ask the user, batching up to 4 related questions per call where they share a theme. Ground every question in specific codebase findings from the subagents. Ask about:
-   - Ambiguities or gaps in the zing document
-   - Decisions that affect architecture or integration with existing code
-   - Behavior in edge cases and error scenarios
-   - Anything a junior engineer would likely misunderstand or get wrong
+### Phase C — Collect results and submit to review UI (main thread)
+
+After all subagents return, check each subagent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+Otherwise, collect and deduplicate findings from all subagents:
+
+1. **Parse JSONL from each subagent:** For each subagent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
+
+2. **Deduplicate findings:** Across all subagents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first subagent that returned it) and discard later ones.
+
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the plan step ID and `finding_data` is the parsed JSON object.
+
+4. **Wait for review:** Call `review_wait(session_id, step_id)` where `step_id` is the plan step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and answer all planning questions at once. When the user submits the review, `review_wait` returns a list of items — each containing the original question, context, and the user's answer.
+
+5. **Merge findings:** Combine all subagent findings (from the bulleted text above the `---JSONL---` marker in each subagent's output) into a single understanding of the codebase state.
+
+6. **Incorporate answers:** Iterate over the returned review items. Most items will have a direct answer — incorporate those into your understanding.
+
+   For any items the user marked **"Discuss"**, walk through each one conversationally before continuing:
+   - Lead with what the subagent found, referencing the relevant code naturally: "In `auth.py` around line 15, ..."
+   - Show a short code snippet so the user can see exactly what's being discussed
+   - Explain the trade-offs or concerns in plain language
+   - Ask the user what they'd like to do and record their decision
+   - Vary how you introduce each finding — don't start every one the same way
+
+   Use all answers (both direct and discussed) alongside the merged findings when fleshing out the plan in the next step.
 </step>
 
 <step name="flesh_out_document">
@@ -116,6 +163,8 @@ After all questions are answered, update the zing document so it can be handed t
 
    Group steps into phases where it makes sense (e.g., "Phase 1: Data Model", "Phase 2: API Endpoints", "Phase 3: Frontend"). Number every step.
 
+   **Context and current behavior:** The action plan should begin with an overview section (before the numbered steps) that explains how the relevant parts of the system currently work at a detailed technical level — what code runs, what data flows where, what the current structure looks like. Be visual in this section — use Mermaid diagrams liberally (sequence diagrams, flowcharts, component diagrams) to show the current architecture, data flows, and how the proposed changes fit in. A picture is worth a thousand words, and diagrams communicate system behavior far more effectively than prose alone. This gives the reader the context they need before diving into individual steps. For individual steps or phases that involve complicated changes, also include a brief explanation of how things work today and how they're changing, rather than just saying "add X to Y". The goal is that a reader who has never seen this codebase can follow the plan without needing to go read the code themselves first.
+
 5. A **Progress** section at the end of the document to track completion. Generate a checklist from the action plan with every step listed. Use this exact format:
 
    ```
@@ -133,16 +182,22 @@ After all questions are answered, update the zing document so it can be handed t
 <step name="next_steps">
 After saving the updated document, print a brief summary of what was added (Relevant Files, Action Plan, Progress sections).
 
-End your summary with: "Zing! Plan complete — handing off to audit."
+End your summary with: "Zing! Plan complete."
 
-Before chaining to audit, use AskUserQuestion to ask the user:
-- "View the plan in a markdown viewer before continuing?"
-  - "Yes, open it" — open the file for viewing (see instructions below), then proceed to chain to plan-audit
-  - "No, continue" — proceed directly to plan-audit
+Then show the user the dashboard link where they can view the rendered plan:
 
-**Opening the markdown file:** Run `open -a Typora "{file_path}"`. If Typora is not installed (the command fails), fall back to `open "{file_path}"` to use the system default handler.
+> View the plan: {url}?tab=plan
 
-Then invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+Where `{url}` is the session URL returned by `session_create` (e.g., `http://localhost:{port}/{session_id}`).
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Plan ready for review", body="The plan is complete. Review and approve or request changes.")` where `session_id` is the session ID from the zing file frontmatter.
+
+Then use `AskUserQuestion` to ask if the user wants to make modifications before handing off to audit. Offer two options: one to proceed to audit, and one to make modifications.
+
+If the user chooses to proceed, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+
+If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says exactly "DONE" (all caps), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 </step>
 
 </process>

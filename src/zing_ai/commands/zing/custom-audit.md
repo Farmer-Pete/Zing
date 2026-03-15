@@ -12,7 +12,10 @@ Read the shared review reference file at `~/.claude/commands/zing/_shared/review
 <step name="resolve_scope">
 Convert the user's description into a concrete set of files to audit.
 
-1. **If no arguments provided**, use AskUserQuestion to ask: "What code should be audited? You can provide file/directory paths (e.g. `src/auth/`), a description (e.g. 'the authentication module'), or a mix of both."
+1. **If no arguments provided**:
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="Specify which code to audit.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion to ask: "What code should be audited? You can provide file/directory paths (e.g. `src/auth/`), a description (e.g. 'the authentication module'), or a mix of both."
 
 2. **Parse for explicit paths.** Check each whitespace-separated or comma-separated token to see if it resolves to an existing file or directory (via `test -e` or `ls`). Collect hits as "explicit paths." For directories, recursively include all code files within them.
 
@@ -47,6 +50,9 @@ Convert the user's description into a concrete set of files to audit.
    5 files, ~387 lines total
    ```
 
+   Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Confirm audit scope", body="Review the proposed audit scope and confirm or adjust.")` where `session_id` is the session ID from the zing file frontmatter.
+
    Use AskUserQuestion:
    - "Looks good, start the audit" (description: "Review these {count} files")
    - "Add or remove files" (description: "Adjust the scope before starting")
@@ -54,6 +60,14 @@ Convert the user's description into a concrete set of files to audit.
 
    If "Add or remove files": Ask the user what to add/remove, re-resolve, and confirm again.
    If "Cancel": Exit.
+
+### Session setup
+
+After confirming scope with the user, call `session_create(title="Code Audit — {user_description}", steps=["code-review"])` to get a new session ID and step IDs.
+
+Then call `step_start(session_id, step_id)` where `step_id` is the code-review step ID returned by `session_create`. This transitions the step from PENDING to STARTED.
+
+The session ID and step ID will be passed to the review agents.
 </step>
 
 <step name="read_files">
@@ -123,7 +137,8 @@ Launch 6 parallel Task agents to review the code. Each agent receives:
 - The severity/confidence scales from the shared review reference
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to explore code beyond the provided context (callers, callees, related modules, test coverage)
-- Instructions to return findings in pipe-delimited format, one finding per line: `FINDING|category|severity|confidence|file_path:line_number|description`. If the agent has no findings, it should return `NO_FINDINGS`.
+- The **session ID** and **step ID** for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`)
+- Instructions for agent lifecycle and JSONL return format (see below)
 
 **Adapted framing for all agents:**
 
@@ -156,13 +171,30 @@ Agents 2, 3, and 5 should use their respective aid tools (`aid_hunt_bugs`, `aid_
 - Agent 5 (Performance & Data Integrity): Performance (incl. all sub-items)
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`.
+**Agent lifecycle and returning results:**
+
+Each agent must call `agent_start(session_id, step_id, name="{agent-name}", description="{agent description}")` at the very start of its task, and `agent_stop(session_id, step_id, name="{agent-name}")` at the very end (after all analysis is done).
+
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**NEVER call `mcp__zing-ai__finding_submit`** — this is forbidden for agents. The parent process collects all agent findings, deduplicates them, and submits them. Agents must only return findings as text. Format each finding as a JSON line and return them all at the end of the task output using this exact format. The `body` field supports GitHub-flavored markdown — follow the `finding_body_format` guidelines from the shared review reference for writing rich, self-contained bodies with embedded code snippets and optional mermaid diagrams:
+
+```
+---JSONL---
+{"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
+```
+
+Each line after `---JSONL---` must be a single valid JSON object — one line per finding. If the agent has no findings, omit the `---JSONL---` marker entirely.
+
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include these mandates verbatim:
+1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
 
 **After all 6 agents return**, the parent:
-1. Collects all `FINDING|...` lines from all agents
-2. Deduplicates: if two agents flagged the same `file_path:line_number`, keep the finding with the higher severity and concatenate both descriptions
-3. Sorts by severity (critical first), then confidence
-4. Proceeds to the `present_summary` step with the merged findings list
+1. Checks each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+2. Otherwise, proceeds to the `check_and_review` step.
 </step>
 
 <step name="present_summary">
@@ -172,8 +204,6 @@ Give a brief, natural overview of the audit scope before diving into findings. S
 Alright, I've gone through the {count} files in the audit scope ({user_description}). Here's what I found — {total_count} things I want to flag:
 ```
 
-Follow the `present_summary` step from the shared review reference for the table format and confidence mapping.
-
 If no issues were found, just say something like:
 ```
 Went through everything — nothing jumped out. This code looks solid.
@@ -181,12 +211,19 @@ Went through everything — nothing jumped out. This code looks solid.
 Write an empty findings report and exit.
 </step>
 
+<step name="check_and_review">
+Follow the `check_and_review` step from the shared review reference.
+
+- **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
+- **No findings after triage**: Say something like "Went through everything — nothing survived triage. This code looks solid." Write an empty findings report and exit.
+</step>
+
 <step name="walk_through_findings">
 Follow the `walk_through_findings` guidelines from the shared review reference. Code snippets come from the actual file content at the relevant line numbers (not from diffs).
 </step>
 
 <step name="write_report">
-After all findings have been reviewed, compile the valid findings into a GitHub-flavored markdown file.
+Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
 First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-audit-{scope_slug}-{datetime}.md` where `{scope_slug}` is a sanitized short version of the user's description (max ~30 chars, lowercase, spaces/slashes replaced with dashes) and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
 
@@ -215,16 +252,23 @@ Audited on {YYYY-MM-DD}. {file_count} files reviewed ({total_lines} lines). {val
 
 `{file_path}:{line_number}` — **{severity}**, {confidence} confidence
 
-{Write the explanation the same way you explained it during the walkthrough — conversationally, with specific references to the code. Include a code snippet showing the problematic lines.}
+{Write the explanation conversationally, with specific references to the code. Include a code snippet showing the problematic lines. For downgraded findings, use the adjusted severity. For discuss findings, include a note: "(Flagged for discussion)".}
 
 ```{language}
 {relevant code snippet}
 `` `
 
+**Approach:** {the user's selected approach — see instructions below}
+
 ---
 
 ### 2. ...
 ```
+
+**Including the selected approach:** Each `ReviewItem` returned by `review_wait()` contains a `response` with `selected` and `other_text` fields. For each finding in the report:
+- If `response.selected` is set and is NOT `"__other__"`: use the `selected` value as the approach text (it will match one of the finding's `options[].label` values — include the matching option's `description` too, e.g. "**Approach:** Add guard clause — Check for None and return a 404, simple minimal change").
+- If `response.selected` is `"__other__"` and `response.other_text` is set: use the `other_text` as the approach (e.g. "**Approach:** Wrap in a try/except and log the error instead").
+- If `response.selected` is not set (no approach was chosen): omit the **Approach:** line entirely for that finding.
 
 After writing, tell the user:
 ```
@@ -239,11 +283,27 @@ If zero valid findings, write a short file noting "Nothing to flag — code look
 <step name="post_review">
 End your review summary with: "Zing! Review complete."
 
-After writing the review report, use AskUserQuestion to ask: "What next?"
-- Options:
-  - "Fix with chat" (description: "Walk through each finding interactively — faster, fix as you go")
-  - "Build a plan to fix" (description: "Systematically plan and build a fix for each finding — slower but more thorough")
-  - "I'm done" (description: "Stop here")
+### Determine the recommended option
+
+After writing the review report, examine the complexity of all accepted/downgraded findings from the `review_wait()` response. For each finding, use `response.complexity or finding.complexity` (user override first, then agent classification).
+
+Count the findings by complexity and determine the default using the `smart_default_mapping` from the shared review reference.
+
+### Present the "What next?" question
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Custom audit complete", body="Review findings are ready. Choose how to proceed.")` where `session_id` is the session ID from the zing file frontmatter.
+
+Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
+
+- "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
+- "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
+- "Build a plan to fix" (description: "Full plan → audit → build pipeline. Most rigorous, slowest.")
+- "I'm done" (description: "Stop here")
+
+### Handling each choice
+
+If "Auto-apply all fixes": proceed to the `auto_apply` step.
 
 If "Fix with chat": proceed to the `discuss_findings` step.
 
@@ -254,8 +314,36 @@ Follow the `attribution_rule` from the shared review reference.
 If "I'm done", exit normally.
 </step>
 
+<step name="auto_apply">
+Automatically apply fixes for all accepted/downgraded findings without interactive prompts. This step is self-contained — no separate skill or server-side code is needed.
+
+### Process
+
+1. **Iterate through each accepted/downgraded finding** in the order they appear in the report.
+
+2. **For each finding:**
+   a. Read the finding's body (the detailed explanation from the report) and the selected approach option (from `response.selected` / `response.other_text`).
+   b. Read the relevant source file(s) referenced in the finding.
+   c. Apply the fix directly using Edit/Write tools. For simple findings the fix should be obvious from the finding description and selected approach. For standard findings, use the approach option to guide the implementation.
+   d. After applying the fix, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+   e. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), **fall back to interactive "fix with chat" mode for that finding only**: show the finding to the user, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+3. **After all findings are processed**, show a summary:
+   ```
+   Auto-apply complete:
+   - {applied_count} fixes applied successfully
+   - {fallback_count} required interactive resolution
+   - {skipped_count} skipped
+   ```
+
+4. After auto-apply, return to the `post_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
+</step>
+
 <step name="discuss_findings">
 Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Before presenting findings, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
 
@@ -273,7 +361,7 @@ Then enter a conversational loop. The user drives the interaction using natural 
 
 After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
 
-After the walkthrough is complete, return to the `post_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Fix with chat" option again).
+After the walkthrough is complete, return to the `post_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
 </step>
 
 </process>
@@ -298,10 +386,10 @@ Review is complete when:
 - [ ] Big-picture assessment shared (scope, structure, first impressions, dependencies)
 - [ ] Code was analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were presented in a sorted summary table
-- [ ] Each finding was walked through one at a time with the user
-- [ ] User validated or invalidated each finding
-- [ ] Valid findings were written to a markdown file in `.zing/` in GFM format
+- [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
+- [ ] Review UI was opened for batch triage via `review_wait()`
+- [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
+- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>

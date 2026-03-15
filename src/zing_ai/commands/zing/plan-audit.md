@@ -2,7 +2,7 @@
 <objective>
 Evaluate a zing plan or technical design document for soundness against established engineering principles including clarity, fitness for purpose, YAGNI, TDD readiness, operability, maintainability, correctness/safety, specificity/executability, and code quality. A key goal is eliminating ambiguity: when an agent opens the evaluated plan, it should know exactly what to build and exactly how to build it, with zero guesswork required.
 
-Read the provided file, perform a rigorous evaluation, present results as tables, then propose concrete improvements one at a time and apply the ones the user approves.
+Read the provided file, perform a rigorous evaluation, present results in the review UI, then propose concrete improvements as choices and apply the ones the user approves.
 </objective>
 
 <process>
@@ -59,7 +59,19 @@ This keeps agent prompts lean — agents receive distilled summaries, not full f
 </step>
 
 <step name="evaluate">
-You are now a senior technical design reviewer. Launch 4 parallel Task subagents — one for each evaluation pass. Each agent independently evaluates the plan against its assigned criteria and returns structured results.
+You are now a senior technical design reviewer. Launch 4 parallel Task subagents — one for each evaluation pass. Each agent independently evaluates the plan against its assigned criteria and posts results to the review server.
+
+### Session setup
+
+After reading the zing doc, parse its YAML frontmatter. Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
+
+If there is no `session` in the frontmatter (or no frontmatter at all), this is a standalone invocation. Call `session_create(title)` to get a new session ID and step IDs, then update the zing doc's frontmatter to include `session: {session_id}` and `steps:` with the returned step ID mapping. Save the file after updating.
+
+Once you have the session ID and step IDs, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title=doc_title)` to associate the zing file with the session.
+
+Then call `step_start(session_id, steps.plan-audit)` where `steps.plan-audit` is the plan-audit step ID from the frontmatter. This transitions the plan-audit step from PENDING to STARTED.
+
+The session ID and plan-audit step ID will be used by subagents for agent lifecycle tracking.
 
 ### Preparing the agent prompts
 
@@ -78,10 +90,8 @@ Each agent receives the same shared context block:
 Each agent also receives:
 - Its specific pass criteria, litmus tests, and warning signs (copied verbatim below)
 - The MCP-only mandate: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files. Built-in tools are fine for non-code files (markdown, JSON, YAML, configs, .zing docs)."
-- Instructions to return results in this structured format — pipe-delimited lines, one per item:
-  - `RATING|criterion_name|Strong/Adequate/Weak/Missing|justification`
-  - `LITMUS|test_name|result`
-  - `WARNING|sign_name|Yes/No|details`
+- The **session ID** and **server port** for posting findings to the review server
+- Instructions for how to POST evaluation tables and improvement proposals (see below)
 
 ### Launching the agents
 
@@ -130,18 +140,30 @@ Launching 4 evaluation passes in parallel...
 - Only one approach was considered (no alternatives evaluated)
 - Components exist "for future flexibility" without a current requirement
 
-**Return your results as pipe-delimited lines:**
+**Agent lifecycle and returning results:**
+
+At the very start of your task, call `agent_start(session_id, step_id, name="design-fundamentals", description="Evaluating design fundamentals")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="design-fundamentals")`.
+
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
+
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
+
 ```
-RATING|Clarity & Simplicity|{rating}|{justification}
-RATING|Fitness for Purpose|{rating}|{justification}
-RATING|YAGNI|{rating}|{justification}
-RATING|Maintainability|{rating}|{justification}
-LITMUS|Simplest thing that could work?|{result}
-LITMUS|What requirement drives each component?|{result}
-WARNING|"Might need this someday" justifications|{Yes/No}|{details or "—"}
-WARNING|Only one approach considered|{Yes/No}|{details or "—"}
-WARNING|Components for "future flexibility"|{Yes/No}|{details or "—"}
+## Evaluation: Pass 1 — Design Fundamentals
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 1: Design Fundamentals","criteria":[{"name":"Clarity & Simplicity","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Fitness for Purpose","rating":"{rating}","justification":"{justification}"},{"name":"YAGNI","rating":"{rating}","justification":"{justification}"},{"name":"Maintainability","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Simplest thing that could work?","result":"{result}"},{"name":"What requirement drives each component?","result":"{result}"}],"warnings":[{"name":"Might need this someday justifications","found":true,"details":"{details}"},{"name":"Only one approach considered","found":false,"details":""},{"name":"Components for future flexibility","found":false,"details":""}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
+
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -180,19 +202,30 @@ WARNING|Components for "future flexibility"|{Yes/No}|{details or "—"}
 - Deployment/migration strategy is deferred ("we'll figure it out later")
 - No tests or test strategy described
 
-**Return your results as pipe-delimited lines:**
+**Agent lifecycle and returning results:**
+
+At the very start of your task, call `agent_start(session_id, step_id, name="robustness-safety", description="Evaluating robustness and safety")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="robustness-safety")`.
+
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
+
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
+
 ```
-RATING|Correctness & Safety|{rating}|{justification}
-RATING|Operability|{rating}|{justification}
-RATING|TDD Readiness|{rating}|{justification}
-LITMUS|What happens when this fails?|{result}
-LITMUS|How will we know it's working?|{result}
-LITMUS|How do we test this?|{result}
-WARNING|Only happy path described|{Yes/No}|{details or "—"}
-WARNING|Data model is afterthought|{Yes/No}|{details or "—"}
-WARNING|Deployment strategy deferred|{Yes/No}|{details or "—"}
-WARNING|No test strategy|{Yes/No}|{details or "—"}
+## Evaluation: Pass 2 — Robustness & Safety
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 2: Robustness & Safety","criteria":[{"name":"Correctness & Safety","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Operability","rating":"{rating}","justification":"{justification}"},{"name":"TDD Readiness","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"What happens when this fails?","result":"{result}"},{"name":"How will we know it is working?","result":"{result}"},{"name":"How do we test this?","result":"{result}"}],"warnings":[{"name":"Only happy path described","found":true,"details":"{details}"},{"name":"Data model is afterthought","found":false,"details":""},{"name":"Deployment strategy deferred","found":false,"details":""},{"name":"No test strategy","found":false,"details":""}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
+
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -237,22 +270,30 @@ WARNING|No test strategy|{Yes/No}|{details or "—"}
 - Steps that can't be verified independently — multiple steps must all be completed before any of them can be tested or verified, indicating they should be combined into a single step.
 - Scaffolding steps without behavior — steps that only create empty files, folder structures, or placeholder interfaces with no testable behavior, instead of being merged into the step that implements the actual behavior.
 
-**Return your results as pipe-delimited lines:**
+**Agent lifecycle and returning results:**
+
+At the very start of your task, call `agent_start(session_id, step_id, name="executable-spec", description="Evaluating plan as executable spec")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="executable-spec")`.
+
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
+
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
+
 ```
-RATING|Specificity & Executability|{rating}|{justification}
-RATING|Step Atomicity|{rating}|{justification}
-LITMUS|Could two people build different things from this plan?|{result}
-LITMUS|Can each step be completed, tested, and committed independently?|{result}
-WARNING|Implementation over interfaces|{Yes/No}|{details or "—"}
-WARNING|Steps missing acceptance criteria|{Yes/No}|{details or "—"}
-WARNING|Vague or weasel words|{Yes/No}|{details or "—"}
-WARNING|Unspecified tech choices|{Yes/No}|{details or "—"}
-WARNING|Missing data models|{Yes/No}|{details or "—"}
-WARNING|TBD/TODO markers|{Yes/No}|{details or "—"}
-WARNING|Tests separated from implementation|{Yes/No}|{details or "—"}
-WARNING|Steps that can't be verified independently|{Yes/No}|{details or "—"}
-WARNING|Scaffolding steps without behavior|{Yes/No}|{details or "—"}
+## Evaluation: Pass 3 — Plan as Executable Spec
+...your evaluation text with criteria ratings, litmus tests, warning signs...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 3: Plan as Executable Spec","criteria":[{"name":"Specificity & Executability","rating":"{strong|adequate|weak|missing}","justification":"{justification}"},{"name":"Step Atomicity","rating":"{rating}","justification":"{justification}"}],"litmus_tests":[{"name":"Could two people build different things from this plan?","result":"{result}"},{"name":"Can each step be completed, tested, and committed independently?","result":"{result}"}],"warnings":[{"name":"Implementation over interfaces","found":true,"details":"{details}"},{"name":"Steps missing acceptance criteria","found":false,"details":""},{"name":"Vague or weasel words","found":false,"details":""},{"name":"Unspecified tech choices","found":false,"details":""},{"name":"Missing data models","found":false,"details":""},{"name":"TBD/TODO markers","found":false,"details":""},{"name":"Tests separated from implementation","found":false,"details":""},{"name":"Steps that cannot be verified independently","found":false,"details":""},{"name":"Scaffolding steps without behavior","found":false,"details":""}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
+
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing", any warning sign with `found: true`). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
@@ -273,87 +314,48 @@ WARNING|Scaffolding steps without behavior|{Yes/No}|{details or "—"}
 - Are any new patterns introduced? If so, are they good patterns worth adopting, or unnecessary divergence from established conventions?
 - Can this solution be simplified without losing functionality?
 
-**Return your results as pipe-delimited lines:**
+**Agent lifecycle and returning results:**
+
+At the very start of your task, call `agent_start(session_id, step_id, name="code-quality", description="Evaluating code quality and idiomacy")`. At the very end (after all analysis is done), call `agent_stop(session_id, step_id, name="code-quality")`.
+
+If `agent_start` or `agent_stop` returns an error:
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `ValueError` = fix and retry
+
+**Only create findings that require a decision from the user.** Do NOT create findings for statements, analysis results, or confirmations — those belong in your returned text, not in the review UI. Every finding must ask the user to decide something.
+
+**Prefer `triage` type with `options`** — provide 2-3 concrete improvement options based on what you found. Only use `text` type if the question is truly open-ended and you cannot suggest reasonable options.
+
+**Do NOT call `finding_submit` directly.** Instead, format your evaluation and each improvement finding as a JSON line and return them all at the end of your task output using this exact format:
+
 ```
-RATING|Code Quality & Idiomacy|{rating}|{justification}
+## Evaluation: Pass 4 — Code Quality
+...your evaluation text with criteria ratings...
+
+---JSONL---
+{"type":"evaluation","title":"Pass 4: Code Quality","criteria":[{"name":"Code Quality & Idiomacy","rating":"{strong|adequate|weak|missing}","justification":"{justification}"}]}
+{"type":"triage","title":"{short problem title}","body":"{rich markdown: embed referenced code snippets, use tables for comparisons, mermaid for flows — describe the specific problem and why it matters}","options":[{"label":"{approach 1 name}","description":"{concrete edit to make}"},{"label":"{approach 2 name}","description":"{concrete edit to make}"}]}
 ```
+
+Each line after `---JSONL---` must be a single valid JSON object. Include the evaluation as the first JSONL line, then one line per improvement finding (for any criterion rated "weak" or "missing"). If you have no improvement findings, the evaluation line alone is sufficient.
 
 ---
 
-### Collecting and presenting results
+### Collecting results
 
-After all 4 Task agents return, parse their pipe-delimited output and present the results as tables — one section per pass, using the same table format as before:
+After all 4 Task agents return, check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
 
-**Pass 1: Design Fundamentals**
+Otherwise, collect and deduplicate findings from all agents:
 
-| Criterion | Rating | Justification |
-|---|---|---|
-| Clarity & Simplicity | {rating} | {justification} |
-| Fitness for Purpose | {rating} | {justification} |
-| YAGNI | {rating} | {justification} |
-| Maintainability | {rating} | {justification} |
+1. **Parse JSONL from each agent:** For each agent's return text, split on the `---JSONL---` marker. If present, parse each subsequent non-empty line as a JSON object. These are the finding objects.
 
-| Litmus Test | Result |
-|---|---|
-| Simplest thing that could work? | {result} |
-| What requirement drives each component? | {result} |
+2. **Deduplicate findings:** Across all agents, deduplicate findings by exact match on the `(type, title)` tuple — two findings are duplicates if and only if they have the same `type` string and the same `title` string. When duplicates are found, keep the first occurrence (from the first agent that returned it) and discard later ones.
 
-| Warning Sign | Found? | Details |
-|---|---|---|
-| "Might need this someday" justifications | {Yes/No} | {details or "—"} |
-| Only one approach considered | {Yes/No} | {details or "—"} |
-| Components for "future flexibility" | {Yes/No} | {details or "—"} |
+3. **Submit findings:** For each unique finding, call `finding_submit(session_id, step_id, finding_data)` where `step_id` is the plan-audit step ID and `finding_data` is the parsed JSON object.
 
-**Pass 2: Robustness & Safety**
+4. **Merge evaluation text:** Combine all agent evaluation text (from above the `---JSONL---` marker in each agent's output) into a consolidated view for the summary step.
 
-| Criterion | Rating | Justification |
-|---|---|---|
-| Correctness & Safety | {rating} | {justification} |
-| Operability | {rating} | {justification} |
-| TDD Readiness | {rating} | {justification} |
-
-| Litmus Test | Result |
-|---|---|
-| What happens when this fails? | {result} |
-| How will we know it's working? | {result} |
-| How do we test this? | {result} |
-
-| Warning Sign | Found? | Details |
-|---|---|---|
-| Only happy path described | {Yes/No} | {details or "—"} |
-| Data model is afterthought | {Yes/No} | {details or "—"} |
-| Deployment strategy deferred | {Yes/No} | {details or "—"} |
-| No test strategy | {Yes/No} | {details or "—"} |
-
-**Pass 3: Plan as Executable Spec**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Specificity & Executability | {rating} | {justification} |
-| Step Atomicity | {rating} | {justification} |
-
-| Litmus Test | Result |
-|---|---|
-| Could two people build different things from this plan? | {result} |
-| Can each step be completed, tested, and committed independently? | {result} |
-
-| Warning Sign | Found? | Details |
-|---|---|---|
-| Implementation over interfaces | {Yes/No} | {details or "—"} |
-| Steps missing acceptance criteria | {Yes/No} | {details or "—"} |
-| Vague or weasel words | {Yes/No} | {details or "—"} |
-| Unspecified tech choices | {Yes/No} | {details or "—"} |
-| Missing data models | {Yes/No} | {details or "—"} |
-| TBD/TODO markers | {Yes/No} | {details or "—"} |
-| Tests separated from implementation | {Yes/No} | {details or "—"} |
-| Steps that can't be verified independently | {Yes/No} | {details or "—"} |
-| Scaffolding steps without behavior | {Yes/No} | {details or "—"} |
-
-**Pass 4: Code Quality**
-
-| Criterion | Rating | Justification |
-|---|---|---|
-| Code Quality & Idiomacy | {rating} | {justification} |
+Then proceed to the `present_summary` step.
 
 </step>
 
@@ -380,24 +382,22 @@ List specific, actionable changes to improve the design, ordered by priority. If
 </step>
 
 <step name="propose_improvements">
-If the verdict is **Adequate with Gaps** or **Needs Significant Rework**, compile a list of concrete improvements to the zing file. Each improvement should be a specific edit — not vague advice, but an actual change to make (e.g., "Add a Failure Modes section covering database unavailability and API timeout scenarios", "Rewrite the authentication section to specify JWT with refresh tokens instead of 'some auth mechanism'").
-
-Derive improvements from:
-- Any criterion rated "Weak" or "Missing"
-- Any warning sign marked "Yes"
-- Items in the Top Risks / Weaknesses list
-- Items in the Recommendations list
-
-Then walk through each improvement ONE AT A TIME using AskUserQuestion:
-- Clearly describe the problem and why it matters
-- Come up with 2-3 distinct ways to address it — different approaches, not just "apply or skip". Each option should be a concrete, specific change with a different trade-off or direction. Always include "Skip" as a final option.
-- Example: if the plan lacks error handling, options might be: "Add retry-with-backoff for all external calls", "Add circuit breaker pattern with fallback responses", "Add simple try/catch with logging and alerting", "Skip"
-- When the user picks an option, immediately apply the edit to the zing file using the Edit tool
-- If the user provides custom input via "Other", apply their version
-
-After all improvements have been walked through, summarize what was changed.
-
 If the verdict is **Strong Design**, skip this step and say "No improvements needed — the design looks solid."
+
+Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
+
+When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's response:
+
+- **Accepted findings** (user selected an option): Apply the corresponding edit to the zing file using the Edit tool. The option's `description` field contains the concrete edit to make.
+- **Skipped findings**: Exclude entirely.
+- **Discuss findings**: Walk through each one conversationally with the user before applying:
+  - Lead with what the agent found, referencing the relevant code naturally
+  - Show a short code snippet so the user can see exactly what's being discussed
+  - Explain the trade-offs or concerns in plain language
+  - Ask the user what they'd like to do and apply their decision
+  - Vary how you introduce each finding — don't start every one the same way
+
+After all improvements have been applied, summarize what was changed.
 </step>
 
 <step name="ensure_progress_section">
@@ -422,11 +422,21 @@ Tell the user whether you added a Progress section or if one already existed.
 
 End your summary with: "Zing! Audit complete."
 
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Audit complete", body="Plan audit finished. Choose next step: build, create tickets, or view plan.")` where `session_id` is the session ID from the zing file frontmatter.
+
 Then use AskUserQuestion to ask the user what they'd like to do next:
 - Option 1: "Start build" — invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited
-- Option 2: "Create Linear tickets" — invoke `Skill(skill: 'zing:plan-linear', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited
-- Option 3: "View the plan" — open the file for viewing (run `open -a Typora "{file_path}"`, falling back to `open "{file_path}"` if Typora is not installed), then re-ask this same question
-- Option 4: "Not now" — end the session without invoking anything
+- Option 2: "Start build (fresh context)" — print the following and stop:
+  ```
+  Run these commands to start the build with a clean context window:
+  /clear
+  /zing:build {file_path}
+  ```
+  where `{file_path}` is the path to the zing plan file that was audited. Do NOT invoke the build skill — just print these instructions and end.
+- Option 3: "Create Linear tickets" — invoke `Skill(skill: 'zing:plan-linear', args: '{file_path}')` where `{file_path}` is the path to the zing plan file that was audited
+- Option 4: "View the plan" — open the file for viewing (run `open -a Typora "{file_path}"`, falling back to `open "{file_path}"` if Typora is not installed), then re-ask this same question
+- Option 5: "Not now" — end the session without invoking anything
 </step>
 
 </process>
@@ -435,7 +445,7 @@ Then use AskUserQuestion to ask the user what they'd like to do next:
 - Don't skip passes or criteria — complete all four passes even if some seem less relevant
 - Don't combine passes — complete each pass and present its results before starting the next
 - Don't inflate ratings — be honest about gaps
-- Don't present all improvements at once — propose one at a time, wait for the answer
+- Don't bypass the review UI for improvements — let the user pick approaches in the browser
 - Don't ask questions about findings rated "Strong" — focus on gaps
 - Don't make assumptions about the user's domain — ask if context is unclear
 - Don't make vague suggestions — every proposed improvement should be a specific, concrete edit
@@ -446,11 +456,11 @@ Evaluation is complete when:
 
 - [ ] Document was read and understood
 - [ ] All files referenced in the plan were read (or noted as not yet existing)
-- [ ] Pass 1 (Design Fundamentals): 4 criteria rated, 2 litmus tests answered, 3 warning signs checked, results presented
-- [ ] Pass 2 (Robustness & Safety): 3 criteria rated, 3 litmus tests answered, 4 warning signs checked, results presented
-- [ ] Pass 3 (Plan as Executable Spec): 2 criteria rated, 2 litmus tests answered, 9 warning signs checked, results presented
-- [ ] Pass 4 (Code Quality): 1 criterion rated, results presented
+- [ ] Pass 1 (Design Fundamentals): 4 criteria rated, 2 litmus tests answered, 3 warning signs checked, results posted to review server
+- [ ] Pass 2 (Robustness & Safety): 3 criteria rated, 3 litmus tests answered, 4 warning signs checked, results posted to review server
+- [ ] Pass 3 (Plan as Executable Spec): 2 criteria rated, 2 litmus tests answered, 9 warning signs checked, results posted to review server
+- [ ] Pass 4 (Code Quality): 1 criterion rated, results posted to review server
 - [ ] Summary verdict, strengths, risks, and recommendations presented
-- [ ] Improvements proposed and applied (or skipped if design is strong)
+- [ ] Improvements reviewed in UI and applied (or skipped if design is strong)
 - [ ] Progress section ensured — added if missing, skipped if already present
 </success_criteria>

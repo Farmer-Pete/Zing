@@ -141,6 +141,30 @@ def _prompt_runtime_selection() -> list[str]:
         click.echo(f"Invalid choice: {choice!r}. Please enter 1, 2, or 3.")
 
 
+@cli.command("mcp")
+@click.option("--port", default=9876, type=int, help="Port to listen on.")
+def mcp_cmd(port: int) -> None:
+    """Start the Zing MCP + HTTP server."""
+    import uvicorn
+
+    from zing_ai.server.app import create_app
+
+    app = create_app(port=port)
+    click.echo(f"Starting Zing server on http://127.0.0.1:{port}")
+    click.echo(f"Dashboard: http://127.0.0.1:{port}/dashboard")
+    uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=3)
+
+
+def _register_sim() -> None:
+    """Register the sim command group eagerly (imports sim module at CLI load time)."""
+    from zing_ai.sim import sim
+
+    cli.add_command(sim)
+
+
+_register_sim()
+
+
 def main() -> None:
     """CLI entry point."""
     cli()

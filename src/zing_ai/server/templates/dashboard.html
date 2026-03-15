@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Zing Dashboard{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if sessions %}
+<div data-signals="{_d: true}" data-init="@get('/dashboard/events')">
+<div class="timeline">
+    {% set current_day = namespace(value="") %}
+    {% for s in sessions %}
+    {% set day = s.created_at.strftime('%A, %b %d, %Y') %}
+    {% if day != current_day.value %}
+        {% set current_day.value = day %}
+        <div class="timeline-day">{{ day }}</div>
+    {% endif %}
+    {% include "fragments/session_card.html" %}
+    {% include "fragments/notification_timeline.html" %}
+    {% endfor %}
+</div>
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-state-icon">&#9889;</div>
+    <p>No sessions yet — start a review to see it here!</p>
+</div>
+{% endif %}
+{% endblock %}

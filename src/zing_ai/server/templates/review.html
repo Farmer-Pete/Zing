@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}{{ session.title }} — Zing Review{% endblock %}
+
+{% block content %}
+<h1>{{ session.title }}</h1>
+<div class="session-meta">
+    <span class="session-meta-id">{{ session.session_id }}</span>
+    <span id="session-status-badge" class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span>
+</div>
+
+{% set s = session %}
+{% include "fragments/notification_timeline.html" %}
+
+<nav class="step-nav">
+    {% if session.zing_file %}
+    <a href="/{{ session.session_id }}?tab=plan" id="step-tab-plan"
+       class="step-link {% if current_tab == 'plan' %}active{% endif %}">
+        Plan
+    </a>
+    {% endif %}
+    {% for step in session.steps %}
+    <a href="/{{ session.session_id }}?step={{ step.step_id }}" id="step-tab-{{ step.step_id }}"
+       class="step-link {% if step.step_id == current_step and current_tab != 'plan' %}active{% endif %}">
+        {{ step.step_name }}
+        <span id="step-badge-{{ step.step_id }}" class="status-badge status-{{ step.state.value }}">{{ step.state.value }}</span>
+    </a>
+    {% endfor %}
+</nav>
+
+{% if current_tab == 'plan' %}
+<div data-init="@get('/{{ session.session_id }}/stream?active_tab=plan')"></div>
+    {% include "fragments/markdown_tab.html" %}
+{% elif step and step.state.value in ("ready", "completed") %}
+<div id="review-root"
+     data-signals='{{ {"responses": saved_responses, "step_id": current_step} | tojson }}'>
+
+    {% include "fragments/agent_status.html" %}
+
+    <div id="findings-container">
+        {% for f_html in rendered_findings %}{{ f_html | safe }}{% endfor %}
+    </div>
+
+    {% include "fragments/log_viewer.html" %}
+
+    {{ review_status_html | safe }}
+    {{ submit_html | safe }}
+</div>
+{% else %}
+<div id="review-root"
+     data-signals='{{ {"responses": saved_responses, "step_id": current_step} | tojson }}'
+     data-init="@get('/{{ session.session_id }}/stream?step={{ current_step }}&active_tab=step')">
+
+    {% if step %}{% include "fragments/agent_status.html" %}{% else %}<div id="agents-container"></div>{% endif %}
+
+    <div id="findings-container">
+    </div>
+
+    {% if step %}{% include "fragments/log_viewer.html" %}{% else %}<div id="log-viewer"></div>{% endif %}
+
+    <div id="review-status">
+    </div>
+
+    <div id="submit-section">
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,6 +1,6 @@
 # Shared Code Review Reference
 
-This file is referenced by `/zing:build-audit` and `/zing:pr-audit`. Edit here to update both.
+This file is referenced by `/zing:build-audit`, `/zing:pr-audit`, and `/zing:custom-audit`. Edit here to update all three.
 
 <tone>
 You are a senior developer reviewing a teammate's PR. Write the way you'd actually talk in a code review:
@@ -12,6 +12,7 @@ You are a senior developer reviewing a teammate's PR. Write the way you'd actual
 - When something is clearly bad, say so plainly: "This will crash if the array is empty"
 - When something is minor, own that too: "Small thing — this name is a bit misleading"
 - Don't over-explain obvious things. Trust that the developer reading this knows their codebase.
+- Code snippets, tables, and mermaid diagrams don't count as over-explaining — they're dense and worth the space. Always prefer showing code over describing it.
 - Vary your language. Don't use the same sentence structure for every finding.
 </tone>
 
@@ -65,13 +66,41 @@ Agents do NOT receive full file contents upfront. Instead, each agent uses Seren
 - `high`: Significant bug or vulnerability that will affect users
 - `medium`: Issue that should be fixed but won't cause immediate harm
 - `low`: Minor improvement or nitpick
+- `info`: Informational observation, not necessarily a problem
 </severity_scale>
+
+<category_values>
+Valid categories: `architecture`, `correctness`, `security`, `readability`, `performance`, `testing`, `style`
+</category_values>
 
 <confidence_scale>
 - `high`: You've read the surrounding code and you're sure this is a real problem
 - `medium`: Looks like an issue but you can't fully verify without runtime context or deeper knowledge of the system
 - `low`: Something feels off but you might be missing context — worth a second pair of eyes
 </confidence_scale>
+
+<finding_body_format>
+The `body` field is rendered as GitHub-flavored markdown with syntax-highlighted code blocks, tables, and mermaid diagram support. Write the body as a self-contained explanation that a reader can understand without opening the source file. **Every file reference must include an embedded code snippet** showing the relevant lines — never mention a file or line number without showing the actual code.
+
+**Code snippets**: Embed fenced code blocks (with language tags) directly in the prose wherever code is referenced. Show 5-10 lines of surrounding context so the reader can see the issue in situ. Use the actual code from the file (read via Serena), not approximations. Interleave snippets with explanation naturally — "Here's the handler:" followed by the code block, then "The problem is that `x` can be null here because..."
+
+**Tables**: Use markdown tables for comparisons, before/after diffs, option trade-off matrices, or any structured data that's clearer in tabular form than in prose. Tables are particularly useful for showing multiple related values, enumerating cases, or summarizing the impact of a change across several locations.
+
+**Mermaid diagrams**: When the issue involves data flow, state transitions, call chains, race conditions, or complex control flow, include a `mermaid` fenced code block to illustrate the relationships. Not every finding needs one — skip for simple bugs, naming issues, or single-location problems.
+
+**Richness over brevity**: Code snippets, tables, and mermaid diagrams are not subject to the conciseness directive. They take up markup space but convey information densely — always prefer them over prose descriptions of the same content.
+
+**What NOT to do**: Don't just say "on line 42, the null check is missing" without showing the code. Don't dump a huge code block and leave the reader to find the issue — highlight the specific problematic lines in your explanation.
+
+**Suggested approaches (`options`)**: Include 1-3 options when there are distinct approaches to fixing the issue. Each option needs a concrete `label` naming the action ("Use `Optional` return type", "Add circuit breaker", "Extract to helper") and a `description` explaining the trade-off or rationale. Skip options for trivial fixes with only one obvious solution. Don't restate the problem in the option — the body already covers that. The reviewer can select an approach from the dashboard or type a custom one.
+
+**Fix complexity (`complexity`)**: How difficult the fix is to implement. One of:
+- `"simple"` — adding tests, simple code refactor, small focused change. The fix is obvious and can be applied without planning.
+- `"standard"` — a moderate fix that benefits from interactive walkthrough but doesn't need a full plan.
+- `"complex"` — a large architectural change that does not have an obvious solution and needs further clarification, discussion, or a detailed plan before implementation.
+
+Default to `"standard"` when unsure. Classify as `"simple"` only when the fix is a clear one-liner or trivially obvious. Classify as `"complex"` only when the fix requires multi-file architectural changes or has multiple viable approaches with significant trade-offs.
+</finding_body_format>
 
 <review_categories>
 
@@ -110,6 +139,25 @@ Step back from the implementation details and evaluate whether the approach itse
 - Is a framework, API, library, or service used that should not be used? Could a different one improve the solution?
 - Does similar functionality already exist in the codebase? If yes, why isn't it reused? Could the existing solution be extended instead of rolling a new one?
 - Is there duplicated or near-duplicated logic across the changed files? Look for copy-pasted blocks, similar functions that differ only slightly, or multiple places solving the same problem in inconsistent ways. These should be consolidated into a shared abstraction or at least made consistent.
+
+### 3. Root Cause vs. Surface Fix
+Step back from the specific lines changed and ask whether this PR is solving the actual problem or just patching the symptom that was reported.
+
+**Partial migrations and incomplete consistency**
+- If the PR updates N instances of a pattern but the same pattern exists in other files, is this a partial fix that leaves the codebase in an inconsistent intermediate state? Use Serena to search for other instances of the same pattern across the codebase. A fix that touches 3 of 14 call sites may be stable today by coincidence but will break the moment someone touches a 4th.
+- If the change introduces a new convention (naming scheme, key format, configuration pattern), are all existing usages migrated in this PR? If not, is the incomplete state documented and safe, or is it a trap for the next developer who follows the new convention without realizing the old one still exists?
+
+**Defensive guards masking deeper problems**
+- If the PR adds null checks, type guards, try/catch wrappers, or fallback defaults, ask *why* the value can be null/wrong in the first place. Defensive code that prevents a crash is fine as a stopgap, but if the data should never be in that state, the real fix is upstream. Flag cases where guards are treating symptoms of a broken invariant rather than restoring the invariant.
+
+**Latent traps for follow-up work**
+- Could a natural, reasonable follow-up change (extending the same pattern, adding a similar feature, continuing a migration) reintroduce the original bug? If the system is only stable because two incomplete halves happen to not overlap yet, that's a time bomb.
+- Are there cross-references (cache keys and invalidation keys, schema definitions and serializers, event producers and consumers) that need to stay in sync? If the PR updates one side, check whether the other side still matches.
+
+**Scattered hardcoded values**
+- If the fix involves changing a hardcoded value (string key, config constant, magic number), search for that value across the codebase. Are there other copies that need the same change? Would a single source of truth (constant, config, shared builder) prevent this class of bug entirely?
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 ---
 
@@ -154,6 +202,8 @@ Step back from the implementation details and evaluate whether the approach itse
 - When adding retry logic, verify there is a maximum retry count with backoff. Infinite retries on a permanently failing operation will back up the queue and flood logs. Consider circuit-breaker patterns for operations that fail repeatedly for the same input.
 - When classes are used in log messages or error reports, verify they produce meaningful string representations — not raw object references. Log messages containing `<Object at 0x7f...>` or `[object Object]` are useless for debugging.
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 ---
 
 ## Agent 3 (Security & API Surface)
@@ -182,6 +232,8 @@ Step back from the implementation details and evaluate whether the approach itse
 - When a new endpoint is added, verify it has complete API documentation including response schemas for all status codes. Missing or commented-out schema decorators are a red flag — they indicate the endpoint is invisible to generated clients.
 - When custom headers are introduced, verify they are added to CORS allowed headers and correctly marked as optional vs required. A required header that consumers can't always provide will break every request.
 - When a serializer changes a field's representation (e.g., from nested object to ID, from string to enum, from required to nullable), verify API consumers are aware and coordinated. Silent response shape changes are the most common cause of frontend breakage from backend PRs.
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 ---
 
@@ -217,6 +269,8 @@ Step back from the implementation details and evaluate whether the approach itse
 - When removing or refactoring CSS, search for all elements that depend on the changed styles. A removed class or modified rule may affect components beyond the one being changed.
 - When a PR adds or modifies a visual component, spot-check at least one other instance of the same component pattern elsewhere in the application to verify styling consistency. Inconsistent styling between sibling components (different font sizes, weights, colors, alignment) is a frequent source of UI bugs.
 - When a third-party library is configured with multiple interacting options (e.g., chart libraries, map libraries, rich text editors), check the library's docs for known incompatibilities between the specific option combination being used. Config option interactions are a common source of crashes that only surface with specific data.
+
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
 
 ---
 
@@ -282,6 +336,8 @@ If the changed code allocates data structures, manages caches, or handles large 
 - When constructing strongly-typed data structures (DataFrames, typed arrays, typed collections) from external data, ensure type coercion or lenient parsing is configured. External data routinely contains mixed types in the same field (integers in string columns, strings in integer columns).
 - When external data is stored in the database, verify the storage layer can handle edge cases: null bytes in strings (rejected by PostgreSQL text/jsonb), integers exceeding column range, special Unicode characters, and deeply nested or oversized JSON.
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 ---
 
 ## Agent 6 (Testing & Observability)
@@ -311,6 +367,8 @@ If the changed code allocates data structures, manages caches, or handles large 
 - Should a specific expert (security, usability, accessibility, etc.) look at this before it ships?
 - Will this change impact other teams who should review it?
 
+For each finding, classify the fix complexity as `simple`, `standard`, or `complex` in the `complexity` field.
+
 </review_categories>
 
 <step name="agent_dispatch">
@@ -323,46 +381,100 @@ Launch 6 parallel Task agents to review the diff. Each agent receives:
 - The tone guidelines from the shared review reference
 - Instructions to use Serena on-demand to pull full file context when the diff hunks alone are insufficient for its analysis (see diff_preparation step for guidance on when to do this)
 - Any additional skill-specific context (see the calling skill's `analyze_changes` step for extras)
-- Instructions to return findings in pipe-delimited format, one finding per line: `FINDING|category|severity|confidence|file_path:line_number|description`. Example: `FINDING|Logic Errors and Bugs|high|high|src/auth.py:42|Null check missing — req.user can be undefined when session expires`. If the agent has no findings, it should return `NO_FINDINGS`.
+- The **session ID** and **step ID** (from `step_start`) — for `agent_start`/`agent_stop` calls ONLY
+- Instructions to call `agent_start` at the beginning, return findings as JSONL, and call `agent_stop` when done (see below)
+- **CRITICAL: The explicit instruction that agents must NEVER call `finding_submit`. Only the parent process calls `finding_submit` after deduplicating agent results. Include this verbatim in each agent's prompt: "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."**
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include the MCP-only mandate verbatim: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
-- Agent 1 (Architecture & Design): Design, Implementation — lightweight pass reviewing design, abstraction, and coupling across all changed files. Should rarely need Serena.
+**Agent lifecycle and finding format:** Each agent follows this lifecycle:
+
+1. **Start:** Call the `mcp__zing-ai__agent_start` MCP tool at the beginning:
+   ```
+   mcp__zing-ai__agent_start(session_id=SESSION_ID, step_id=STEP_ID, name=AGENT_NAME, description=AGENT_DESCRIPTION)
+   ```
+   Where `AGENT_NAME` is a short identifier (e.g., "architecture", "correctness", "security", "readability", "performance", "testing") and `AGENT_DESCRIPTION` is the agent's role (e.g., "Architecture & Design review").
+
+2. **Collect findings:** Review the diff using the assigned checklist. **NEVER call `mcp__zing-ai__finding_submit`** — this is forbidden for agents. The parent process collects all agent findings, deduplicates them, and submits them. Agents must only return findings as text. Format each finding as a single JSON object on one line (JSONL format). The `body` field supports GitHub-flavored markdown — follow the `finding_body_format` guidelines above for writing rich, self-contained bodies with embedded code snippets and optional mermaid diagrams:
+   ```
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","complexity":"simple","location":{"file":"src/handlers.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
+   ```
+
+3. **Stop:** Call the `mcp__zing-ai__agent_stop` MCP tool when done:
+   ```
+   mcp__zing-ai__agent_stop(session_id=SESSION_ID, step_id=STEP_ID, name=AGENT_NAME)
+   ```
+
+4. **Return findings:** After calling `agent_stop`, return all findings in the task output using the `---JSONL---` delimiter. Each `body` should be a rich, self-contained markdown explanation following the `finding_body_format` guidelines — include code snippets and mermaid diagrams where appropriate:
+   ```
+   ---JSONL---
+   {"type":"triage","title":"Unchecked null return from get_user()","body":"The handler calls `get_user()` and immediately accesses `.email` without checking for `None`. If the user ID doesn't exist in the database, this will raise an `AttributeError` in production.\n\nHere's the handler:\n\n```python\ndef handle_request(user_id: str):\n    user = get_user(user_id)\n    send_email(user.email, \"Welcome!\")  # user can be None here\n    return {\"status\": \"ok\"}\n```\n\nThe problem is that `get_user()` returns `None` when the ID is not found (see `db.py:47`), but this code path assumes it always succeeds.","category":"correctness","severity":"high","confidence":"high","complexity":"simple","location":{"file":"src/foo.py","line":42},"options":[{"label":"Add guard clause","description":"Check for None and return a 404 — simple, minimal change"},{"label":"Return early with error response","description":"Raise a typed UserNotFoundError so the error handler produces a consistent API response"}]}
+   {"type":"triage","title":"Session token in URL query parameter","body":"The session token is passed as a query parameter, which means it gets logged in server access logs, browser history, and any proxy logs along the way.\n\n```python\ndef build_auth_url(token: str) -> str:\n    return f\"/dashboard?session={token}\"\n```\n\nMove the token to an `Authorization` header or a `Set-Cookie` with `HttpOnly` and `Secure` flags instead.","category":"security","severity":"medium","confidence":"medium","complexity":"standard","location":{"file":"src/bar.py","line":17},"options":[{"label":"Move token to HttpOnly cookie","description":"Use Set-Cookie with HttpOnly and Secure flags — keeps tokens out of JS and logs"}]}
+   ```
+   If the agent has no findings, still call `agent_stop` and return an empty JSONL section:
+   ```
+   ---JSONL---
+   ```
+
+If `agent_start` or `agent_stop` returns an error, check the error message:
+- `ValueError` = fix the input and retry
+- `KeyError` = abort with FATAL error (wrong session/step/agent name)
+
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include these mandates verbatim:
+1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
+2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
+Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls only.
+- Agent 1 (Architecture & Design): Design, Implementation, Root Cause vs. Surface Fix — reviews design, abstraction, and coupling across all changed files. For Root Cause analysis, **must use Serena** to search for other instances of patterns being modified in the PR (e.g., if the PR changes a hardcoded key in 3 files, search for that key across the codebase to find unmigrated instances).
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
 - Agent 4 (UI & Readability): Naming, Readability, Language-Specific, Usability and Accessibility, UI Layout Robustness — reviews all changed files for naming, readability, code style, and UI layout issues. Rarely needs Serena.
 - Agent 5 (Performance & Data Integrity): Performance (incl. Database Query Performance, Memory, Concurrency and Data Integrity, External Data Defensiveness) — reviews all changed files for performance issues, N+1 queries, data integrity, external data defensiveness, and concurrency. Use Serena to read model definitions, check indexes, and trace queryset construction.
 - Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion — reviews all changed files for test coverage, test determinism, error handling completeness, and production readiness. Use Serena to verify what tests exercise and check monitoring setup.
 
-**After all 6 agents return**, the parent:
-1. Collects all `FINDING|...` lines from all agents
-2. Deduplicates: if two agents flagged the same `file_path:line_number`, keep the finding with the higher severity and concatenate both descriptions
-3. Sorts by severity (critical first), then confidence
-4. Proceeds to the `present_summary` step with the merged findings list
+**After all 6 agents return**, the parent proceeds to the `check_and_review` step.
 </step>
 
-<step name="present_summary">
-Show a compact table so the user can see all findings at a glance:
+### Smart Defaults (Complexity-Based Recommendations)
 
-| # | What | Where | Severity | How sure? |
-|---|------|-------|----------|-----------|
-| 1 | Short natural description | file:line | critical/high/medium/low | pretty sure / fairly sure / not sure |
+After `review_wait()` returns, examine the `complexity` of all accepted/downgraded findings (using `response.complexity or finding.complexity` for each). Determine the recommended "What next?" option:
 
-Map confidence levels to natural language:
-- high -> "pretty sure"
-- medium -> "fairly sure"
-- low -> "not sure"
+- **All simple** — recommend "Auto-apply all fixes"
+- **Mix of simple and standard (no complex)** — recommend "Fix with chat"
+- **Any complex** — recommend "Build a plan to fix"
 
-Sort by severity (critical first), then confidence.
+Mark the recommended option with a note explaining why (e.g., "Recommended — all 5 findings are simple fixes").
 
-After the table, say something like "Let's go through these one at a time." to transition into the walkthrough.
+<step name="check_and_review">
+This step collects agent results, submits findings for user triage, and returns the triaged findings list to the calling skill.
 
-The calling skill provides the intro line before the table and the no-findings behavior.
+**1. Check for fatal errors:** Check each agent's output for a `FATAL:` prefix. If any agent returned a fatal error, report the error to the user and abort.
+
+**2. Parse JSONL from agent outputs:** For each of the 6 agents, find the `---JSONL---` delimiter in its task output and parse every subsequent line as a JSON object. Collect all findings into a single list.
+
+**3. Deduplicate findings:** Remove duplicate findings where both `type` and `title` match exactly. Keep the first occurrence, discard later duplicates.
+
+**4. Submit findings to the review server:** For each unique finding, call the `mcp__zing-ai__finding_submit` MCP tool:
+```
+mcp__zing-ai__finding_submit(session_id=SESSION_ID, step_id=STEP_ID, finding=FINDING_OBJECT)
+```
+If the tool returns an error:
+- `ValueError` = fix the finding data and retry
+- `KeyError` = abort with FATAL error (wrong session/step ID)
+- `RuntimeError` = abort immediately (step already completed)
+
+**5. Wait for user review:** Call `mcp__zing-ai__review_wait(session_id, step_id)`. The tool returns JSON that includes a `review_url` field — display this URL to the user so they can open the review dashboard (e.g. "Review dashboard ready: http://localhost:PORT/SESSION_ID"). This blocks until the user has reviewed all findings in the browser UI and submitted their decisions. The returned JSON also contains each item with the full original finding alongside the user's response (accepted, dropped, or discuss).
+
+**6. Process the returned JSON:**
+- **Accepted findings**: Include in the output (the calling skill defines how — e.g., report file, PR line comments).
+- **Dropped findings**: Exclude entirely.
+- **Downgraded findings**: Include in the output with their adjusted severity.
+- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines), then include in the output with a note that they were flagged for discussion.
+
+**7. No findings after triage:** If no findings remain after triage (all dropped), the calling skill provides the no-findings behavior and message.
 </step>
 
 <walk_through_findings>
-Walk through each finding ONE AT A TIME, in the order presented in the summary table.
+This step is handled by the browser-based review UI. The `check_and_review` step calls `review_wait(session_id, step_id)` which returns a `review_url` — display this URL to the user so they can open the dashboard. The call blocks until the user reviews findings and submits decisions (accept, drop, or discuss).
 
-For each finding, explain it the way you'd write a PR comment — naturally and specifically:
+For findings marked "discuss", walk through each one conversationally with the user:
 
 - Lead with what you noticed, referencing the file and line conversationally: "In `auth.py` around line 15, ..."
 - Show a short code snippet from the diff so the user can see exactly what you're talking about
@@ -376,22 +488,13 @@ For each finding, explain it the way you'd write a PR comment — naturally and 
   - "Small thing —"
   - "So in the new `handleSubmit` function..."
 
-After explaining, use AskUserQuestion:
-- Question: "What do you think?" (use the header to show which # you're on, like "3/7")
-- Options:
-  - "Yeah, good catch" (description: "Valid — track this finding")
-  - "Nah, not an issue" (description: "False positive — skip it")
-  - "Fair point, but low priority" (description: "Real issue but downgrade severity to low")
-
-Record the decision. If "low priority", set severity to `low` in the final output.
-
-Continue until all findings have been reviewed.
+After explaining, ask the user what they'd like to do with the finding and record their decision.
 </walk_through_findings>
 
 <anti_patterns>
 - Do NOT flag minor style preferences (spacing, brace style, trailing commas) unless they cause genuine confusion
 - Do NOT flag issues in code that was not changed in this branch/PR
-- Do NOT present all findings at once for bulk approval — walk through one at a time
+- Do NOT present all findings at once for bulk approval — the user reviews them in the browser UI
 - Do NOT fabricate line numbers — use actual line numbers from the files
 - Do NOT rely solely on diff hunks when evaluating correctness, security, or performance — use Serena to pull surrounding context when the diff alone is insufficient
 - Do NOT over-flag "possible" issues with low confidence just to pad the findings list — only flag things worth a human's attention
@@ -399,5 +502,11 @@ Continue until all findings have been reviewed.
 </anti_patterns>
 
 <attribution_rule>
-Any output produced by the review — PR comments, review bodies, report files, PR descriptions — must NEVER mention Claude, Codex, OpenCode, or any other AI tool by name. If any attribution is included, it should credit [Zing](https://github.com/Farmer-Pete/Zing).
+Any output that leaves the local environment — PR comments, review bodies, PR descriptions, git commit messages, GitHub issue comments — must always credit Zing:
+
+- **PR comments and review bodies**: Credit [Zing](https://github.com/Farmer-Pete/Zing).
+- **Git commits**: Always include `Co-Authored-By: Zing <zing@farmerpete.net>`.
+- **PR descriptions**: If a "generated by" or similar line is included, credit Zing.
+
+Local-only output (report files in `.zing/`, terminal messages to the user) is exempt from this rule.
 </attribution_rule>

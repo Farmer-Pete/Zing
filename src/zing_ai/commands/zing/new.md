@@ -12,6 +12,8 @@ Two modes:
 Create the `.zing/` directory in the current working directory if it doesn't already exist.
 
 Then check if a `.gitignore` file exists in the current working directory. If it does, read it and check whether `.zing` or `.zing/` is already listed. If not, append `.zing/` to the end of the file. If no `.gitignore` exists, create one containing `.zing/`.
+
+After the directory and gitignore are set up, create a session by calling the `mcp__zing-ai__session_create` MCP tool. Pass a `title` derived from the user's input if available (e.g., the project name or a short summary), otherwise use `"New Zing Session"` as the default title. The tool returns a response containing `session_id` and `steps` (a mapping of step names to step IDs, e.g. `{plan: id, plan-audit: id, build: id, build-audit: id}`). Store these values — they will be embedded in the zing file later.
 </step>
 
 <step name="detect_mode">
@@ -44,6 +46,9 @@ The user has provided a Linear filter/view URL. The goal is to find a ticket wor
    - The priority
    - A brief summary of what it's about
 
+   If a session has already been created at this point, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Ticket found", body="A suitable Linear ticket was found. Confirm or skip.")` where `session_id` is the session ID from the `session_create` call.
+
    Then use `AskUserQuestion` to ask:
    - Question: "Want to work on this ticket?"
    - Options:
@@ -53,9 +58,17 @@ The user has provided a Linear filter/view URL. The goal is to find a ticket wor
 
    If the user says skip, move to the next suitable ticket and repeat. If there are no more suitable tickets, tell the user and switch to conversation mode. If the user says yes, proceed to save.
 
-7. **Save the ticket as a zing file**: Write a markdown file to `.zing/` using the ticket identifier and title as the filename (e.g., `.zing/ENG-123-fix-auth-bug.md`). The file should contain:
+7. **Save the ticket as a zing file**: Write a markdown file to `.zing/` using the ticket identifier and title as the filename (e.g., `.zing/ENG-123-fix-auth-bug.md`). The file MUST begin with YAML frontmatter containing the session ID and step IDs from the `session_create` call:
 
 ```markdown
+---
+session: {session_id}
+steps:
+  plan: {plan_step_id}
+  plan-audit: {plan-audit_step_id}
+  build: {build_step_id}
+  build-audit: {build-audit_step_id}
+---
 # {Ticket Identifier}: {Title}
 
 Linear ticket: {ticket URL or identifier}
@@ -116,9 +129,17 @@ The filename should be descriptive enough to identify the zing spec at a glance.
 <step name="save_zing_file">
 Create the `.zing/` directory if it doesn't exist, then write a markdown file there.
 
-The file should contain ALL information the user provided, organized into logical sections. Use the following structure as a guide, but adapt based on what was actually provided — only include sections where the user gave relevant information:
+The file MUST begin with YAML frontmatter containing the session ID and step IDs from the `session_create` call:
 
 ```markdown
+---
+session: {session_id}
+steps:
+  plan: {plan_step_id}
+  plan-audit: {plan-audit_step_id}
+  build: {build_step_id}
+  build-audit: {build-audit_step_id}
+---
 # {Project Name}
 
 ## Overview
@@ -140,7 +161,10 @@ The file should contain ALL information the user provided, organized into logica
 {Any research results the user chose to include}
 ```
 
+The file should contain ALL information the user provided, organized into logical sections. Use the structure above as a guide, but adapt based on what was actually provided — only include sections where the user gave relevant information.
+
 Rules for the file:
+- The YAML frontmatter with session and steps is REQUIRED — always include it
 - Include EVERYTHING the user said — do not omit, summarize, or editorialize
 - Preserve the user's original wording as much as possible
 - If something doesn't fit a section, put it in Notes
@@ -158,6 +182,8 @@ Saved to .zing/{filename}
 Where `{filename}` is the path relative to the current working directory (e.g., `.zing/recipe-app.md`).
 
 Before chaining to the next skill, print an excited sentence containing "Zing!" with a lightning bolt-related emoji (e.g. ⚡). Vary the sentence each time — don't repeat the same one.
+
+Resolve the zing file path to an absolute path (using the current working directory) before passing it as the skill argument.
 
 Then invoke the `Skill` tool with skill name `zing:plan` and args set to the file path (e.g., `.zing/recipe-app.md`) to continue the pipeline.
 </step>

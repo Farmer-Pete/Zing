@@ -1,0 +1,13 @@
+<div id="agents-container">
+{% if step.agents %}
+<div class="agents-panel">
+    <div class="agents-panel-title">Agents</div>
+    {% for agent in step.agents %}
+    <div class="agent {% if agent.state.value == 'running' %}agent-running{% else %}agent-completed{% endif %}">
+        <strong>{{ agent.name }}</strong>
+        {% if agent.description %}<span class="agent-desc">{{ agent.description | markdown }}</span>{% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+</div>

@@ -25,6 +25,18 @@ Exit.
 If there is no diff (no changes), say something like:
 "This branch is identical to `{base}` — nothing to review yet."
 Exit.
+
+### Session setup
+
+After detecting the branch, parse the zing doc's YAML frontmatter (if one was provided as an argument). Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
+
+If there is no zing doc, no frontmatter, or no `session` in the frontmatter, this is a standalone invocation. Call `session_create(title="Code Review — {branch_name}", steps=["code-review"])` to get a new session ID and step IDs. If a zing doc exists, update its frontmatter to include `session: {session_id}` and the `steps:` mapping, then save the file.
+
+Once you have the session ID, if a zing doc exists, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title="Code Review — {branch_name}")` to associate the zing file with the session.
+
+Then call `step_start(session_id, steps.build-audit)` where `steps.build-audit` is the build-audit step ID from the frontmatter (or the code-review step ID if this is a standalone invocation). This transitions the step from PENDING to STARTED.
+
+The session ID and step ID will be passed to the shared review steps.
 </step>
 
 <step name="read_changed_files">
@@ -39,7 +51,7 @@ Follow the `big_picture` step from the shared review reference.
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies.
+Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
 </step>
 
 <step name="present_summary">
@@ -49,8 +61,6 @@ Give a brief, natural overview of the branch before diving into findings. Someth
 Alright, I've looked through the {count} files changed on `{branch_name}`. Here's what I found — {total_count} things I want to flag:
 ```
 
-Follow the `present_summary` step from the shared review reference for the table format and confidence mapping.
-
 If no issues were found, just say something like:
 ```
 Looked through everything — nothing jumped out at me. Changes look solid.
@@ -58,12 +68,15 @@ Looked through everything — nothing jumped out at me. Changes look solid.
 Write an empty findings report and exit.
 </step>
 
-<step name="walk_through_findings">
-Follow the `walk_through_findings` guidelines from the shared review reference.
+<step name="check_and_review">
+Follow the `check_and_review` step from the shared review reference.
+
+- **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
+- **No findings after triage**: Say something like "Looked through everything — nothing survived triage. Changes look solid." Write an empty findings report and exit.
 </step>
 
 <step name="write_report">
-After all findings have been reviewed, compile the valid findings into a GitHub-flavored markdown file.
+Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
 First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
 
@@ -86,22 +99,27 @@ Reviewed on {YYYY-MM-DD} against `{base_branch}`. {count} files changed across {
 
 `{file_path}:{line_number}` — **{severity}**, {confidence} confidence
 
-{Write the explanation the same way you explained it during the walkthrough — conversationally, with specific references to the code. Include a code snippet showing the problematic lines.}
+{Write the explanation conversationally, with specific references to the code. Include a code snippet showing the problematic lines. For downgraded findings, use the adjusted severity. For discuss findings, include a note: "(Flagged for discussion)".}
 
 ```{language}
 {relevant code snippet}
 `` `
+
+**Approach:** {the user's selected approach — see instructions below}
 
 ---
 
 ### 2. ...
 ```
 
+**Including the selected approach:** Each `ReviewItem` returned by `review_wait()` contains a `response` with `selected` and `other_text` fields. For each finding in the report:
+- If `response.selected` is set and is NOT `"__other__"`: use the `selected` value as the approach text (it will match one of the finding's `options[].label` values — include the matching option's `description` too, e.g. "**Approach:** Add guard clause — Check for None and return a 404, simple minimal change").
+- If `response.selected` is `"__other__"` and `response.other_text` is set: use the `other_text` as the approach (e.g. "**Approach:** Wrap in a try/except and log the error instead").
+- If `response.selected` is not set (no approach was chosen): omit the **Approach:** line entirely for that finding.
+
 After writing, tell the user:
 ```
 Wrote {valid_count} findings to {file_path}
-
-To start working on these fixes, run: /zing:plan {file_path}
 ```
 
 If zero valid findings, write a short file noting "Nothing to flag — changes looked good." and tell the user.
@@ -110,20 +128,37 @@ If zero valid findings, write a short file noting "Nothing to flag — changes l
 <step name="create_pr">
 End your review summary with: "Zing! Review complete."
 
-After writing the review report, use AskUserQuestion to ask: "What next?"
-- Options:
-  - "Create a PR" (description: "Create a GitHub PR from the current branch")
-  - "Fix with chat" (description: "Walk through each finding interactively — faster, fix as you go")
-  - "Build a plan to fix" (description: "Systematically plan and build a fix for each finding — slower but more thorough")
-  - "I'm done" (description: "Stop here")
+### Determine the recommended option
+
+After writing the review report, examine the complexity of all accepted/downgraded findings from the `review_wait()` response. For each finding, use `response.complexity or finding.complexity` (user override first, then agent classification).
+
+Count the findings by complexity and determine the default:
+- If **all** accepted/downgraded findings have `complexity == "simple"`: recommend **"Auto-apply all fixes"**
+- Otherwise (any standard or complex findings): recommend **"Fix with chat"**
+
+### Present the "What next?" question
+
+Before asking the user, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Build audit complete", body="Review findings are ready. Choose how to proceed.")` where `session_id` is the session ID from the zing file frontmatter.
+
+Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
+
+- "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
+- "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
+- "Create a PR" (description: "Create a GitHub PR from the current branch")
+- "I'm done" (description: "Stop here")
+
+### Handling each choice
+
+If "Auto-apply all fixes": proceed to the `auto_apply` step.
 
 If "Fix with chat": proceed to the `discuss_findings` step.
 
-If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/code-review-feature-x-2025-06-15-1423.md`).
-
 If "Create a PR":
 1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
-2. If `gh pr create` fails, show the error message and use AskUserQuestion:
+2. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="PR creation failed", body="The pull request could not be created. Manual intervention needed.")` where `session_id` is the session ID from the zing file frontmatter.
+   Use AskUserQuestion:
    - "Try again" (description: "Retry gh pr create --draft --fill")
    - "Try without --fill" (description: "Run gh pr create --draft without --fill, letting gh prompt for title/body")
    - "Skip PR creation" (description: "Continue without creating a PR")
@@ -134,8 +169,47 @@ Follow the `attribution_rule` from the shared review reference.
 If "I'm done" at the initial question, exit normally.
 </step>
 
+<step name="auto_apply">
+Automatically apply fixes for all accepted/downgraded findings without interactive prompts. This step is self-contained — no separate skill or server-side code is needed.
+
+### Process
+
+1. **Iterate through each accepted/downgraded finding** in the order they appear in the report.
+
+2. **For each finding:**
+   a. Read the finding's body (the detailed explanation from the report) and the selected approach option (from `response.selected` / `response.other_text`).
+   b. Read the relevant source file(s) referenced in the finding.
+   c. Apply the fix directly using Edit/Write tools. For simple findings the fix should be obvious from the finding description and selected approach. For standard findings, use the approach option to guide the implementation.
+   d. After applying the fix, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+   e. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), **fall back to interactive "fix with chat" mode for that finding only**: show the finding to the user, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+3. **After all findings are processed**, show a summary:
+   ```
+   Auto-apply complete:
+   - {applied_count} fixes applied successfully
+   - {fallback_count} required interactive resolution
+   - {skipped_count} skipped
+   ```
+
+4. **Stage and commit all changes** with a descriptive commit message listing the findings addressed:
+   ```
+   Fix code review findings: {brief list of finding titles}
+
+   Applied {applied_count} fixes from code review ({report_file}).
+   Findings addressed:
+   - #{n}: {finding title}
+   - #{n}: {finding title}
+   ...
+   ```
+
+5. After committing, return to the `create_pr` step's AskUserQuestion — offer "Create a PR" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
+</step>
+
 <step name="discuss_findings">
 Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
+
+Before presenting findings, send a browser notification so they know input is needed:
+Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
 
 Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
 
@@ -153,7 +227,7 @@ Then enter a conversational loop. The user drives the interaction using natural 
 
 After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
 
-After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR", "Build a plan to fix", and "I'm done" (without the "Fix with chat" option again).
+After the walkthrough is complete, return to the `create_pr` step's AskUserQuestion — offer "Create a PR" and "I'm done" (without the "Fix with chat" option again).
 </step>
 
 </process>
@@ -172,10 +246,10 @@ Review is complete when:
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
-- [ ] Findings were presented in a sorted summary table
-- [ ] Each finding was walked through one at a time with the user
-- [ ] User validated or invalidated each finding
-- [ ] Valid findings were written to a markdown file in `.zing/` in GFM format
-- [ ] File path was shown to the user with instruction to run `/zing:plan` on it
+- [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
+- [ ] Review UI was opened for batch triage via `review_wait()`
+- [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
+- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
+- [ ] File path was shown to the user
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>

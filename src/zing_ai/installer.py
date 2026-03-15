@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.resources
+import json
 import logging
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from importlib.resources.abc import Traversable
@@ -91,6 +94,8 @@ def install_claude(target_dir: Path | None = None) -> None:
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
     write_manifest(target_dir, "claude-code", relpaths)
+
+    register_mcp_server("claude")
 
 
 def install_opencode(target_dir: Path | None = None) -> None:
@@ -191,6 +196,8 @@ def install_opencode(target_dir: Path | None = None) -> None:
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
     write_manifest(target_dir, "opencode", relpaths)
+
+    register_mcp_server("opencode")
 
 
 def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:
@@ -306,3 +313,89 @@ def _rollback(created_files: list[Path], created_dirs: list[Path]) -> None:
             if d.exists() and not any(d.iterdir()):
                 logger.debug("Removing empty directory: %s", d)
                 d.rmdir()
+
+
+def register_mcp_server(runtime: str) -> None:
+    """Register the Zing MCP server for the given runtime.
+
+    Parameters
+    ----------
+    runtime:
+        Either ``"claude"`` or ``"opencode"``.
+
+    For Claude Code, runs ``claude mcp add -s user zing-ai -- zing-ai mcp``
+    via subprocess.  If the ``claude`` CLI is not on PATH, a warning is logged
+    and the function returns without error.
+
+    For OpenCode, merges the MCP server entry into
+    ``~/.config/opencode/opencode.json``, preserving any existing config.
+
+    The operation is idempotent — running it again is a no-op.
+    """
+    if runtime == "claude":
+        _register_mcp_claude()
+    elif runtime == "opencode":
+        _register_mcp_opencode()
+    else:
+        logger.warning("Unknown runtime %r, skipping MCP registration", runtime)
+
+
+def _register_mcp_claude() -> None:
+    """Register the Zing MCP server for Claude Code via the CLI.
+
+    Uses mcp-remote (npx) as a stdio-to-HTTP bridge to avoid Claude Code's
+    OAuth discovery issues with direct HTTP transport.
+    """
+    if shutil.which("claude") is None:
+        logger.warning(
+            "claude CLI not found on PATH; skipping MCP server registration. "
+            "Run 'claude mcp add -s user zing-ai -- "
+            "npx mcp-remote@0.1.18 http://127.0.0.1:9876/mcp' manually."
+        )
+        return
+
+    logger.info("Registering Zing MCP server for Claude Code")
+    try:
+        subprocess.run(
+            [
+                "claude",
+                "mcp",
+                "add",
+                "-s",
+                "user",
+                "zing-ai",
+                "--",
+                "npx",
+                "mcp-remote",
+                "http://127.0.0.1:9876/mcp",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning("Failed to register MCP server via claude CLI: %s", exc.stderr)
+
+
+def _register_mcp_opencode() -> None:
+    """Register the Zing MCP server in the OpenCode config file."""
+    config_path = Path.home() / ".config" / "opencode" / "opencode.json"
+
+    logger.info("Registering Zing MCP server in %s", config_path)
+
+    config: dict = {}
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing OpenCode config: %s", exc)
+            config = {}
+
+    mcp_section = config.setdefault("mcp", {})
+    mcp_section["zing-ai"] = {
+        "type": "http",
+        "url": "http://127.0.0.1:9876/mcp",
+    }
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

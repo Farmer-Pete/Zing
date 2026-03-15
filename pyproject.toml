@@ -7,38 +7,47 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "click>=8.1",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "datastar-py>=0.4",
+    "pydantic>=2.0",
+    "mcp>=1.26,<2",
+    "jinja2",
+    "mistune>=3.0",
+    "pygments>=2.17",
 ]
 
 [project.scripts]
 zing-ai = "zing_ai.cli:main"
 
 [build-system]
- requires = ["hatchling", "uv-dynamic-versioning"]
- build-backend = "hatchling.build"
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-playwright>=0.6",
     "pre-commit>=4.0",
     "ruff>=0.15",
     "pyright>=1.1",
     "pyleft>=1.1",
+    "httpx>=0.28",
 ]
 
- [tool.hatch.version]
- source = "uv-dynamic-versioning"
- 
- [tool.uv-dynamic-versioning]
- vcs = "git"
- style = "pep440"
- fallback-version = "0.0.0"
- 
- [tool.hatch.build.targets.wheel]
- packages = ["src/zing_ai"]
- 
- [tool.uv]
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zing_ai"]
+
+[tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
- 
 
 [tool.ruff]
 target-version = "py312"
@@ -50,6 +59,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "W"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+markers = ["ui: browser-based UI tests (require Playwright)"]
 
 [tool.pyleft]
 paths = ["src"]
