@@ -20,6 +20,8 @@ class TestSessionLifecycle(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmp.name)
         self.manager = SessionManager(data_dir=self.data_dir)
+        self.zing_file = str(self.data_dir / "plan.md")
+        Path(self.zing_file).write_text("# Plan\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -45,8 +47,8 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_create_session_zing_file_absolute(self) -> None:
         """Creating a session with a valid absolute zing_file path succeeds."""
-        session = self.manager.create_session("s1", "Test", zing_file=__file__)
-        assert session.zing_file == __file__
+        session = self.manager.create_session("s1", "Test", zing_file=self.zing_file)
+        assert session.zing_file == self.zing_file
 
     def test_create_session_zing_file_relative_rejected(self) -> None:
         """Creating a session with a relative zing_file path raises ValueError."""
@@ -58,6 +60,13 @@ class TestSessionLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError, msg="zing_file path does not exist"):
             self.manager.create_session("s1", "Test", zing_file="/nonexistent/path.md")
 
+    def test_create_session_zing_file_non_markdown_rejected(self) -> None:
+        """Creating a session with a non-.md zing_file raises ValueError."""
+        non_md = str(self.data_dir / "plan.txt")
+        Path(non_md).write_text("not markdown", encoding="utf-8")
+        with self.assertRaises(ValueError, msg="zing_file must be a markdown file"):
+            self.manager.create_session("s1", "Test", zing_file=non_md)
+
     def test_update_session(self) -> None:
         """update_session changes zing_file and title on an existing session."""
         session = self.manager.create_session("s1", "Original Title")
@@ -65,31 +74,31 @@ class TestSessionLifecycle(unittest.TestCase):
         assert session.zing_file is None
 
         updated = self.manager.update_session(
-            "s1", zing_file=__file__, title="New Title",
+            "s1", zing_file=self.zing_file, title="New Title",
         )
         assert updated.title == "New Title"
-        assert updated.zing_file == __file__
+        assert updated.zing_file == self.zing_file
 
         # Verify changes persisted by reloading
         reloaded = SessionManager(data_dir=self.data_dir)
         s = reloaded.get_session("s1")
         assert s is not None
         assert s.title == "New Title"
-        assert s.zing_file == __file__
+        assert s.zing_file == self.zing_file
 
     def test_update_session_partial(self) -> None:
         """update_session with None parameters skips those fields."""
-        self.manager.create_session("s1", "Title", zing_file=__file__)
+        self.manager.create_session("s1", "Title", zing_file=self.zing_file)
 
         # Update only title
         updated = self.manager.update_session("s1", title="New Title")
         assert updated.title == "New Title"
-        assert updated.zing_file == __file__
+        assert updated.zing_file == self.zing_file
 
         # Update only zing_file (using setUp.py as a different valid file)
-        updated2 = self.manager.update_session("s1", zing_file=__file__)
+        updated2 = self.manager.update_session("s1", zing_file=self.zing_file)
         assert updated2.title == "New Title"
-        assert updated2.zing_file == __file__
+        assert updated2.zing_file == self.zing_file
 
     def test_update_session_validates_zing_file(self) -> None:
         """update_session rejects relative and nonexistent zing_file paths."""

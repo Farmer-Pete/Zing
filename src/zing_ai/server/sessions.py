@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from zing_ai.server.models import (
     Agent,
     AgentState,
@@ -40,6 +42,7 @@ if not logger.handlers:
 
 _DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "zing-ai" / "sessions"
 _SAFE_SESSION_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+_FINDING_ADAPTER = TypeAdapter(Finding)
 
 
 class SessionManager:
@@ -58,6 +61,7 @@ class SessionManager:
         self._events: dict[str, asyncio.Event] = {}
         self._steps_by_id: dict[str, tuple[str, int]] = {}
         self._listeners: list[Callable[[str, str], None]] = []
+        self._auto_completed_steps: set[str] = set()
         self._load_existing_sessions()
 
     def add_listener(self, callback: Callable[[str, str], None]) -> None:
@@ -92,7 +96,7 @@ class SessionManager:
         """Write a session to disk as JSON atomically (write-then-rename)."""
         path = self._session_path(session.session_id)
         tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(session.model_dump_json(indent=2))
+        tmp_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
         tmp_path.replace(path)
         logger.debug("Persisted session %s to %s", session.session_id, path)
 
@@ -100,7 +104,7 @@ class SessionManager:
         """Load all existing session JSON files into memory on startup."""
         for path in self._data_dir.glob("*.json"):
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 session = Session.model_validate(data)
                 self._sessions[session.session_id] = session
                 # Index steps by step_id and create events
@@ -121,12 +125,21 @@ class SessionManager:
                 logger.exception("Failed to load session from %s", path)
 
     def _update_session_state(self, session: Session) -> None:
-        """Update session-level state based on the latest step."""
+        """Update session-level state based on the highest-priority step state.
+
+        Priority order: COMPLETED > READY > STARTED > PENDING.
+        """
         if not session.steps:
             session.state = SessionState.PENDING
             return
-        latest = session.steps[-1]
-        session.state = latest.state
+        priority = {
+            SessionState.PENDING: 0,
+            SessionState.STARTED: 1,
+            SessionState.READY: 2,
+            SessionState.COMPLETED: 3,
+        }
+        best = max(session.steps, key=lambda s: priority.get(s.state, 0))
+        session.state = best.state
 
     def create_session(
         self,
@@ -158,6 +171,10 @@ class SessionManager:
             if not os.path.exists(zing_file):
                 logger.warning("Rejected zing_file (does not exist): %s", zing_file)
                 msg = f"zing_file path does not exist: {zing_file}"
+                raise ValueError(msg)
+            if not zing_file.endswith(".md"):
+                logger.warning("Rejected zing_file (not markdown): %s", zing_file)
+                msg = f"zing_file must be a markdown file (.md), got: {zing_file}"
                 raise ValueError(msg)
         session = Session(session_id=session_id, title=title, zing_file=zing_file)
         if steps:
@@ -204,6 +221,10 @@ class SessionManager:
                 logger.warning("Rejected zing_file (does not exist): %s", zing_file)
                 msg = f"zing_file path does not exist: {zing_file}"
                 raise ValueError(msg)
+            if not zing_file.endswith(".md"):
+                logger.warning("Rejected zing_file (not markdown): %s", zing_file)
+                msg = f"zing_file must be a markdown file (.md), got: {zing_file}"
+                raise ValueError(msg)
             session.zing_file = zing_file
         if title is not None:
             session.title = title
@@ -246,6 +267,7 @@ class SessionManager:
                 break
             if prior.state in (SessionState.STARTED, SessionState.READY):
                 prior.state = SessionState.COMPLETED
+                self._auto_completed_steps.add(prior.step_id)
                 key = self._event_key(session_id, prior.step_id)
                 event = self._events.get(key)
                 if event:
@@ -338,10 +360,7 @@ class SessionManager:
             )
             raise ValueError(msg)
 
-        from pydantic import TypeAdapter
-
-        adapter = TypeAdapter(Finding)
-        finding = adapter.validate_python(finding_data)
+        finding = _FINDING_ADAPTER.validate_python(finding_data)
 
         # Deduplicate by (type, title) — skip if an identical pair already exists
         for existing in step.findings:
@@ -689,7 +708,10 @@ class SessionManager:
         return ReviewResponse(session_id=session_id, step_name=step.step_name, items=items)
 
     def _build_review_response(
-        self, session_id: str, step: WorkflowStep,
+        self,
+        session_id: str,
+        step: WorkflowStep,
+        auto_completed: bool = False,
     ) -> ReviewResponse:
         """Build a ReviewResponse from a step's findings and responses."""
         responses = step.responses or [UserResponse() for _ in step.findings]
@@ -700,7 +722,12 @@ class SessionManager:
             ReviewItem(finding=finding, response=response)
             for finding, response in zip(step.findings, responses, strict=True)
         ]
-        return ReviewResponse(session_id=session_id, step_name=step.step_name, items=items)
+        return ReviewResponse(
+            session_id=session_id,
+            step_name=step.step_name,
+            items=items,
+            auto_completed=auto_completed,
+        )
 
     async def wait_for_review(self, session_id: str, step_id: str) -> ReviewResponse:
         """Transition a step to READY and block until the review is submitted.
@@ -738,10 +765,18 @@ class SessionManager:
         if key not in self._events:
             self._events[key] = asyncio.Event()
         await self._events[key].wait()
-        # Re-fetch after await — raises KeyError if session was cleaned up
-        _session, step = self.get_step_by_id(step_id)
+        # Re-fetch after await — session may have been cleaned up while waiting
+        try:
+            _session, step = self.get_step_by_id(step_id)
+        except KeyError:
+            msg = f"Session was cleaned up while waiting for review (step_id={step_id!r})"
+            raise KeyError(msg) from None
+        was_auto_completed = step_id in self._auto_completed_steps
+        self._auto_completed_steps.discard(step_id)
 
-        return self._build_review_response(session_id, step)
+        return self._build_review_response(
+            session_id, step, auto_completed=was_auto_completed,
+        )
 
     def get_session(self, session_id: str) -> Session | None:
         """Return a session by ID, or None if not found."""

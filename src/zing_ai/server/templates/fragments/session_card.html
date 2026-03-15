@@ -13,7 +13,7 @@
         <div class="timeline-footer">
             <span class="timeline-time">{{ s.created_at.strftime('%H:%M') }}</span>
             <button class="cleanup-btn" type="button"
-                    data-on:click="event.stopPropagation(); event.preventDefault(); @post('/sessions/{{ s.session_id }}/cleanup')">Delete</button>
+                    data-on:click="event.stopPropagation(); event.preventDefault(); if (confirm('Delete this session? This cannot be undone.')) { @post('/sessions/{{ s.session_id }}/cleanup') }">Delete</button>
         </div>
     </a>
 </div>

@@ -603,12 +603,14 @@ class TestHTMLEndpoints(ServerTestBase):
         self._create_session(session_id="s1", title="First Session")
         self._create_session(session_id="s2", title="Second Session")
         step_id_s2 = self.step_id
-        # Complete the second session's step so it gets a different status badge
-        self.client.post(
-            "/s2/findings",
-            json={"step_id": step_id_s2, "type": "text", "title": "How is it?"},
+        # Transition second session's step to READY via SessionManager
+        self.manager.add_finding(
+            "s2", step_id_s2,
+            {"type": "text", "title": "How is it?"},
         )
-        self.client.post("/s2/agent-complete", json={"step_id": step_id_s2})
+        self.manager.start_agent("s2", step_id_s2, "test-agent")
+        self.manager.stop_agent("s2", step_id_s2, "test-agent")
+        self.manager.mark_step_ready("s2", step_id_s2)
         resp = self.client.get("/dashboard")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("First Session", resp.text)

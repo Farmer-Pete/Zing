@@ -329,3 +329,4 @@ class ReviewResponse(BaseModel):
     session_id: str
     step_name: str
     items: list[ReviewItem]
+    auto_completed: bool = False

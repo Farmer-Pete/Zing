@@ -350,7 +350,7 @@ def _register_mcp_claude() -> None:
         logger.warning(
             "claude CLI not found on PATH; skipping MCP server registration. "
             "Run 'claude mcp add -s user zing-ai -- "
-            "npx mcp-remote http://127.0.0.1:9876/mcp' manually."
+            "npx mcp-remote@0.1.18 http://127.0.0.1:9876/mcp' manually."
         )
         return
 

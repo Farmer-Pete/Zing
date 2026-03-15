@@ -168,6 +168,8 @@ async def notification_send(
         return {"error": "title must be 200 characters or fewer"}
     if len(body) > 1000:
         return {"error": "body must be 1000 characters or fewer"}
+    if url is not None and not url.startswith(("http://", "https://")):
+        return {"error": "url must use http:// or https:// scheme"}
     sm = _get_session_manager()
     try:
         notification = sm.add_notification(session_id, title, body, url)

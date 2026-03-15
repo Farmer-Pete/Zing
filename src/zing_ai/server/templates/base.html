@@ -106,6 +106,9 @@
             margin: 0 -2rem;
             padding: 0.75rem 2rem;
             position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
 
         .brand-bar a { display: inline-block; line-height: 0; }
@@ -776,10 +779,7 @@
             font-weight: 600;
             font-family: inherit;
             transition: all 0.15s ease;
-            position: absolute;
-            right: 2rem;
-            top: 50%;
-            transform: translateY(-50%);
+            flex-shrink: 0;
         }
         .notif-opt-in-btn:hover {
             color: #fff;

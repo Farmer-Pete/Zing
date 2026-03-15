@@ -8,6 +8,7 @@ import json
 import logging
 import pathlib
 from collections import defaultdict
+from itertools import zip_longest
 from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
@@ -35,6 +36,38 @@ _sse_queues: dict[str, list[asyncio.Queue[str]]] = defaultdict(list)
 
 # Queues for dashboard SSE connections — notified when any session changes state.
 _dashboard_queues: list[asyncio.Queue[str]] = []
+
+
+def _submitted_status_html() -> str:
+    """Return the 'Review submitted' banner HTML."""
+    return '<div id="review-status" class="submit-banner">Review submitted — thank you!</div>'
+
+
+def _submitted_button_html() -> str:
+    """Return the disabled 'Review submitted' button HTML."""
+    return (
+        '<div id="submit-section">'
+        '<button class="submit-btn submit-btn--done"'
+        " disabled>Review submitted</button></div>"
+    )
+
+
+def _ready_status_html() -> str:
+    """Return the 'ready for review' banner HTML."""
+    return (
+        '<div id="review-status" class="submit-banner">'
+        "All agents complete — ready for review</div>"
+    )
+
+
+def _ready_button_html(session_id: str) -> str:
+    """Return the Submit Review button HTML."""
+    return (
+        '<div id="submit-section">'
+        f'<button class="submit-btn" '
+        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
+        "Submit Review</button></div>"
+    )
 
 
 def _session_not_found(session_id: str) -> JSONResponse:
@@ -167,7 +200,11 @@ async def post_save_response(session_id: str, request: Request) -> JSONResponse:
     # Save each non-empty response
     saved_count = 0
     for finding, response in zip(step.findings, mapped, strict=True):
-        if response.action is not None or response.selected is not None or response.answer is not None or response.complexity is not None:
+        has_data = any(
+            getattr(response, f) is not None
+            for f in ("action", "selected", "answer", "complexity")
+        )
+        if has_data:
             # Merge with existing response to preserve fields from earlier saves
             if step.responses and finding.id:
                 idx = next(
@@ -279,7 +316,9 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     if step.responses:
         responses = [
             resp.merge_over(existing)
-            for resp, existing in zip(responses, step.responses, strict=False)
+            for resp, existing in zip_longest(
+                responses, step.responses, fillvalue=UserResponse()
+            )
         ]
 
     try:
@@ -298,15 +337,8 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     )
 
     def _sse_patches():  # noqa: ANN202
-        yield SSE.patch_elements(
-            '<div id="review-status" class="submit-banner">'
-            "Review submitted — thank you!</div>",
-        )
-        yield SSE.patch_elements(
-            '<div id="submit-section">'
-            '<button class="submit-btn submit-btn--done"'
-            " disabled>Review submitted</button></div>",
-        )
+        yield SSE.patch_elements(_submitted_status_html())
+        yield SSE.patch_elements(_submitted_button_html())
 
     return _sse_patches()
 
@@ -476,27 +508,11 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 # If already ready/completed, show submit UI immediately
                 if target_step.state.value in ("ready", "completed"):
                     if target_step.state.value == "completed":
-                        yield SSE.patch_elements(
-                            '<div id="review-status" class="submit-banner">'
-                            "Review submitted — thank you!</div>",
-                        )
-                        yield SSE.patch_elements(
-                            '<div id="submit-section">'
-                            '<button class="submit-btn"'
-                            ' style="background: #059669; cursor: default;"'
-                            " disabled>Review submitted</button></div>",
-                        )
+                        yield SSE.patch_elements(_submitted_status_html())
+                        yield SSE.patch_elements(_submitted_button_html())
                     else:
-                        yield SSE.patch_elements(
-                            '<div id="review-status" class="submit-banner">'
-                            "All agents complete — ready for review</div>",
-                        )
-                        yield SSE.patch_elements(
-                            '<div id="submit-section">'
-                            f'<button class="submit-btn" '
-                            f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                            "Submit Review</button></div>",
-                        )
+                        yield SSE.patch_elements(_ready_status_html())
+                        yield SSE.patch_elements(_ready_button_html(session_id))
                     return
 
             # Stream events (findings for active step + notification dots for other tabs)
@@ -634,50 +650,22 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                         )
 
                     # Check terminal states
-                    if target_step.state.value == "completed":
-                        yield SSE.patch_elements(
-                            '<div id="review-status" class="submit-banner">'
-                            "Review submitted — thank you!</div>",
-                        )
-                        yield SSE.patch_elements(
-                            '<div id="submit-section">'
-                            '<button class="submit-btn"'
-                            ' style="background: #059669; cursor: default;"'
-                            " disabled>Review submitted</button></div>",
-                        )
+                    if target_step.state.value == "completed" or event == "completed":
+                        yield SSE.patch_elements(_submitted_status_html())
+                        yield SSE.patch_elements(_submitted_button_html())
                         return
                     if event == "ready" or target_step.state.value == "ready":
-                        yield SSE.patch_elements(
-                            '<div id="review-status" class="submit-banner">'
-                            "All agents complete — ready for review</div>",
-                        )
-                        yield SSE.patch_elements(
-                            '<div id="submit-section">'
-                            f'<button class="submit-btn" '
-                            f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                            "Submit Review</button></div>",
-                        )
-                        return
-
-                    if event == "completed":
-                        yield SSE.patch_elements(
-                            '<div id="review-status" class="submit-banner">'
-                            "Review submitted — thank you!</div>",
-                        )
-                        yield SSE.patch_elements(
-                            '<div id="submit-section">'
-                            '<button class="submit-btn"'
-                            ' style="background: #059669; cursor: default;"'
-                            " disabled>Review submitted</button></div>",
-                        )
+                        yield SSE.patch_elements(_ready_status_html())
+                        yield SSE.patch_elements(_ready_button_html(session_id))
                         return
         finally:
             # Remove this connection's queue
             queues = _sse_queues.get(session_id, [])
             if queue in queues:
                 queues.remove(queue)
-            if not queues:
-                _sse_queues.pop(session_id, None)
+                # Only pop the key if the list is empty AND it's still the same list
+                if not queues and _sse_queues.get(session_id) is queues:
+                    _sse_queues.pop(session_id, None)
 
     return _generate()
 
@@ -687,8 +675,8 @@ async def get_dashboard(request: Request) -> HTMLResponse:
     """Return the dashboard HTML page."""
     manager = request.app.state.session_manager
     sessions = sorted(manager.list_sessions(), key=lambda s: s.created_at, reverse=True)
-    html = render("dashboard.html", sessions=sessions)
-    return HTMLResponse(content=html)
+    page_html = render("dashboard.html", sessions=sessions)
+    return HTMLResponse(content=page_html)
 
 
 @router.get("/dashboard/events")
@@ -849,27 +837,11 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
             for f in active_step.findings
         ]
         if active_step.state.value == "completed":
-            review_status_html = (
-                '<div id="review-status" class="submit-banner">'
-                "Review submitted — thank you!</div>"
-            )
-            submit_html = (
-                '<div id="submit-section">'
-                '<button class="submit-btn"'
-                ' style="background: #059669; cursor: default;"'
-                " disabled>Review submitted</button></div>"
-            )
+            review_status_html = _submitted_status_html()
+            submit_html = _submitted_button_html()
         else:
-            review_status_html = (
-                '<div id="review-status" class="submit-banner">'
-                "All agents complete — ready for review</div>"
-            )
-            submit_html = (
-                '<div id="submit-section">'
-                '<button class="submit-btn" '
-                f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-                "Submit Review</button></div>"
-            )
+            review_status_html = _ready_status_html()
+            submit_html = _ready_button_html(session_id)
 
     page_html = render(
         "review.html",

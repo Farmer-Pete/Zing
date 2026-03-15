@@ -209,18 +209,22 @@ class TestReviewWait(ServerTestBase):
         self.manager.stop_agent("block-session", self.step_id, "test-agent")
 
         async def _test_blocking() -> None:
+            wait_started = asyncio.Event()
             completed = False
 
             async def do_wait() -> dict:
                 nonlocal completed
+                wait_started.set()
                 result = await review_wait(session_id="block-session", step_id=self.step_id)
                 completed = True
                 return result
 
             task = asyncio.create_task(do_wait())
 
-            # Yield control briefly — review_wait should NOT have completed yet
-            await asyncio.sleep(0.05)
+            # Wait until the review_wait coroutine has started
+            await wait_started.wait()
+            # Yield once more to ensure it's blocked on the internal event
+            await asyncio.sleep(0)
             self.assertFalse(completed, "review_wait should block until submission")
 
             # Submit responses to unblock
