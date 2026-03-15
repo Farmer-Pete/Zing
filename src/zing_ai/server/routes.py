@@ -598,13 +598,14 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                             f'class="status-badge status-{html.escape(s.state.value)}">'
                             f"{html.escape(s.state.value)}</span>",
                         )
-                if states_changed or session_state != current_session.state.value:
-                    session_state = current_session.state.value
+                cur_state = current_session.state.value
+                if states_changed or session_state != cur_state:
+                    session_state = cur_state
                     yield SSE.patch_elements(
                         f'<span id="session-status-badge" '
                         f'class="status-badge status-'
-                        f'{html.escape(current_session.state.value)}">'
-                        f"{html.escape(current_session.state.value)}</span>",
+                        f'{html.escape(cur_state)}">'
+                        f"{html.escape(cur_state)}</span>",
                     )
 
                 # If viewing a step tab, also stream findings for the active step

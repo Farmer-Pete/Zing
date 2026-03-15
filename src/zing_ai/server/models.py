@@ -160,6 +160,13 @@ class SessionState(StrEnum):
     COMPLETED = "completed"
 
 
+_STATE_PRIORITY: dict[str, int] = {
+    SessionState.PENDING: 0,
+    SessionState.STARTED: 1,
+    SessionState.READY: 2,
+}
+
+
 class AgentState(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
@@ -319,14 +326,9 @@ class Session(BaseModel):
             return SessionState.PENDING
         if all(s.state == SessionState.COMPLETED for s in self.steps):
             return SessionState.COMPLETED
-        priority = {
-            SessionState.PENDING: 0,
-            SessionState.STARTED: 1,
-            SessionState.READY: 2,
-        }
         non_completed = [s for s in self.steps if s.state != SessionState.COMPLETED]
-        best = max(non_completed, key=lambda s: priority.get(s.state, 0))
-        return best.state
+        highest_priority_step = max(non_completed, key=lambda s: _STATE_PRIORITY.get(s.state, 0))
+        return highest_priority_step.state
 
     @property
     def current_step_name(self) -> str | None:
