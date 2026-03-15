@@ -278,6 +278,7 @@ class Session(BaseModel):
     title: str
     zing_file: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
+    notifications: list[Notification] = Field(default_factory=list)
     state: SessionState = SessionState.PENDING
     created_at: datetime = Field(default_factory=datetime.now)
 
