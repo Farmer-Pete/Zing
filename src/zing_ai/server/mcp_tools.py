@@ -164,6 +164,10 @@ async def notification_send(
     url: str | None = None,
 ) -> dict:
     """Send a browser notification tied to a Zing session."""
+    if len(title) > 200:
+        return {"error": "title must be 200 characters or fewer"}
+    if len(body) > 1000:
+        return {"error": "body must be 1000 characters or fewer"}
     sm = _get_session_manager()
     try:
         notification = sm.add_notification(session_id, title, body, url)

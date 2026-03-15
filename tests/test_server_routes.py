@@ -585,10 +585,9 @@ class TestSSEStream(ServerTestBase):
         )
 
         # review_wait should return immediately since step is completed
-        with patch("zing_ai.server.mcp_tools.webbrowser.open"):
-            result = asyncio.run(
-                review_wait(session_id="unblock-session", step_id=self.step_id)
-            )
+        result = asyncio.run(
+            review_wait(session_id="unblock-session", step_id=self.step_id)
+        )
         self.assertEqual(result["session_id"], "unblock-session")
         self.assertEqual(result["step_name"], _STEP)
         self.assertEqual(len(result["items"]), 1)
@@ -846,9 +845,9 @@ class TestNotificationRouting(ServerTestBase):
         queue: asyncio.Queue[str] = asyncio.Queue()
         _dashboard_queues.append(queue)
         try:
-            _notify_dashboard_connections("notification", session_id="abc123")
+            _notify_dashboard_connections("notification:notif1", session_id="abc123")
             events = self._drain_queue(queue)
-            self.assertEqual(events, ["notification:abc123"])
+            self.assertEqual(events, ["notification:notif1:abc123"])
         finally:
             _dashboard_queues.remove(queue)
 
@@ -866,16 +865,16 @@ class TestNotificationRouting(ServerTestBase):
             _dashboard_queues.remove(queue)
 
     def test_sse_notification_routed_to_session_queues(self) -> None:
-        """_notify_sse_connections pushes 'notification' to the session's queues."""
+        """_notify_sse_connections pushes 'notification:{id}' to the session's queues."""
         from zing_ai.server.routes import _notify_sse_connections
 
         session_id = "notif-sse"
         queue: asyncio.Queue[str] = asyncio.Queue()
         _sse_queues[session_id].append(queue)
         try:
-            _notify_sse_connections(session_id, "notification")
+            _notify_sse_connections(session_id, "notification:abc123")
             events = self._drain_queue(queue)
-            self.assertEqual(events, ["notification"])
+            self.assertEqual(events, ["notification:abc123"])
         finally:
             _sse_queues[session_id].remove(queue)
             if not _sse_queues[session_id]:
@@ -1037,13 +1036,14 @@ class TestNotificationSSEOutput(ServerTestBase):
     def test_stream_findings_notification_yields_execute_script(self) -> None:
         """stream_findings yields execute_script with Notification JS on notification event."""
         self._create_session(session_id="notif-stream")
-        self.manager.add_notification(
+        notif = self.manager.add_notification(
             "notif-stream", "Build started", body="Step 1 running",
         )
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-stream", self.step_id, ["notification"],
+                self.manager, "notif-stream", self.step_id,
+                [f"notification:{notif.id}"],
             ),
         )
         # The SSE output should contain a script element with Notification constructor
@@ -1054,11 +1054,14 @@ class TestNotificationSSEOutput(ServerTestBase):
     def test_stream_findings_notification_yields_timeline_patch(self) -> None:
         """stream_findings yields patch_elements for notification timeline."""
         self._create_session(session_id="notif-tl")
-        self.manager.add_notification("notif-tl", "Build started", body="Step 1 running")
+        notif = self.manager.add_notification(
+            "notif-tl", "Build started", body="Step 1 running",
+        )
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-tl", self.step_id, ["notification"],
+                self.manager, "notif-tl", self.step_id,
+                [f"notification:{notif.id}"],
             ),
         )
         self.assertIn("notifications-notif-tl", body)
@@ -1066,11 +1069,12 @@ class TestNotificationSSEOutput(ServerTestBase):
     def test_stream_findings_notification_without_body(self) -> None:
         """stream_findings handles notification with no body (empty opts)."""
         self._create_session(session_id="notif-nobody")
-        self.manager.add_notification("notif-nobody", "Build started")
+        notif = self.manager.add_notification("notif-nobody", "Build started")
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "notif-nobody", self.step_id, ["notification"],
+                self.manager, "notif-nobody", self.step_id,
+                [f"notification:{notif.id}"],
             ),
         )
         self.assertIn("Notification(", body)
@@ -1078,14 +1082,16 @@ class TestNotificationSSEOutput(ServerTestBase):
         self.assertIn("{}", body)
 
     def test_dashboard_events_notification_yields_script_and_patch(self) -> None:
-        """dashboard_events parses notification:{session_id} and yields script + timeline."""
+        """dashboard_events parses notification:{notif_id}:{session_id} and yields script + timeline."""
         session_id = "dash-notif"
         self._create_session(session_id=session_id)
-        self.manager.add_notification(session_id, "Review ready", body="Please check")
+        notif = self.manager.add_notification(
+            session_id, "Review ready", body="Please check",
+        )
 
         body = asyncio.run(
             self._collect_dashboard_events(
-                self.manager, [f"notification:{session_id}"],
+                self.manager, [f"notification:{notif.id}:{session_id}"],
             ),
         )
         self.assertIn("Notification(", body)
@@ -1103,13 +1109,14 @@ class TestNotificationSSEOutput(ServerTestBase):
 
         body = asyncio.run(
             self._collect_stream_findings(
-                self.manager, "empty-notif", self.step_id, ["notification"],
+                self.manager, "empty-notif", self.step_id,
+                ["notification:nonexistent"],
             ),
         )
         self.assertNotIn("new Notification(", body)
 
     def test_dashboard_events_notification_empty_notifications(self) -> None:
-        """dashboard_events handles notification:{session_id} with no notifications gracefully."""
+        """dashboard_events handles notification with no notifications gracefully."""
         session_id = "dash-empty-notif"
         self._create_session(session_id=session_id)
         session = self.manager.get_session(session_id)
@@ -1118,7 +1125,7 @@ class TestNotificationSSEOutput(ServerTestBase):
 
         body = asyncio.run(
             self._collect_dashboard_events(
-                self.manager, [f"notification:{session_id}"],
+                self.manager, [f"notification:nonexistent:{session_id}"],
             ),
         )
         self.assertNotIn("new Notification(", body)

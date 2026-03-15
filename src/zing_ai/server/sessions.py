@@ -168,9 +168,11 @@ class SessionManager:
                 key = self._event_key(session_id, step.step_id)
                 self._events[key] = asyncio.Event()
         self._sessions[session_id] = session
-        session.notifications.append(Notification(title=f"New session: {title}"))
+        notif = Notification(title=f"New session: {title}")
+        session.notifications.append(notif)
         self._persist(session)
         self._notify("session_created", session_id)
+        self._notify(f"notification_added:{notif.id}", session_id)
         logger.info("Created session %s: %s", session_id, title)
         return session
 
@@ -547,9 +549,11 @@ class SessionManager:
             raise ValueError(msg)
         step.state = SessionState.READY
         self._update_session_state(session)
-        session.notifications.append(Notification(title=f"Review ready: {step.step_name}"))
+        notif = Notification(title=f"Review ready: {step.step_name}")
+        session.notifications.append(notif)
         self._persist(session)
         self._notify("step_ready", session_id)
+        self._notify(f"notification_added:{notif.id}", session_id)
         logger.info(
             "Step '%s' (id=%s) transitioned to READY",
             step.step_name,
@@ -782,5 +786,5 @@ class SessionManager:
         notification = Notification(title=title, body=body, url=url)
         session.notifications.append(notification)
         self._persist(session)
-        self._notify("notification_added", session_id)
+        self._notify(f"notification_added:{notification.id}", session_id)
         return notification

@@ -798,7 +798,7 @@
     <header class="brand-bar">
         <a href="/dashboard"><img src="/static/zing-logo.svg" alt="Zing"></a>
         <button id="notif-opt-in" class="notif-opt-in-btn" style="display:none;"
-                onclick="Notification.requestPermission().then(p => { if (p === 'granted') this.style.display = 'none'; })">
+                onclick="Notification.requestPermission().then(p => { if (p !== 'default') this.style.display = 'none'; })">
             Enable notifications
         </button>
         <script>

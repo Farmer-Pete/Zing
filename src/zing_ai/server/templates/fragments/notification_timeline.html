@@ -1,4 +1,5 @@
 <div class="notification-timeline" id="notifications-{{ s.session_id }}">
+    {% if s.notifications %}
     {% for n in s.notifications %}
     <div class="notification-entry">
         <span class="notification-time">{{ n.created_at.strftime('%H:%M') }}</span>
@@ -6,4 +7,5 @@
         {% if n.body %}<span class="notification-body">{{ n.body }}</span>{% endif %}
     </div>
     {% endfor %}
+    {% endif %}
 </div>

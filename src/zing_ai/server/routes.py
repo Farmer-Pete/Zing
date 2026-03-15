@@ -16,7 +16,13 @@ from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from zing_ai.server.models import Complexity, Finding, ResponseAction, UserResponse
+from zing_ai.server.models import (
+    Complexity,
+    Finding,
+    Notification,
+    ResponseAction,
+    UserResponse,
+)
 from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger("zing_ai.server")
@@ -65,6 +71,31 @@ def _notify_dashboard_connections(event: str, session_id: str | None = None) -> 
     message = f"{event}:{session_id}" if session_id is not None else event
     for queue in _dashboard_queues:
         queue.put_nowait(message)
+
+
+def _build_notification_script(notif: Notification, default_on_click_js: str) -> str:
+    """Build a browser Notification JS snippet from a Notification model.
+
+    Args:
+        notif: The notification to render as a browser popup.
+        default_on_click_js: JS expression for onclick when ``notif.url`` is not set.
+    """
+    title_js = json.dumps(notif.title)
+    opts: dict[str, str] = {}
+    if notif.body:
+        opts["body"] = notif.body
+    opts_js = json.dumps(opts)
+    if notif.url:
+        url_js = json.dumps(notif.url)
+        on_click_js = f"window.location.href = {url_js}; n.close();"
+    else:
+        on_click_js = default_on_click_js
+    return (
+        f"if (Notification.permission === 'granted') {{"
+        f"  const n = new Notification({title_js}, {opts_js});"
+        f"  n.onclick = () => {{ {on_click_js} }};"
+        f"}}"
+    )
 
 
 def finding_fragment(
@@ -483,23 +514,19 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if current_session is None:
                     return
 
-                if event == "notification":
-                    # Look up the latest notification from the session model
+                if event.startswith("notification:"):
+                    notif_id = event.split(":", 1)[1]
                     if current_session and current_session.notifications:
-                        notif = current_session.notifications[-1]
-                        title_js = json.dumps(notif.title)
-                        opts: dict[str, str] = {}
-                        if notif.body:
-                            opts["body"] = notif.body
-                        opts_js = json.dumps(opts)
-                        script = (
-                            f"if (Notification.permission === 'granted') {{"
-                            f"  const n = new Notification({title_js}, {opts_js});"
-                            f"  n.onclick = () => {{ window.focus(); n.close(); }};"
-                            f"}}"
+                        notif = next(
+                            (n for n in current_session.notifications if n.id == notif_id),
+                            None,
                         )
-                        yield SSE.execute_script(script)
-                        # Also re-render the notification timeline on the session page
+                        if notif is not None:
+                            script = _build_notification_script(
+                                notif, "window.focus(); n.close();"
+                            )
+                            yield SSE.execute_script(script)
+                        # Re-render the notification timeline on the session page
                         timeline_html = render(
                             "fragments/notification_timeline.html", s=current_session
                         )
@@ -682,23 +709,23 @@ async def dashboard_events(request: Request):  # noqa: ANN201
                     continue
 
                 if event.startswith("notification:"):
-                    notif_session_id = event.split(":", 1)[1]
+                    # Format: "notification:{notif_id}:{session_id}"
+                    parts = event.split(":", 2)
+                    notif_id = parts[1] if len(parts) > 1 else ""
+                    notif_session_id = parts[2] if len(parts) > 2 else ""
                     session = manager.get_session(notif_session_id)
                     if session and session.notifications:
-                        notif = session.notifications[-1]
-                        title_js = json.dumps(notif.title)
-                        opts = {}
-                        if notif.body:
-                            opts["body"] = notif.body
-                        opts_js = json.dumps(opts)
-                        session_url = json.dumps(f"/{notif_session_id}")
-                        script = (
-                            f"if (Notification.permission === 'granted') {{"
-                            f"  const n = new Notification({title_js}, {opts_js});"
-                            f"  n.onclick = () => {{ window.location.href = {session_url}; n.close(); }};"
-                            f"}}"
+                        notif = next(
+                            (n for n in session.notifications if n.id == notif_id),
+                            None,
                         )
-                        yield SSE.execute_script(script)
+                        if notif is not None:
+                            session_url = json.dumps(f"/{notif_session_id}")
+                            script = _build_notification_script(
+                                notif,
+                                f"window.location.href = {session_url}; n.close();",
+                            )
+                            yield SSE.execute_script(script)
                         # Re-render the notification timeline for the affected session card
                         timeline_html = render("fragments/notification_timeline.html", s=session)
                         yield SSE.patch_elements(

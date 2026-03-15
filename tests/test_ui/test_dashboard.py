@@ -183,6 +183,8 @@ def test_notif_opt_in_visible_when_permission_default(
     server: _ServerInfo, page: Page
 ) -> None:
     """Notification opt-in button is visible when permission is 'default'."""
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.add_init_script("""
         window.Notification = { permission: 'default', requestPermission: () => Promise.resolve('default') };
     """)
@@ -191,12 +193,15 @@ def test_notif_opt_in_visible_when_permission_default(
 
     btn = page.locator("#notif-opt-in")
     expect(btn).to_be_visible(timeout=3000)
+    assert errors == [], f"JS console errors: {errors}"
 
 
 def test_notif_opt_in_hidden_when_permission_granted(
     server: _ServerInfo, page: Page
 ) -> None:
     """Notification opt-in button is hidden when permission is already 'granted'."""
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.add_init_script("""
         window.Notification = { permission: 'granted', requestPermission: () => Promise.resolve('granted') };
     """)
@@ -205,12 +210,34 @@ def test_notif_opt_in_hidden_when_permission_granted(
 
     btn = page.locator("#notif-opt-in")
     expect(btn).not_to_be_visible(timeout=3000)
+    assert errors == [], f"JS console errors: {errors}"
+
+
+def test_notif_opt_in_click_hides_button(
+    server: _ServerInfo, page: Page
+) -> None:
+    """Clicking the opt-in button calls requestPermission and hides the button on 'granted'."""
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+    page.add_init_script("""
+        window.Notification = { permission: 'default', requestPermission: () => Promise.resolve('granted') };
+    """)
+    page.goto(f"{server.base_url}/dashboard")
+    page.wait_for_load_state("domcontentloaded", timeout=3000)
+
+    btn = page.locator("#notif-opt-in")
+    expect(btn).to_be_visible(timeout=3000)
+    btn.click()
+    expect(btn).not_to_be_visible(timeout=3000)
+    assert errors == [], f"JS console errors: {errors}"
 
 
 def test_notification_timeline_appears_with_notifications(
     server: _ServerInfo, page: Page
 ) -> None:
     """Notification timeline appears under session card when notifications exist."""
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     manager = server.manager
     manager.create_session(session_id="timeline-1", title="Timeline Test", steps=["review"])
     # create_session auto-adds a notification, so timeline should have entries
@@ -221,10 +248,13 @@ def test_notification_timeline_appears_with_notifications(
     expect(page.locator("#notifications-timeline-1 .notification-entry")).to_have_count(
         1, timeout=3000
     )
+    assert errors == [], f"JS console errors: {errors}"
 
 
 def test_notification_timeline_live_update(server: _ServerInfo, page: Page) -> None:
     """Timeline updates live when new notification arrives via SSE."""
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     manager = server.manager
     manager.create_session(session_id="live-tl", title="Live Timeline", steps=["review"])
 
@@ -241,3 +271,4 @@ def test_notification_timeline_live_update(server: _ServerInfo, page: Page) -> N
     manager.add_notification("live-tl", title="Agent finished", body="Review is ready")
     expect(entries).to_have_count(2, timeout=5000)
     expect(page.locator("#notifications-live-tl .notification-title", has_text="Agent finished")).to_be_visible(timeout=3000)
+    assert errors == [], f"JS console errors: {errors}"

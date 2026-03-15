@@ -1018,13 +1018,17 @@ class TestNotifications(unittest.TestCase):
         assert len(session.notifications) == 3
 
     def test_notification_added_event_emitted(self) -> None:
-        """add_notification() emits a 'notification_added' event to listeners."""
+        """add_notification() emits a 'notification_added:{id}' event to listeners."""
         self.manager.create_session("s1", "Test")
         events: list[tuple[str, str]] = []
         self.manager.add_listener(lambda et, sid: events.append((et, sid)))
 
-        self.manager.add_notification("s1", "Alert")
-        assert ("notification_added", "s1") in events
+        notif = self.manager.add_notification("s1", "Alert")
+        matching = [
+            (et, sid) for et, sid in events
+            if et == f"notification_added:{notif.id}" and sid == "s1"
+        ]
+        assert len(matching) == 1
 
 
 if __name__ == "__main__":
