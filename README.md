@@ -17,31 +17,20 @@ Every AI-generated line of code is a small bet. Sometimes it's exactly right. Of
 
 AI coding assistants are great at writing functions. But shipping software isn't just writing functions. It's understanding what to build, figuring out where it fits in the codebase, breaking work into steps that make sense, building it incrementally, reviewing it properly, and tracking it in your project management tool. Today, you do all of that orchestration yourself, or you don't, and entropy wins.
 
+## The Landscape
+
+There are a lot of really good projects tackling AI-assisted development right now, such as [GSD](https://github.com/gsd-build/get-shit-done), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Taskmaster AI](https://github.com/eyaltoledano/claude-task-master), [Spec Kit](https://github.com/github/spec-kit), and [OpenSpec](https://github.com/Fission-AI/OpenSpec). These are all worth checking out. But there's a fundamental philosophical difference between Zing and every other option: **they all stop at "plan and execute."** They help you structure work for an AI agent, then trust the agent to deliver. The human is involved at the beginning (writing the spec) and at the end (reading the PR), but the middle is a black box.
+
 ## Why Zing is Different
 
-### It's an entropy reduction engine.
-Zing gives you the tools to stay in control. You make the big decisions: what to build, which approach to take, which trade-offs to accept. The AI handles the smaller implementation decisions within the boundaries you set. This is the opposite of vibe coding. It's structured coding with AI as the executor, not the architect.
-
-### The review loop.
-Code review isn't just a gate at the end. It's how the system self-improves. Four specialized review agents catch inconsistencies, flag drift from the plan, and surface entropy before it gets committed. Every review pass actively removes disorder from the system. The result is a codebase that gets cleaner over time, not messier, even though AI is writing most of the code, because humans are involved in every step of the process.
-
-### It's a pipeline, not a prompt.
-Each stage feeds into the next. The plan audit catches problems before they're built. The build follows the audited plan exactly. The code review knows what was intended because it has the spec. Entropy can't sneak in between the cracks when there are no cracks.
-
-### Parallelism is a first-class concept.
-Codebase exploration, plan evaluation, and code review all fan out across multiple specialized agents working simultaneously. This isn't just faster. It produces better results because each agent has a focused lens.
-
-### A real-time review dashboard.
-Zing includes a built-in MCP server and web UI. When review agents run, they stream findings to a live dashboard in your browser via Server-Sent Events. You see agents spin up, watch findings arrive in real time, and triage them without leaving the browser — accept, drop, downgrade, or discuss each finding, pick from suggested approaches, or write your own. Responses auto-save as you go. The MCP server coordinates the whole workflow: agents submit findings through it, and your AI coding assistant blocks until you submit your responses in the browser, then picks up exactly where you left off.
-
-### Humans stay in the loop.
-Zing doesn't disappear into a corner and come back with a PR. It checks in at every stage, confirming the spec, walking through plan improvements, discussing review findings one by one. You make the decisions. Zing does the legwork.
-
-### Chain of thought, not chain of hope.
-The pipeline structure acts as an external chain of thought. Each stage narrows the problem space before the next one starts. The AI never has to hold an entire complex system in its head at once. It specs, then plans, then builds one step at a time. This is how you get reliable output on complex systems.
-
-### It's opinionated about discipline.
-The build phase has strict anti-patterns: no deviations from the plan, no bonus features, no drive-by refactoring. Every step has acceptance criteria. Every completion gets a commit. This is how you ship reliably with AI, by keeping it on rails.
+- **It doesn't trust the middle.** Every stage boundary is a decision point where a human stays in control — not just before the work starts, but during planning, between plan and build, and after the code is written. Decision points are asynchronous and batched so they don't slow you down.
+- **It's an entropy reduction engine.** You make the big decisions. The AI handles implementation within the boundaries you set. This is the opposite of vibe coding — structured coding with AI as the executor, not the architect.
+- **A real-time review dashboard.** Parallel agents stream findings to a live dashboard in your browser via SSE. You triage findings, pick fix approaches, and answer planning questions in minutes instead of one at a time in the terminal. The AI blocks until you submit, then picks up exactly where it left off.
+- **The review loop.** Six specialized review agents catch inconsistencies, flag drift from the plan, and surface entropy before it gets committed. Every review pass actively removes disorder from the system.
+- **It's a pipeline, not a prompt.** Each stage feeds into the next. Four parallel audit passes stress-test the plan before code is written. The build follows the audited plan exactly. The code review knows what was intended because it has the spec.
+- **Parallelism is a first-class concept.** Codebase exploration, plan evaluation, and code review all fan out across multiple specialized agents simultaneously. Better results because each agent has a focused lens.
+- **Context isolation per build step.** Each build step runs in a fresh subagent with only the information it needs, producing one atomic commit per step with verified git hygiene.
+- **Chain of thought, not chain of hope.** Each stage narrows the problem space before the next one starts. No deviations from the plan, no bonus features, no drive-by refactoring. Every step has acceptance criteria. Every completion gets a commit.
 
 ## What Zing Does
 
