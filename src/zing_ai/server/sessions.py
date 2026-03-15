@@ -124,23 +124,6 @@ class SessionManager:
             except Exception:
                 logger.exception("Failed to load session from %s", path)
 
-    def _update_session_state(self, session: Session) -> None:
-        """Update session-level state based on the highest-priority step state.
-
-        Priority order: COMPLETED > READY > STARTED > PENDING.
-        """
-        if not session.steps:
-            session.state = SessionState.PENDING
-            return
-        priority = {
-            SessionState.PENDING: 0,
-            SessionState.STARTED: 1,
-            SessionState.READY: 2,
-            SessionState.COMPLETED: 3,
-        }
-        best = max(session.steps, key=lambda s: priority.get(s.state, 0))
-        session.state = best.state
-
     def create_session(
         self,
         session_id: str,
@@ -279,7 +262,7 @@ class SessionManager:
                 )
 
         step.state = SessionState.STARTED
-        self._update_session_state(session)
+
         self._persist(session)
         self._notify("step_started", session_id)
         logger.info(
@@ -547,7 +530,7 @@ class SessionManager:
             )
             raise ValueError(msg)
         step.state = SessionState.READY
-        self._update_session_state(session)
+
         notif = Notification(title=f"Review ready: {step.step_name}")
         session.notifications.append(notif)
         self._persist(session)
@@ -656,7 +639,7 @@ class SessionManager:
 
         step.responses = responses
         step.state = SessionState.COMPLETED
-        self._update_session_state(session)
+
         self._persist(session)
         self._notify("review_submitted", session_id)
 
