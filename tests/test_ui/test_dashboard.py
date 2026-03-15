@@ -177,3 +177,31 @@ def test_submit_to_completed_step_is_disabled(server: _ServerInfo, page: Page) -
         data={"step_id": step_id, "responses": []},
     )
     assert api_response.status == 409
+
+
+def test_notif_opt_in_visible_when_permission_default(
+    server: _ServerInfo, page: Page
+) -> None:
+    """Notification opt-in button is visible when permission is 'default'."""
+    page.add_init_script("""
+        window.Notification = { permission: 'default', requestPermission: () => Promise.resolve('default') };
+    """)
+    page.goto(f"{server.base_url}/dashboard")
+    page.wait_for_load_state("domcontentloaded", timeout=3000)
+
+    btn = page.locator("#notif-opt-in")
+    expect(btn).to_be_visible(timeout=3000)
+
+
+def test_notif_opt_in_hidden_when_permission_granted(
+    server: _ServerInfo, page: Page
+) -> None:
+    """Notification opt-in button is hidden when permission is already 'granted'."""
+    page.add_init_script("""
+        window.Notification = { permission: 'granted', requestPermission: () => Promise.resolve('granted') };
+    """)
+    page.goto(f"{server.base_url}/dashboard")
+    page.wait_for_load_state("domcontentloaded", timeout=3000)
+
+    btn = page.locator("#notif-opt-in")
+    expect(btn).not_to_be_visible(timeout=3000)
