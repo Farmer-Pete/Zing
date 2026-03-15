@@ -8,13 +8,17 @@ from unittest.mock import patch
 
 from tests.test_server_base import ServerTestBase
 from zing_ai.server.models import (
+    Category,
     ChoiceOption,
+    Confidence,
     CriterionRating,
     EvaluationFinding,
     LitmusTest,
     Location,
     Notification,
+    Rating,
     Session,
+    Severity,
     TextFinding,
     TriageFinding,
     WarningSign,
@@ -86,9 +90,9 @@ class TestFindingFragment(unittest.TestCase):
             id="tri1",
             title="Unused import os",
             body="The `os` module is imported but **never used**.",
-            category="style",
-            severity="low",
-            confidence="high",
+            category=Category.STYLE,
+            severity=Severity.LOW,
+            confidence=Confidence.HIGH,
             location=Location(file="src/main.py", line=5),
         )
         html = finding_fragment(finding, "test-session")
@@ -112,8 +116,8 @@ class TestFindingFragment(unittest.TestCase):
             id="eval1",
             title="Pass 1: Design Fundamentals",
             criteria=[
-                CriterionRating(name="Clarity", rating="strong", justification="Very clear"),
-                CriterionRating(name="YAGNI", rating="weak", justification="Over-engineered"),
+                CriterionRating(name="Clarity", rating=Rating.STRONG, justification="Very clear"),
+                CriterionRating(name="YAGNI", rating=Rating.WEAK, justification="Over-engineered"),
             ],
             litmus_tests=[
                 LitmusTest(name="Simplest thing?", result="Could be simpler"),
@@ -152,7 +156,11 @@ class TestFindingFragment(unittest.TestCase):
             id="eval2",
             title="Pass 4: Code Quality",
             criteria=[
-                CriterionRating(name="Code Quality", rating="adequate", justification="Decent"),
+                CriterionRating(
+                    name="Code Quality",
+                    rating=Rating.ADEQUATE,
+                    justification="Decent",
+                ),
             ],
         )
         html = finding_fragment(finding, "test-session")
@@ -282,6 +290,7 @@ class TestTriageEnumValidation(ServerTestBase):
                 "location": {"file": "src/main.py", "line": 42},
             },
         )
+        assert isinstance(finding, TriageFinding)
         assert finding.location is not None
         self.assertEqual(finding.location.file, "src/main.py")
         self.assertEqual(finding.location.line, 42)

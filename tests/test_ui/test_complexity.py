@@ -153,6 +153,7 @@ def test_complexity_click_updates_ui_and_persists(server: _ServerInfo, page: Pag
 
     # Verify server state updated
     _, step = server.manager.get_step_by_id(step_id)
+    assert step.responses is not None
     assert step.responses[triage_idx].complexity == Complexity.SIMPLE
 
 
@@ -265,5 +266,6 @@ def test_complexity_persists_alongside_action(server: _ServerInfo, page: Page) -
 
     # Both should be preserved via merge
     _, step = server.manager.get_step_by_id(step_id)
+    assert step.responses is not None
     assert step.responses[triage_idx].action == ResponseAction.ACCEPT
     assert step.responses[triage_idx].complexity == Complexity.COMPLEX

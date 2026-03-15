@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from zing_ai.server.models import SessionState, UserResponse, WorkflowStep
+from zing_ai.server.models import ResponseAction, SessionState, UserResponse, WorkflowStep
 from zing_ai.server.sessions import SessionManager
 
 _STEP = "review"
@@ -313,7 +313,7 @@ class TestSessionLifecycle(unittest.TestCase):
         # Submit responses
         responses = [
             UserResponse(answer="Yes, it is correct"),
-            UserResponse(action="accept"),
+            UserResponse(action=ResponseAction.ACCEPT),
         ]
         review = self.manager.submit_responses("s1", step.step_id, responses)
         assert review.session_id == "s1"
@@ -1044,6 +1044,7 @@ class TestAddLog(unittest.TestCase):
         entry3 = self.manager.add_log("s1", step.step_id, "agent-a", "Analysis complete")
 
         updated_session = self.manager.get_session("s1")
+        assert updated_session is not None
         updated_step = updated_session.steps[0]
         assert len(updated_step.logs) == 3
 
@@ -1092,6 +1093,7 @@ class TestNotifications(unittest.TestCase):
         self.manager.create_session("s1", "Test")
         notif = self.manager.add_notification("s1", "Alert", body="Details", url="/s1")
         session = self.manager.get_session("s1")
+        assert session is not None
         # create_session adds one auto-notification, add_notification adds another
         assert len(session.notifications) == 2
         assert session.notifications[-1].title == "Alert"
@@ -1106,6 +1108,7 @@ class TestNotifications(unittest.TestCase):
 
         mgr2 = SessionManager(data_dir=self.data_dir)
         session = mgr2.get_session("s1")
+        assert session is not None
         titles = [n.title for n in session.notifications]
         assert "Persisted alert" in titles
 
@@ -1124,6 +1127,7 @@ class TestNotifications(unittest.TestCase):
         self.manager.mark_step_ready("s1", step.step_id)
 
         session = self.manager.get_session("s1")
+        assert session is not None
         titles = [n.title for n in session.notifications]
         assert f"Review ready: {_STEP}" in titles
 
@@ -1138,6 +1142,7 @@ class TestNotifications(unittest.TestCase):
 
         mgr2 = SessionManager(data_dir=self.data_dir)
         session = mgr2.get_session("s1")
+        assert session is not None
         titles = [n.title for n in session.notifications]
         assert "New session: Test" in titles
         assert f"Review ready: {_STEP}" in titles

@@ -17,7 +17,7 @@ from zing_ai.server.mcp_tools import (
     step_log,
     step_start,
 )
-from zing_ai.server.models import UserResponse
+from zing_ai.server.models import ResponseAction, TriageFinding, UserResponse
 
 
 class TestSessionCreate(ServerTestBase):
@@ -189,7 +189,7 @@ class TestReviewWait(ServerTestBase):
         self.manager.submit_responses(
             "wait-session",
             self.step_id,
-            [UserResponse(action="accept")],
+            [UserResponse(action=ResponseAction.ACCEPT)],
         )
 
         # Now review_wait should return immediately since the event is already set
@@ -291,7 +291,9 @@ class TestMCPFindingSubmit(ServerTestBase):
         session = self.manager.get_session("sf-triage-no-meta")
         assert session is not None
         finding = session.steps[0].findings[0]
+        assert isinstance(finding, TriageFinding)
         self.assertEqual(finding.type, "triage")
+        assert finding.options is not None
         self.assertEqual(len(finding.options), 2)
         self.assertEqual(finding.options[0].label, "Option A")
         self.assertEqual(finding.options[1].label, "Option B")

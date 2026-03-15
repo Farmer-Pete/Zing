@@ -136,6 +136,7 @@ class TestSaveResponse(ServerTestBase):
         assert session is not None
         step = session.steps[0]
         assert step.responses is not None
+        assert step.responses[0].complexity is not None
         self.assertEqual(step.responses[0].complexity.value, "simple")
 
     def test_save_response_complexity_complex(self) -> None:
@@ -153,6 +154,7 @@ class TestSaveResponse(ServerTestBase):
         assert session is not None
         step = session.steps[0]
         assert step.responses is not None
+        assert step.responses[0].complexity is not None
         self.assertEqual(step.responses[0].complexity.value, "complex")
 
     def test_save_response_complexity_preserves_action(self) -> None:
@@ -179,6 +181,7 @@ class TestSaveResponse(ServerTestBase):
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
+        assert step.responses[0].complexity is not None
         self.assertEqual(step.responses[0].complexity.value, "complex")
 
     def test_save_response_complexity_default_when_missing(self) -> None:
@@ -476,6 +479,7 @@ class TestSubmit(ServerTestBase):
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
+        assert step.responses[0].complexity is not None
         self.assertEqual(step.responses[0].complexity.value, "complex")
 
     def test_submit_merges_with_auto_saved_complexity(self) -> None:
@@ -519,6 +523,7 @@ class TestSubmit(ServerTestBase):
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
         # Complexity should be preserved from auto-save
+        assert step.responses[0].complexity is not None
         self.assertEqual(step.responses[0].complexity.value, "complex")
 
 
@@ -1005,6 +1010,7 @@ class TestNotificationSSEOutput(ServerTestBase):
                     s = kwargs.get("s")
                     sid = s.session_id if s else "unknown"
                     return f'<div id="notifications-{sid}">timeline</div>'
+                assert _real_render is not None
                 return _real_render(template_name, **kwargs)
 
             import zing_ai.server.routes as _routes_mod
@@ -1020,7 +1026,7 @@ class TestNotificationSSEOutput(ServerTestBase):
                 async for chunk in response.body_iterator:
                     if isinstance(chunk, bytes):
                         chunk = chunk.decode()
-                    chunks.append(chunk)
+                    chunks.append(chunk)  # type: ignore[arg-type]
 
         # Clean up queue registration
         queues = _sse_queues.get(session_id, [])
@@ -1052,6 +1058,7 @@ class TestNotificationSSEOutput(ServerTestBase):
                 s = kwargs.get("s")
                 sid = s.session_id if s else "unknown"
                 return f'<div id="notifications-{sid}">timeline</div>'
+            assert _real_render is not None
             return _real_render(template_name, **kwargs)
 
         import zing_ai.server.routes as _routes_mod
@@ -1080,7 +1087,7 @@ class TestNotificationSSEOutput(ServerTestBase):
                     async for chunk in response.body_iterator:
                         if isinstance(chunk, bytes):
                             chunk = chunk.decode()
-                        chunks.append(chunk)
+                        chunks.append(chunk)  # type: ignore[arg-type]
                 except (asyncio.CancelledError, StopAsyncIteration):
                     pass
 

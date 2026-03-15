@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.applications import Starlette
 from starlette.routing import Mount
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from zing_ai.server.mcp_tools import configure, mcp_server
 from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
@@ -52,7 +52,7 @@ class MCPDebugMiddleware:
         body_parts: list[bytes] = []
         request_complete = False
 
-        async def receive_wrapper() -> dict:
+        async def receive_wrapper() -> Message:
             nonlocal request_complete
             msg = await receive()
             if msg["type"] == "http.request":
@@ -68,7 +68,7 @@ class MCPDebugMiddleware:
         response_status = 0
         response_headers: dict[str, str] = {}
 
-        async def send_wrapper(message: dict) -> None:
+        async def send_wrapper(message: Message) -> None:
             nonlocal response_status, response_headers
             if message["type"] == "http.response.start":
                 response_status = message["status"]

@@ -298,8 +298,10 @@ def test_submit_captures_triage_response(server: _ServerInfo, page: Page) -> Non
 
     # Triage finding: action should be "accept"
     triage_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-1")
-    assert step.responses[triage_idx].action is not None
-    assert step.responses[triage_idx].action.value == "accept"
+    assert step.responses is not None
+    triage_response = step.responses[triage_idx]
+    assert triage_response.action is not None
+    assert triage_response.action.value == "accept"
 
     # Triage-2 finding: selected approach should be "Option A"
     triage2_idx = next(i for i, f in enumerate(step.findings) if f.id == "triage-2")
@@ -423,6 +425,7 @@ def test_triage_button_fires_save_response_post(server: _ServerInfo, page: Page)
     assert resp_info.value.status == 200
 
     _, step = server.manager.get_step_by_id(step_id)
+    assert step.responses is not None
     assert step.responses[triage_idx].action == ResponseAction.DROP
 
 
