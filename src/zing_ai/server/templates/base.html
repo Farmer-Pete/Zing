@@ -731,6 +731,31 @@
             width: 8px; height: 8px; background: var(--red-orange); border-radius: 50%;
         }
 
+        /* === Notification Timeline === */
+        .notification-timeline {
+            margin-left: 2rem;
+            padding-left: 1rem;
+            border-left: 2px solid var(--gray-200);
+            margin-top: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .notification-entry {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            padding: 0.25rem 0;
+            font-size: 0.8125rem;
+            color: var(--gray-700);
+        }
+        .notification-time {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+        .notification-title { font-weight: 600; }
+        .notification-body { color: var(--gray-500); }
+
         /* === Animations === */
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
