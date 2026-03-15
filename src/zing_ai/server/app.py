@@ -50,6 +50,7 @@ def create_app(
             "review_submitted": "completed",
             "log_added": "log_added",
             "session_updated": "session_updated",
+            "notification_added": "notification",
         }
         dashboard_events = {
             "session_created": "created",
@@ -60,11 +61,17 @@ def create_app(
             "agent_stopped": "agent_stopped",
             "review_submitted": "review_submitted",
             "session_cleaned_up": "cleaned_up",
+            "notification_added": "notification",
         }
+        # Events that should include session_id context in dashboard notifications
+        _dashboard_session_context_events = {"notification_added"}
         if event_type in sse_events:
             _notify_sse_connections(session_id, sse_events[event_type])
         if event_type in dashboard_events:
-            _notify_dashboard_connections(dashboard_events[event_type])
+            kwargs = {}
+            if event_type in _dashboard_session_context_events:
+                kwargs["session_id"] = session_id
+            _notify_dashboard_connections(dashboard_events[event_type], **kwargs)
 
     sm.add_listener(_on_session_event)
 
