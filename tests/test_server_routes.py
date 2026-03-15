@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from tests.test_server_base import _STEP, ServerTestBase
 from zing_ai.server.mcp_tools import configure, review_wait
-from zing_ai.server.routes import _dashboard_queues
+from zing_ai.server.routes import _dashboard_queues, _sse_queues
 
 
 class TestRemovedEndpoints(ServerTestBase):
@@ -825,3 +825,57 @@ class TestConcurrentSessions(ServerTestBase):
         self.assertEqual(session_b.total_findings, 1)
         self.assertEqual(session_a.steps[0].findings[0].type, "text")
         self.assertEqual(session_b.steps[0].findings[0].type, "triage")
+
+
+class TestNotificationRouting(ServerTestBase):
+    """Tests for notification event routing through SSE and dashboard queues."""
+
+    @staticmethod
+    def _drain_queue(queue: asyncio.Queue[str]) -> list[str]:
+        """Drain all pending events from a queue and return them."""
+        events: list[str] = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        return events
+
+    def test_dashboard_notification_with_session_id(self) -> None:
+        """_notify_dashboard_connections encodes session_id into the event string."""
+        from zing_ai.server.routes import _notify_dashboard_connections
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            _notify_dashboard_connections("notification", session_id="abc123")
+            events = self._drain_queue(queue)
+            self.assertEqual(events, ["notification:abc123"])
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_dashboard_notification_without_session_id(self) -> None:
+        """_notify_dashboard_connections passes event unchanged when no session_id."""
+        from zing_ai.server.routes import _notify_dashboard_connections
+
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _dashboard_queues.append(queue)
+        try:
+            _notify_dashboard_connections("notification")
+            events = self._drain_queue(queue)
+            self.assertEqual(events, ["notification"])
+        finally:
+            _dashboard_queues.remove(queue)
+
+    def test_sse_notification_routed_to_session_queues(self) -> None:
+        """_notify_sse_connections pushes 'notification' to the session's queues."""
+        from zing_ai.server.routes import _notify_sse_connections
+
+        session_id = "notif-sse"
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        _sse_queues[session_id].append(queue)
+        try:
+            _notify_sse_connections(session_id, "notification")
+            events = self._drain_queue(queue)
+            self.assertEqual(events, ["notification"])
+        finally:
+            _sse_queues[session_id].remove(queue)
+            if not _sse_queues[session_id]:
+                _sse_queues.pop(session_id, None)
