@@ -9,6 +9,9 @@
     <span id="session-status-badge" class="status-badge status-{{ session.state.value }}">{{ session.state.value }}</span>
 </div>
 
+{% set s = session %}
+{% include "fragments/notification_timeline.html" %}
+
 <nav class="step-nav">
     {% if session.zing_file %}
     <a href="/{{ session.session_id }}?tab=plan" id="step-tab-plan"
