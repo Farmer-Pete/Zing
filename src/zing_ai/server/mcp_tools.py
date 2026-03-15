@@ -154,3 +154,19 @@ async def step_log(session_id: str, step_id: str, agent_name: str, message: str)
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}
     return {"status": "ok", "timestamp": entry.timestamp.isoformat()}
+
+
+@mcp_server.tool()
+async def notification_send(
+    session_id: str,
+    title: str,
+    body: str = "",
+    url: str | None = None,
+) -> dict:
+    """Send a browser notification tied to a Zing session."""
+    sm = _get_session_manager()
+    try:
+        notification = sm.add_notification(session_id, title, body, url)
+        return {"status": "sent", "notification_id": notification.id}
+    except (ValueError, KeyError) as exc:
+        return {"error": str(exc)}
