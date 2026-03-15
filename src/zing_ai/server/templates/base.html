@@ -739,6 +739,29 @@
             50% { transform: translateY(-8px); }
         }
 
+        /* === Notification Opt-in Button === */
+        .notif-opt-in-btn {
+            padding: 0.25rem 0.625rem;
+            background: transparent;
+            color: rgba(255,255,255,0.7);
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+            font-family: inherit;
+            transition: all 0.15s ease;
+            position: absolute;
+            right: 2rem;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        .notif-opt-in-btn:hover {
+            color: #fff;
+            border-color: rgba(255,255,255,0.6);
+            background: rgba(255,255,255,0.1);
+        }
+
         /* === Legacy compat (session list) === */
         .session-list { list-style: none; }
         .session-list li { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 1rem; margin-bottom: 0.75rem; }
@@ -749,6 +772,15 @@
 <body>
     <header class="brand-bar">
         <a href="/dashboard"><img src="/static/zing-logo.svg" alt="Zing"></a>
+        <button id="notif-opt-in" class="notif-opt-in-btn" style="display:none;"
+                onclick="Notification.requestPermission().then(p => { if (p === 'granted') this.style.display = 'none'; })">
+            Enable notifications
+        </button>
+        <script>
+            if ('Notification' in window && Notification.permission === 'default') {
+                document.getElementById('notif-opt-in').style.display = 'inline-block';
+            }
+        </script>
     </header>
     <main class="main-content">
         {% block content %}{% endblock %}
