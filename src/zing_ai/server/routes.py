@@ -483,6 +483,33 @@ async def stream_findings(session_id: str, request: Request):  # noqa: ANN201
                 if current_session is None:
                     return
 
+                if event == "notification":
+                    # Look up the latest notification from the session model
+                    if current_session and current_session.notifications:
+                        notif = current_session.notifications[-1]
+                        title_js = json.dumps(notif.title)
+                        opts: dict[str, str] = {}
+                        if notif.body:
+                            opts["body"] = notif.body
+                        opts_js = json.dumps(opts)
+                        script = (
+                            f"if (Notification.permission === 'granted') {{"
+                            f"  const n = new Notification({title_js}, {opts_js});"
+                            f"  n.onclick = () => {{ window.focus(); n.close(); }};"
+                            f"}}"
+                        )
+                        yield SSE.execute_script(script)
+                        # Also re-render the notification timeline on the session page
+                        timeline_html = render(
+                            "fragments/notification_timeline.html", s=current_session
+                        )
+                        yield SSE.patch_elements(
+                            timeline_html,
+                            selector=f"#notifications-{session_id}",
+                            mode=ElementPatchMode.OUTER,
+                        )
+                    continue
+
                 # Check for notification dots on non-active step tabs
                 for s in current_session.steps:
                     old_count = step_finding_counts.get(s.step_id, 0)
