@@ -19,18 +19,56 @@ AI coding assistants are great at writing functions. But shipping software isn't
 
 ## The Landscape
 
-There are a lot of really good projects tackling AI-assisted development right now, such as [GSD](https://github.com/gsd-build/get-shit-done), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Taskmaster AI](https://github.com/eyaltoledano/claude-task-master), [Spec Kit](https://github.com/github/spec-kit), and [OpenSpec](https://github.com/Fission-AI/OpenSpec). These are all worth checking out. But there's a fundamental philosophical difference between Zing and every other option: **they all stop at "plan and execute."** They help you structure work for an AI agent, then trust the agent to deliver. The human is involved at the beginning (writing the spec) and at the end (reading the PR), but the middle is a black box.
+There are a lot of really good projects tackling AI-assisted development right now, such as [GSD](https://github.com/gsd-build/get-shit-done), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Taskmaster AI](https://github.com/eyaltoledano/claude-task-master), [Spec Kit](https://github.com/github/spec-kit), and [OpenSpec](https://github.com/Fission-AI/OpenSpec).
+
+These are all worth checking out. But there's a fundamental philosophical difference between Zing and every other option: **they all stop at "plan and execute."** They help you structure work for an AI agent, then trust the agent to deliver. The human is involved at the beginning (writing the spec) and at the end (reading the PR), but the middle is a black box.
 
 ## Why Zing is Different
 
-- **It doesn't trust the middle.** Every stage boundary is a decision point where a human stays in control — not just before the work starts, but during planning, between plan and build, and after the code is written. Decision points are asynchronous and batched so they don't slow you down.
-- **It's an entropy reduction engine.** You make the big decisions. The AI handles implementation within the boundaries you set. This is the opposite of vibe coding — structured coding with AI as the executor, not the architect.
-- **A real-time review dashboard.** Parallel agents stream findings to a live dashboard in your browser via SSE. You triage findings, pick fix approaches, and answer planning questions in minutes instead of one at a time in the terminal. The AI blocks until you submit, then picks up exactly where it left off.
-- **The review loop.** Six specialized review agents catch inconsistencies, flag drift from the plan, and surface entropy before it gets committed. Every review pass actively removes disorder from the system.
-- **It's a pipeline, not a prompt.** Each stage feeds into the next. Four parallel audit passes stress-test the plan before code is written. The build follows the audited plan exactly. The code review knows what was intended because it has the spec.
-- **Parallelism is a first-class concept.** Codebase exploration, plan evaluation, and code review all fan out across multiple specialized agents simultaneously. Better results because each agent has a focused lens.
-- **Context isolation per build step.** Each build step runs in a fresh subagent with only the information it needs, producing one atomic commit per step with verified git hygiene.
-- **Chain of thought, not chain of hope.** Each stage narrows the problem space before the next one starts. No deviations from the plan, no bonus features, no drive-by refactoring. Every step has acceptance criteria. Every completion gets a commit.
+- **It doesn't trust the middle.**
+
+  > Every stage boundary is a decision point where a human stays in control — not just before the work starts, but during planning, between plan and build, and after the code is written. Decision points are asynchronous and batched so they don't slow you down.
+- **It's an entropy reduction engine.**
+
+  > You make the big decisions. The AI handles implementation within the boundaries you set. This isn't vibe coding. It's structured coding with AI as the executor, you as the architect.
+- **A real-time review dashboard.**
+
+  > Parallel agents stream findings to a live dashboard in your browser via SSE. You triage findings, pick fix approaches, and answer planning questions in minutes instead of one at a time in the terminal. The AI blocks until you submit, then picks up exactly where it left off.
+- **The review loop.**
+
+  > Six specialized review agents catch inconsistencies, flag drift from the plan, and surface entropy before it gets committed. Every review pass actively removes disorder from the system.
+- **It's a pipeline, not a prompt.**
+
+  > Each stage feeds into the next. Four parallel audit passes stress-test the plan before code is written. The build follows the audited plan exactly. The code review knows what was intended because it has the spec.
+- **Parallelism is a first-class concept.**
+
+  > Codebase exploration, plan evaluation, and code review all fan out across multiple specialized agents simultaneously. Better results because each agent has a focused lens.
+- **Context isolation per build step.**
+
+  > Each build step runs in a fresh subagent with only the information it needs, producing one atomic commit per step with verified git hygiene.
+- **Chain of thought, not chain of hope.**
+
+  > Each stage narrows the problem space before the next one starts. No deviations from the plan, no bonus features, no drive-by refactoring. Every step has acceptance criteria. Every completion gets a commit.
+
+### How they compare
+
+|  | [Zing](https://github.com/Farmer-Pete/Zing) | [GSD](https://github.com/gsd-build/get-shit-done) | [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) | [Taskmaster AI](https://github.com/eyaltoledano/claude-task-master) | [Spec Kit](https://github.com/github/spec-kit) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Capture requirements | Yes | Yes | Yes | Via PRD | Yes | Yes |
+| Plan | Yes | Yes | Yes | Yes | Yes | Yes |
+| Audit plan before build | **Yes** | — | Partial | — | — | — |
+| Build with context isolation | **Yes** | Yes | — | — | — | — |
+| Code review | **Yes** | — | Partial | — | — | — |
+| PR creation & response | **Yes** | — | — | — | — | — |
+| Live review dashboard | **Yes** | — | — | — | — | — |
+| Parallel specialized agents | **Yes** | — | — | — | — | — |
+| Async batch decision UI | **Yes** | — | — | — | — | — |
+| Fresh context per phase | Yes | **Yes** | — | Yes | — | — |
+| Multi-model support | — | **Yes** | — | — | — | — |
+| Task dependency graphs | — | — | — | **Yes** | — | — |
+| Agent-agnostic | — | Partial | — | Yes | **Yes** | Yes |
+| Runtimes supported | Claude Code, OpenCode | Claude Code, OpenCode, Gemini CLI, Codex | Claude Code, Cursor | 13+ IDEs | Agent-agnostic | 20+ tools |
+| Issue tracker integration | **Linear** | — | — | — | GitHub | — |
 
 ## What Zing Does
 
