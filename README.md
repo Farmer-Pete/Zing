@@ -57,13 +57,12 @@ These are all worth checking out. But there's a fundamental philosophical differ
 | Capture requirements | ✅ | ☑️ | ☑️ | Via PRD | ☑️ | ☑️ |
 | Plan | ✅ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
 | Audit plan before build | ✅ | — | Partial | — | — | — |
-| Build with context isolation | ✅ | ☑️ | — | — | — | — |
+| Context isolation | ✅ | ☑️ | — | ☑️ | — | — |
 | Code review | ✅ | — | Partial | — | — | — |
 | PR creation & response | ✅ | — | — | — | — | — |
 | Live review dashboard | ✅ | — | — | — | — | — |
 | Parallel specialized agents | ✅ | — | — | — | — | — |
 | Async batch decision UI | ✅ | — | — | — | — | — |
-| Fresh context per phase | ✅ | ☑️ | — | ☑️ | — | — |
 | Multi-model support | — | ☑️ | — | — | — | — |
 | Task dependency graphs | — | — | — | ☑️ | — | — |
 | Agent-agnostic | — | Partial | — | ☑️ | ☑️ | ☑️ |
