@@ -62,7 +62,6 @@ These are all worth checking out. But there's a fundamental philosophical differ
 | PR creation & response | ✅ | — | — | — | — | — |
 | Live review dashboard | ✅ | — | — | — | — | — |
 | Parallel specialized agents | ✅ | — | — | — | — | — |
-| Async batch decision UI | ✅ | — | — | — | — | — |
 | Multi-model support | — | ☑️ | — | — | — | — |
 | Task dependency graphs | — | — | — | ☑️ | — | — |
 | Agent-agnostic | — | Partial | — | ☑️ | ☑️ | ☑️ |
