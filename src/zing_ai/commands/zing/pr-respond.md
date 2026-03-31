@@ -148,7 +148,6 @@ Filter to reviews where:
 - `body` is non-empty (after trimming whitespace)
 - `state` is not `DISMISSED`
 - `user.login` is not the PR author
-- `user.login` does not end in `[bot]`
 
 For each matching review, note:
 - `id` — the review's REST API ID
@@ -169,7 +168,6 @@ gh api repos/{owner}/{repo}/issues/{number}/comments --paginate
 
 Filter to comments where:
 - `user.login` is not the PR author
-- `user.login` does not end in `[bot]`
 
 For each matching comment, note:
 - `id` — the comment's REST API ID
@@ -397,7 +395,13 @@ Parse the output to categorize each check as:
 
 ### Create CI-level tasks
 
-Create one task per CI check:
+Create one task per check that should be waited on:
+
+- All **required** checks (as determined by GitHub branch protection)
+- All **automated code-review** checks, even if optional or non-required by GitHub — these post review comments that need to be responded to. Identify them using:
+  1. **Known tools** — checks whose name contains any of the following (case-insensitive substring match): `seer`, `code review`, `codereview`, `coderabbit`, `sourcery`, `deepsource`, `codeclimate`
+  2. **Judgment** — any other check whose name suggests it performs fully automated code review
+- **Exclude** interactive or manual-approval checks (e.g., Chromatic visual review) that wait for human input and could block indefinitely
 
 ```
 TaskCreate: "CI: {check_name}" (description: "{status}")
@@ -435,7 +439,7 @@ to get the failure logs. Analyze the failures and attempt to fix them. After fix
 
 Poll with increasing backoff until all non-ignored checks complete. The backoff schedule is: 30s, 60s, 90s, 120s, then 120s for all subsequent attempts.
 
-**Ignored checks:** Skip checks matching "chromatic" (case-insensitive) — do not wait for them or include them in the pending count. They should still appear in the status table but should not block completion.
+**Ignored checks:** Skip checks that were not included in CI-level tasks (e.g., optional non-review checks, interactive checks like Chromatic) — do not wait for them or include them in the pending count. They should still appear in the status table but should not block completion. If new checks appear during polling that match the CI-level task criteria (required or automated code-review), create tasks for them and include them in the pending count.
 
 On each poll iteration:
 1. Wait for the current backoff interval.
@@ -506,7 +510,6 @@ Mark the "Re-request reviews" phase task as `completed` using TaskUpdate.
 - NEVER reply to comments with AI-generated fluff — keep replies concise and specific
 - NEVER combine unrelated fixes into one commit — if addressing comments requires changes across different concerns, make separate commits
 - NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
-- NEVER include bot comments (users whose login ends in `[bot]`) — always filter them out
 - NEVER reply to the same comment twice — before posting a reply to a review body or issue comment, check if a reply has already been posted in the current run
 </anti_patterns>
 
@@ -518,7 +521,6 @@ The skill is complete when:
 - [ ] All unresolved review threads were fetched and presented
 - [ ] All top-level review bodies (summaries) were fetched and presented
 - [ ] All issue comments were fetched and presented
-- [ ] Bot comments were filtered out from all three sources
 - [ ] Each comment was analyzed and addressed (fixed, answered, or acknowledged)
 - [ ] When multiple fix approaches existed, the user was given a choice
 - [ ] Code changes were committed and pushed
