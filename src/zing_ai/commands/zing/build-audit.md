@@ -14,9 +14,14 @@ Determine the current branch and its base branch:
 
 1. Run `git branch --show-current` to get the current branch name.
 2. Determine the base branch by checking which of `main` or `master` exists: `git rev-parse --verify main 2>/dev/null` and `git rev-parse --verify master 2>/dev/null`. Use whichever exists. If both exist, prefer `main`. If neither exists, use the default remote HEAD via `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null`.
-3. Run `git diff <base>...HEAD` to get the full diff of the branch.
-4. Run `git diff <base>...HEAD --stat` to get a summary of changed files.
-5. Run `git log <base>...HEAD --oneline` to get the commit history for this branch.
+3. Check if the current branch has an open PR: `gh pr view --json number --jq '.number' 2>/dev/null`. If a PR exists, use `gh pr diff` for steps 4–5 (this gives the correct GitHub-perspective diff regardless of merge history). If no PR exists, fall back to `git diff`.
+4. Get the full diff:
+   - **With PR:** `gh pr diff {number}`
+   - **Without PR:** `git diff <base>...HEAD`
+5. Get a summary of changed files:
+   - **With PR:** `gh pr diff {number} --name-only`
+   - **Without PR:** `git diff <base>...HEAD --stat`
+6. Run `git log <base>...HEAD --oneline` to get the commit history for this branch.
 
 If the current branch IS the base branch (e.g., user is on `main`), say something like:
 "Looks like you're on `{branch}` — there's no feature branch to diff against. Check out the branch you want reviewed and run this again."
