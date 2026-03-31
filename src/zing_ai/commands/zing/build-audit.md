@@ -14,14 +14,15 @@ Determine the current branch and its base branch:
 
 1. Run `git branch --show-current` to get the current branch name.
 2. Determine the base branch by checking which of `main` or `master` exists: `git rev-parse --verify main 2>/dev/null` and `git rev-parse --verify master 2>/dev/null`. Use whichever exists. If both exist, prefer `main`. If neither exists, use the default remote HEAD via `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null`.
-3. Check if the current branch has an open PR: `gh pr view --json number --jq '.number' 2>/dev/null`. If a PR exists, use `gh pr diff` for steps 4–5 (this gives the correct GitHub-perspective diff regardless of merge history). If no PR exists, fall back to `git diff`.
-4. Get the full diff:
+3. Check if the current branch has an open PR: `gh pr view --json number --jq '.number' 2>/dev/null`. If a PR exists, use `gh pr diff` for steps 4–5 (this gives the correct GitHub-perspective diff regardless of merge history). If no PR exists, fall back to `git diff` using a fork-point base.
+4. **Without PR only:** Try to find the original fork point: `git merge-base --fork-point <base> HEAD 2>/dev/null`. If this succeeds, use the returned commit as `<fork>` in place of `<base>...HEAD` for steps 5–6. If it fails (e.g., reflog expired or fresh clone), fall back to `<base>...HEAD`.
+5. Get the full diff:
    - **With PR:** `gh pr diff {number}`
-   - **Without PR:** `git diff <base>...HEAD`
-5. Get a summary of changed files:
+   - **Without PR:** `git diff <fork>..HEAD` (or `git diff <base>...HEAD` if fork-point failed)
+6. Get a summary of changed files:
    - **With PR:** `gh pr diff {number} --name-only`
-   - **Without PR:** `git diff <base>...HEAD --stat`
-6. Run `git log <base>...HEAD --oneline` to get the commit history for this branch.
+   - **Without PR:** `git diff <fork>..HEAD --stat` (or `git diff <base>...HEAD --stat` if fork-point failed)
+7. Run `git log <base>...HEAD --oneline` to get the commit history for this branch.
 
 If the current branch IS the base branch (e.g., user is on `main`), say something like:
 "Looks like you're on `{branch}` — there's no feature branch to diff against. Check out the branch you want reviewed and run this again."
