@@ -255,13 +255,20 @@ If `complexity: simple` is set in the zing file frontmatter, skip the plan-audit
 Skill(skill: 'zing:build', args: '{file_path}')
 ```
 
-### Standard tasks — offer plan-audit
+### Standard tasks — offer plan-audit or fast build
 
-For standard complexity tasks, use `AskUserQuestion` to ask if the user wants to make modifications before handing off to audit. Offer two options: one to proceed to audit, and one to make modifications.
+For standard complexity tasks, count the number of steps in the Action Plan (i.e., the total number of numbered steps across all phases in the **Action Plan** section of the zing document).
 
-If the user chooses to proceed, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+**If the plan has ≤3 steps**, use `AskUserQuestion` with three options:
 
-If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive) invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+1. **"Start build"** (description: "Skip audit — plan is small enough to execute directly") — if chosen, invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing document.
+2. **"Run plan-audit anyway"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+3. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+
+**If the plan has >3 steps**, use `AskUserQuestion` with two options:
+
+1. **"Run plan-audit"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+2. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 </step>
 
 </process>
