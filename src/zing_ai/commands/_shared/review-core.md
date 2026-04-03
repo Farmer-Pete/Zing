@@ -418,16 +418,16 @@ If `agent_start` or `agent_stop` returns an error, check the error message:
 - `ValueError` = fix the input and retry
 - `KeyError` = abort with FATAL error (wrong session/step/agent name)
 
-Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. Each agent's prompt must include these mandates verbatim:
+Launch all 6 agents in parallel using 6 `Task` tool calls in a single message with `subagent_type: "general-purpose"`. For agents 1-3 (Architecture, Correctness, Security), do NOT specify a model — they inherit the parent's model. For agents 4-6 (UI & Readability, Performance, Testing), add `model: "sonnet"`. Each agent's prompt must include these mandates verbatim:
 1. "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
 2. "Do NOT call mcp__zing-ai__finding_submit — return findings as JSONL text only. The parent process handles submission."
 Each agent must also receive the **session ID** and **step ID** for the `agent_start`/`agent_stop` calls only.
 - Agent 1 (Architecture & Design): Design, Implementation, Root Cause vs. Surface Fix — reviews design, abstraction, and coupling across all changed files. For Root Cause analysis, **must use Serena** to search for other instances of patterns being modified in the PR (e.g., if the PR changes a hardcoded key in 3 files, search for that key across the codebase to find unmigrated instances).
 - Agent 2 (Correctness & State): Logic Errors (incl. Async Initialization, State Serialization, Stale References, Business Logic Completeness), Error Handling — reviews all changed files for logic bugs, null safety, state management, race conditions, and business logic completeness. Use Serena to trace references and check surrounding context.
 - Agent 3 (Security & API Surface): Security and Data Privacy, Dependencies and Compatibility, API Contract Integrity — reviews all changed files for security vulnerabilities, auth issues, API contract integrity, and sensitive data exposure. Use Serena to trace input validation paths and auth middleware.
-- Agent 4 (UI & Readability): Naming, Readability, Language-Specific, Usability and Accessibility, UI Layout Robustness — reviews all changed files for naming, readability, code style, and UI layout issues. Rarely needs Serena.
-- Agent 5 (Performance & Data Integrity): Performance (incl. Database Query Performance, Memory, Concurrency and Data Integrity, External Data Defensiveness) — reviews all changed files for performance issues, N+1 queries, data integrity, external data defensiveness, and concurrency. Use Serena to read model definitions, check indexes, and trace queryset construction.
-- Agent 6 (Testing & Observability): Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion — reviews all changed files for test coverage, test determinism, error handling completeness, and production readiness. Use Serena to verify what tests exercise and check monitoring setup.
+- Agent 4 (UI & Readability) [`model: "sonnet"`]: Naming, Readability, Language-Specific, Usability and Accessibility, UI Layout Robustness — reviews all changed files for naming, readability, code style, and UI layout issues. Rarely needs Serena.
+- Agent 5 (Performance & Data Integrity) [`model: "sonnet"`]: Performance (incl. Database Query Performance, Memory, Concurrency and Data Integrity, External Data Defensiveness) — reviews all changed files for performance issues, N+1 queries, data integrity, external data defensiveness, and concurrency. Use Serena to read model definitions, check indexes, and trace queryset construction.
+- Agent 6 (Testing & Observability) [`model: "sonnet"`]: Testing and Testability (incl. Test Determinism), Production Readiness, Experts' Opinion — reviews all changed files for test coverage, test determinism, error handling completeness, and production readiness. Use Serena to verify what tests exercise and check monitoring setup.
 
 **After all 6 agents return**, the parent proceeds to the `check_and_review` step.
 </step>
