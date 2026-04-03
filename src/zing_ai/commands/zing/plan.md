@@ -39,7 +39,18 @@ If the task is `simple`:
 2. Do NOT call `review_wait` for planning questions.
 3. Instead, based on the spec alone, write a concise Action Plan directly inline — 1 to 3 steps, each specific enough for a build agent to execute (name the exact file, function, or line involved).
 4. Also write a **Relevant Files** section listing only the files that need to change.
-5. Generate the **Progress** checklist immediately from the steps.
+5. Generate the **Progress** section immediately after the Action Plan. Use this exact format:
+
+   ```
+   ## Progress
+
+   - [ ] Step 1: {description}
+   - [ ] Step 2: {description}
+   - [ ] Step 3: {description}
+   ...
+   ```
+
+   All items start unchecked.
 6. Save the updated document.
 7. Skip to the `next_steps` step — the `explore_codebase` and `flesh_out_document` steps are skipped entirely.
 
