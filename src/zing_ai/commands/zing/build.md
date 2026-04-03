@@ -107,7 +107,7 @@ This is the core execution loop. The parent agent owns the step loop but delegat
    - MCP-only code reading mandate: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
    - Storybook instructions: "If this step involves creating or modifying Storybook stories (*.stories.*), call the `mcp__storybook-mcp__get-storybook-story-instructions` tool BEFORE writing any story code to get the correct patterns and imports. After writing stories, use `mcp__storybook-mcp__preview-stories` to verify they render correctly."
 
-5. **Launch the Task subagent** using the `Task` tool with `subagent_type: "general-purpose"` and the constructed prompt. The subagent executes the step, logs progress via `step_log`, verifies acceptance criteria, and returns a summary of what was done.
+5. **Launch the Task subagent** using the `Task` tool with `subagent_type: "general-purpose"`, `model: "sonnet"`, and the constructed prompt. The subagent executes the step, logs progress via `step_log`, verifies acceptance criteria, and returns a summary of what was done.
 
 6. **After the subagent returns**, the parent:
    - Calls `agent_stop(session_id, step_id, name)` where `name` is the same agent name used in `agent_start` (e.g. `"Step {N}: {description}"`)
