@@ -109,6 +109,8 @@ Here is the structure your response MUST follow:
 ... all in the SAME response
 ```
 
+Launch all Task subagents with `subagent_type: "general-purpose"` and `model: "sonnet"`. These agents only read code and return findings — they don't make architectural decisions.
+
 Each subagent receives a prompt with:
 
 1. The full zing document content
