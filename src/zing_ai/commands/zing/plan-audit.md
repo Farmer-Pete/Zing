@@ -95,7 +95,7 @@ Each agent also receives:
 
 ### Launching the agents
 
-Launch all 4 agents in parallel using 4 `Task` tool calls in a single message. Print a status line before launching:
+Launch all 4 agents in parallel using 4 `Task` tool calls in a single message with `model: "sonnet"`. Print a status line before launching:
 
 ```
 Launching 4 evaluation passes in parallel...
