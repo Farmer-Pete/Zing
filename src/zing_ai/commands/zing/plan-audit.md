@@ -400,6 +400,52 @@ When `review_wait` returns, iterate over the returned items. Each item contains 
 After all improvements have been applied, summarize what was changed.
 </step>
 
+<step name="merge_small_steps">
+Read the Action Plan section of the zing document and apply step-merging heuristics to eliminate steps that are too granular.
+
+### Identify small steps
+
+Flag any step that exhibits one or more of these signals:
+
+- The step description is under 20 words
+- The step touches only one file and describes a single-line or purely mechanical change
+- The step is purely mechanical in nature: "add import", "rename variable", "update config value", "add type hint", "create empty file", "add placeholder"
+- Multiple consecutive steps touch the same file
+
+### Merge strategy
+
+Apply the following merges:
+
+1. **Same-file consecutive steps** — Group consecutive steps that touch the same file into a single combined step. Use the most substantive step's description as the base and append the mechanical changes as sub-bullets or inline additions.
+2. **Scaffolding + behavior** — Merge any step that only creates structure (empty file, folder, imports, placeholder interface) with the immediately following step that adds actual behavior to that structure.
+3. **Test + implementation** — Merge any "add tests for X" step with its corresponding "implement X" step. Tests must always live in the same step as their implementation.
+
+Do NOT merge steps that:
+- Involve different components or different logical concerns
+- Touch different areas of the codebase (different modules, services, or layers)
+- Require non-trivial decision-making that is separate from adjacent steps
+- Are already of substantial size (over 40 words describing non-trivial work)
+
+When in doubt, leave steps separate.
+
+### Apply merges
+
+If any merges were identified, use the Edit tool to update the Action Plan section of the zing document:
+
+- Combine the merged step descriptions into a single step entry, listing all files touched and all sub-tasks
+- Renumber all steps sequentially after merging
+- Update the `## Progress` section checklist (if present) to match the new step list — same numbering and descriptions
+
+If no merges are needed, skip the Edit and note that no steps required merging.
+
+### Report
+
+Tell the user:
+- How many steps were merged (e.g. "Merged 3 pairs of steps")
+- What the original step count was and what the final step count is (e.g. "12 steps → 9 steps")
+- A brief summary of what was merged and why
+</step>
+
 <step name="ensure_progress_section">
 After improvements are complete, check if the document has a `## Progress` section with a checklist.
 
