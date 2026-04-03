@@ -39,23 +39,78 @@ Then call `step_start(session_id, steps.build-audit)` where `steps.build-audit` 
 The session ID and step ID will be passed to the shared review steps.
 </step>
 
+<step name="assess_diff_size">
+Parse the `git diff --stat` output obtained in `detect_branch_and_diff` to classify the diff size.
+
+### Counting files and lines
+
+From the `--stat` output:
+- **Files changed**: Count the number of lines that end with `| ` (each changed file appears as one such line). Alternatively, read the summary line at the end of the stat output — it reads like `3 files changed, 42 insertions(+), 5 deletions(-)`.
+- **Total lines changed**: Sum the insertions and deletions from the summary line.
+
+### Classification
+
+- **Small**: fewer than 5 files changed AND fewer than 100 total lines changed (insertions + deletions)
+- **Large**: anything else (5 or more files, or 100 or more lines)
+
+Store `diff_size` as either `"small"` or `"large"` for use in subsequent steps.
+
+No output to the user is needed here — this is a routing step only.
+</step>
+
 <step name="read_changed_files">
 Follow the `read_changed_files` step from the shared review reference.
 </step>
 
 <step name="big_picture">
-Follow the `big_picture` step from the shared review reference.
+**Skip this step entirely if `diff_size == "small"`** — it is unnecessary overhead for small changes.
+
+Otherwise, follow the `big_picture` step from the shared review reference.
 </step>
 
 <step name="analyze_changes">
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
+### Agent dispatch — small diff path
+
+**If `diff_size == "small"`**, launch only **2 agents** instead of 6:
+- Agent 2: Correctness & State
+- Agent 3: Security & API Surface
+
+Both agents run on Opus. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
+
+After both agents return their JSONL findings, **do NOT call `finding_submit` or `review_wait`**. Instead, proceed directly to the inline findings display below.
+
+#### Inline findings display (small diff)
+
+Parse the agents' JSONL findings. Deduplicate by title (case-insensitive). Then for each finding:
+
+```
+**#{n} — {title}**
+Severity: {severity} | Confidence: {confidence}
+{brief summary — 1–2 sentences}
+
+Auto-applying: {first option label} — {first option description}
+```
+
+After listing all findings (or "No issues found." if there are none), say:
+
+> {N} findings from quick review. Continuing with auto-apply. Say **review** to open the full dashboard instead.
+
+Wait briefly for user input (use AskUserQuestion with a short timeout or just present the message and check if the user responds before continuing). If the user says **"review"** or any variant thereof, submit all findings via `finding_submit()`, call `review_wait()`, and proceed with the full dashboard triage flow (continuing to `check_and_review` → `write_report` → `create_pr`).
+
+Otherwise (user continues or does not respond), proceed to the `auto_apply_small` step, then to `write_report` and `create_pr`.
+
+### Agent dispatch — large diff path
+
+**If `diff_size == "large"`**, follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
 </step>
 
 <step name="present_summary">
-Give a brief, natural overview of the branch before diving into findings. Something like:
+**Skip this step if `diff_size == "small"`** — the inline findings display in `analyze_changes` serves as the summary.
+
+Otherwise, give a brief, natural overview of the branch before diving into findings. Something like:
 
 ```
 Alright, I've looked through the {count} files changed on `{branch_name}`. Here's what I found — {total_count} things I want to flag:
@@ -69,10 +124,48 @@ Write an empty findings report and exit.
 </step>
 
 <step name="check_and_review">
-Follow the `check_and_review` step from the shared review reference.
+**Skip this step if `diff_size == "small"` and the user did not escalate to full review** — triage is handled inline in `analyze_changes`.
+
+Otherwise, follow the `check_and_review` step from the shared review reference.
 
 - **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
 - **No findings after triage**: Say something like "Looked through everything — nothing survived triage. Changes look solid." Write an empty findings report and exit.
+</step>
+
+<step name="auto_apply_small">
+This step handles auto-apply for small diffs. It runs after the inline findings display in `analyze_changes` when the user does not escalate to full review.
+
+### Process
+
+For each finding (in order), use the **first option** from the finding's `options` list as the selected approach:
+
+1. Read the relevant source file(s) referenced in the finding.
+2. Apply the fix directly using Edit/Write tools, guided by the first option's `label` and `description`.
+3. After applying, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+4. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), fall back to interactive mode for that finding only: show the finding, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+If there are **zero findings**, skip directly to `write_report` and `create_pr` — no commit is needed.
+
+### After all findings are processed
+
+Show a brief summary:
+```
+Auto-apply complete:
+- {applied_count} fixes applied
+- {fallback_count} required interactive resolution
+```
+
+Stage and commit all changes with:
+```
+Fix code review findings: {brief list of finding titles}
+
+Applied {applied_count} fixes from quick review.
+Findings addressed:
+- #{n}: {finding title}
+...
+```
+
+Then proceed to `write_report` and `create_pr`.
 </step>
 
 <step name="write_report">
@@ -243,13 +336,26 @@ Review is complete when:
 - [ ] Shared review reference was loaded
 - [ ] Current branch and base branch were detected
 - [ ] Full diff was obtained and all changed files were read
+- [ ] Diff size was assessed (small: <5 files and <100 lines; large: anything else)
+
+**Small diff path:**
+- [ ] Only 2 agents launched (Correctness & State; Security & API Surface)
+- [ ] Findings displayed inline with auto-apply intent (title, severity, brief summary, proposed option)
+- [ ] User given opportunity to escalate to full review by saying "review"
+- [ ] If escalated: findings submitted via `finding_submit()`, `review_wait()` called, full triage completed
+- [ ] If not escalated: `auto_apply_small` step applied first option from each finding automatically
+- [ ] Zero findings case: "No issues found" shown, proceeded directly to `write_report` and `create_pr`
+
+**Large diff path:**
 - [ ] Big-picture assessment shared (sizing, context, relevance)
-- [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
+- [ ] Changes were analyzed against the full review checklist using all 6 agents
 - [ ] Each finding has a severity and confidence rating
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
-- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
+
+**Both paths:**
+- [ ] Triaged/auto-applied findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>
