@@ -1,0 +1,148 @@
+"""Tests for zing_ai.config (schema, load/save round-trip, hashing, file lock)."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from filelock import FileLock, Timeout
+
+from zing_ai.config import (
+    ConfigError,
+    config_hash,
+    default_config,
+    load_config,
+    save_config,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _patch_config_path(tmp_path: Path):
+    """Return a context manager that redirects config_path() to tmp_path/config.toml."""
+    target = tmp_path / "config.toml"
+    return patch("zing_ai.config.config_path", return_value=target)
+
+
+# ---------------------------------------------------------------------------
+# test_round_trip
+# ---------------------------------------------------------------------------
+
+
+def test_round_trip(tmp_path: Path) -> None:
+    """save_config then load_config returns an equal Config."""
+    with _patch_config_path(tmp_path):
+        cfg = default_config()
+        save_config(cfg)
+        loaded = load_config()
+    assert loaded == cfg
+
+
+# ---------------------------------------------------------------------------
+# test_load_missing_returns_defaults
+# ---------------------------------------------------------------------------
+
+
+def test_load_missing_returns_defaults(tmp_path: Path) -> None:
+    """When the config file is absent, load_config() returns the default config."""
+    with _patch_config_path(tmp_path):
+        result = load_config()
+    assert result == default_config()
+
+
+# ---------------------------------------------------------------------------
+# test_load_invalid_toml_raises_config_error
+# ---------------------------------------------------------------------------
+
+
+def test_load_invalid_toml_raises_config_error(tmp_path: Path) -> None:
+    """Invalid TOML raises ConfigError with 'not valid TOML' in the message."""
+    target = tmp_path / "config.toml"
+    target.write_text("this is not = valid toml [", encoding="utf-8")
+
+    with _patch_config_path(tmp_path), pytest.raises(ConfigError, match="not valid TOML"):
+        load_config()
+
+
+# ---------------------------------------------------------------------------
+# test_load_invalid_value_raises_config_error
+# ---------------------------------------------------------------------------
+
+
+def test_load_invalid_value_raises_config_error(tmp_path: Path) -> None:
+    """An invalid enum value raises ConfigError mentioning the offending field."""
+    target = tmp_path / "config.toml"
+    target.write_text('[git]\nworkflow_mode = "rebase"\n', encoding="utf-8")
+
+    with _patch_config_path(tmp_path), pytest.raises(ConfigError, match="workflow_mode"):
+        load_config()
+
+
+# ---------------------------------------------------------------------------
+# test_hash_stable_across_runs
+# ---------------------------------------------------------------------------
+
+
+def test_hash_stable_across_runs() -> None:
+    """config_hash produces the same value across separate interpreter invocations."""
+    code = (
+        "from zing_ai.config import config_hash, default_config; "
+        "print(config_hash(default_config()))"
+    )
+    h1 = subprocess.check_output([sys.executable, "-c", code], text=True).strip()
+    h2 = subprocess.check_output([sys.executable, "-c", code], text=True).strip()
+    assert h1 == h2
+
+
+# ---------------------------------------------------------------------------
+# test_hash_changes_on_field_change
+# ---------------------------------------------------------------------------
+
+
+def test_hash_changes_on_field_change() -> None:
+    """Mutating a field value produces a different config_hash."""
+    base = default_config()
+    modified = default_config()
+    modified.thresholds.large_file_lines = 999
+    assert config_hash(base) != config_hash(modified)
+
+
+# ---------------------------------------------------------------------------
+# test_save_uses_filelock
+# ---------------------------------------------------------------------------
+
+
+def test_save_uses_filelock(tmp_path: Path) -> None:
+    """FileLock raises Timeout when the lock is already held by another holder."""
+    lock_path = str(tmp_path / "config.toml") + ".lock"
+
+    # Acquire the lock in the main thread so nothing else can grab it.
+    holder = FileLock(lock_path)
+    holder.acquire(timeout=10)
+
+    raised: list[Exception] = []
+
+    def _try_acquire() -> None:
+        contender = FileLock(lock_path, timeout=1)
+        try:
+            contender.acquire()
+        except Timeout as e:
+            raised.append(e)
+        finally:
+            if contender.is_locked:
+                contender.release()
+
+    t = threading.Thread(target=_try_acquire)
+    t.start()
+    t.join(timeout=5)
+
+    holder.release()
+
+    assert len(raised) == 1, "Expected Timeout to be raised when lock is held"
+    assert isinstance(raised[0], Timeout)
