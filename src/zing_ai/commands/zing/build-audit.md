@@ -50,7 +50,7 @@ From the `--stat` output:
 
 ### Classification
 
-- **Small**: fewer than 5 files changed AND fewer than 100 total lines changed (insertions + deletions)
+- **Small**: fewer than {{ thresholds.small_diff_max_files }} files changed AND fewer than {{ thresholds.small_diff_max_lines }} total lines changed (insertions + deletions)
 - **Large**: anything else (5 or more files, or 100 or more lines)
 
 Store `diff_size` as either `"small"` or `"large"` for use in subsequent steps.
@@ -74,7 +74,7 @@ Follow the `diff_preparation` step from the shared review reference.
 
 ### Agent dispatch — small diff path
 
-**If `diff_size == "small"`**, launch only **2 agents** instead of 6:
+**If `diff_size == "small"`**, launch only **{{ agents.review_small_diff_count }} agents** instead of {{ agents.review_large_diff_count }}:
 - Agent 2: Correctness & State
 - Agent 3: Security & API Surface
 
@@ -171,7 +171,7 @@ Then proceed to `write_report` and `create_pr`.
 <step name="write_report">
 Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
+First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in {{ report.datetime_format }} format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
 
 Use this structure:
 
@@ -336,10 +336,10 @@ Review is complete when:
 - [ ] Shared review reference was loaded
 - [ ] Current branch and base branch were detected
 - [ ] Full diff was obtained and all changed files were read
-- [ ] Diff size was assessed (small: <5 files and <100 lines; large: anything else)
+- [ ] Diff size was assessed (small: <{{ thresholds.small_diff_max_files }} files and <{{ thresholds.small_diff_max_lines }} total lines; large: anything else)
 
 **Small diff path:**
-- [ ] Only 2 agents launched (Correctness & State; Security & API Surface)
+- [ ] Only {{ agents.review_small_diff_count }} agents launched (Correctness & State; Security & API Surface)
 - [ ] Findings displayed inline with auto-apply intent (title, severity, brief summary, proposed option)
 - [ ] User given opportunity to escalate to full review by saying "review"
 - [ ] If escalated: findings submitted via `finding_submit()`, `review_wait()` called, full triage completed
@@ -348,7 +348,7 @@ Review is complete when:
 
 **Large diff path:**
 - [ ] Big-picture assessment shared (sizing, context, relevance)
-- [ ] Changes were analyzed against the full review checklist using all 6 agents
+- [ ] Changes were analyzed against the full review checklist using all {{ agents.review_large_diff_count }} agents
 - [ ] Each finding has a severity and confidence rating
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`

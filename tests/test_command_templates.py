@@ -45,3 +45,11 @@ class TestPlanAuditMd(unittest.TestCase):
         self.assertIn('model: "sonnet"', out)
         self.assertIn("< 20 words", out)
         self.assertIn("> 40 words", out)
+
+
+class TestBuildAuditMd(unittest.TestCase):
+    def test_build_audit_md_substitutions(self) -> None:
+        out = _render("zing/build-audit.md")
+        self.assertIn("<5 files", out)
+        self.assertIn("<100 total lines", out)
+        self.assertIn("%Y-%m-%d-%H%M", out)
