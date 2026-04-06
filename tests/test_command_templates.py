@@ -81,3 +81,23 @@ class TestPrRespondMd(unittest.TestCase):
     def test_pr_respond_md_substitutions(self) -> None:
         out = _render("zing/pr-respond.md")
         self.assertIn("Co-Authored-By: Zing <zing@farmerpete.net>", out)
+
+
+class TestReviewCoreMd(unittest.TestCase):
+    def test_review_core_md_substitutions(self) -> None:
+        out = _render("_shared/review-core.md")
+        self.assertIn("over 1000 lines", out)
+        self.assertIn('model: "sonnet"', out)
+
+    def test_review_core_omits_agents_1_3_model_when_empty(self) -> None:
+        out = _render("_shared/review-core.md")
+        # default review_agents_1_3 = "" so model: "" must NOT appear
+        self.assertNotIn('model: ""', out)
+
+    def test_review_core_includes_agents_1_3_model_when_set(self) -> None:
+        from zing_ai.config import default_config
+
+        cfg = default_config()
+        cfg.models.review_agents_1_3 = "opus"
+        out = _render("_shared/review-core.md", config=cfg)
+        self.assertIn('model: "opus"', out)
