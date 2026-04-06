@@ -93,7 +93,7 @@ Follow the `check_and_review` step from the shared review reference.
 <step name="write_report">
 Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file as a local record.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
+First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in {{ report.datetime_format }} format (e.g. `2025-06-15-1423`).
 
 Use this structure:
 

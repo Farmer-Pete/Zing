@@ -90,7 +90,7 @@ Execute the approved repro plan using the `mcp__claude-in-chrome__*` tools. Stan
 3. `screenshot` to confirm auth state and orient yourself.
 4. Walk through the repro steps with `find` / `read_page` to locate elements, then `computer` (`left_click`, `scroll`, etc.) for interaction.
 5. After each meaningful navigation, `screenshot` to capture state for the eventual report.
-6. Use `wait` for slow loads, but cap waits at a few seconds — if the page is still loading after ~10 seconds, stop and tell the user something is wrong rather than retrying indefinitely.
+6. Use `wait` for slow loads, but cap waits at a few seconds — if the page is still loading after ~{{ thresholds.browser_wait_timeout_seconds }} seconds, stop and tell the user something is wrong rather than retrying indefinitely.
 
 **Before any click that would mutate state**, use AskUserQuestion to confirm. The question should quote the specific action (e.g. "About to click 'Archive' on alert X. Proceed?") with options:
 - **Yes** — proceed with this action

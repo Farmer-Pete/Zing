@@ -207,7 +207,7 @@ General comments ({issue_comment_count}):
 ...
 ```
 
-Omit any group header if that group has zero items. Truncate long comment bodies to ~100 characters with "..." for the summary view.
+Omit any group header if that group has zero items. Truncate long comment bodies to ~{{ thresholds.comment_truncation_chars }} characters with "..." for the summary view.
 
 ### Create comment-level tasks
 
@@ -305,7 +305,7 @@ After all comments have been addressed:
 1. Run `git status` to see what changed.
 2. If there are changes:
    - Stage the specific changed files (NEVER use `git add -A` or `git add .`)
-   - Commit with a message like: `Address PR review comments on #{number}` — always include `Co-Authored-By: Zing <zing@farmerpete.net>` in the commit message
+   - Commit with a message like: `Address PR review comments on #{number}` — always include `{{ git.coauthor_trailer }}` in the commit message
    - Push to the remote branch:
      ```
      git push
@@ -509,7 +509,7 @@ Mark the "Re-request reviews" phase task as `completed` using TaskUpdate.
 - NEVER guess at what a reviewer meant — if a comment is ambiguous, ask the user
 - NEVER reply to comments with AI-generated fluff — keep replies concise and specific
 - NEVER combine unrelated fixes into one commit — if addressing comments requires changes across different concerns, make separate commits
-- NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
+- NEVER omit `{{ git.coauthor_trailer }}` from commit messages
 - NEVER reply to the same comment twice — before posting a reply to a review body or issue comment, check if a reply has already been posted in the current run
 </anti_patterns>
 

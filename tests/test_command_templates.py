@@ -62,3 +62,22 @@ class TestCustomAuditMd(unittest.TestCase):
         self.assertIn("~5000", out)
         self.assertIn("about 25", out)
         self.assertIn(">50 files", out)
+
+
+class TestPrAuditMd(unittest.TestCase):
+    def test_pr_audit_md_substitutions(self) -> None:
+        out = _render("zing/pr-audit.md")
+        self.assertIn("%Y-%m-%d-%H%M", out)
+
+
+class TestPrAuditVisualMd(unittest.TestCase):
+    def test_pr_audit_visual_md_substitutions(self) -> None:
+        out = _render("zing/pr-audit-visual.md")
+        # Visual one uses browser timeout
+        self.assertIn("~10 seconds", out)
+
+
+class TestPrRespondMd(unittest.TestCase):
+    def test_pr_respond_md_substitutions(self) -> None:
+        out = _render("zing/pr-respond.md")
+        self.assertIn("Co-Authored-By: Zing <zing@farmerpete.net>", out)
