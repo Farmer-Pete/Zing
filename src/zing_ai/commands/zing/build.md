@@ -60,7 +60,7 @@ The session ID and build step ID will be used for agent lifecycle tracking and l
 
 Check the current git branch by running `git branch --show-current`. If the branch is `main` or `master`, create a new feature branch before starting the build:
 
-1. Derive a branch name from the zing document title (the `# Title` heading): lowercase it, replace spaces and special characters with hyphens, strip leading/trailing hyphens, and truncate to 60 characters. Prefix with `zing/` (e.g., `zing/recipe-app`, `zing/add-user-authentication`).
+1. Derive a branch name from the zing document title (the `# Title` heading): lowercase it, replace spaces and special characters with hyphens, strip leading/trailing hyphens, and truncate to {{ thresholds.branch_name_max_length }} characters. Prefix with `{{ git.branch_prefix }}` (e.g., `{{ git.branch_prefix }}recipe-app`, `{{ git.branch_prefix }}add-user-authentication`).
 2. Run `git checkout -b {branch_name}` to create and switch to the new branch.
 3. Tell the user: `Created branch: {branch_name}`
 
@@ -107,11 +107,11 @@ This is the core execution loop. The parent agent owns the step loop but delegat
    - MCP-only code reading mandate: "Use Serena for code exploration, aid for analysis, CodeGraphContext for architecture. Do not use built-in Read/Grep/Glob for code files."
    - Storybook instructions: "If this step involves creating or modifying Storybook stories (*.stories.*), call the `mcp__storybook-mcp__get-storybook-story-instructions` tool BEFORE writing any story code to get the correct patterns and imports. After writing stories, use `mcp__storybook-mcp__preview-stories` to verify they render correctly."
 
-5. **Launch the Task subagent** using the `Task` tool with `subagent_type: "general-purpose"`, `model: "sonnet"`, and the constructed prompt. The subagent executes the step, logs progress via `step_log`, verifies acceptance criteria, and returns a summary of what was done.
+5. **Launch the Task subagent** using the `Task` tool with `subagent_type: "general-purpose"`, `model: "{{ models.build_step }}"`, and the constructed prompt. The subagent executes the step, logs progress via `step_log`, verifies acceptance criteria, and returns a summary of what was done.
 
 6. **After the subagent returns**, the parent:
    - Calls `agent_stop(session_id, step_id, name)` where `name` is the same agent name used in `agent_start` (e.g. `"Step {N}: {description}"`)
-   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `Co-Authored-By: Zing <zing@farmerpete.net>` trailer. Do NOT push to remote. **Immediately after every commit**, verify that `Co-Authored-By: Zing <zing@farmerpete.net>` is present in the commit message by running `git log -1 --format=%B`. If it is missing, amend the commit to append it: `git commit --amend -m "$(git log -1 --format=%B)" -m "Co-Authored-By: Zing <zing@farmerpete.net>"`. This verification is mandatory and must never be skipped.
+   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `{{ git.coauthor_trailer }}` trailer. Do NOT push to remote. **Immediately after every commit**, verify that `{{ git.coauthor_trailer }}` is present in the commit message by running `git log -1 --format=%B`. If it is missing, amend the commit to append it: `git commit --amend -m "$(git log -1 --format=%B)" -m "{{ git.coauthor_trailer }}"`. This verification is mandatory and must never be skipped.
    - Updates the Progress section in the zing file (`- [ ]` → `- [x]`) using Edit
    - Marks the task as completed using TaskUpdate
 
@@ -148,5 +148,5 @@ No file path argument is needed — build-audit uses git diff.
 - NEVER mark a step complete if acceptance criteria are not met
 - NEVER work on steps out of order unless a step is explicitly marked as independent
 - NEVER combine multiple steps into one commit — one commit per step
-- NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
+- NEVER omit `{{ git.coauthor_trailer }}` from commit messages
 </anti_patterns>
