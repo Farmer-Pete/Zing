@@ -56,19 +56,25 @@ def cli(ctx: click.Context, *, verbose: bool) -> None:
 @_runtime_options
 def install(claude: bool, opencode: bool, all_runtimes: bool) -> None:
     """Install Zing commands for the selected runtime(s)."""
+    from zing_ai.config import ConfigError, load_config
     from zing_ai.installer import InstallError, install_claude, install_opencode
 
     runtimes = _resolve_runtimes(claude, opencode, all_runtimes)
     logger.info("Resolved runtimes: %s", runtimes)
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(1)
     for rt in runtimes:
         try:
             if rt == "claude":
                 click.echo("Installing for Claude Code...")
-                install_claude()
+                install_claude(config=cfg)
                 click.echo("Claude Code commands installed successfully.")
             elif rt == "opencode":
                 click.echo("Installing for OpenCode...")
-                install_opencode()
+                install_opencode(config=cfg)
                 click.echo("OpenCode commands installed successfully.")
         except InstallError as e:
             click.echo(f"error: {e}", err=True)
