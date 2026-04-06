@@ -422,3 +422,91 @@ def test_source_mtime_max_returns_none_on_oserror(tmp_path: Path) -> None:
     with patch.object(Path, "stat", side_effect=OSError("no stat")):
         result = _source_mtime_max([tmp_path / "anything"])
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# is_install_stale tests
+# ---------------------------------------------------------------------------
+
+
+def test_stale_when_manifest_missing(tmp_path: Path) -> None:
+    """Returns True when no manifest exists in the target directory."""
+    from zing_ai.config import default_config
+    from zing_ai.installer import is_install_stale
+
+    assert is_install_stale(tmp_path, "claude-code", default_config()) is True
+
+
+def test_stale_when_config_hash_differs(tmp_path: Path) -> None:
+    """Returns True when manifest config_hash doesn't match current config."""
+    from zing_ai import __version__
+    from zing_ai.config import default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash="other_hash",
+        source_mtime_max=None,
+        package_version=__version__,
+    )
+    assert is_install_stale(tmp_path, "claude-code", default_config()) is True
+
+
+def test_stale_when_package_version_differs(tmp_path: Path) -> None:
+    """Returns True when manifest package_version doesn't match installed version."""
+    from zing_ai.config import config_hash, default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    cfg = default_config()
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash=config_hash(cfg),
+        source_mtime_max=None,
+        package_version="not_current",
+    )
+    assert is_install_stale(tmp_path, "claude-code", cfg) is True
+
+
+def test_fresh_when_all_match(tmp_path: Path) -> None:
+    """Returns False when config hash, version, and mtime all match (wheel path)."""
+    from zing_ai import __version__
+    from zing_ai.config import config_hash, default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    cfg = default_config()
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash=config_hash(cfg),
+        source_mtime_max=None,
+        package_version=__version__,
+    )
+    # source_mtime_max=None triggers the wheel-install path → False
+    assert is_install_stale(tmp_path, "claude-code", cfg) is False
+
+
+def test_stale_when_source_mtime_advances(tmp_path: Path) -> None:
+    """Returns True when manifest source_mtime_max is older than current source files."""
+    from zing_ai import __version__
+    from zing_ai.config import config_hash, default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    cfg = default_config()
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash=config_hash(cfg),
+        source_mtime_max=1.0,  # epoch second — far in the past
+        package_version=__version__,
+    )
+    assert is_install_stale(tmp_path, "claude-code", cfg) is True

@@ -256,6 +256,25 @@ def _source_mtime_max(traversables: object) -> float | None:
     return max_mtime
 
 
+def is_install_stale(target_dir: Path, runtime: str, config: Config) -> bool:
+    """Return True if the installed commands are stale relative to current source + config."""
+    from zing_ai.manifest import load_manifest
+
+    _ = runtime  # reserved for future per-runtime cache keying
+    manifest = load_manifest(target_dir)
+    if manifest is None:
+        return True
+    if manifest.get("config_hash") != config_hash(config):
+        return True
+    if manifest.get("package_version") != __version__:
+        return True
+    stored_mtime = manifest.get("source_mtime_max")
+    current_mtime = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    if stored_mtime is None or current_mtime is None:
+        return False  # wheel install — version check above is the only signal
+    return current_mtime > stored_mtime
+
+
 def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:
     """Create *path* and any missing parents, tracking newly created dirs."""
     # Walk from the deepest dir upward to find which parts we'll create.
