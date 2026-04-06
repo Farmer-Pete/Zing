@@ -11,6 +11,9 @@ from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
+from zing_ai.config import Config, load_config
+from zing_ai.templating import render_template
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +29,7 @@ _TOP_LEVEL_FILE = "zing.md"
 _SUBDIRS = ("zing", "_shared")
 
 
-def install_claude(target_dir: Path | None = None) -> None:
+def install_claude(target_dir: Path | None = None, config: Config | None = None) -> None:
     """Install Zing command files for Claude Code.
 
     Copies the bundled markdown command files to the Claude Code commands
@@ -36,6 +39,9 @@ def install_claude(target_dir: Path | None = None) -> None:
     ----------
     target_dir:
         Override for the commands directory.  Useful for testing.
+    config:
+        Configuration used for Jinja template rendering.  Defaults to the
+        user's saved config (or built-in defaults) when *None*.
 
     Raises
     ------
@@ -43,6 +49,9 @@ def install_claude(target_dir: Path | None = None) -> None:
         On any I/O error (permissions, disk full, etc.).  Partial files are
         cleaned up before raising.
     """
+    if config is None:
+        config = load_config()
+
     if target_dir is None:
         target_dir = Path.home() / ".claude" / "commands"
 
@@ -70,7 +79,7 @@ def install_claude(target_dir: Path | None = None) -> None:
         # -- 2. Copy the top-level zing.md ------------------------------------
         src_top = commands_root.joinpath(_TOP_LEVEL_FILE)
         dst_top = target_dir / _TOP_LEVEL_FILE
-        _copy_resource_file(src_top, dst_top, created_files)
+        _copy_resource_file(src_top, dst_top, created_files, config=config)
 
         # -- 3. Copy subdirectories (zing/, _shared/) ------------------------
         for subdir_name in _SUBDIRS:
@@ -80,7 +89,7 @@ def install_claude(target_dir: Path | None = None) -> None:
                 if subdir_name == "_shared"
                 else target_dir / subdir_name
             )
-            _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs)
+            _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs, config=config)
 
     except Exception as exc:
         # Roll back any files/dirs we created during this run.
@@ -99,7 +108,7 @@ def install_claude(target_dir: Path | None = None) -> None:
     register_mcp_server("claude")
 
 
-def install_opencode(target_dir: Path | None = None) -> None:
+def install_opencode(target_dir: Path | None = None, config: Config | None = None) -> None:
     """Install Zing command files for OpenCode.
 
     Reads the bundled markdown command files, converts them for OpenCode
@@ -117,6 +126,9 @@ def install_opencode(target_dir: Path | None = None) -> None:
     ----------
     target_dir:
         Override for the commands directory.  Useful for testing.
+    config:
+        Configuration used for Jinja template rendering.  Defaults to the
+        user's saved config (or built-in defaults) when *None*.
 
     Raises
     ------
@@ -125,6 +137,9 @@ def install_opencode(target_dir: Path | None = None) -> None:
         cleaned up before raising.
     """
     from zing_ai.converter import convert_for_opencode
+
+    if config is None:
+        config = load_config()
 
     if target_dir is None:
         target_dir = Path.home() / ".config" / "opencode" / "commands"
@@ -156,6 +171,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
             dst_top,
             convert_for_opencode,
             created_files,
+            config=config,
         )
 
         # -- 3. Copy and convert zing/ sub-commands (flattened) --------------
@@ -169,6 +185,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
                     target_dir / dst_name,
                     convert_for_opencode,
                     created_files,
+                    config=config,
                 )
 
         # -- 4. Copy and convert _shared/ (preserves structure) --------------
@@ -180,6 +197,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
             convert_for_opencode,
             created_files,
             created_dirs,
+            config=config,
         )
 
     except Exception as exc:
@@ -222,10 +240,13 @@ def _copy_resource_file(
     src: Traversable,
     dst: Path,
     created_files: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Copy a single resource file to *dst*, tracking it for rollback."""
     logger.debug("Copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
+    if config is not None:
+        data = render_template(data, config)
     dst.write_text(data, encoding="utf-8")
     created_files.append(dst)
 
@@ -235,6 +256,7 @@ def _copy_resource_tree(
     dst_dir: Path,
     created_files: list[Path],
     created_dirs: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Recursively copy a resource directory tree to *dst_dir*."""
     _ensure_dir(dst_dir, created_dirs)
@@ -244,9 +266,11 @@ def _copy_resource_tree(
             # Skip __init__.py and other Python files — only copy .md files.
             if not item.name.endswith(".md"):
                 continue
-            _copy_resource_file(item, dst_dir / item.name, created_files)
+            _copy_resource_file(item, dst_dir / item.name, created_files, config=config)
         elif item.is_dir():
-            _copy_resource_tree(item, dst_dir / item.name, created_files, created_dirs)
+            _copy_resource_tree(
+                item, dst_dir / item.name, created_files, created_dirs, config=config
+            )
 
 
 def _copy_resource_file_converted(
@@ -254,10 +278,13 @@ def _copy_resource_file_converted(
     dst: Path,
     converter: Callable[[str], str],
     created_files: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Read *src*, run through *converter*, write to *dst*."""
     logger.debug("Converting and copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
+    if config is not None:
+        data = render_template(data, config)
     data = converter(data)
     dst.write_text(data, encoding="utf-8")
     created_files.append(dst)
@@ -269,6 +296,7 @@ def _copy_resource_tree_converted(
     converter: Callable[[str], str],
     created_files: list[Path],
     created_dirs: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Recursively copy and convert a resource directory tree to *dst_dir*."""
     _ensure_dir(dst_dir, created_dirs)
@@ -282,6 +310,7 @@ def _copy_resource_tree_converted(
                 dst_dir / item.name,
                 converter,
                 created_files,
+                config=config,
             )
         elif item.is_dir():
             _copy_resource_tree_converted(
@@ -290,6 +319,7 @@ def _copy_resource_tree_converted(
                 converter,
                 created_files,
                 created_dirs,
+                config=config,
             )
 
 

@@ -338,3 +338,53 @@ def test_opencode_install_calls_register_mcp_server(tmp_path: Path) -> None:
         install_opencode(target_dir=target)
 
     mock_reg.assert_called_once_with("opencode")
+
+
+# ---------------------------------------------------------------------------
+# Jinja rendering tests
+# ---------------------------------------------------------------------------
+
+
+def test_render_substitutes_jinja_token(tmp_path: Path) -> None:
+    """_copy_resource_file renders Jinja tokens when config is provided."""
+    from zing_ai.config import default_config
+    from zing_ai.installer import _copy_resource_file
+
+    # Build a fake source file with a Jinja token.
+    src_file = tmp_path / "test.md"
+    src_file.write_text("value={{ thresholds.large_file_lines }}", encoding="utf-8")
+
+    dst_file = tmp_path / "out.md"
+    cfg = default_config()
+
+    _copy_resource_file(src_file, dst_file, [], config=cfg)
+
+    result = dst_file.read_text(encoding="utf-8")
+    assert result == "value=1000", f"Unexpected output: {result!r}"
+
+
+def test_render_runs_before_opencode_convert(tmp_path: Path) -> None:
+    """_copy_resource_file_converted renders Jinja first, then converts tool names."""
+    from zing_ai.config import default_config
+    from zing_ai.converter import convert_for_opencode
+    from zing_ai.installer import _copy_resource_file_converted
+
+    # Content has both a Jinja token AND a Claude Code tool name that the
+    # converter rewrites (Bash -> bash).
+    src_file = tmp_path / "test.md"
+    src_file.write_text(
+        "lines={{ thresholds.large_file_lines }} use Bash here",
+        encoding="utf-8",
+    )
+
+    dst_file = tmp_path / "out.md"
+    cfg = default_config()
+
+    _copy_resource_file_converted(src_file, dst_file, convert_for_opencode, [], config=cfg)
+
+    result = dst_file.read_text(encoding="utf-8")
+    # Rendered token survives.
+    assert "1000" in result, f"Jinja token not rendered in: {result!r}"
+    # Converter ran: Bash -> bash.
+    assert "bash" in result, f"Converter did not run (no 'bash') in: {result!r}"
+    assert "Bash" not in result, f"Converter did not replace 'Bash' in: {result!r}"
