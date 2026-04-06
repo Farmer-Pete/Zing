@@ -66,6 +66,10 @@ def write_manifest(
     target_dir: Path,
     runtime: str,
     file_relpaths: list[str],
+    *,
+    config_hash: str,
+    source_mtime_max: float | None,
+    package_version: str,
 ) -> None:
     """Write a ``zing-manifest.json`` file alongside installed commands.
 
@@ -84,6 +88,12 @@ def write_manifest(
         ``"claude-code"`` or ``"opencode"``.
     file_relpaths:
         Relative paths (from *target_dir*) of the installed files.
+    config_hash:
+        Hash of the Config object used during this install.
+    source_mtime_max:
+        Maximum mtime of the source command files, or ``None`` if unavailable.
+    package_version:
+        The installed package version string.
     """
     try:
         manifest = {
@@ -91,6 +101,9 @@ def write_manifest(
             "installed_at": datetime.now(UTC).isoformat(),
             "runtime": runtime,
             "files": hash_installed_files(target_dir, file_relpaths),
+            "config_hash": config_hash,
+            "source_mtime_max": source_mtime_max,
+            "package_version": package_version,
         }
         manifest_path = target_dir / _MANIFEST_FILENAME
         logger.debug("Writing manifest to %s (%d files)", manifest_path, len(file_relpaths))
@@ -134,6 +147,30 @@ def read_manifest(target_dir: Path) -> dict | None:
         return None
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not read manifest at %s: %s", manifest_path, exc)
+        return None
+
+
+def load_manifest(target_dir: Path) -> dict | None:
+    """Return the parsed manifest from *target_dir*, or ``None`` if missing/unreadable.
+
+    This is a simple read-and-parse function with no domain-model dependencies.
+    Callers that need richer error handling should use :func:`read_manifest`.
+
+    Parameters
+    ----------
+    target_dir:
+        Directory containing ``zing-manifest.json``.
+
+    Returns
+    -------
+    dict or None
+        Parsed manifest dict, or ``None`` if the file doesn't exist or
+        cannot be read/parsed.
+    """
+    manifest_path = target_dir / _MANIFEST_FILENAME
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
 
 

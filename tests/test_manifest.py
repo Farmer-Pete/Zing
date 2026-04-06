@@ -13,6 +13,7 @@ from zing_ai.manifest import (
     detect_modified_files,
     hash_file,
     hash_installed_files,
+    load_manifest,
     read_manifest,
     write_manifest,
 )
@@ -73,7 +74,14 @@ def test_hash_installed_skips_missing_files(tmp_path: Path) -> None:
 def test_write_manifest_creates_valid_json(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
 
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     manifest_path = tmp_path / "zing-manifest.json"
     assert manifest_path.exists()
@@ -92,7 +100,14 @@ def test_write_manifest_version_matches_package(tmp_path: Path) -> None:
     from zing_ai import __version__
 
     (tmp_path / "a.md").write_text("content", encoding="utf-8")
-    write_manifest(tmp_path, "opencode", ["a.md"])
+    write_manifest(
+        tmp_path,
+        "opencode",
+        ["a.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     data = json.loads(
         (tmp_path / "zing-manifest.json").read_text(encoding="utf-8"),
@@ -102,7 +117,14 @@ def test_write_manifest_version_matches_package(tmp_path: Path) -> None:
 
 def test_write_manifest_installed_at_is_iso_timestamp(tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text("content", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["a.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["a.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     data = json.loads(
         (tmp_path / "zing-manifest.json").read_text(encoding="utf-8"),
@@ -118,7 +140,14 @@ def test_write_manifest_permission_error_prints_warning(tmp_path: Path) -> None:
 
     try:
         with patch("sys.stderr") as mock_stderr:
-            write_manifest(tmp_path, "claude-code", ["a.md"])
+            write_manifest(
+                tmp_path,
+                "claude-code",
+                ["a.md"],
+                config_hash="abc",
+                source_mtime_max=1234.5,
+                package_version="0.1.0",
+            )
             mock_stderr.write.assert_called()
             written = "".join(
                 call.args[0] for call in mock_stderr.write.call_args_list if call.args
@@ -170,7 +199,14 @@ def test_read_manifest_returns_none_for_corrupt_json(tmp_path: Path) -> None:
 
 def test_detect_no_changes_returns_empty(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     assert detect_modified_files(tmp_path) == []
 
@@ -178,7 +214,14 @@ def test_detect_no_changes_returns_empty(tmp_path: Path) -> None:
 def test_detect_modified_file(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
     (tmp_path / "other.md").write_text("# Other", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md", "other.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md", "other.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     (tmp_path / "zing.md").write_text("# Modified!", encoding="utf-8")
 
@@ -187,7 +230,14 @@ def test_detect_modified_file(tmp_path: Path) -> None:
 
 def test_detect_deleted_file(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     (tmp_path / "zing.md").unlink()
 
@@ -204,10 +254,70 @@ def test_detect_multiple_modified_files(tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text("alpha", encoding="utf-8")
     (tmp_path / "b.md").write_text("bravo", encoding="utf-8")
     (tmp_path / "c.md").write_text("charlie", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["a.md", "b.md", "c.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["a.md", "b.md", "c.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
 
     (tmp_path / "a.md").write_text("ALPHA", encoding="utf-8")
     (tmp_path / "c.md").write_text("CHARLIE", encoding="utf-8")
 
     modified = detect_modified_files(tmp_path)
     assert sorted(modified) == ["a.md", "c.md"]
+
+
+# ---------------------------------------------------------------------------
+# write_manifest — new fields
+# ---------------------------------------------------------------------------
+
+
+def test_write_manifest_includes_new_fields(tmp_path: Path) -> None:
+    (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
+
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
+
+    data = json.loads((tmp_path / "zing-manifest.json").read_text(encoding="utf-8"))
+    assert data["config_hash"] == "abc"
+    assert data["source_mtime_max"] == 1234.5
+    assert data["package_version"] == "0.1.0"
+
+
+# ---------------------------------------------------------------------------
+# load_manifest
+# ---------------------------------------------------------------------------
+
+
+def test_load_manifest_round_trip(tmp_path: Path) -> None:
+    (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
+
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=1234.5,
+        package_version="0.1.0",
+    )
+
+    result = load_manifest(tmp_path)
+    assert result is not None
+    assert result["config_hash"] == "abc"
+    assert result["source_mtime_max"] == 1234.5
+    assert result["package_version"] == "0.1.0"
+    assert result["runtime"] == "claude-code"
+    assert "zing.md" in result["files"]
+
+
+def test_load_manifest_returns_none_when_missing(tmp_path: Path) -> None:
+    assert load_manifest(tmp_path) is None

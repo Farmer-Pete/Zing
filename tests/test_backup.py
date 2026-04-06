@@ -17,7 +17,14 @@ from zing_ai.manifest import write_manifest
 
 def test_backs_up_modified_files(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Original", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=0.0,
+        package_version="0.0.0",
+    )
 
     (tmp_path / "zing.md").write_text("# Modified!", encoding="utf-8")
 
@@ -40,14 +47,28 @@ def test_backup_returns_empty_on_fresh_install(tmp_path: Path) -> None:
 
 def test_backup_returns_empty_when_no_files_modified(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=0.0,
+        package_version="0.0.0",
+    )
 
     assert backup_modified_files(tmp_path) == []
 
 
 def test_backup_skips_deleted_files(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Zing", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=0.0,
+        package_version="0.0.0",
+    )
     (tmp_path / "zing.md").unlink()
 
     assert backup_modified_files(tmp_path) == []
@@ -55,7 +76,14 @@ def test_backup_skips_deleted_files(tmp_path: Path) -> None:
 
 def test_patches_dir_creation_failure_prints_warning(tmp_path: Path) -> None:
     (tmp_path / "zing.md").write_text("# Original", encoding="utf-8")
-    write_manifest(tmp_path, "claude-code", ["zing.md"])
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        ["zing.md"],
+        config_hash="abc",
+        source_mtime_max=0.0,
+        package_version="0.0.0",
+    )
     (tmp_path / "zing.md").write_text("# Modified!", encoding="utf-8")
 
     original_mkdir = Path.mkdir

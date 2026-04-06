@@ -11,7 +11,8 @@ from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-from zing_ai.config import Config, load_config
+from zing_ai import __version__
+from zing_ai.config import Config, config_hash, load_config
 from zing_ai.templating import render_template
 
 logger = logging.getLogger(__name__)
@@ -103,10 +104,15 @@ def install_claude(target_dir: Path | None = None, config: Config | None = None)
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
-    source_mtime_max = _source_mtime_max(  # noqa: F841 — wired into write_manifest in Step 7
-        importlib.resources.files("zing_ai.commands").iterdir()
+    source_mtime_max = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    write_manifest(
+        target_dir,
+        "claude-code",
+        relpaths,
+        config_hash=config_hash(config),
+        source_mtime_max=source_mtime_max,
+        package_version=__version__,
     )
-    write_manifest(target_dir, "claude-code", relpaths)
 
     register_mcp_server("claude")
 
@@ -214,10 +220,15 @@ def install_opencode(target_dir: Path | None = None, config: Config | None = Non
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
-    source_mtime_max = _source_mtime_max(  # noqa: F841 — wired into write_manifest in Step 7
-        importlib.resources.files("zing_ai.commands").iterdir()
+    source_mtime_max = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    write_manifest(
+        target_dir,
+        "opencode",
+        relpaths,
+        config_hash=config_hash(config),
+        source_mtime_max=source_mtime_max,
+        package_version=__version__,
     )
-    write_manifest(target_dir, "opencode", relpaths)
 
     register_mcp_server("opencode")
 
