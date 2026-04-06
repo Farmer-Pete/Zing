@@ -103,6 +103,9 @@ def install_claude(target_dir: Path | None = None, config: Config | None = None)
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
+    source_mtime_max = _source_mtime_max(  # noqa: F841 — wired into write_manifest in Step 7
+        importlib.resources.files("zing_ai.commands").iterdir()
+    )
     write_manifest(target_dir, "claude-code", relpaths)
 
     register_mcp_server("claude")
@@ -211,9 +214,35 @@ def install_opencode(target_dir: Path | None = None, config: Config | None = Non
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
+    source_mtime_max = _source_mtime_max(  # noqa: F841 — wired into write_manifest in Step 7
+        importlib.resources.files("zing_ai.commands").iterdir()
+    )
     write_manifest(target_dir, "opencode", relpaths)
 
     register_mcp_server("opencode")
+
+
+def _source_mtime_max(traversables: object) -> float | None:
+    """Return the max mtime across source files, or None for wheel installs.
+
+    Recursively walks the bundled commands tree.  Returns *None* if any
+    ``stat()`` call fails (e.g. the package was installed from a wheel/zip
+    archive where real filesystem paths are unavailable).  Callers should
+    fall back to the package version string in that case.
+    """
+    max_mtime: float | None = None
+    for t in traversables:  # type: ignore[union-attr]
+        try:
+            m = Path(str(t)).stat().st_mtime
+        except (TypeError, OSError):
+            return None  # wheel/zip install — caller falls back to package version
+        if t.is_dir():
+            inner = _source_mtime_max(t.iterdir())
+            if inner is None:
+                return None
+            m = max(m, inner)
+        max_mtime = m if max_mtime is None else max(max_mtime, m)
+    return max_mtime
 
 
 def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:

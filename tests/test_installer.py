@@ -388,3 +388,37 @@ def test_render_runs_before_opencode_convert(tmp_path: Path) -> None:
     # Converter ran: Bash -> bash.
     assert "bash" in result, f"Converter did not run (no 'bash') in: {result!r}"
     assert "Bash" not in result, f"Converter did not replace 'Bash' in: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# _source_mtime_max tests
+# ---------------------------------------------------------------------------
+
+
+def test_source_mtime_max_real_path(tmp_path: Path) -> None:
+    """Returns the max mtime across files in a real filesystem tree."""
+    from zing_ai.installer import _source_mtime_max
+
+    src = tmp_path / "src"
+    src.mkdir()
+    file_a = src / "a.md"
+    file_b = src / "b.md"
+    file_a.write_text("a", encoding="utf-8")
+    file_b.write_text("b", encoding="utf-8")
+
+    os.utime(file_a, (1000.0, 1000.0))
+    os.utime(file_b, (2000.0, 2000.0))
+
+    result = _source_mtime_max(src.iterdir())
+    assert result == 2000.0
+
+
+def test_source_mtime_max_returns_none_on_oserror(tmp_path: Path) -> None:
+    """Returns None when stat() raises OSError (e.g. wheel/zip install)."""
+    from unittest.mock import patch
+
+    from zing_ai.installer import _source_mtime_max
+
+    with patch.object(Path, "stat", side_effect=OSError("no stat")):
+        result = _source_mtime_max([tmp_path / "anything"])
+    assert result is None
