@@ -7,12 +7,16 @@ import json
 import logging
 import shutil
 import subprocess
-import sys
 from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+class InstallError(Exception):
+    """Raised when an install operation fails."""
+
 
 # Files that live directly in the commands/ package root.
 # zing.md is special: it installs one level up from the zing/ subdirectory.
@@ -35,9 +39,9 @@ def install_claude(target_dir: Path | None = None) -> None:
 
     Raises
     ------
-    SystemExit
+    InstallError
         On any I/O error (permissions, disk full, etc.).  Partial files are
-        cleaned up before exiting.
+        cleaned up before raising.
     """
     if target_dir is None:
         target_dir = Path.home() / ".claude" / "commands"
@@ -78,14 +82,11 @@ def install_claude(target_dir: Path | None = None) -> None:
             )
             _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs)
 
-    except SystemExit:
-        raise
     except Exception as exc:
         # Roll back any files/dirs we created during this run.
-        logger.warning("Install failed, rolling back: %s", exc)
+        logger.error("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise InstallError(str(exc)) from exc
 
     logger.debug("Installed %d files", len(created_files))
 
@@ -119,9 +120,9 @@ def install_opencode(target_dir: Path | None = None) -> None:
 
     Raises
     ------
-    SystemExit
+    InstallError
         On any I/O error (permissions, disk full, etc.).  Partial files are
-        cleaned up before exiting.
+        cleaned up before raising.
     """
     from zing_ai.converter import convert_for_opencode
 
@@ -181,13 +182,10 @@ def install_opencode(target_dir: Path | None = None) -> None:
             created_dirs,
         )
 
-    except SystemExit:
-        raise
     except Exception as exc:
-        logger.warning("Install failed, rolling back: %s", exc)
+        logger.error("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise InstallError(str(exc)) from exc
 
     logger.debug("Installed %d files", len(created_files))
 

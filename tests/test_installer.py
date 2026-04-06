@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from zing_ai.installer import install_claude, install_opencode
+from zing_ai.installer import InstallError, install_claude, install_opencode
 
 # All markdown files that should be installed, relative to the target dir.
 EXPECTED_FILES = [
@@ -106,16 +106,15 @@ def test_claude_idempotent_install(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_claude_unwritable_directory_exits_with_code_1(tmp_path: Path) -> None:
+def test_claude_unwritable_directory_raises_install_error(tmp_path: Path) -> None:
     unwritable = tmp_path / "locked"
     unwritable.mkdir()
     os.chmod(unwritable, stat.S_IRUSR | stat.S_IXUSR)
 
     target = unwritable / "commands"
     try:
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(InstallError):
             install_claude(target_dir=target)
-        assert exc_info.value.code == 1
     finally:
         os.chmod(unwritable, stat.S_IRWXU)
 
@@ -127,7 +126,7 @@ def test_claude_unwritable_directory_leaves_no_partial_files(tmp_path: Path) -> 
 
     target = unwritable / "commands"
     try:
-        with pytest.raises(SystemExit):
+        with pytest.raises(InstallError):
             install_claude(target_dir=target)
         assert not target.exists(), "Partial directory left behind"
     finally:
@@ -148,10 +147,8 @@ def test_claude_partial_install_cleanup(tmp_path: Path) -> None:
                 raise OSError("Simulated disk full")
         return real_write_text(self, data, encoding=encoding)
 
-    with patch.object(Path, "write_text", patched_write_text):
-        with pytest.raises(SystemExit) as exc_info:
-            install_claude(target_dir=target)
-        assert exc_info.value.code == 1
+    with patch.object(Path, "write_text", patched_write_text), pytest.raises(InstallError):
+        install_claude(target_dir=target)
 
     md_files = list(target.rglob("*.md")) if target.exists() else []
     assert md_files == [], f"Partial files left behind: {md_files}"
@@ -272,16 +269,15 @@ def test_opencode_idempotent_install(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_opencode_unwritable_directory_exits_with_code_1(tmp_path: Path) -> None:
+def test_opencode_unwritable_directory_raises_install_error(tmp_path: Path) -> None:
     unwritable = tmp_path / "locked"
     unwritable.mkdir()
     os.chmod(unwritable, stat.S_IRUSR | stat.S_IXUSR)
 
     target = unwritable / "commands"
     try:
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(InstallError):
             install_opencode(target_dir=target)
-        assert exc_info.value.code == 1
     finally:
         os.chmod(unwritable, stat.S_IRWXU)
 
@@ -293,7 +289,7 @@ def test_opencode_unwritable_directory_leaves_no_partial_files(tmp_path: Path) -
 
     target = unwritable / "commands"
     try:
-        with pytest.raises(SystemExit):
+        with pytest.raises(InstallError):
             install_opencode(target_dir=target)
         assert not target.exists(), "Partial directory left behind"
     finally:
@@ -314,10 +310,8 @@ def test_opencode_partial_install_cleanup(tmp_path: Path) -> None:
                 raise OSError("Simulated disk full")
         return real_write_text(self, data, encoding=encoding)
 
-    with patch.object(Path, "write_text", patched_write_text):
-        with pytest.raises(SystemExit) as exc_info:
-            install_opencode(target_dir=target)
-        assert exc_info.value.code == 1
+    with patch.object(Path, "write_text", patched_write_text), pytest.raises(InstallError):
+        install_opencode(target_dir=target)
 
     md_files = list(target.rglob("*.md")) if target.exists() else []
     assert md_files == [], f"Partial files left behind: {md_files}"
