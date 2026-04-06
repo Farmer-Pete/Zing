@@ -14,7 +14,7 @@ After reading the zing document, assess the complexity of the spec to decide whe
 
 ### Heuristics — classify as **simple** only if ALL of the following are true:
 
-1. **Word count:** The spec body (excluding YAML frontmatter, headings, and metadata) is under 150 words.
+1. **Word count:** The spec body (excluding YAML frontmatter, headings, and metadata) is under {{ thresholds.simple_spec_max_words }} words.
 2. **Scope:** The spec mentions a single file or a very small, clearly bounded scope.
 3. **Language:** The spec uses bug-fix / typo / config-change language — it contains at least one of: "fix", "typo", "rename", "config", "update value", "change default".
 4. **No expansion signals:** The spec does NOT mention multiple components, new features, architectural changes, or new files to create.
@@ -78,7 +78,7 @@ The session ID and plan step ID will be used by subagents for agent lifecycle tr
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
-After reading the zing document, identify 3-5 discrete investigation areas based on what the spec describes. Examples of areas (adapt to the actual spec):
+After reading the zing document, identify around {{ agents.plan_exploration_count }} discrete investigation areas based on what the spec describes. Examples of areas (adapt to the actual spec):
 - "Data model" — database schemas, ORM models, migrations
 - "API layer" — routes, controllers, middleware, request/response types
 - "Frontend components" — UI components, state management, pages
@@ -109,7 +109,7 @@ Here is the structure your response MUST follow:
 ... all in the SAME response
 ```
 
-Launch all Task subagents with `subagent_type: "general-purpose"` and `model: "sonnet"`. These agents only read code and return findings — they don't make architectural decisions.
+Launch all Task subagents with `subagent_type: "general-purpose"` and `model: "{{ models.plan_exploration }}"`. These agents only read code and return findings — they don't make architectural decisions.
 
 Each subagent receives a prompt with:
 
@@ -259,13 +259,13 @@ Skill(skill: 'zing:build', args: '{file_path}')
 
 For standard complexity tasks, count the number of steps in the Action Plan (i.e., the total number of numbered steps across all phases in the **Action Plan** section of the zing document).
 
-**If the plan has ≤3 steps**, use `AskUserQuestion` with three options:
+**If the plan has ≤{{ thresholds.plan_small_step_count }} steps**, use `AskUserQuestion` with three options:
 
 1. **"Start build"** (description: "Skip audit — plan is small enough to execute directly") — if chosen, invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing document.
 2. **"Run plan-audit anyway"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 3. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 
-**If the plan has >3 steps**, use `AskUserQuestion` with two options:
+**If the plan has >{{ thresholds.plan_small_step_count }} steps**, use `AskUserQuestion` with two options:
 
 1. **"Run plan-audit"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 2. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.

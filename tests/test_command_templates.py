@@ -27,3 +27,12 @@ class TestBuildMd(unittest.TestCase):
         self.assertIn("zing/", out)
         self.assertIn("Co-Authored-By: Zing <zing@farmerpete.net>", out)
         self.assertIn('model: "sonnet"', out)
+
+
+class TestPlanMd(unittest.TestCase):
+    def test_plan_md_substitutions(self) -> None:
+        out = _render("zing/plan.md")
+        self.assertIn("150 words", out)
+        self.assertIn("around 4", out)
+        self.assertIn('model: "sonnet"', out)
+        self.assertIn("≤3 steps", out)
