@@ -138,6 +138,61 @@
             margin-bottom: 0.5rem;
         }
 
+        /* === Top Nav === */
+        .top-nav {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            padding: 0 0.25rem;
+            border-bottom: 1px solid var(--border);
+            gap: 0.25rem;
+            margin: 0 -2rem;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            background: var(--gray-50);
+        }
+
+        .top-nav a {
+            text-decoration: none;
+            color: var(--navy);
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            border-bottom: 3px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+        }
+
+        .top-nav a:hover {
+            color: var(--orange);
+        }
+
+        .top-nav a.active {
+            border-bottom: 3px solid var(--orange);
+            font-weight: 600;
+        }
+
+        /* === Form Inputs === */
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: inherit;
+            transition: border-color 0.15s;
+            background: #fff;
+            color: var(--text-primary);
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        select:focus {
+            outline: none;
+            border-color: var(--orange);
+        }
+
         .main-content {
             padding: 2rem 0;
             position: relative;
@@ -807,6 +862,11 @@
             }
         </script>
     </header>
+    <nav class="top-nav">
+        <a href="/dashboard">Sessions</a>
+        <a href="/config">Config</a>
+        <a href="/install">Install</a>
+    </nav>
     <main class="main-content">
         {% block content %}{% endblock %}
     </main>
