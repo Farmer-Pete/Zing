@@ -36,3 +36,12 @@ class TestPlanMd(unittest.TestCase):
         self.assertIn("around 4", out)
         self.assertIn('model: "sonnet"', out)
         self.assertIn("≤3 steps", out)
+
+
+class TestPlanAuditMd(unittest.TestCase):
+    def test_plan_audit_md_substitutions(self) -> None:
+        out = _render("zing/plan-audit.md")
+        self.assertIn("4", out)
+        self.assertIn('model: "sonnet"', out)
+        self.assertIn("< 20 words", out)
+        self.assertIn("> 40 words", out)
