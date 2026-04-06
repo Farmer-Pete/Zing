@@ -53,3 +53,12 @@ class TestBuildAuditMd(unittest.TestCase):
         self.assertIn("<5 files", out)
         self.assertIn("<100 total lines", out)
         self.assertIn("%Y-%m-%d-%H%M", out)
+
+
+class TestCustomAuditMd(unittest.TestCase):
+    def test_custom_audit_md_substitutions(self) -> None:
+        out = _render("zing/custom-audit.md")
+        self.assertIn("~2000", out)
+        self.assertIn("~5000", out)
+        self.assertIn("about 25", out)
+        self.assertIn(">50 files", out)

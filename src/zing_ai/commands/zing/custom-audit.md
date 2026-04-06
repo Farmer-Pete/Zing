@@ -32,7 +32,7 @@ Convert the user's description into a concrete set of files to audit.
 
 5. **Handle edge cases**:
    - No files found: "Couldn't find any files matching '{description}'. Try a more specific path or description." Exit.
-   - Too many files (over 50): Narrow to the top 20-30 most relevant. Warn: "This matches a lot of files ({count}). Narrowing to the most relevant ones — you can adjust the scope if needed."
+   - Too many files (>{{ thresholds.scope_max_files }} files): Narrow to the about {{ thresholds.scope_narrow_target }} most relevant. Warn: "This matches a lot of files ({count}). Narrowing to the most relevant ones — you can adjust the scope if needed."
 
 6. **Confirm with the user.** Present the resolved file list grouped by directory, showing file count and approximate line count. Example:
 
@@ -76,9 +76,9 @@ Read the files in scope. Use a tiered strategy based on total scope size:
 1. **Calculate total scope size** by summing the line counts of all resolved files.
 
 2. **Tier selection**:
-   - **Small scope (under ~2000 total lines)**: Read all files in full using the Read tool (in parallel where possible). Agents receive full file contents.
-   - **Medium scope (~2000-5000 total lines)**: Read all files in full. Agents receive full file contents but are instructed to use Serena on-demand for cross-file context.
-   - **Large scope (over ~5000 total lines)**: Use `mcp__aid__distill_file` for each file to produce compact API summaries. Read full contents only for files under ~200 lines or files the user explicitly named. Agents receive distilled summaries and use Serena on-demand for deep dives.
+   - **Small scope (under ~{{ thresholds.audit_scope_small_lines }} total lines)**: Read all files in full using the Read tool (in parallel where possible). Agents receive full file contents.
+   - **Medium scope (~{{ thresholds.audit_scope_small_lines }}-{{ thresholds.audit_scope_medium_lines }} total lines)**: Read all files in full. Agents receive full file contents but are instructed to use Serena on-demand for cross-file context.
+   - **Large scope (over ~{{ thresholds.audit_scope_medium_lines }} total lines)**: Use `mcp__aid__distill_file` for each file to produce compact API summaries. Read full contents only for files under ~{{ thresholds.audit_always_read_lines }} lines or files the user explicitly named. Agents receive distilled summaries and use Serena on-demand for deep dives.
 
 3. **Build a file manifest** for agents: For each file in scope, record:
    - File path
@@ -225,7 +225,7 @@ Follow the `walk_through_findings` guidelines from the shared review reference. 
 <step name="write_report">
 Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-audit-{scope_slug}-{datetime}.md` where `{scope_slug}` is a sanitized short version of the user's description (max ~30 chars, lowercase, spaces/slashes replaced with dashes) and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
+First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-audit-{scope_slug}-{datetime}.md` where `{scope_slug}` is a sanitized short version of the user's description (max ~{{ thresholds.scope_slug_max_length }} chars, lowercase, spaces/slashes replaced with dashes) and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
 
 Use this structure:
 
