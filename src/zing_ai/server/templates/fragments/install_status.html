@@ -13,5 +13,8 @@
   {% else %}
     <span class="status-badge status-fresh">Up to date</span>
   {% endif %}
+  {% if status.error %}
+    <p class="install-error">{{ status.error }}</p>
+  {% endif %}
   <button class="install-btn" data-on:click="@post('/install/run', { runtime: '{{ status.runtime }}' })">Install</button>
 </div>
