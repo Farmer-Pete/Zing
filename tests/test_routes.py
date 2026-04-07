@@ -18,10 +18,10 @@ class TestConfigRoutes(ServerTestBase):
         self.assertIn("Configuration", resp.text)
 
     def test_config_html_renders_all_fields(self) -> None:
-        from zing_ai.server.routes import _FIELD_META
+        from zing_ai.server.config_meta import FIELD_META
 
         resp = self.client.get("/config")
-        for dot_key in _FIELD_META:
+        for dot_key in FIELD_META:
             self.assertIn(dot_key, resp.text)
 
 
@@ -112,14 +112,14 @@ class TestInstallRoutes(ServerTestBase):
         self._tmp_install = tempfile.mkdtemp()
         self._tmp_config_dir = tempfile.mkdtemp()
 
-        import zing_ai.server.routes as routes_mod
+        import zing_ai.server.routes_install as install_mod
 
-        self._orig_target = routes_mod._install_target_for
+        self._orig_target = install_mod._install_target_for
 
         def fake_target(runtime: str) -> Path:
             return Path(self._tmp_install) / runtime
 
-        routes_mod._install_target_for = fake_target
+        install_mod._install_target_for = fake_target
 
         import zing_ai.config as cfg_mod
 
@@ -131,9 +131,9 @@ class TestInstallRoutes(ServerTestBase):
     def tearDown(self):
         super().tearDown()
 
-        import zing_ai.server.routes as routes_mod
+        import zing_ai.server.routes_install as install_mod
 
-        routes_mod._install_target_for = self._orig_target
+        install_mod._install_target_for = self._orig_target
 
         import zing_ai.config as cfg_mod
 
@@ -159,7 +159,7 @@ class TestInstallRoutes(ServerTestBase):
 
     def test_run_install_flips_badge(self):
         # Patch install_claude to be a no-op success that creates a manifest
-        import zing_ai.server.routes as routes_mod
+        import zing_ai.server.routes_install as install_mod
         from zing_ai import __version__
         from zing_ai.config import config_hash, default_config
         from zing_ai.manifest import write_manifest
@@ -179,27 +179,27 @@ class TestInstallRoutes(ServerTestBase):
                 package_version=__version__,
             )
 
-        orig_claude = routes_mod.install_claude
-        routes_mod.install_claude = fake_install
+        orig_claude = install_mod.install_claude
+        install_mod.install_claude = fake_install
         try:
             r = self.client.post("/install/run", json={"runtime": "claude"})
             self.assertEqual(r.status_code, 200)
             self.assertIn("Up to date", r.text)
         finally:
-            routes_mod.install_claude = orig_claude
+            install_mod.install_claude = orig_claude
 
     def test_run_install_surfaces_install_error(self):
-        import zing_ai.server.routes as routes_mod
+        import zing_ai.server.routes_install as install_mod
         from zing_ai.installer import InstallError
 
         def boom(target_dir=None, config=None):
             raise InstallError("boom")
 
-        orig_claude = routes_mod.install_claude
-        routes_mod.install_claude = boom
+        orig_claude = install_mod.install_claude
+        install_mod.install_claude = boom
         try:
             r = self.client.post("/install/run", json={"runtime": "claude"})
             self.assertEqual(r.status_code, 200)
             self.assertIn("boom", r.text)
         finally:
-            routes_mod.install_claude = orig_claude
+            install_mod.install_claude = orig_claude

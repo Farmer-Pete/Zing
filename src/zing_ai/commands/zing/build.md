@@ -67,7 +67,7 @@ The session ID and build step ID will be used for agent lifecycle tracking and l
 2. Compute the worktree path by formatting `{{ git.worktree_root }}` with `{repo}` = the basename of the current repo root and `{branch}` = the derived branch slug. Resolve to an absolute path.
 3. Run `git worktree add -b <branch_name> <worktree_path>`.
 4. `cd` into the worktree path.
-5. If `<worktree_path>/zing-init.sh` exists, run it with these environment variables set: `ZING_BRANCH=<branch_name>`, `ZING_WORKTREE_PATH=<absolute_worktree_path>`, `ZING_SPEC_FILE=<absolute_zing_file>`, `ZING_SESSION_ID=<session_id_from_frontmatter>`. If the file does not exist, silently skip this step.
+5. If `<repo_root>/{{ git.zing_init_script }}` exists in the original repo (NOT the new worktree — the script is typically untracked and won't be present in the fresh worktree), run it from the new worktree's working directory with these environment variables set: `ZING_BRANCH=<branch_name>`, `ZING_WORKTREE_PATH=<absolute_worktree_path>`, `ZING_SPEC_FILE=<absolute_zing_file>`, `ZING_SESSION_ID=<session_id_from_frontmatter>`. Invoke as `<absolute_repo_root>/{{ git.zing_init_script }}`. If the file does not exist, silently skip this step.
 6. Read the zing spec file's YAML frontmatter and add a top-level `worktree_path: <absolute_worktree_path>` entry. Save the file. This signals to subsequent skills (build-audit, pr-audit, pr-respond) that they should `cd` into the worktree before running git/gh commands.
 {% elif git.workflow_mode == "none" %}
 No isolation. Proceed in the current working directory. Do not create any branches or worktrees.
@@ -120,7 +120,7 @@ This is the core execution loop. The parent agent owns the step loop but delegat
 
 6. **After the subagent returns**, the parent:
    - Calls `agent_stop(session_id, step_id, name)` where `name` is the same agent name used in `agent_start` (e.g. `"Step {N}: {description}"`)
-   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `{{ git.coauthor_trailer }}` trailer. Do NOT push to remote. **Immediately after every commit**, verify that `{{ git.coauthor_trailer }}` is present in the commit message by running `git log -1 --format=%B`. If it is missing, amend the commit to append it: `git commit --amend -m "$(git log -1 --format=%B)" -m "{{ git.coauthor_trailer }}"`. This verification is mandatory and must never be skipped.
+   - **Commits the step's changes to git:** Run `git status` to check for uncommitted changes. If there are changes, stage the specific changed files (NEVER use `git add -A` or `git add .`) and commit with message `Step {N}: {short description}` and a `Co-Authored-By: Zing <zing@farmerpete.net>` trailer. Do NOT push to remote. **Immediately after every commit**, verify that `Co-Authored-By: Zing <zing@farmerpete.net>` is present in the commit message by running `git log -1 --format=%B`. If it is missing, amend the commit to append it: `git commit --amend -m "$(git log -1 --format=%B)" -m "Co-Authored-By: Zing <zing@farmerpete.net>"`. This verification is mandatory and must never be skipped.
    - Updates the Progress section in the zing file (`- [ ]` → `- [x]`) using Edit
    - Marks the task as completed using TaskUpdate
 
@@ -157,5 +157,5 @@ No file path argument is needed — build-audit uses git diff.
 - NEVER mark a step complete if acceptance criteria are not met
 - NEVER work on steps out of order unless a step is explicitly marked as independent
 - NEVER combine multiple steps into one commit — one commit per step
-- NEVER omit `{{ git.coauthor_trailer }}` from commit messages
+- NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
 </anti_patterns>

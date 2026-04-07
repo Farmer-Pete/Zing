@@ -18,20 +18,26 @@ class ConfigError(Exception):
 
 
 class ThresholdsConfig(BaseModel):
+    # File reading
     large_file_lines: int = 1000
+    audit_always_read_lines: int = 200
+    # Naming limits
     branch_name_max_length: int = 60
+    scope_slug_max_length: int = 30
+    # Planning
     simple_spec_max_words: int = 150
     plan_small_step_count: int = 3
-    step_merge_min_words: int = 20
-    step_merge_max_words: int = 40
+    step_merge_min_words: int = 100
+    step_merge_max_words: int = 300
+    # Diff & audit sizing
     small_diff_max_files: int = 5
     small_diff_max_lines: int = 100
     audit_scope_small_lines: int = 2000
     audit_scope_medium_lines: int = 5000
-    audit_always_read_lines: int = 200
+    # Scope
     scope_max_files: int = 50
     scope_narrow_target: int = 25
-    scope_slug_max_length: int = 30
+    # Misc
     comment_truncation_chars: int = 100
     browser_wait_timeout_seconds: int = 10
 
@@ -45,10 +51,10 @@ class ModelsConfig(BaseModel):
 
 
 class GitConfig(BaseModel):
-    branch_prefix: str = "zing/"
-    coauthor_trailer: str = "Co-Authored-By: Zing <zing@farmerpete.net>"
     workflow_mode: Literal["branch", "worktree", "none", "ask"] = "branch"
+    branch_prefix: str = "zing/"
     worktree_root: str = "../{repo}-{branch}"
+    zing_init_script: str = ".zing-init.sh"
 
 
 class AgentsConfig(BaseModel):
@@ -115,8 +121,11 @@ def save_config(cfg: Config) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(path) + ".lock", timeout=5)
+    data = cfg.model_dump(exclude_defaults=True)
+    # Drop empty sub-tables so we don't write bare `[section]` headers.
+    data = {k: v for k, v in data.items() if v != {}}
     with lock:
-        path.write_text(tomli_w.dumps(cfg.model_dump()), encoding="utf-8")
+        path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
 def config_hash(cfg: Config) -> str:

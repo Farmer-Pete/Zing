@@ -1,0 +1,230 @@
+/* === Config Page === */
+.page-config,
+.page-install {
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+.page-intro {
+    color: var(--gray-500);
+    font-size: 0.9375rem;
+    margin-bottom: 1.5rem;
+}
+
+.config-section {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem 1.75rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(26,23,20,0.04);
+}
+
+.config-section h2 {
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gray-500);
+    padding-bottom: 0.625rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+}
+.config-section h2::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    width: 32px;
+    height: 2px;
+    background: var(--orange);
+}
+
+.config-subgroup {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--gray-500);
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px dashed var(--gray-200);
+}
+.config-section > .config-subgroup:first-of-type {
+    margin-top: 0;
+}
+.config-section > .config-subgroup ~ .config-field,
+.config-section > .config-subgroup ~ .config-field-row {
+    padding-left: 1rem;
+    border-left: 2px solid var(--gray-100);
+    margin-left: 0.25rem;
+}
+
+.config-field-row {
+    display: flex;
+    gap: 1.25rem;
+    padding: 0.875rem 0;
+    border-bottom: 1px solid var(--gray-100);
+}
+.config-field-row:last-child { border-bottom: none; padding-bottom: 0; }
+.config-field-row:first-child { padding-top: 0; }
+.config-field-row > .config-field {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0;
+    border-bottom: none;
+}
+
+.config-field {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+        "label  status"
+        "input  input"
+        "desc   desc";
+    gap: 0.375rem 0.5rem;
+    padding: 0.875rem 0;
+    border-bottom: 1px solid var(--gray-100);
+}
+.config-field:last-child { border-bottom: none; padding-bottom: 0; }
+.config-field:first-child { padding-top: 0; }
+
+.config-field label {
+    grid-area: label;
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--navy);
+}
+
+.config-field input,
+.config-field select {
+    grid-area: input;
+}
+
+.config-field input[type="number"] {
+    max-width: 140px;
+}
+
+.config-field .field-status {
+    grid-area: status;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #16a34a;
+    align-self: center;
+    min-height: 1em;
+}
+
+.config-field .field-description {
+    grid-area: desc;
+    line-height: 1.4;
+    margin-top: 0.125rem;
+}
+.config-field .field-description p { margin: 0; }
+.config-field .field-description code {
+    font-size: 0.78em;
+}
+.field-description-short {
+    font-size: 0.8125rem;
+    color: var(--gray-700);
+}
+.field-description-long {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-top: 0.25rem;
+}
+
+/* === Install Page === */
+.install-status {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(26,23,20,0.04);
+    transition: box-shadow 0.2s ease;
+}
+.install-status:hover {
+    box-shadow: 0 4px 16px rgba(26,23,20,0.06);
+}
+
+.install-status-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.install-status h3 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: var(--navy);
+    text-transform: capitalize;
+    margin: 0;
+}
+
+.install-target {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8125rem;
+    color: var(--gray-700);
+    background: var(--gray-50);
+    padding: 0.375rem 0.625rem;
+    border-radius: 4px;
+    border: 1px solid var(--gray-100);
+    display: inline-block;
+    margin-bottom: 0.5rem;
+    word-break: break-all;
+}
+
+.install-when {
+    font-size: 0.8125rem;
+    color: var(--gray-500);
+    margin-bottom: 1rem;
+}
+
+.install-error {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    margin-bottom: 0.75rem;
+}
+
+.install-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.install-btn {
+    padding: 0.5rem 1.25rem;
+    background: var(--orange);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(245,124,32,0.25);
+    transition: all 0.15s ease;
+    font-family: inherit;
+}
+.install-btn:hover {
+    background: var(--orange-hover);
+    box-shadow: 0 4px 12px rgba(245,124,32,0.35);
+    transform: translateY(-1px);
+}
+.install-btn--fresh {
+    background: #fff;
+    color: var(--gray-700);
+    border: 1px solid var(--gray-300);
+    box-shadow: none;
+}
+.install-btn--fresh:hover {
+    background: var(--gray-50);
+    border-color: var(--gray-500);
+    color: var(--navy);
+    box-shadow: none;
+}

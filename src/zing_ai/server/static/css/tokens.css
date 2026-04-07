@@ -1,0 +1,178 @@
+/* === Foundation === */
+:root {
+    --navy: #0f1b2d;
+    --navy-light: #1a2d4a;
+    --navy-mid: #243b5e;
+    --orange: #f57c20;
+    --orange-hover: #e06810;
+    --amber: #f5a623;
+    --gold: #ffd666;
+    --cyan: #3ecfe0;
+    --cyan-dim: #2ba8b6;
+    --red-orange: #e84430;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --border: var(--gray-200);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background: var(--off-white);
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 2rem;
+}
+
+body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 400px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(245,124,32,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* === Brand Header === */
+.brand-bar {
+    background: var(--navy);
+    margin: 0 -2rem;
+    padding: 0.75rem 2rem;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.brand-bar a { display: inline-block; line-height: 0; }
+.brand-bar img { height: 111px; width: auto; }
+
+.brand-bar::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--gold), var(--cyan));
+}
+
+/* === Typography === */
+h1 {
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: var(--navy);
+    margin-bottom: 1rem;
+    letter-spacing: -0.01em;
+}
+
+h2 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 0.5rem;
+}
+
+/* === Top Nav === */
+.top-nav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    gap: 0.25rem;
+    margin: 0 -2rem;
+    padding: 0 2rem;
+    background: var(--gray-50);
+}
+
+.top-nav a {
+    text-decoration: none;
+    color: var(--navy);
+    padding: 0.75rem 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.top-nav a:hover {
+    color: var(--orange);
+    background: rgba(245,124,32,0.04);
+}
+
+.top-nav a.active {
+    border-bottom-color: var(--orange);
+    color: var(--navy);
+    font-weight: 700;
+    background: #fff;
+}
+
+/* === Form Inputs === */
+input[type="text"],
+input[type="number"],
+select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--gray-300);
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    background: #fff;
+    color: var(--text-primary);
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus {
+    outline: none;
+    border-color: var(--orange);
+    box-shadow: 0 0 0 3px rgba(245,124,32,0.15);
+}
+
+textarea {
+    width: 100%; min-height: 80px; padding: 0.5rem;
+    border: 1px solid var(--gray-300); border-radius: 6px;
+    font-family: inherit; resize: vertical;
+    transition: border-color 0.15s;
+}
+textarea:focus { outline: none; border-color: var(--orange); }
+
+.main-content {
+    padding: 2rem 0;
+    position: relative;
+    z-index: 1;
+}
+
+/* === Code === */
+code {
+    background: var(--gray-100);
+    padding: 0.125rem 0.25rem;
+    border-radius: 3px;
+    font-size: 0.875rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+pre {
+    background: var(--gray-100);
+    padding: 0.75rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+}
+
+/* === Animations === */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+}

@@ -22,7 +22,9 @@ gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 
 Store the PR number, head branch, base branch, title, and URL for later use.
 
+{% if git.workflow_mode == "worktree" or git.workflow_mode == "ask" -%}
 If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+{%- endif %}
 
 Get the `{owner}/{repo}` from:
 ```
@@ -307,7 +309,7 @@ After all comments have been addressed:
 1. Run `git status` to see what changed.
 2. If there are changes:
    - Stage the specific changed files (NEVER use `git add -A` or `git add .`)
-   - Commit with a message like: `Address PR review comments on #{number}` — always include `{{ git.coauthor_trailer }}` in the commit message
+   - Commit with a message like: `Address PR review comments on #{number}` — always include `Co-Authored-By: Zing <zing@farmerpete.net>` in the commit message
    - Push to the remote branch:
      ```
      git push
@@ -511,7 +513,7 @@ Mark the "Re-request reviews" phase task as `completed` using TaskUpdate.
 - NEVER guess at what a reviewer meant — if a comment is ambiguous, ask the user
 - NEVER reply to comments with AI-generated fluff — keep replies concise and specific
 - NEVER combine unrelated fixes into one commit — if addressing comments requires changes across different concerns, make separate commits
-- NEVER omit `{{ git.coauthor_trailer }}` from commit messages
+- NEVER omit `Co-Authored-By: Zing <zing@farmerpete.net>` from commit messages
 - NEVER reply to the same comment twice — before posting a reply to a review body or issue comment, check if a reply has already been posted in the current run
 </anti_patterns>
 

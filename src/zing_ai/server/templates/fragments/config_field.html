@@ -7,7 +7,7 @@
    - options: list of strings (only used when field_type == "select")
    - signal_name: unique Datastar signal name (key with dots → underscores)
 #}
-<div class="config-field" id="field-{{ signal_name }}" data-key="{{ key }}">
+<div class="config-field" id="field-{{ signal_name }}" data-key="{{ key }}"{% if show_when %} data-show="{{ show_when }}"{% endif %}>
   <label for="input-{{ signal_name }}">{{ label }}</label>
   {% if field_type == "select" %}
     <select id="input-{{ signal_name }}"
@@ -30,5 +30,10 @@
            data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', {payload: { '{{ key.split('.')[1] }}': ${{ signal_name }} }})">
   {% endif %}
   <span class="field-status" id="status-{{ signal_name }}"></span>
-  <p class="field-description">{{ description }}</p>
+  <div class="field-description">
+    <div class="field-description-short">{{ description.short | markdown }}</div>
+    {% if description.long %}
+      <div class="field-description-long">{{ description.long | markdown }}</div>
+    {% endif %}
+  </div>
 </div>

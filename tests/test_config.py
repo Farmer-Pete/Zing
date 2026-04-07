@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,6 +43,36 @@ def test_round_trip(tmp_path: Path) -> None:
         save_config(cfg)
         loaded = load_config()
     assert loaded == cfg
+
+
+def test_save_omits_defaults(tmp_path: Path) -> None:
+    """Saving a default config writes an empty file (no fields persisted)."""
+    target = tmp_path / "config.toml"
+    with _patch_config_path(tmp_path):
+        save_config(default_config())
+    assert target.read_text(encoding="utf-8") == ""
+
+
+def test_save_persists_only_changes(tmp_path: Path) -> None:
+    """Only fields that differ from defaults are written to disk."""
+    target = tmp_path / "config.toml"
+    with _patch_config_path(tmp_path):
+        cfg = default_config()
+        cfg.thresholds.large_file_lines = 9999
+        save_config(cfg)
+    raw = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert raw == {"thresholds": {"large_file_lines": 9999}}
+
+
+def test_load_merges_defaults(tmp_path: Path) -> None:
+    """A partial config file is merged with defaults at load time."""
+    target = tmp_path / "config.toml"
+    target.write_text("[thresholds]\nlarge_file_lines = 9999\n", encoding="utf-8")
+    with _patch_config_path(tmp_path):
+        loaded = load_config()
+    expected = default_config()
+    expected.thresholds.large_file_lines = 9999
+    assert loaded == expected
 
 
 # ---------------------------------------------------------------------------

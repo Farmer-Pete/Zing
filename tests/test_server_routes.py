@@ -656,7 +656,7 @@ class TestHTMLEndpoints(ServerTestBase):
         self.assertIn("First Session", resp.text)
         self.assertIn("Second Session", resp.text)
         self.assertIn("Zing Dashboard", resp.text)
-        self.assertIn("status-pending", resp.text)
+        self.assertIn("status-started", resp.text)
         self.assertIn("status-ready", resp.text)
 
     def test_session_page(self) -> None:

@@ -29,12 +29,12 @@ def tmp_install_env(monkeypatch):
     save_config(default_config())
 
     # Patch _install_target_for so the /install page checks our temp dirs
-    import zing_ai.server.routes as routes_mod
+    import zing_ai.server.routes_install as install_mod
 
     def fake_target(runtime: str) -> Path:
         return Path(tmp_install) / runtime
 
-    monkeypatch.setattr(routes_mod, "_install_target_for", fake_target)
+    monkeypatch.setattr(install_mod, "_install_target_for", fake_target)
 
     # Stub install_claude / install_opencode to write a fresh manifest
     # without touching real installer behavior
@@ -54,8 +54,8 @@ def tmp_install_env(monkeypatch):
             package_version=__version__,
         )
 
-    monkeypatch.setattr(routes_mod, "install_claude", fake_install)
-    monkeypatch.setattr(routes_mod, "install_opencode", fake_install)
+    monkeypatch.setattr(install_mod, "install_claude", fake_install)
+    monkeypatch.setattr(install_mod, "install_opencode", fake_install)
 
     yield tmp_install
     shutil.rmtree(tmp_install, ignore_errors=True)

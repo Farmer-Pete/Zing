@@ -9,7 +9,6 @@ import logging
 import pathlib
 from collections import defaultdict
 from itertools import zip_longest
-from pathlib import Path
 from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
@@ -17,16 +16,31 @@ from datastar_py.consts import ElementPatchMode
 from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from filelock import Timeout
-from pydantic import ValidationError
 
-from zing_ai.config import load_config, save_config
-from zing_ai.installer import InstallError, install_claude, install_opencode, is_install_stale
-from zing_ai.manifest import load_manifest
+from zing_ai.server.html_fragments import (
+    build_notification_script as _build_notification_script,
+)
+from zing_ai.server.html_fragments import (
+    notification_dot_html as _notification_dot_html,
+)
+from zing_ai.server.html_fragments import (
+    ready_button_html as _ready_button_html,
+)
+from zing_ai.server.html_fragments import (
+    ready_status_html as _ready_status_html,
+)
+from zing_ai.server.html_fragments import (
+    session_not_found as _session_not_found,
+)
+from zing_ai.server.html_fragments import (
+    submitted_button_html as _submitted_button_html,
+)
+from zing_ai.server.html_fragments import (
+    submitted_status_html as _submitted_status_html,
+)
 from zing_ai.server.models import (
     Complexity,
     Finding,
-    Notification,
     ResponseAction,
     UserResponse,
 )
@@ -36,164 +50,6 @@ logger = logging.getLogger("zing_ai.server")
 
 router = APIRouter()
 
-_FIELD_META: dict[str, dict] = {
-    # category: thresholds
-    "thresholds.large_file_lines": {
-        "label": "Large file line cutoff",
-        "field_type": "number",
-        "description": "Files larger than this are read in chunks",
-    },
-    "thresholds.branch_name_max_length": {
-        "label": "Branch name max length",
-        "field_type": "number",
-        "description": "Maximum chars for auto-generated branch names",
-    },
-    "thresholds.simple_spec_max_words": {
-        "label": "Simple spec max words",
-        "field_type": "number",
-        "description": "Specs under this word count skip planning",
-    },
-    "thresholds.plan_small_step_count": {
-        "label": "Plan small step count",
-        "field_type": "number",
-        "description": "Plans with this many or fewer steps skip plan-audit",
-    },
-    "thresholds.step_merge_min_words": {
-        "label": "Step merge min words",
-        "field_type": "number",
-        "description": "Plan steps shorter than this are merge candidates",
-    },
-    "thresholds.step_merge_max_words": {
-        "label": "Step merge max words",
-        "field_type": "number",
-        "description": "Plan steps longer than this are protected from merging",
-    },
-    "thresholds.small_diff_max_files": {
-        "label": "Small diff max files",
-        "field_type": "number",
-        "description": "Diffs with fewer files use the lightweight audit path",
-    },
-    "thresholds.small_diff_max_lines": {
-        "label": "Small diff max lines",
-        "field_type": "number",
-        "description": "Diffs with fewer lines use the lightweight audit path",
-    },
-    "thresholds.audit_scope_small_lines": {
-        "label": "Audit scope small tier",
-        "field_type": "number",
-        "description": "Codebases under this size are read in full",
-    },
-    "thresholds.audit_scope_medium_lines": {
-        "label": "Audit scope medium tier",
-        "field_type": "number",
-        "description": "Codebases under this size use on-demand exploration",
-    },
-    "thresholds.audit_always_read_lines": {
-        "label": "Audit always-read cutoff",
-        "field_type": "number",
-        "description": "Files smaller than this are always read in full",
-    },
-    "thresholds.scope_max_files": {
-        "label": "Scope max files",
-        "field_type": "number",
-        "description": "Audit scopes wider than this are narrowed",
-    },
-    "thresholds.scope_narrow_target": {
-        "label": "Scope narrow target",
-        "field_type": "number",
-        "description": "Target file count after narrowing a wide scope",
-    },
-    "thresholds.scope_slug_max_length": {
-        "label": "Scope slug max length",
-        "field_type": "number",
-        "description": "Maximum chars for audit scope slugs",
-    },
-    "thresholds.comment_truncation_chars": {
-        "label": "Comment truncation chars",
-        "field_type": "number",
-        "description": "Long comment bodies are truncated to this length",
-    },
-    "thresholds.browser_wait_timeout_seconds": {
-        "label": "Browser wait timeout (s)",
-        "field_type": "number",
-        "description": "Maximum wait for page loads in visual audits",
-    },
-    # category: models
-    "models.plan_exploration": {
-        "label": "Plan exploration model",
-        "field_type": "text",
-        "description": "Model used by plan exploration subagents",
-    },
-    "models.plan_audit": {
-        "label": "Plan audit model",
-        "field_type": "text",
-        "description": "Model used by plan-audit evaluation agents",
-    },
-    "models.build_step": {
-        "label": "Build step model",
-        "field_type": "text",
-        "description": "Model used by build step execution",
-    },
-    "models.review_agents_1_3": {
-        "label": "Review agents 1-3 model",
-        "field_type": "text",
-        "description": "Model for Arch/Correctness/Security agents (empty = inherit)",
-    },
-    "models.review_agents_4_6": {
-        "label": "Review agents 4-6 model",
-        "field_type": "text",
-        "description": "Model for UI/Performance/Testing agents",
-    },
-    # category: git
-    "git.branch_prefix": {
-        "label": "Branch prefix",
-        "field_type": "text",
-        "description": "Prefix added to auto-generated branch names",
-    },
-    "git.coauthor_trailer": {
-        "label": "Co-author trailer",
-        "field_type": "text",
-        "description": "Commit trailer added to all build commits",
-    },
-    "git.workflow_mode": {
-        "label": "Workflow mode",
-        "field_type": "select",
-        "description": "How new work is isolated",
-        "options": ["branch", "worktree", "none", "ask"],
-    },
-    "git.worktree_root": {
-        "label": "Worktree root",
-        "field_type": "text",
-        "description": "Path template for new worktrees ({repo}, {branch})",
-    },
-    # category: agents
-    "agents.plan_exploration_count": {
-        "label": "Plan exploration agent count",
-        "field_type": "number",
-        "description": "Number of exploration agents launched in planning",
-    },
-    "agents.plan_audit_count": {
-        "label": "Plan audit agent count",
-        "field_type": "number",
-        "description": "Number of evaluation agents in plan-audit",
-    },
-    "agents.review_small_diff_count": {
-        "label": "Review small-diff agent count",
-        "field_type": "number",
-        "description": "Agents launched for small-diff reviews",
-    },
-    "agents.review_large_diff_count": {
-        "label": "Review large-diff agent count",
-        "field_type": "number",
-        "description": "Agents launched for full reviews",
-    },
-    # category: report
-    "report.datetime_format": {
-        "label": "Report datetime format",
-        "field_type": "text",
-        "description": "strftime format for report filenames",
-    },
-}
 
 # Per-session list of asyncio queues for active SSE connections.
 # Each SSE connection registers its own queue to receive push notifications.
@@ -201,48 +57,6 @@ _sse_queues: dict[str, list[asyncio.Queue[str]]] = defaultdict(list)
 
 # Queues for dashboard SSE connections — notified when any session changes state.
 _dashboard_queues: list[asyncio.Queue[str]] = []
-
-
-def _submitted_status_html() -> str:
-    """Return the 'Review submitted' banner HTML."""
-    return '<div id="review-status" class="submit-banner">Review submitted — thank you!</div>'
-
-
-def _submitted_button_html() -> str:
-    """Return the disabled 'Review submitted' button HTML."""
-    return (
-        '<div id="submit-section">'
-        '<button class="submit-btn submit-btn--done"'
-        " disabled>Review submitted</button></div>"
-    )
-
-
-def _ready_status_html() -> str:
-    """Return the 'ready for review' banner HTML."""
-    return (
-        '<div id="review-status" class="submit-banner">All agents complete — ready for review</div>'
-    )
-
-
-def _ready_button_html(session_id: str) -> str:
-    """Return the Submit Review button HTML."""
-    return (
-        '<div id="submit-section">'
-        f'<button class="submit-btn" '
-        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-        "Submit Review</button></div>"
-    )
-
-
-def _session_not_found(session_id: str) -> JSONResponse:
-    """Return a 404 response for an unknown session."""
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": "session_not_found",
-            "message": f"Session '{session_id}' does not exist",
-        },
-    )
 
 
 def _notify_sse_connections(session_id: str, event: str) -> None:
@@ -268,31 +82,6 @@ def _notify_dashboard_connections(event: str, session_id: str | None = None) -> 
     message = f"{event}:{session_id}" if session_id is not None else event
     for queue in _dashboard_queues:
         queue.put_nowait(message)
-
-
-def _build_notification_script(notif: Notification, default_on_click_js: str) -> str:
-    """Build a browser Notification JS snippet from a Notification model.
-
-    Args:
-        notif: The notification to render as a browser popup.
-        default_on_click_js: JS expression for onclick when ``notif.url`` is not set.
-    """
-    title_js = json.dumps(notif.title)
-    opts: dict[str, str] = {}
-    if notif.body:
-        opts["body"] = notif.body
-    opts_js = json.dumps(opts)
-    if notif.url:
-        url_js = json.dumps(notif.url)
-        on_click_js = f"window.location.href = {url_js}; n.close();"
-    else:
-        on_click_js = default_on_click_js
-    return (
-        f"if (Notification.permission === 'granted') {{"
-        f"  const n = new Notification({title_js}, {opts_js});"
-        f"  n.onclick = () => {{ {on_click_js} }};"
-        f"}}"
-    )
 
 
 def finding_fragment(
@@ -555,36 +344,6 @@ def _map_signals_to_responses(
     return responses
 
 
-def _notification_dot_html(
-    tab_id: str,
-    href: str,
-    label: str,
-    badge_html: str = "",
-) -> str:
-    """Return a Datastar-compatible element that adds the notification-dot class to a tab.
-
-    The returned ``<a>`` must include the full inner content (label, badge span)
-    because ``ElementPatchMode.OUTER`` replaces the entire element.
-
-    Args:
-        tab_id: The DOM id of the tab link element (e.g. "step-tab-<step_id>").
-        href: The link target for the tab.
-        label: The visible text label for the tab.
-        badge_html: Optional pre-built HTML for the status badge ``<span>``.
-
-    Returns:
-        An HTML snippet that patches the tab element via SSE.
-    """
-    return (
-        f'<a id="{html.escape(tab_id)}" '
-        f'href="{html.escape(href)}" '
-        f'class="step-link notification-dot">'
-        f"{html.escape(label)}"
-        f"{badge_html}"
-        f"</a>"
-    )
-
-
 def _default_step_id(steps: list[Any]) -> str | None:
     """Pick the best default step: last started/ready step, else last step."""
     for step in reversed(steps):
@@ -838,113 +597,8 @@ async def get_dashboard(request: Request) -> HTMLResponse:
     """Return the dashboard HTML page."""
     manager = request.app.state.session_manager
     sessions = sorted(manager.list_sessions(), key=lambda s: s.created_at, reverse=True)
-    page_html = render("dashboard.html", sessions=sessions)
+    page_html = render("dashboard.html", sessions=sessions, current_path="/dashboard")
     return HTMLResponse(content=page_html)
-
-
-@router.get("/config")
-def get_config_page(request: Request) -> HTMLResponse:
-    """Return the configuration page HTML."""
-    cfg = load_config()
-    return HTMLResponse(render("config.html", config=cfg, field_meta=_FIELD_META))
-
-
-@router.post("/config/save/{category}")
-def post_save_config(category: str, payload: dict[str, Any]) -> JSONResponse:
-    """Save a config section by category name."""
-    valid = {"thresholds", "models", "git", "agents", "report"}
-    if category not in valid:
-        return JSONResponse({"error": f"unknown category: {category}"}, status_code=400)
-    cfg = load_config()
-    section = getattr(cfg, category)
-    try:
-        new_section = section.model_copy(update=payload)
-        # Force re-validation by re-instantiating the model from dump
-        new_section = type(section).model_validate(new_section.model_dump())
-    except ValidationError as e:
-        return JSONResponse({"error": e.errors()[0]}, status_code=422)
-    setattr(cfg, category, new_section)
-    try:
-        save_config(cfg)
-    except Timeout:
-        return JSONResponse({"error": "config is locked, try again"}, status_code=503)
-    return JSONResponse({"status": "ok"})
-
-
-def _install_target_for(runtime: str) -> Path:
-    """Return the default install target directory for the given runtime."""
-    if runtime == "claude":
-        return Path.home() / ".claude" / "commands"
-    if runtime == "opencode":
-        return Path.home() / ".config" / "opencode" / "commands"
-    raise ValueError(f"unknown runtime: {runtime}")
-
-
-@router.post("/install/run")
-@datastar_response
-async def post_run_install(payload: dict[str, str]):  # noqa: ANN201
-    """Run the installer for the given runtime and return a status fragment."""
-    runtime = payload.get("runtime", "")
-
-    async def _generate():  # noqa: ANN202
-        if runtime not in ("claude", "opencode"):
-            yield SSE.patch_elements(
-                f"<div class='error'>unknown runtime: {runtime}</div>",
-                selector="#install-status-error",
-            )
-            return
-        cfg = load_config()
-        target_dir = _install_target_for(runtime)
-        install_fn = install_claude if runtime == "claude" else install_opencode
-        try:
-            await asyncio.to_thread(install_fn, target_dir=target_dir, config=cfg)
-        except InstallError as e:
-            manifest = load_manifest(target_dir)
-            status = {
-                "runtime": runtime,
-                "stale": True,
-                "installed_at": manifest.get("installed_at") if manifest else None,
-                "target_dir": str(target_dir),
-                "error": str(e),
-            }
-            yield SSE.patch_elements(
-                render("fragments/install_status.html", status=status),
-                selector=f"#install-status-{runtime}",
-            )
-            return
-        # Success — re-render with fresh status
-        manifest = load_manifest(target_dir)
-        status = {
-            "runtime": runtime,
-            "stale": is_install_stale(target_dir, runtime, cfg),
-            "installed_at": manifest.get("installed_at") if manifest else None,
-            "target_dir": str(target_dir),
-        }
-        yield SSE.patch_elements(
-            render("fragments/install_status.html", status=status),
-            selector=f"#install-status-{runtime}",
-        )
-
-    return _generate()
-
-
-@router.get("/install")
-def get_install_page(request: Request) -> HTMLResponse:
-    """Return the install page HTML."""
-    cfg = load_config()
-    statuses = []
-    for runtime in ("claude", "opencode"):
-        target_dir = _install_target_for(runtime)
-        manifest = load_manifest(target_dir)
-        statuses.append(
-            {
-                "runtime": runtime,
-                "stale": is_install_stale(target_dir, runtime, cfg),
-                "installed_at": manifest.get("installed_at") if manifest else None,
-                "target_dir": str(target_dir),
-            }
-        )
-    return HTMLResponse(render("install.html", statuses=statuses))
 
 
 @router.get("/dashboard/events")
@@ -999,7 +653,9 @@ async def dashboard_events(request: Request):  # noqa: ANN201
 
                 if event in ("created", "cleaned_up"):
                     # Structural change — full re-render
-                    page_html = render("dashboard.html", sessions=sessions)
+                    page_html = render(
+                        "dashboard.html", sessions=sessions, current_path="/dashboard"
+                    )
                     yield SSE.patch_elements(
                         page_html,
                         selector="body",
