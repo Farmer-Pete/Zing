@@ -1,0 +1,31 @@
+{# Context contract:
+   - key: dot-path string, e.g. "thresholds.large_file_lines"
+   - label: human-readable field label
+   - field_type: "number" | "text" | "select"
+   - value: current value (int or str)
+   - description: short help text
+   - options: list of strings (only used when field_type == "select")
+   - signal_name: unique Datastar signal name (key with dots → underscores)
+#}
+<div class="config-field" id="field-{{ signal_name }}" data-key="{{ key }}">
+  <label for="input-{{ signal_name }}">{{ label }}</label>
+  {% if field_type == "select" %}
+    <select id="input-{{ signal_name }}"
+            data-signals='{"{{ signal_name }}": "{{ value }}"}'
+            data-on:change="@post('/config/save/{{ key.split('.')[0] }}', { '{{ key.split('.')[1] }}': ${{ signal_name }} })">
+      {% for opt in options %}
+        <option value="{{ opt }}" {% if opt == value %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  {% elif field_type == "number" %}
+    <input type="number" id="input-{{ signal_name }}" value="{{ value }}"
+           data-signals='{"{{ signal_name }}": {{ value }}}'
+           data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', { '{{ key.split('.')[1] }}': ${{ signal_name }} })">
+  {% else %}
+    <input type="text" id="input-{{ signal_name }}" value="{{ value }}"
+           data-signals='{"{{ signal_name }}": "{{ value }}"}'
+           data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', { '{{ key.split('.')[1] }}': ${{ signal_name }} })">
+  {% endif %}
+  <span class="field-status" id="status-{{ signal_name }}"></span>
+  <p class="field-description">{{ description }}</p>
+</div>

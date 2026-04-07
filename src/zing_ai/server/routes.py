@@ -17,6 +17,7 @@ from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from zing_ai.config import load_config
 from zing_ai.server.models import (
     Complexity,
     Finding,
@@ -29,6 +30,165 @@ from zing_ai.server.templates import render, render_markdown
 logger = logging.getLogger("zing_ai.server")
 
 router = APIRouter()
+
+_FIELD_META: dict[str, dict] = {
+    # category: thresholds
+    "thresholds.large_file_lines": {
+        "label": "Large file line cutoff",
+        "field_type": "number",
+        "description": "Files larger than this are read in chunks",
+    },
+    "thresholds.branch_name_max_length": {
+        "label": "Branch name max length",
+        "field_type": "number",
+        "description": "Maximum chars for auto-generated branch names",
+    },
+    "thresholds.simple_spec_max_words": {
+        "label": "Simple spec max words",
+        "field_type": "number",
+        "description": "Specs under this word count skip planning",
+    },
+    "thresholds.plan_small_step_count": {
+        "label": "Plan small step count",
+        "field_type": "number",
+        "description": "Plans with this many or fewer steps skip plan-audit",
+    },
+    "thresholds.step_merge_min_words": {
+        "label": "Step merge min words",
+        "field_type": "number",
+        "description": "Plan steps shorter than this are merge candidates",
+    },
+    "thresholds.step_merge_max_words": {
+        "label": "Step merge max words",
+        "field_type": "number",
+        "description": "Plan steps longer than this are protected from merging",
+    },
+    "thresholds.small_diff_max_files": {
+        "label": "Small diff max files",
+        "field_type": "number",
+        "description": "Diffs with fewer files use the lightweight audit path",
+    },
+    "thresholds.small_diff_max_lines": {
+        "label": "Small diff max lines",
+        "field_type": "number",
+        "description": "Diffs with fewer lines use the lightweight audit path",
+    },
+    "thresholds.audit_scope_small_lines": {
+        "label": "Audit scope small tier",
+        "field_type": "number",
+        "description": "Codebases under this size are read in full",
+    },
+    "thresholds.audit_scope_medium_lines": {
+        "label": "Audit scope medium tier",
+        "field_type": "number",
+        "description": "Codebases under this size use on-demand exploration",
+    },
+    "thresholds.audit_always_read_lines": {
+        "label": "Audit always-read cutoff",
+        "field_type": "number",
+        "description": "Files smaller than this are always read in full",
+    },
+    "thresholds.scope_max_files": {
+        "label": "Scope max files",
+        "field_type": "number",
+        "description": "Audit scopes wider than this are narrowed",
+    },
+    "thresholds.scope_narrow_target": {
+        "label": "Scope narrow target",
+        "field_type": "number",
+        "description": "Target file count after narrowing a wide scope",
+    },
+    "thresholds.scope_slug_max_length": {
+        "label": "Scope slug max length",
+        "field_type": "number",
+        "description": "Maximum chars for audit scope slugs",
+    },
+    "thresholds.comment_truncation_chars": {
+        "label": "Comment truncation chars",
+        "field_type": "number",
+        "description": "Long comment bodies are truncated to this length",
+    },
+    "thresholds.browser_wait_timeout_seconds": {
+        "label": "Browser wait timeout (s)",
+        "field_type": "number",
+        "description": "Maximum wait for page loads in visual audits",
+    },
+    # category: models
+    "models.plan_exploration": {
+        "label": "Plan exploration model",
+        "field_type": "text",
+        "description": "Model used by plan exploration subagents",
+    },
+    "models.plan_audit": {
+        "label": "Plan audit model",
+        "field_type": "text",
+        "description": "Model used by plan-audit evaluation agents",
+    },
+    "models.build_step": {
+        "label": "Build step model",
+        "field_type": "text",
+        "description": "Model used by build step execution",
+    },
+    "models.review_agents_1_3": {
+        "label": "Review agents 1-3 model",
+        "field_type": "text",
+        "description": "Model for Arch/Correctness/Security agents (empty = inherit)",
+    },
+    "models.review_agents_4_6": {
+        "label": "Review agents 4-6 model",
+        "field_type": "text",
+        "description": "Model for UI/Performance/Testing agents",
+    },
+    # category: git
+    "git.branch_prefix": {
+        "label": "Branch prefix",
+        "field_type": "text",
+        "description": "Prefix added to auto-generated branch names",
+    },
+    "git.coauthor_trailer": {
+        "label": "Co-author trailer",
+        "field_type": "text",
+        "description": "Commit trailer added to all build commits",
+    },
+    "git.workflow_mode": {
+        "label": "Workflow mode",
+        "field_type": "select",
+        "description": "How new work is isolated",
+        "options": ["branch", "worktree", "none", "ask"],
+    },
+    "git.worktree_root": {
+        "label": "Worktree root",
+        "field_type": "text",
+        "description": "Path template for new worktrees ({repo}, {branch})",
+    },
+    # category: agents
+    "agents.plan_exploration_count": {
+        "label": "Plan exploration agent count",
+        "field_type": "number",
+        "description": "Number of exploration agents launched in planning",
+    },
+    "agents.plan_audit_count": {
+        "label": "Plan audit agent count",
+        "field_type": "number",
+        "description": "Number of evaluation agents in plan-audit",
+    },
+    "agents.review_small_diff_count": {
+        "label": "Review small-diff agent count",
+        "field_type": "number",
+        "description": "Agents launched for small-diff reviews",
+    },
+    "agents.review_large_diff_count": {
+        "label": "Review large-diff agent count",
+        "field_type": "number",
+        "description": "Agents launched for full reviews",
+    },
+    # category: report
+    "report.datetime_format": {
+        "label": "Report datetime format",
+        "field_type": "text",
+        "description": "strftime format for report filenames",
+    },
+}
 
 # Per-session list of asyncio queues for active SSE connections.
 # Each SSE connection registers its own queue to receive push notifications.
@@ -675,6 +835,13 @@ async def get_dashboard(request: Request) -> HTMLResponse:
     sessions = sorted(manager.list_sessions(), key=lambda s: s.created_at, reverse=True)
     page_html = render("dashboard.html", sessions=sessions)
     return HTMLResponse(content=page_html)
+
+
+@router.get("/config")
+def get_config_page(request: Request) -> HTMLResponse:
+    """Return the configuration page HTML."""
+    cfg = load_config()
+    return HTMLResponse(render("config.html", config=cfg, field_meta=_FIELD_META))
 
 
 @router.get("/dashboard/events")

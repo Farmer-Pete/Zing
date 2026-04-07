@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-config">
+  <h1>Configuration</h1>
+  <p class="page-intro">Changes auto-save as you edit. There is no save button.</p>
+  {% set categories = [
+    ("git", "Git", config.git),
+    ("thresholds", "Thresholds", config.thresholds),
+    ("models", "Models", config.models),
+    ("agents", "Agents", config.agents),
+    ("report", "Report", config.report),
+  ] %}
+  {% for cat_key, cat_label, cat_obj in categories %}
+    <section class="config-section">
+      <h2>{{ cat_label }}</h2>
+      {% for field_name, field_value in cat_obj.model_dump().items() %}
+        {% set dot_key = cat_key ~ "." ~ field_name %}
+        {% set meta = field_meta.get(dot_key, {"label": field_name, "field_type": "text", "description": ""}) %}
+        {% set signal_name = dot_key.replace(".", "_") %}
+        {% set key = dot_key %}
+        {% set label = meta.label %}
+        {% set field_type = meta.field_type %}
+        {% set value = field_value %}
+        {% set description = meta.description %}
+        {% set options = meta.get("options", []) %}
+        {% include "fragments/config_field.html" %}
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>
+{% endblock %}
