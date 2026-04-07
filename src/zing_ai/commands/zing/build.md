@@ -58,13 +58,22 @@ The session ID and build step ID will be used for agent lifecycle tracking and l
 
 ### Branch setup
 
-Check the current git branch by running `git branch --show-current`. If the branch is `main` or `master`, create a new feature branch before starting the build:
-
-1. Derive a branch name from the zing document title (the `# Title` heading): lowercase it, replace spaces and special characters with hyphens, strip leading/trailing hyphens, and truncate to {{ thresholds.branch_name_max_length }} characters. Prefix with `{{ git.branch_prefix }}` (e.g., `{{ git.branch_prefix }}recipe-app`, `{{ git.branch_prefix }}add-user-authentication`).
-2. Run `git checkout -b {branch_name}` to create and switch to the new branch.
-3. Tell the user: `Created branch: {branch_name}`
-
-If the branch is anything other than `main`/`master`, assume the user is already on the correct branch and skip this step.
+{% if git.workflow_mode == "branch" %}
+1. Run `git branch --show-current`.
+2. If on `main` or `master`, derive a branch name from the zing title: lowercase, replace spaces and special characters with hyphens, strip leading/trailing hyphens, and truncate to {{ thresholds.branch_name_max_length }} characters. Prefix with `{{ git.branch_prefix }}` (e.g., `{{ git.branch_prefix }}recipe-app`, `{{ git.branch_prefix }}add-user-authentication`). Run `git checkout -b <branch_name>`. Print: "Created branch: <branch_name>".
+3. If already on any other branch, proceed without creating a new one.
+{% elif git.workflow_mode == "worktree" %}
+1. Derive a branch name from the zing title using the same rules as the branch mode (lowercase, hyphens, max {{ thresholds.branch_name_max_length }} chars, `{{ git.branch_prefix }}` prefix).
+2. Compute the worktree path by formatting `{{ git.worktree_root }}` with `{repo}` = the basename of the current repo root and `{branch}` = the derived branch slug. Resolve to an absolute path.
+3. Run `git worktree add -b <branch_name> <worktree_path>`.
+4. `cd` into the worktree path.
+5. If `<worktree_path>/zing-init.sh` exists, run it with these environment variables set: `ZING_BRANCH=<branch_name>`, `ZING_WORKTREE_PATH=<absolute_worktree_path>`, `ZING_SPEC_FILE=<absolute_zing_file>`, `ZING_SESSION_ID=<session_id_from_frontmatter>`. If the file does not exist, silently skip this step.
+6. Read the zing spec file's YAML frontmatter and add a top-level `worktree_path: <absolute_worktree_path>` entry. Save the file. This signals to subsequent skills (build-audit, pr-audit, pr-respond) that they should `cd` into the worktree before running git/gh commands.
+{% elif git.workflow_mode == "none" %}
+No isolation. Proceed in the current working directory. Do not create any branches or worktrees.
+{% elif git.workflow_mode == "ask" %}
+Use `AskUserQuestion` to prompt the user with three options: "Create a branch", "Create a worktree", "Work in place". Then proceed using the equivalent block above for the chosen mode.
+{% endif %}
 </step>
 
 <step name="create_tasklist">

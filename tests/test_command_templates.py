@@ -94,6 +94,37 @@ class TestReviewCoreMd(unittest.TestCase):
         # default review_agents_1_3 = "" so model: "" must NOT appear
         self.assertNotIn('model: ""', out)
 
+
+class TestBuildMdWorkflowModes(unittest.TestCase):
+    def _render_with_mode(self, mode: str) -> str:
+        from zing_ai.config import default_config
+
+        cfg = default_config()
+        cfg.git.workflow_mode = mode  # type: ignore[assignment]
+        return _render("zing/build.md", config=cfg)
+
+    def test_build_md_branch_mode(self) -> None:
+        out = self._render_with_mode("branch")
+        self.assertIn("git checkout -b", out)
+        self.assertNotIn("git worktree add", out)
+
+    def test_build_md_worktree_mode(self) -> None:
+        out = self._render_with_mode("worktree")
+        self.assertIn("git worktree add", out)
+        self.assertIn("zing-init.sh", out)
+        self.assertIn("ZING_WORKTREE_PATH", out)
+        self.assertIn("worktree_path:", out)
+
+    def test_build_md_none_mode(self) -> None:
+        out = self._render_with_mode("none")
+        self.assertIn("No isolation", out)
+        self.assertNotIn("git checkout -b", out)
+        self.assertNotIn("git worktree add", out)
+
+    def test_build_md_ask_mode(self) -> None:
+        out = self._render_with_mode("ask")
+        self.assertIn("AskUserQuestion", out)
+
     def test_review_core_includes_agents_1_3_model_when_set(self) -> None:
         from zing_ai.config import default_config
 
