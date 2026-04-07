@@ -12,6 +12,7 @@ CLI tool that installs skill/command markdown files into a user's Claude Code or
 ## Project structure
 
 - `src/zing_ai/` — Main package. CLI entry point, installer, converter (adapts syntax for OpenCode), manifest (tracks installed file hashes for change detection), and backup/patch reapply logic.
+- `src/zing_ai/config.py` and `src/zing_ai/templating.py` — User config (`~/.config/zing-ai/config.toml`) and the Jinja rendering pipeline that resolves command markdowns at install time. The LLM only ever sees fully-rendered markdown — config values and `{% if %}` blocks are resolved before files are written to the runtime directory.
 - `src/zing_ai/commands/` — Bundled markdown skill files that get installed into the user's config directory. Contains the top-level `/zing` command, sub-commands (new, build, plan, audits, etc.), and shared review logic.
 - `tests/` — Unit tests (one per module) plus an integration test for the end-to-end install flow.
 
