@@ -40,7 +40,10 @@ class TestPlanMd(unittest.TestCase):
 
 class TestPlanAuditMd(unittest.TestCase):
     def test_plan_audit_md_substitutions(self) -> None:
-        out = _render("zing/plan-audit.md")
+        cfg = default_config()
+        cfg.thresholds.step_merge_min_words = 20
+        cfg.thresholds.step_merge_max_words = 40
+        out = _render("zing/plan-audit.md", config=cfg)
         self.assertIn("4", out)
         self.assertIn('model: "sonnet"', out)
         self.assertIn("< 20 words", out)

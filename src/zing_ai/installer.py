@@ -240,6 +240,9 @@ def _source_mtime_max(traversables: object) -> float | None:
     ``stat()`` call fails (e.g. the package was installed from a wheel/zip
     archive where real filesystem paths are unavailable).  Callers should
     fall back to the package version string in that case.
+
+    An empty directory contributes its own mtime but does not collapse the
+    walk to ``None``; only an unstattable entry signals the wheel-install case.
     """
     max_mtime: float | None = None
     for t in traversables:  # type: ignore[union-attr]
@@ -249,18 +252,29 @@ def _source_mtime_max(traversables: object) -> float | None:
             return None  # wheel/zip install — caller falls back to package version
         if t.is_dir():
             inner = _source_mtime_max(t.iterdir())
-            if inner is None:
+            if inner is None and not _dir_is_empty(t):
                 return None
-            m = max(m, inner)
+            if inner is not None:
+                m = max(m, inner)
         max_mtime = m if max_mtime is None else max(max_mtime, m)
     return max_mtime
 
 
-def is_install_stale(target_dir: Path, runtime: str, config: Config) -> bool:
+def _dir_is_empty(t: object) -> bool:
+    """Return True if the traversable directory has no entries."""
+    try:
+        next(iter(t.iterdir()))  # type: ignore[union-attr]
+    except StopIteration:
+        return True
+    except (TypeError, OSError):
+        return False
+    return False
+
+
+def is_install_stale(target_dir: Path, config: Config) -> bool:
     """Return True if the installed commands are stale relative to current source + config."""
     from zing_ai.manifest import load_manifest
 
-    _ = runtime  # reserved for future per-runtime cache keying
     manifest = load_manifest(target_dir)
     if manifest is None:
         return True
@@ -270,8 +284,10 @@ def is_install_stale(target_dir: Path, runtime: str, config: Config) -> bool:
         return True
     stored_mtime = manifest.get("source_mtime_max")
     current_mtime = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
-    if stored_mtime is None or current_mtime is None:
+    if current_mtime is None:
         return False  # wheel install — version check above is the only signal
+    if stored_mtime is None:
+        return True  # manifest predates mtime tracking — force reinstall
     return current_mtime > stored_mtime
 
 

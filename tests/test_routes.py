@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 from tests.test_server_base import ServerTestBase
 
@@ -27,24 +28,27 @@ class TestConfigRoutes(ServerTestBase):
 
 class TestConfigSave(ServerTestBase):
     def setUp(self):
-        # Patch config_path to a temp file BEFORE calling super().setUp() so the
-        # TestClient's app sees the patched path when handling requests.
-        import zing_ai.config as cfg_mod
-
+        # Patch config_path via mock.patch so it's reversed even if setUp raises.
         self._tmpdir = tempfile.mkdtemp()
         self._tmp_config = Path(self._tmpdir) / "config.toml"
-        self._orig_config_path = cfg_mod.config_path
-        cfg_mod.config_path = lambda: self._tmp_config
-        cfg_mod.save_config(cfg_mod.default_config())
+        self._patcher = patch("zing_ai.config.config_path", return_value=self._tmp_config)
+        self._patcher.start()
+        try:
+            import zing_ai.config as cfg_mod
 
-        super().setUp()
+            cfg_mod.save_config(cfg_mod.default_config())
+            super().setUp()
+        except Exception:
+            self._patcher.stop()
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            raise
 
     def tearDown(self):
-        import zing_ai.config as cfg_mod
-
-        super().tearDown()
-        cfg_mod.config_path = self._orig_config_path
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        try:
+            super().tearDown()
+        finally:
+            self._patcher.stop()
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_save_threshold_persists(self):
         r = self.client.post("/config/save/thresholds", json={"large_file_lines": 1500})
@@ -95,14 +99,11 @@ class TestConfigSave(ServerTestBase):
             self.assertEqual(errors, ["timeout"])
 
     def test_save_unknown_field_in_known_category(self):
-        # ThresholdsConfig has no model_config with extra="forbid", so pydantic v2
-        # silently ignores unknown fields — assert 200 and the field is not persisted.
+        # Unknown payload keys are now rejected with 422 so typo'd field names
+        # surface as errors instead of silently dropping the change.
         r = self.client.post("/config/save/thresholds", json={"nonexistent_field": 1})
-        self.assertEqual(r.status_code, 200)
-        from zing_ai.config import load_config
-
-        cfg = load_config()
-        self.assertFalse(hasattr(cfg.thresholds, "nonexistent_field"))
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("unknown fields", r.text)
 
 
 class TestInstallRoutes(ServerTestBase):
@@ -161,6 +162,7 @@ class TestInstallRoutes(ServerTestBase):
         # Patch install_claude to be a no-op success that creates a manifest
         import zing_ai.server.routes_install as install_mod
         from zing_ai import __version__
+        from zing_ai import installer as installer_mod
         from zing_ai.config import config_hash, default_config
         from zing_ai.manifest import write_manifest
 
@@ -175,18 +177,21 @@ class TestInstallRoutes(ServerTestBase):
                 "claude-code",
                 [],
                 config_hash=config_hash(config or default_config()),
-                source_mtime_max=None,
+                source_mtime_max=12345.0,
                 package_version=__version__,
             )
 
         orig_claude = install_mod.install_claude
+        orig_mtime = installer_mod._source_mtime_max
         install_mod.install_claude = fake_install
+        installer_mod._source_mtime_max = lambda *_a, **_kw: 12345.0
         try:
             r = self.client.post("/install/run", json={"runtime": "claude"})
             self.assertEqual(r.status_code, 200)
             self.assertIn("Up to date", r.text)
         finally:
             install_mod.install_claude = orig_claude
+            installer_mod._source_mtime_max = orig_mtime
 
     def test_run_install_surfaces_install_error(self):
         import zing_ai.server.routes_install as install_mod

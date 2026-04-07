@@ -3,6 +3,14 @@
 <div class="page-config">
   <h1>Configuration</h1>
   <p class="page-intro">Changes save automatically.</p>
+  {% if config_error %}
+    <div class="config-error-banner" role="alert">
+      <strong>Could not load config:</strong> {{ config_error }}
+    </div>
+  {% endif %}
+  <div class="config-staleness-banner" role="status">
+    Saved changes won't take effect until you <a href="/install">reinstall</a>.
+  </div>
   {% set categories = [
     ("git", "Git", config.git),
     ("thresholds", "Thresholds", config.thresholds),

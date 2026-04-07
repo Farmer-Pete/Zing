@@ -30,15 +30,6 @@ def tmp_config(monkeypatch):
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _wait_for_save_post(page: Page, base_url: str, category: str, timeout: int = 5000) -> None:
-    """Wait for a successful POST to /config/save/{category}."""
-    with page.expect_response(
-        lambda r: f"/config/save/{category}" in r.url and r.status == 200,
-        timeout=timeout,
-    ):
-        pass
-
-
 def test_autosave_on_change(server: _ServerInfo, page: Page, tmp_config: Path) -> None:
     """Changing a number input triggers a POST that persists the new value."""
     errors: list[str] = []
@@ -92,9 +83,16 @@ def test_validation_error_leaves_page_usable(
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
     locator = page.locator("#input-thresholds_large_file_lines")
-    locator.fill("-1")
-    locator.dispatch_event("change")
-    page.wait_for_load_state("networkidle", timeout=5000)
+
+    with page.expect_response(
+        lambda r: "/config/save/thresholds" in r.url,
+        timeout=5000,
+    ) as resp_info:
+        locator.fill("-1")
+        locator.dispatch_event("change")
+
+    # Server must reject the negative value with 422
+    assert resp_info.value.status == 422
 
     # The page must still be rendered and show the heading — no crash
     expect(page.locator("h1")).to_have_text("Configuration", timeout=3000)

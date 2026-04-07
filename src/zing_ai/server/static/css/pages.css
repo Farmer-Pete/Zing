@@ -1,4 +1,23 @@
 /* === Config Page === */
+.config-error-banner {
+    background: #fce8e6;
+    border: 1px solid #d93025;
+    color: #5b1410;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+.config-staleness-banner {
+    background: #fef7e0;
+    border: 1px solid #f9ab00;
+    color: #5c4205;
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+}
+.config-staleness-banner a { color: #5c4205; text-decoration: underline; }
+
 .page-config,
 .page-install {
     max-width: 720px;

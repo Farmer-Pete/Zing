@@ -20,6 +20,7 @@
   {% endif %}
   <div class="install-actions">
     <button class="install-btn{% if not status.stale %} install-btn--fresh{% endif %}"
+            aria-label="{% if status.installed_at %}Reinstall{% else %}Install{% endif %} {{ status.runtime }}"
             data-on:click="@post('/install/run', { payload: { runtime: '{{ status.runtime }}' } })">
       {% if status.installed_at %}Reinstall{% else %}Install{% endif %}
     </button>

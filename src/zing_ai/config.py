@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import tempfile
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import tomli_w
 from filelock import FileLock
@@ -17,29 +20,32 @@ class ConfigError(Exception):
     """Raised when config.toml cannot be loaded or validated."""
 
 
+PositiveInt = Annotated[int, Field(ge=1)]
+
+
 class ThresholdsConfig(BaseModel):
     # File reading
-    large_file_lines: int = 1000
-    audit_always_read_lines: int = 200
+    large_file_lines: PositiveInt = 1000
+    audit_always_read_lines: PositiveInt = 200
     # Naming limits
-    branch_name_max_length: int = 60
-    scope_slug_max_length: int = 30
+    branch_name_max_length: PositiveInt = 60
+    scope_slug_max_length: PositiveInt = 30
     # Planning
-    simple_spec_max_words: int = 150
-    plan_small_step_count: int = 3
-    step_merge_min_words: int = 100
-    step_merge_max_words: int = 300
+    simple_spec_max_words: PositiveInt = 150
+    plan_small_step_count: PositiveInt = 3
+    step_merge_min_words: PositiveInt = 100
+    step_merge_max_words: PositiveInt = 300
     # Diff & audit sizing
-    small_diff_max_files: int = 5
-    small_diff_max_lines: int = 100
-    audit_scope_small_lines: int = 2000
-    audit_scope_medium_lines: int = 5000
+    small_diff_max_files: PositiveInt = 5
+    small_diff_max_lines: PositiveInt = 100
+    audit_scope_small_lines: PositiveInt = 2000
+    audit_scope_medium_lines: PositiveInt = 5000
     # Scope
-    scope_max_files: int = 50
-    scope_narrow_target: int = 25
+    scope_max_files: PositiveInt = 50
+    scope_narrow_target: PositiveInt = 25
     # Misc
-    comment_truncation_chars: int = 100
-    browser_wait_timeout_seconds: int = 10
+    comment_truncation_chars: PositiveInt = 100
+    browser_wait_timeout_seconds: PositiveInt = 10
 
 
 class ModelsConfig(BaseModel):
@@ -105,10 +111,15 @@ def load_config() -> Config:
     try:
         return Config.model_validate(data)
     except ValidationError as e:
-        err = e.errors()[0]
-        loc = ".".join(str(p) for p in err["loc"])
+        errors = e.errors()
+        if not errors:
+            raise ConfigError("config.toml failed validation") from e
+        err = errors[0]
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        err_type = err.get("type", "value")
+        err_input = err.get("input", "<unknown>")
         raise ConfigError(
-            f"config.toml field {loc} is invalid: expected {err['type']}, got {err['input']!r}"
+            f"config.toml field {loc} is invalid: expected {err_type}, got {err_input!r}"
         ) from e
 
 
@@ -125,7 +136,18 @@ def save_config(cfg: Config) -> None:
     # Drop empty sub-tables so we don't write bare `[section]` headers.
     data = {k: v for k, v in data.items() if v != {}}
     with lock:
-        path.write_text(tomli_w.dumps(data), encoding="utf-8")
+        # Atomic write: tempfile in same dir, then os.replace().
+        fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(tomli_w.dumps(data))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+            raise
 
 
 def config_hash(cfg: Config) -> str:

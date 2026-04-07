@@ -145,7 +145,7 @@ textarea {
     font-family: inherit; resize: vertical;
     transition: border-color 0.15s;
 }
-textarea:focus { outline: none; border-color: var(--orange); }
+textarea:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(245,124,32,0.15); }
 
 .main-content {
     padding: 2rem 0;

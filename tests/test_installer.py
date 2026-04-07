@@ -453,7 +453,7 @@ def test_stale_when_manifest_missing(tmp_path: Path) -> None:
     from zing_ai.config import default_config
     from zing_ai.installer import is_install_stale
 
-    assert is_install_stale(tmp_path, "claude-code", default_config()) is True
+    assert is_install_stale(tmp_path, default_config()) is True
 
 
 def test_stale_when_config_hash_differs(tmp_path: Path) -> None:
@@ -471,7 +471,7 @@ def test_stale_when_config_hash_differs(tmp_path: Path) -> None:
         source_mtime_max=None,
         package_version=__version__,
     )
-    assert is_install_stale(tmp_path, "claude-code", default_config()) is True
+    assert is_install_stale(tmp_path, default_config()) is True
 
 
 def test_stale_when_package_version_differs(tmp_path: Path) -> None:
@@ -489,17 +489,19 @@ def test_stale_when_package_version_differs(tmp_path: Path) -> None:
         source_mtime_max=None,
         package_version="not_current",
     )
-    assert is_install_stale(tmp_path, "claude-code", cfg) is True
+    assert is_install_stale(tmp_path, cfg) is True
 
 
-def test_fresh_when_all_match(tmp_path: Path) -> None:
+def test_fresh_when_all_match(tmp_path: Path, monkeypatch) -> None:
     """Returns False when config hash, version, and mtime all match (wheel path)."""
-    from zing_ai import __version__
+    from zing_ai import __version__, installer
     from zing_ai.config import config_hash, default_config
     from zing_ai.installer import is_install_stale
     from zing_ai.manifest import write_manifest
 
     cfg = default_config()
+    # Force the wheel-install path: current_mtime is None.
+    monkeypatch.setattr(installer, "_source_mtime_max", lambda *_a, **_kw: None)
     write_manifest(
         tmp_path,
         "claude-code",
@@ -508,8 +510,7 @@ def test_fresh_when_all_match(tmp_path: Path) -> None:
         source_mtime_max=None,
         package_version=__version__,
     )
-    # source_mtime_max=None triggers the wheel-install path → False
-    assert is_install_stale(tmp_path, "claude-code", cfg) is False
+    assert is_install_stale(tmp_path, cfg) is False
 
 
 def test_stale_when_source_mtime_advances(tmp_path: Path) -> None:
@@ -528,4 +529,44 @@ def test_stale_when_source_mtime_advances(tmp_path: Path) -> None:
         source_mtime_max=1.0,  # epoch second — far in the past
         package_version=__version__,
     )
-    assert is_install_stale(tmp_path, "claude-code", cfg) is True
+    assert is_install_stale(tmp_path, cfg) is True
+
+
+def test_fresh_when_mtime_matches(tmp_path: Path, monkeypatch) -> None:
+    """Equality boundary: stored == current → False (would catch a `>=` typo)."""
+    from zing_ai import __version__, installer
+    from zing_ai.config import config_hash, default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    cfg = default_config()
+    monkeypatch.setattr(installer, "_source_mtime_max", lambda *_a, **_kw: 12345.0)
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash=config_hash(cfg),
+        source_mtime_max=12345.0,
+        package_version=__version__,
+    )
+    assert is_install_stale(tmp_path, cfg) is False
+
+
+def test_stale_when_stored_mtime_missing_but_current_exists(tmp_path: Path, monkeypatch) -> None:
+    """An older manifest without source_mtime_max forces a reinstall."""
+    from zing_ai import __version__, installer
+    from zing_ai.config import config_hash, default_config
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import write_manifest
+
+    cfg = default_config()
+    monkeypatch.setattr(installer, "_source_mtime_max", lambda *_a, **_kw: 12345.0)
+    write_manifest(
+        tmp_path,
+        "claude-code",
+        [],
+        config_hash=config_hash(cfg),
+        source_mtime_max=None,
+        package_version=__version__,
+    )
+    assert is_install_stale(tmp_path, cfg) is True

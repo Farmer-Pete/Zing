@@ -136,7 +136,7 @@ def _compute_asset_version() -> str:
     return str(max(mtimes)) if mtimes else "0"
 
 
-_env.globals["asset_version"] = _compute_asset_version()
+_env.globals["asset_version"] = _compute_asset_version
 
 
 def render(template_name: str, **context: Any) -> str:

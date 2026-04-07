@@ -3,6 +3,11 @@
 <div class="page-install">
   <h1>Install</h1>
   <p class="page-intro">Install the rendered command files into Claude Code or OpenCode.</p>
+  {% if config_error %}
+    <div class="config-error-banner" role="alert">
+      <strong>Could not load config:</strong> {{ config_error }}
+    </div>
+  {% endif %}
   {% for status in statuses %}
     {% include "fragments/install_status.html" %}
   {% endfor %}

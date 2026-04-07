@@ -50,12 +50,17 @@ def tmp_install_env(monkeypatch):
             "claude-code",
             [],
             config_hash=config_hash(config or default_config()),
-            source_mtime_max=None,
+            source_mtime_max=12345.0,
             package_version=__version__,
         )
 
     monkeypatch.setattr(install_mod, "install_claude", fake_install)
     monkeypatch.setattr(install_mod, "install_opencode", fake_install)
+
+    # Pin source mtime so is_install_stale matches what fake_install wrote.
+    import zing_ai.installer as installer_mod
+
+    monkeypatch.setattr(installer_mod, "_source_mtime_max", lambda *_a, **_kw: 12345.0)
 
     yield tmp_install
     shutil.rmtree(tmp_install, ignore_errors=True)
@@ -70,6 +75,11 @@ def test_install_page_flow(server: _ServerInfo, page: Page, tmp_install_env) -> 
     # 1. Initial visit — both runtimes should be "Updates pending" (no manifest yet)
     page.goto(f"{server.base_url}/install")
     page.wait_for_load_state("networkidle", timeout=5000)
+
+    # Confirm Datastar parsed the click bindings before we try to click them.
+    binding_count = page.locator("[data-on\\:click]").count()
+    assert binding_count > 0, "Datastar bindings were not parsed on the install page"
+
     expect(page.locator("#install-status-claude")).to_contain_text("Updates pending", timeout=3000)
     expect(page.locator("#install-status-opencode")).to_contain_text(
         "Updates pending", timeout=3000
