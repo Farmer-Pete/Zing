@@ -16,5 +16,5 @@
   {% if status.error %}
     <p class="install-error">{{ status.error }}</p>
   {% endif %}
-  <button class="install-btn" data-on:click="@post('/install/run', { runtime: '{{ status.runtime }}' })">Install</button>
+  <button class="install-btn" data-on:click="@post('/install/run', { payload: { runtime: '{{ status.runtime }}' } })">Install</button>
 </div>
