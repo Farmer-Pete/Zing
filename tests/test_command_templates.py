@@ -139,7 +139,9 @@ class TestBuildMdWorkflowModes(unittest.TestCase):
 
 class TestWorktreePathDocs(unittest.TestCase):
     def test_audit_files_mention_worktree_path(self) -> None:
+        cfg = default_config()
+        cfg.git.workflow_mode = "worktree"
         for name in ("zing/build-audit.md", "zing/pr-audit.md", "zing/pr-respond.md"):
-            out = _render(name)
+            out = _render(name, config=cfg)
             with self.subTest(file=name):
                 self.assertIn("worktree_path", out)
