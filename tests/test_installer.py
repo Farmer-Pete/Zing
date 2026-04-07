@@ -26,6 +26,7 @@ EXPECTED_FILES = [
     "zing/custom-audit.md",
     "zing/pr-respond.md",
     "zing/_shared/review-core.md",
+    "zing/pr-audit-visual.md",
 ]
 
 # Directories that should be created.
@@ -72,21 +73,30 @@ def test_claude_no_extra_files(tmp_path: Path) -> None:
 
 
 def test_claude_file_contents_match_source(tmp_path: Path) -> None:
+    from zing_ai.config import default_config
+    from zing_ai.templating import render_template
+
     target = tmp_path / "commands"
-    install_claude(target_dir=target)
+    cfg = default_config()
+    install_claude(target_dir=target, config=cfg)
 
     commands_root = importlib.resources.files("zing_ai.commands")
 
-    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing.md").read_text(encoding="utf-8"), cfg
+    )
     dst_content = (target / "zing.md").read_text(encoding="utf-8")
     assert src_content == dst_content, "zing.md content mismatch"
 
-    src_content = commands_root.joinpath("zing").joinpath("build.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing").joinpath("build.md").read_text(encoding="utf-8"), cfg
+    )
     dst_content = (target / "zing" / "build.md").read_text(encoding="utf-8")
     assert src_content == dst_content, "zing/build.md content mismatch"
 
-    src_content = (
-        commands_root.joinpath("_shared").joinpath("review-core.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("_shared").joinpath("review-core.md").read_text(encoding="utf-8"),
+        cfg,
     )
     dst_content = (target / "zing" / "_shared" / "review-core.md").read_text(encoding="utf-8")
     assert src_content == dst_content, "zing/_shared/review-core.md content mismatch"
@@ -170,6 +180,7 @@ OPENCODE_EXPECTED_FILES = [
     "zing-custom-audit.md",
     "zing-pr-respond.md",
     "_shared/review-core.md",
+    "zing-pr-audit-visual.md",
 ]
 
 OPENCODE_EXPECTED_DIRS = [
@@ -218,25 +229,33 @@ def test_opencode_flat_naming_scheme(tmp_path: Path) -> None:
 
 
 def test_opencode_content_is_converted(tmp_path: Path) -> None:
+    from zing_ai.config import default_config
     from zing_ai.converter import convert_for_opencode
+    from zing_ai.templating import render_template
 
     target = tmp_path / "commands"
-    install_opencode(target_dir=target)
+    cfg = default_config()
+    install_opencode(target_dir=target, config=cfg)
 
     commands_root = importlib.resources.files("zing_ai.commands")
 
-    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing.md").read_text(encoding="utf-8"), cfg
+    )
     expected = convert_for_opencode(src_content)
     actual = (target / "zing.md").read_text(encoding="utf-8")
     assert actual == expected, "zing.md content not converted"
 
-    src_content = commands_root.joinpath("zing").joinpath("build.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing").joinpath("build.md").read_text(encoding="utf-8"), cfg
+    )
     expected = convert_for_opencode(src_content)
     actual = (target / "zing-build.md").read_text(encoding="utf-8")
     assert actual == expected, "zing-build.md content not converted"
 
-    src_content = (
-        commands_root.joinpath("_shared").joinpath("review-core.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("_shared").joinpath("review-core.md").read_text(encoding="utf-8"),
+        cfg,
     )
     expected = convert_for_opencode(src_content)
     actual = (target / "_shared" / "review-core.md").read_text(encoding="utf-8")
