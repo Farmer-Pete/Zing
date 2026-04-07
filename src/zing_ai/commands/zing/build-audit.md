@@ -30,6 +30,8 @@ Exit.
 
 After detecting the branch, parse the zing doc's YAML frontmatter (if one was provided as an argument). Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
 
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+
 If there is no zing doc, no frontmatter, or no `session` in the frontmatter, this is a standalone invocation. Call `session_create(title="Code Review — {branch_name}", steps=["code-review"])` to get a new session ID and step IDs. If a zing doc exists, update its frontmatter to include `session: {session_id}` and the `steps:` mapping, then save the file.
 
 Once you have the session ID, if a zing doc exists, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title="Code Review — {branch_name}")` to associate the zing file with the session.

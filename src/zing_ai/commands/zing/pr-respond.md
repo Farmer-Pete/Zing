@@ -22,6 +22,8 @@ gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 
 Store the PR number, head branch, base branch, title, and URL for later use.
 
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+
 Get the `{owner}/{repo}` from:
 ```
 gh repo view --json nameWithOwner --jq '.nameWithOwner'

@@ -132,3 +132,11 @@ class TestBuildMdWorkflowModes(unittest.TestCase):
         cfg.models.review_agents_1_3 = "opus"
         out = _render("_shared/review-core.md", config=cfg)
         self.assertIn('model: "opus"', out)
+
+
+class TestWorktreePathDocs(unittest.TestCase):
+    def test_audit_files_mention_worktree_path(self) -> None:
+        for name in ("zing/build-audit.md", "zing/pr-audit.md", "zing/pr-respond.md"):
+            out = _render(name)
+            with self.subTest(file=name):
+                self.assertIn("worktree_path", out)

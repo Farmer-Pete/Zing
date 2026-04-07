@@ -27,6 +27,8 @@ Store the PR number, head branch, base branch, title, and URL for later use.
 
 After resolving the PR, call `session_create(title="PR Review — #{number} {title}", steps=["code-review"])` to get a new session ID and step IDs.
 
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+
 Then call `step_start(session_id, step_id)` where `step_id` is the code-review step ID returned by `session_create`. This transitions the step from PENDING to STARTED.
 
 The session ID and step ID will be passed to the shared review steps.
