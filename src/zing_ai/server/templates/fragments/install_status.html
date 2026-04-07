@@ -1,0 +1,17 @@
+<div class="install-status" id="install-status-{{ status.runtime }}">
+  <h3>{{ status.runtime }}</h3>
+  <p class="install-target">{{ status.target_dir }}</p>
+  <p class="install-when">
+    {% if status.installed_at %}
+      Last installed: {{ status.installed_at }}
+    {% else %}
+      Not installed
+    {% endif %}
+  </p>
+  {% if status.stale %}
+    <span class="status-badge status-pending">Updates pending</span>
+  {% else %}
+    <span class="status-badge status-fresh">Up to date</span>
+  {% endif %}
+  <button class="install-btn" data-on:click="@post('/install/run', { runtime: '{{ status.runtime }}' })">Install</button>
+</div>

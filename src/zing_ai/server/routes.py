@@ -9,6 +9,7 @@ import logging
 import pathlib
 from collections import defaultdict
 from itertools import zip_longest
+from pathlib import Path
 from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
@@ -866,6 +867,37 @@ def post_save_config(category: str, payload: dict[str, Any]) -> JSONResponse:
     except Timeout:
         return JSONResponse({"error": "config is locked, try again"}, status_code=503)
     return JSONResponse({"status": "ok"})
+
+
+def _install_target_for(runtime: str) -> Path:
+    """Return the default install target directory for the given runtime."""
+    if runtime == "claude":
+        return Path.home() / ".claude" / "commands"
+    if runtime == "opencode":
+        return Path.home() / ".config" / "opencode" / "commands"
+    raise ValueError(f"unknown runtime: {runtime}")
+
+
+@router.get("/install")
+def get_install_page(request: Request) -> HTMLResponse:
+    """Return the install page HTML."""
+    from zing_ai.installer import is_install_stale
+    from zing_ai.manifest import load_manifest
+
+    cfg = load_config()
+    statuses = []
+    for runtime in ("claude", "opencode"):
+        target_dir = _install_target_for(runtime)
+        manifest = load_manifest(target_dir)
+        statuses.append(
+            {
+                "runtime": runtime,
+                "stale": is_install_stale(target_dir, runtime, cfg),
+                "installed_at": manifest.get("installed_at") if manifest else None,
+                "target_dir": str(target_dir),
+            }
+        )
+    return HTMLResponse(render("install.html", statuses=statuses))
 
 
 @router.get("/dashboard/events")

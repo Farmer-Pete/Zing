@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-install">
+  <h1>Install</h1>
+  <p class="page-intro">Install the rendered command files into Claude Code or OpenCode.</p>
+  {% for status in statuses %}
+    {% include "fragments/install_status.html" %}
+  {% endfor %}
+</div>
+{% endblock %}

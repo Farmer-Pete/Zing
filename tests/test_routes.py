@@ -103,3 +103,52 @@ class TestConfigSave(ServerTestBase):
 
         cfg = load_config()
         self.assertFalse(hasattr(cfg.thresholds, "nonexistent_field"))
+
+
+class TestInstallRoutes(ServerTestBase):
+    def setUp(self):
+        import tempfile
+
+        self._tmp_install = tempfile.mkdtemp()
+        self._tmp_config_dir = tempfile.mkdtemp()
+
+        import zing_ai.server.routes as routes_mod
+
+        self._orig_target = routes_mod._install_target_for
+
+        def fake_target(runtime: str) -> Path:
+            return Path(self._tmp_install) / runtime
+
+        routes_mod._install_target_for = fake_target
+
+        import zing_ai.config as cfg_mod
+
+        self._orig_cfg_path = cfg_mod.config_path
+        cfg_mod.config_path = lambda: Path(self._tmp_config_dir) / "config.toml"
+
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+
+        import zing_ai.server.routes as routes_mod
+
+        routes_mod._install_target_for = self._orig_target
+
+        import zing_ai.config as cfg_mod
+
+        cfg_mod.config_path = self._orig_cfg_path
+
+        shutil.rmtree(self._tmp_install, ignore_errors=True)
+        shutil.rmtree(self._tmp_config_dir, ignore_errors=True)
+
+    def test_get_install_returns_status_for_both_runtimes(self):
+        r = self.client.get("/install")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("claude", r.text)
+        self.assertIn("opencode", r.text)
+
+    def test_install_html_shows_updates_pending_when_stale(self):
+        # No manifest exists in tmp dirs → both runtimes are stale
+        r = self.client.get("/install")
+        self.assertIn("Updates pending", r.text)
