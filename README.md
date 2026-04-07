@@ -112,7 +112,10 @@ Given a PR link or number, Zing checks out the branch, fetches all unresolved re
 ### 9. PR Review (`/zing-pr-audit`)
 Once a PR is open, Zing can review it the way a senior developer would — on GitHub, with line-level comments. It checks out the PR branch, reads every changed file in full, fans out four parallel review agents (the same ones from the build review), and walks you through each finding before submitting. The final review is posted via the GitHub API with inline comments on the exact lines that matter, severity ratings, and code suggestions where the fix is obvious. The review action (approve, comment, or request changes) is your call. A local markdown report is also saved so you can feed findings straight back into `/zing-plan` if fixes are needed.
 
-### 10. Code Audit (`/zing-custom-audit`)
+### 10. Visual PR Review (`/zing-pr-audit-visual`)
+A UI-focused companion to `/zing-pr-audit`. Zing checks out the PR branch, drives the affected pages with Playwright, captures snapshots, and diffs them against the base branch to surface visual regressions, layout breakage, and accessibility issues. Each visual finding is presented with before/after screenshots so you can validate or dismiss it before the review is posted to GitHub.
+
+### 11. Code Audit (`/zing-custom-audit`)
 Point Zing at any area of your codebase — files, directories, or just a description like "the authentication module" — and it performs a focused audit. Zing resolves your description to concrete files, confirms the scope with you, then fans out six parallel review agents to analyze the code as it stands today. Each finding is walked through one by one so you can validate, discuss, or dismiss it. Confirmed findings are written to a markdown report you can feed into `/zing-plan` to start fixing them.
 
 ---
@@ -229,6 +232,7 @@ After installation, the zing commands are available as slash commands in your AI
 - `/zing:custom-audit` — Audit existing code for issues
 - `/zing:pr-respond` — Address unresolved PR review comments
 - `/zing:pr-audit` — Review a pull request on GitHub
+- `/zing:pr-audit-visual` — Visual/UI review of a pull request via Playwright snapshots
 - `/zing:plan-linear` — Create Linear tickets from the plan
 
 In OpenCode, use flat naming: `/zing-plan`, `/zing-build`, etc.
@@ -270,6 +274,7 @@ flowchart TD
     buildaudit -.->|"Fix findings"| plan
     customaudit["/zing:custom-audit"] -.->|"Fix findings"| plan
     praudit["/zing:pr-audit"] -.->|"Fix findings"| plan
+    praudivisual["/zing:pr-audit-visual"] -.->|"Fix findings"| plan
 
     prrespond["/zing:pr-respond"]
 
@@ -277,6 +282,7 @@ flowchart TD
     style prrespond fill:#6c757d,color:#fff
     style customaudit fill:#6c757d,color:#fff
     style praudit fill:#6c757d,color:#fff
+    style praudivisual fill:#6c757d,color:#fff
     style planlinear fill:#6c757d,color:#fff
 ```
 
