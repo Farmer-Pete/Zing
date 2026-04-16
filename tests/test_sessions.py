@@ -664,6 +664,24 @@ class TestPersistence(unittest.TestCase):
         assert session.steps[0].agents == []
         assert session.state == SessionState.PENDING
 
+    def test_ticket_id_survives_persistence(self) -> None:
+        """ticket_id is preserved after persist/reload and defaults to None."""
+        # Default is None when not set
+        mgr1 = SessionManager(data_dir=self.data_dir)
+        session = mgr1.create_session("s2", "No Ticket", steps=[_STEP])
+        assert session.ticket_id is None
+
+        # Set ticket_id, persist, reload
+        mgr2 = SessionManager(data_dir=self.data_dir)
+        session2 = mgr2.create_session("s3", "With Ticket", steps=[_STEP])
+        session2.ticket_id = "TEST-1"
+        mgr2._persist(session2)
+
+        mgr3 = SessionManager(data_dir=self.data_dir)
+        reloaded = mgr3.get_session("s3")
+        assert reloaded is not None
+        assert reloaded.ticket_id == "TEST-1"
+
 
 class TestWorkflowStepLooping(unittest.TestCase):
     """Test that the same step name can be used multiple times."""
