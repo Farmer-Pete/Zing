@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
+import yaml
 from mcp.server.fastmcp import FastMCP
 
 from zing_ai.server.sessions import SessionManager
@@ -67,16 +68,57 @@ async def session_create(title: str, steps: list[str] | None = None) -> dict:
     return {"session_id": session_id, "steps": step_map, "url": url}
 
 
+def _extract_ticket_id_from_frontmatter(file_path: str) -> str | None:
+    """Extract ``ticket_id`` from YAML frontmatter of a zing file.
+
+    The file is expected to start with ``---\n<yaml>\n---\n<body>``.
+    Returns ``None`` if the file cannot be read, has no frontmatter, or
+    ``ticket_id`` is not present in the frontmatter.  Never raises.
+    """
+    try:
+        with open(file_path, encoding="utf-8") as fh:
+            content = fh.read()
+        if not content.startswith("---"):
+            return None
+        # Find the closing '---'
+        end = content.find("\n---", 3)
+        if end == -1:
+            return None
+        frontmatter_text = content[3:end].strip()
+        data = yaml.safe_load(frontmatter_text)
+        if isinstance(data, dict):
+            value = data.get("ticket_id")
+            return str(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 @mcp_server.tool()
 async def session_update(
     session_id: str,
     zing_file: str | None = None,
     title: str | None = None,
+    ticket_id: str | None = None,
 ) -> dict:
-    """Update session title and/or zing file path."""
+    """Update session title, zing file path, and/or ticket ID.
+
+    Precedence for ticket_id:
+    - If ``ticket_id`` is provided explicitly, it is used directly.
+    - If ``ticket_id`` is None and ``zing_file`` is provided, the file's YAML
+      frontmatter is parsed and ``ticket_id`` is extracted from there if present.
+    - A malformed or unreadable zing_file does not raise; it is silently skipped.
+    """
     sm = _get_session_manager()
+
+    resolved_ticket_id = ticket_id
+    if resolved_ticket_id is None and zing_file is not None:
+        resolved_ticket_id = _extract_ticket_id_from_frontmatter(zing_file)
+
     try:
-        session = sm.update_session(session_id, zing_file=zing_file, title=title)
+        session = sm.update_session(
+            session_id, zing_file=zing_file, title=title, ticket_id=resolved_ticket_id
+        )
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}
     return {"status": "updated", "session_id": session.session_id, "title": session.title}
