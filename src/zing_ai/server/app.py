@@ -15,7 +15,9 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from zing_ai.config import load_config
 from zing_ai.server.external_cache import ExternalCache
+from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
 from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
 from zing_ai.server.routes_command_center import router as command_center_router
@@ -156,8 +158,21 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
-        async with mcp_server.session_manager.run():
-            yield
+        # Note: state is set on fastapi_app.state, NOT starlette_app.state (different objects).
+        poller = ExternalPoller(
+            cache=fastapi_app.state.external_cache,
+            queues=fastapi_app.state.cc_queues,
+            config=load_config().command_center,
+        )
+        poller_task = asyncio.create_task(poller.run())
+        try:
+            async with mcp_server.session_manager.run():
+                yield
+        finally:
+            poller_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller_task
+            await poller.aclose()
 
     mcp_starlette = mcp_server.streamable_http_app()
 
