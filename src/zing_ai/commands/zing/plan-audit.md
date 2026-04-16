@@ -95,10 +95,10 @@ Each agent also receives:
 
 ### Launching the agents
 
-Launch all 4 agents in parallel using 4 `Task` tool calls in a single message. Print a status line before launching:
+Launch all {{ agents.plan_audit_count }} agents in parallel using {{ agents.plan_audit_count }} `Task` tool calls in a single message with `model: "{{ models.plan_audit }}"`. Print a status line before launching:
 
 ```
-Launching 4 evaluation passes in parallel...
+Launching {{ agents.plan_audit_count }} evaluation passes in parallel...
 ```
 
 ---
@@ -384,7 +384,7 @@ List specific, actionable changes to improve the design, ordered by priority. If
 <step name="propose_improvements">
 If the verdict is **Strong Design**, skip this step and say "No improvements needed — the design looks solid."
 
-Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the 4 agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
+Otherwise, call `review_wait(session_id, step_id)` where `step_id` is the plan-audit step ID. The returned JSON includes a `review_url` — display this URL to the user so they can open the review dashboard and see all evaluation tables (as read-only reference) and improvement proposals (as radio-button choices) posted by the {{ agents.plan_audit_count }} agents. The user picks their preferred approach for each improvement — or selects "Skip" — and submits all decisions at once.
 
 When `review_wait` returns, iterate over the returned items. Each item contains the original problem description, the options, and the user's response:
 
@@ -398,6 +398,52 @@ When `review_wait` returns, iterate over the returned items. Each item contains 
   - Vary how you introduce each finding — don't start every one the same way
 
 After all improvements have been applied, summarize what was changed.
+</step>
+
+<step name="merge_small_steps">
+Read the Action Plan section of the zing document and apply step-merging heuristics to eliminate steps that are too granular.
+
+### Identify small steps
+
+Flag any step that exhibits one or more of these signals:
+
+- The step description is < {{ thresholds.step_merge_min_words }} words
+- The step touches only one file and describes a single-line or purely mechanical change
+- The step is purely mechanical in nature: "add import", "rename variable", "update config value", "add type hint", "create empty file", "add placeholder"
+- Multiple consecutive steps touch the same file
+
+### Merge strategy
+
+Apply the following merges:
+
+1. **Same-file consecutive steps** — Group consecutive steps that touch the same file into a single combined step. Use the most substantive step's description as the base and append the mechanical changes as sub-bullets or inline additions.
+2. **Scaffolding + behavior** — Merge any step that only creates structure (empty file, folder, imports, placeholder interface) with the immediately following step that adds actual behavior to that structure.
+3. **Test + implementation** — Merge any "add tests for X" step with its corresponding "implement X" step. Tests must always live in the same step as their implementation.
+
+Do NOT merge steps that:
+- Involve different components or different logical concerns
+- Touch different areas of the codebase (different modules, services, or layers)
+- Require non-trivial decision-making that is separate from adjacent steps
+- Are already of substantial size (> {{ thresholds.step_merge_max_words }} words describing non-trivial work)
+
+When in doubt, leave steps separate.
+
+### Apply merges
+
+If any merges were identified, use the Edit tool to update the Action Plan section of the zing document:
+
+- Combine the merged step descriptions into a single step entry, listing all files touched and all sub-tasks
+- Renumber all steps sequentially after merging
+- Update the `## Progress` section checklist (if present) to match the new step list — same numbering and descriptions
+
+If no merges are needed, skip the Edit and note that no steps required merging.
+
+### Report
+
+Tell the user:
+- How many steps were merged (e.g. "Merged 3 pairs of steps")
+- What the original step count was and what the final step count is (e.g. "12 steps → 9 steps")
+- A brief summary of what was merged and why
 </step>
 
 <step name="ensure_progress_section">

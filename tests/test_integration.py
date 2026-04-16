@@ -34,6 +34,7 @@ CLAUDE_EXPECTED_FILES = [
     "zing/custom-audit.md",
     "zing/pr-respond.md",
     "zing/_shared/review-core.md",
+    "zing/pr-audit-visual.md",
 ]
 
 OPENCODE_EXPECTED_FILES = [
@@ -48,6 +49,7 @@ OPENCODE_EXPECTED_FILES = [
     "zing-custom-audit.md",
     "zing-pr-respond.md",
     "_shared/review-core.md",
+    "zing-pr-audit-visual.md",
 ]
 
 # PascalCase Claude tool names that must NOT appear in OpenCode files.
@@ -60,9 +62,13 @@ CLAUDE_TOOL_NAMES = ["AskUserQuestion", "TaskCreate", "Bash", "Read", "Grep"]
 
 
 def test_claude_full_install_flow(tmp_path: Path) -> None:
-    """install_claude produces all 9 files, a manifest, and content matches source."""
+    """install_claude produces expected files, manifest, and content matches rendered source."""
+    from zing_ai.config import default_config
+    from zing_ai.templating import render_template
+
     target = tmp_path / "commands"
-    install_claude(target_dir=target)
+    cfg = default_config()
+    install_claude(target_dir=target, config=cfg)
 
     for relpath in CLAUDE_EXPECTED_FILES:
         assert (target / relpath).is_file(), f"Expected file missing: {relpath}"
@@ -73,7 +79,9 @@ def test_claude_full_install_flow(tmp_path: Path) -> None:
     assert len(manifest["files"]) == len(CLAUDE_EXPECTED_FILES)
 
     commands_root = importlib.resources.files("zing_ai.commands")
-    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing.md").read_text(encoding="utf-8"), cfg
+    )
     dst_content = (target / "zing.md").read_text(encoding="utf-8")
     assert src_content == dst_content, "zing.md content mismatch"
 
@@ -128,11 +136,14 @@ def test_claude_reinstall_with_modifications(tmp_path: Path) -> None:
 
 
 def test_opencode_full_install_flow(tmp_path: Path) -> None:
-    """install_opencode produces all 9 files in flat naming, manifest exists, content converted."""
+    """install_opencode produces flat-named files, manifest exists, content converted."""
+    from zing_ai.config import default_config
     from zing_ai.converter import convert_for_opencode
+    from zing_ai.templating import render_template
 
     target = tmp_path / "commands"
-    install_opencode(target_dir=target)
+    cfg = default_config()
+    install_opencode(target_dir=target, config=cfg)
 
     for relpath in OPENCODE_EXPECTED_FILES:
         assert (target / relpath).is_file(), f"Expected file missing: {relpath}"
@@ -143,7 +154,9 @@ def test_opencode_full_install_flow(tmp_path: Path) -> None:
     assert len(manifest["files"]) == len(OPENCODE_EXPECTED_FILES)
 
     commands_root = importlib.resources.files("zing_ai.commands")
-    src_content = commands_root.joinpath("zing.md").read_text(encoding="utf-8")
+    src_content = render_template(
+        commands_root.joinpath("zing.md").read_text(encoding="utf-8"), cfg
+    )
     expected = convert_for_opencode(src_content)
     actual = (target / "zing.md").read_text(encoding="utf-8")
     assert actual == expected, "zing.md not converted for OpenCode"
@@ -190,11 +203,11 @@ def test_cli_dispatch_both_runtimes(tmp_path: Path) -> None:
     with (
         patch(
             "zing_ai.installer.install_claude",
-            side_effect=lambda: install_claude(target_dir=claude_target),
+            side_effect=lambda *args, **kwargs: install_claude(target_dir=claude_target),
         ),
         patch(
             "zing_ai.installer.install_opencode",
-            side_effect=lambda: install_opencode(target_dir=opencode_target),
+            side_effect=lambda *args, **kwargs: install_opencode(target_dir=opencode_target),
         ),
     ):
         result = runner.invoke(cli, ["install", "--all"])

@@ -9,8 +9,60 @@ Once you have a file, read it. This is something that the user is trying to buil
 Read the provided zing document to understand what the user wants to build.
 </step>
 
+<step name="assess_complexity">
+After reading the zing document, assess the complexity of the spec to decide whether to run the full exploration flow or a fast inline path.
+
+### Heuristics — classify as **simple** only if ALL of the following are true:
+
+1. **Word count:** The spec body (excluding YAML frontmatter, headings, and metadata) is under {{ thresholds.simple_spec_max_words }} words.
+2. **Scope:** The spec mentions a single file or a very small, clearly bounded scope.
+3. **Language:** The spec uses bug-fix / typo / config-change language — it contains at least one of: "fix", "typo", "rename", "config", "update value", "change default".
+4. **No expansion signals:** The spec does NOT mention multiple components, new features, architectural changes, or new files to create.
+
+If **all four** conditions are met, the task is `simple`. Otherwise it is `standard`.
+
+### Write the classification to frontmatter
+
+Update the zing document's YAML frontmatter to include:
+
+```yaml
+complexity: simple   # or: complexity: standard
+```
+
+Save the file after updating.
+
+### Fast path for simple tasks
+
+If the task is `simple`:
+
+1. Do NOT launch investigation subagents.
+2. Do NOT call `review_wait` for planning questions.
+3. Instead, based on the spec alone, write a concise Action Plan directly inline — 1 to 3 steps, each specific enough for a build agent to execute (name the exact file, function, or line involved).
+4. Also write a **Relevant Files** section listing only the files that need to change.
+5. Generate the **Progress** section immediately after the Action Plan. Use this exact format:
+
+   ```
+   ## Progress
+
+   - [ ] Step 1: {description}
+   - [ ] Step 2: {description}
+   - [ ] Step 3: {description}
+   ...
+   ```
+
+   All items start unchecked.
+6. Save the updated document.
+7. Skip to the `next_steps` step — the `explore_codebase` and `flesh_out_document` steps are skipped entirely.
+
+### Standard path
+
+If the task is `standard`, continue to the `explore_codebase` step as normal.
+</step>
+
 <step name="explore_codebase">
 Before asking any questions, explore the codebase to understand the current state of the zing spec.
+
+**This step runs only for `standard` complexity tasks.** If `complexity: simple` was written to frontmatter in `assess_complexity`, skip this step entirely and proceed to `next_steps`.
 
 ### Session setup
 
@@ -26,7 +78,7 @@ The session ID and plan step ID will be used by subagents for agent lifecycle tr
 
 ### Phase A+B — Identify areas AND launch all subagents (ONE response)
 
-After reading the zing document, identify 3-5 discrete investigation areas based on what the spec describes. Examples of areas (adapt to the actual spec):
+After reading the zing document, identify around {{ agents.plan_exploration_count }} discrete investigation areas based on what the spec describes. Examples of areas (adapt to the actual spec):
 - "Data model" — database schemas, ORM models, migrations
 - "API layer" — routes, controllers, middleware, request/response types
 - "Frontend components" — UI components, state management, pages
@@ -56,6 +108,8 @@ Here is the structure your response MUST follow:
 [Task tool call for area 3]
 ... all in the SAME response
 ```
+
+Launch all Task subagents with `subagent_type: "general-purpose"` and `model: "{{ models.plan_exploration }}"`. These agents only read code and return findings — they don't make architectural decisions.
 
 Each subagent receives a prompt with:
 
@@ -193,11 +247,28 @@ Where `{url}` is the session URL returned by `session_create` (e.g., `http://loc
 Before asking the user, send a browser notification so they know input is needed:
 Call `notification_send(session_id, title="Plan ready for review", body="The plan is complete. Review and approve or request changes.")` where `session_id` is the session ID from the zing file frontmatter.
 
-Then use `AskUserQuestion` to ask if the user wants to make modifications before handing off to audit. Offer two options: one to proceed to audit, and one to make modifications.
+### Simple tasks — chain directly to build
 
-If the user chooses to proceed, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')` where `{file_path}` is the path to the zing document you just updated.
+If `complexity: simple` is set in the zing file frontmatter, skip the plan-audit step entirely. Do NOT ask the user whether to proceed to audit. Instead, immediately invoke:
 
-If the user chooses to make modifications, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive) invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+```
+Skill(skill: 'zing:build', args: '{file_path}')
+```
+
+### Standard tasks — offer plan-audit or fast build
+
+For standard complexity tasks, count the number of steps in the Action Plan (i.e., the total number of numbered steps across all phases in the **Action Plan** section of the zing document).
+
+**If the plan has ≤{{ thresholds.plan_small_step_count }} steps**, use `AskUserQuestion` with three options:
+
+1. **"Start build"** (description: "Skip audit — plan is small enough to execute directly") — if chosen, invoke `Skill(skill: 'zing:build', args: '{file_path}')` where `{file_path}` is the path to the zing document.
+2. **"Run plan-audit anyway"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+3. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+
+**If the plan has >{{ thresholds.plan_small_step_count }} steps**, use `AskUserQuestion` with two options:
+
+1. **"Run plan-audit"** (description: "Full 4-agent evaluation before building") — if chosen, invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
+2. **"Make modifications"** (description: "Edit the plan before proceeding") — if chosen, enter a conversational loop: make the requested changes to the zing document, save it, and continue chatting naturally. When the user says "DONE" (case insensitive), invoke `Skill(skill: 'zing:plan-audit', args: '{file_path}')`.
 </step>
 
 </process>

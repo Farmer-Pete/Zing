@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import html
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import markupsafe
@@ -82,11 +84,59 @@ def render_markdown(text: str) -> markupsafe.Markup:
     return _render_markdown(text)
 
 
+def _humanize_time(value: Any) -> str:
+    """Jinja2 filter: render a datetime as a relative time string.
+
+    Accepts a datetime, an ISO-8601 string, or None. Returns "just now",
+    "N minutes ago", "N hours ago", "N days ago", or an absolute date for
+    older values.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if not isinstance(value, datetime):
+        return str(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - value
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    return f"on {value.strftime('%Y-%m-%d')}"
+
+
 _env = Environment(
     loader=PackageLoader("zing_ai", "server/templates"),
     autoescape=True,
 )
 _env.filters["markdown"] = _render_markdown
+_env.filters["humanize_time"] = _humanize_time
+
+
+def _compute_asset_version() -> str:
+    """Return a cache-busting token derived from CSS file mtimes."""
+    css_dir = Path(__file__).parent / "static" / "css"
+    try:
+        mtimes = [int(p.stat().st_mtime) for p in sorted(css_dir.glob("*.css"))]
+    except FileNotFoundError:
+        return "0"
+    return str(max(mtimes)) if mtimes else "0"
+
+
+_env.globals["asset_version"] = _compute_asset_version
 
 
 def render(template_name: str, **context: Any) -> str:

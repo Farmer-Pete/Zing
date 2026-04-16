@@ -16,6 +16,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from zing_ai.server.mcp_tools import configure, mcp_server
 from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
+from zing_ai.server.routes_config import router as config_router
+from zing_ai.server.routes_install import router as install_router
 from zing_ai.server.sessions import SessionManager
 
 logger = logging.getLogger("zing_ai.server")
@@ -163,6 +165,10 @@ def create_app(
     fastapi_app.state.session_manager = sm
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    # Specific routers must come before the main router because the latter has
+    # a catch-all `/{session_id}` route that would otherwise swallow /config etc.
+    fastapi_app.include_router(config_router)
+    fastapi_app.include_router(install_router)
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]

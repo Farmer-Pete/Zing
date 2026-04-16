@@ -17,10 +17,30 @@ from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from zing_ai.server.html_fragments import (
+    build_notification_script as _build_notification_script,
+)
+from zing_ai.server.html_fragments import (
+    notification_dot_html as _notification_dot_html,
+)
+from zing_ai.server.html_fragments import (
+    ready_button_html as _ready_button_html,
+)
+from zing_ai.server.html_fragments import (
+    ready_status_html as _ready_status_html,
+)
+from zing_ai.server.html_fragments import (
+    session_not_found as _session_not_found,
+)
+from zing_ai.server.html_fragments import (
+    submitted_button_html as _submitted_button_html,
+)
+from zing_ai.server.html_fragments import (
+    submitted_status_html as _submitted_status_html,
+)
 from zing_ai.server.models import (
     Complexity,
     Finding,
-    Notification,
     ResponseAction,
     UserResponse,
 )
@@ -30,54 +50,13 @@ logger = logging.getLogger("zing_ai.server")
 
 router = APIRouter()
 
+
 # Per-session list of asyncio queues for active SSE connections.
 # Each SSE connection registers its own queue to receive push notifications.
 _sse_queues: dict[str, list[asyncio.Queue[str]]] = defaultdict(list)
 
 # Queues for dashboard SSE connections — notified when any session changes state.
 _dashboard_queues: list[asyncio.Queue[str]] = []
-
-
-def _submitted_status_html() -> str:
-    """Return the 'Review submitted' banner HTML."""
-    return '<div id="review-status" class="submit-banner">Review submitted — thank you!</div>'
-
-
-def _submitted_button_html() -> str:
-    """Return the disabled 'Review submitted' button HTML."""
-    return (
-        '<div id="submit-section">'
-        '<button class="submit-btn submit-btn--done"'
-        " disabled>Review submitted</button></div>"
-    )
-
-
-def _ready_status_html() -> str:
-    """Return the 'ready for review' banner HTML."""
-    return (
-        '<div id="review-status" class="submit-banner">All agents complete — ready for review</div>'
-    )
-
-
-def _ready_button_html(session_id: str) -> str:
-    """Return the Submit Review button HTML."""
-    return (
-        '<div id="submit-section">'
-        f'<button class="submit-btn" '
-        f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-        "Submit Review</button></div>"
-    )
-
-
-def _session_not_found(session_id: str) -> JSONResponse:
-    """Return a 404 response for an unknown session."""
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": "session_not_found",
-            "message": f"Session '{session_id}' does not exist",
-        },
-    )
 
 
 def _notify_sse_connections(session_id: str, event: str) -> None:
@@ -103,31 +82,6 @@ def _notify_dashboard_connections(event: str, session_id: str | None = None) -> 
     message = f"{event}:{session_id}" if session_id is not None else event
     for queue in _dashboard_queues:
         queue.put_nowait(message)
-
-
-def _build_notification_script(notif: Notification, default_on_click_js: str) -> str:
-    """Build a browser Notification JS snippet from a Notification model.
-
-    Args:
-        notif: The notification to render as a browser popup.
-        default_on_click_js: JS expression for onclick when ``notif.url`` is not set.
-    """
-    title_js = json.dumps(notif.title)
-    opts: dict[str, str] = {}
-    if notif.body:
-        opts["body"] = notif.body
-    opts_js = json.dumps(opts)
-    if notif.url:
-        url_js = json.dumps(notif.url)
-        on_click_js = f"window.location.href = {url_js}; n.close();"
-    else:
-        on_click_js = default_on_click_js
-    return (
-        f"if (Notification.permission === 'granted') {{"
-        f"  const n = new Notification({title_js}, {opts_js});"
-        f"  n.onclick = () => {{ {on_click_js} }};"
-        f"}}"
-    )
 
 
 def finding_fragment(
@@ -390,36 +344,6 @@ def _map_signals_to_responses(
     return responses
 
 
-def _notification_dot_html(
-    tab_id: str,
-    href: str,
-    label: str,
-    badge_html: str = "",
-) -> str:
-    """Return a Datastar-compatible element that adds the notification-dot class to a tab.
-
-    The returned ``<a>`` must include the full inner content (label, badge span)
-    because ``ElementPatchMode.OUTER`` replaces the entire element.
-
-    Args:
-        tab_id: The DOM id of the tab link element (e.g. "step-tab-<step_id>").
-        href: The link target for the tab.
-        label: The visible text label for the tab.
-        badge_html: Optional pre-built HTML for the status badge ``<span>``.
-
-    Returns:
-        An HTML snippet that patches the tab element via SSE.
-    """
-    return (
-        f'<a id="{html.escape(tab_id)}" '
-        f'href="{html.escape(href)}" '
-        f'class="step-link notification-dot">'
-        f"{html.escape(label)}"
-        f"{badge_html}"
-        f"</a>"
-    )
-
-
 def _default_step_id(steps: list[Any]) -> str | None:
     """Pick the best default step: last started/ready step, else last step."""
     for step in reversed(steps):
@@ -673,7 +597,7 @@ async def get_dashboard(request: Request) -> HTMLResponse:
     """Return the dashboard HTML page."""
     manager = request.app.state.session_manager
     sessions = sorted(manager.list_sessions(), key=lambda s: s.created_at, reverse=True)
-    page_html = render("dashboard.html", sessions=sessions)
+    page_html = render("dashboard.html", sessions=sessions, current_path="/dashboard")
     return HTMLResponse(content=page_html)
 
 
@@ -729,7 +653,9 @@ async def dashboard_events(request: Request):  # noqa: ANN201
 
                 if event in ("created", "cleaned_up"):
                     # Structural change — full re-render
-                    page_html = render("dashboard.html", sessions=sessions)
+                    page_html = render(
+                        "dashboard.html", sessions=sessions, current_path="/dashboard"
+                    )
                     yield SSE.patch_elements(
                         page_html,
                         selector="body",

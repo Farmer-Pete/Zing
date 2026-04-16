@@ -7,12 +7,20 @@ import json
 import logging
 import shutil
 import subprocess
-import sys
 from collections.abc import Callable
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
+from zing_ai import __version__
+from zing_ai.config import Config, config_hash, load_config
+from zing_ai.templating import render_template
+
 logger = logging.getLogger(__name__)
+
+
+class InstallError(Exception):
+    """Raised when an install operation fails."""
+
 
 # Files that live directly in the commands/ package root.
 # zing.md is special: it installs one level up from the zing/ subdirectory.
@@ -22,7 +30,7 @@ _TOP_LEVEL_FILE = "zing.md"
 _SUBDIRS = ("zing", "_shared")
 
 
-def install_claude(target_dir: Path | None = None) -> None:
+def install_claude(target_dir: Path | None = None, config: Config | None = None) -> None:
     """Install Zing command files for Claude Code.
 
     Copies the bundled markdown command files to the Claude Code commands
@@ -32,13 +40,19 @@ def install_claude(target_dir: Path | None = None) -> None:
     ----------
     target_dir:
         Override for the commands directory.  Useful for testing.
+    config:
+        Configuration used for Jinja template rendering.  Defaults to the
+        user's saved config (or built-in defaults) when *None*.
 
     Raises
     ------
-    SystemExit
+    InstallError
         On any I/O error (permissions, disk full, etc.).  Partial files are
-        cleaned up before exiting.
+        cleaned up before raising.
     """
+    if config is None:
+        config = load_config()
+
     if target_dir is None:
         target_dir = Path.home() / ".claude" / "commands"
 
@@ -66,7 +80,7 @@ def install_claude(target_dir: Path | None = None) -> None:
         # -- 2. Copy the top-level zing.md ------------------------------------
         src_top = commands_root.joinpath(_TOP_LEVEL_FILE)
         dst_top = target_dir / _TOP_LEVEL_FILE
-        _copy_resource_file(src_top, dst_top, created_files)
+        _copy_resource_file(src_top, dst_top, created_files, config=config)
 
         # -- 3. Copy subdirectories (zing/, _shared/) ------------------------
         for subdir_name in _SUBDIRS:
@@ -76,16 +90,13 @@ def install_claude(target_dir: Path | None = None) -> None:
                 if subdir_name == "_shared"
                 else target_dir / subdir_name
             )
-            _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs)
+            _copy_resource_tree(src_subdir, dst_subdir, created_files, created_dirs, config=config)
 
-    except SystemExit:
-        raise
     except Exception as exc:
         # Roll back any files/dirs we created during this run.
-        logger.warning("Install failed, rolling back: %s", exc)
+        logger.error("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise InstallError(str(exc)) from exc
 
     logger.debug("Installed %d files", len(created_files))
 
@@ -93,12 +104,20 @@ def install_claude(target_dir: Path | None = None) -> None:
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
-    write_manifest(target_dir, "claude-code", relpaths)
+    source_mtime_max = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    write_manifest(
+        target_dir,
+        "claude-code",
+        relpaths,
+        config_hash=config_hash(config),
+        source_mtime_max=source_mtime_max,
+        package_version=__version__,
+    )
 
     register_mcp_server("claude")
 
 
-def install_opencode(target_dir: Path | None = None) -> None:
+def install_opencode(target_dir: Path | None = None, config: Config | None = None) -> None:
     """Install Zing command files for OpenCode.
 
     Reads the bundled markdown command files, converts them for OpenCode
@@ -116,14 +135,20 @@ def install_opencode(target_dir: Path | None = None) -> None:
     ----------
     target_dir:
         Override for the commands directory.  Useful for testing.
+    config:
+        Configuration used for Jinja template rendering.  Defaults to the
+        user's saved config (or built-in defaults) when *None*.
 
     Raises
     ------
-    SystemExit
+    InstallError
         On any I/O error (permissions, disk full, etc.).  Partial files are
-        cleaned up before exiting.
+        cleaned up before raising.
     """
     from zing_ai.converter import convert_for_opencode
+
+    if config is None:
+        config = load_config()
 
     if target_dir is None:
         target_dir = Path.home() / ".config" / "opencode" / "commands"
@@ -155,6 +180,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
             dst_top,
             convert_for_opencode,
             created_files,
+            config=config,
         )
 
         # -- 3. Copy and convert zing/ sub-commands (flattened) --------------
@@ -168,6 +194,7 @@ def install_opencode(target_dir: Path | None = None) -> None:
                     target_dir / dst_name,
                     convert_for_opencode,
                     created_files,
+                    config=config,
                 )
 
         # -- 4. Copy and convert _shared/ (preserves structure) --------------
@@ -179,15 +206,13 @@ def install_opencode(target_dir: Path | None = None) -> None:
             convert_for_opencode,
             created_files,
             created_dirs,
+            config=config,
         )
 
-    except SystemExit:
-        raise
     except Exception as exc:
-        logger.warning("Install failed, rolling back: %s", exc)
+        logger.error("Install failed, rolling back: %s", exc)
         _rollback(created_files, created_dirs)
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise InstallError(str(exc)) from exc
 
     logger.debug("Installed %d files", len(created_files))
 
@@ -195,9 +220,75 @@ def install_opencode(target_dir: Path | None = None) -> None:
     from zing_ai.manifest import write_manifest
 
     relpaths = [str(f.relative_to(target_dir)) for f in created_files]
-    write_manifest(target_dir, "opencode", relpaths)
+    source_mtime_max = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    write_manifest(
+        target_dir,
+        "opencode",
+        relpaths,
+        config_hash=config_hash(config),
+        source_mtime_max=source_mtime_max,
+        package_version=__version__,
+    )
 
     register_mcp_server("opencode")
+
+
+def _source_mtime_max(traversables: object) -> float | None:
+    """Return the max mtime across source files, or None for wheel installs.
+
+    Recursively walks the bundled commands tree.  Returns *None* if any
+    ``stat()`` call fails (e.g. the package was installed from a wheel/zip
+    archive where real filesystem paths are unavailable).  Callers should
+    fall back to the package version string in that case.
+
+    An empty directory contributes its own mtime but does not collapse the
+    walk to ``None``; only an unstattable entry signals the wheel-install case.
+    """
+    max_mtime: float | None = None
+    for t in traversables:  # type: ignore[union-attr]
+        try:
+            m = Path(str(t)).stat().st_mtime
+        except (TypeError, OSError):
+            return None  # wheel/zip install — caller falls back to package version
+        if t.is_dir():
+            inner = _source_mtime_max(t.iterdir())
+            if inner is None and not _dir_is_empty(t):
+                return None
+            if inner is not None:
+                m = max(m, inner)
+        max_mtime = m if max_mtime is None else max(max_mtime, m)
+    return max_mtime
+
+
+def _dir_is_empty(t: object) -> bool:
+    """Return True if the traversable directory has no entries."""
+    try:
+        next(iter(t.iterdir()))  # type: ignore[union-attr]
+    except StopIteration:
+        return True
+    except (TypeError, OSError):
+        return False
+    return False
+
+
+def is_install_stale(target_dir: Path, config: Config) -> bool:
+    """Return True if the installed commands are stale relative to current source + config."""
+    from zing_ai.manifest import load_manifest
+
+    manifest = load_manifest(target_dir)
+    if manifest is None:
+        return True
+    if manifest.get("config_hash") != config_hash(config):
+        return True
+    if manifest.get("package_version") != __version__:
+        return True
+    stored_mtime = manifest.get("source_mtime_max")
+    current_mtime = _source_mtime_max(importlib.resources.files("zing_ai.commands").iterdir())
+    if current_mtime is None:
+        return False  # wheel install — version check above is the only signal
+    if stored_mtime is None:
+        return True  # manifest predates mtime tracking — force reinstall
+    return current_mtime > stored_mtime
 
 
 def _ensure_dir(path: Path, created_dirs: list[Path]) -> None:
@@ -224,10 +315,13 @@ def _copy_resource_file(
     src: Traversable,
     dst: Path,
     created_files: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Copy a single resource file to *dst*, tracking it for rollback."""
     logger.debug("Copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
+    if config is not None:
+        data = render_template(data, config)
     dst.write_text(data, encoding="utf-8")
     created_files.append(dst)
 
@@ -237,6 +331,7 @@ def _copy_resource_tree(
     dst_dir: Path,
     created_files: list[Path],
     created_dirs: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Recursively copy a resource directory tree to *dst_dir*."""
     _ensure_dir(dst_dir, created_dirs)
@@ -246,9 +341,11 @@ def _copy_resource_tree(
             # Skip __init__.py and other Python files — only copy .md files.
             if not item.name.endswith(".md"):
                 continue
-            _copy_resource_file(item, dst_dir / item.name, created_files)
+            _copy_resource_file(item, dst_dir / item.name, created_files, config=config)
         elif item.is_dir():
-            _copy_resource_tree(item, dst_dir / item.name, created_files, created_dirs)
+            _copy_resource_tree(
+                item, dst_dir / item.name, created_files, created_dirs, config=config
+            )
 
 
 def _copy_resource_file_converted(
@@ -256,10 +353,13 @@ def _copy_resource_file_converted(
     dst: Path,
     converter: Callable[[str], str],
     created_files: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Read *src*, run through *converter*, write to *dst*."""
     logger.debug("Converting and copying %s -> %s", src, dst)
     data = src.read_text(encoding="utf-8")
+    if config is not None:
+        data = render_template(data, config)
     data = converter(data)
     dst.write_text(data, encoding="utf-8")
     created_files.append(dst)
@@ -271,6 +371,7 @@ def _copy_resource_tree_converted(
     converter: Callable[[str], str],
     created_files: list[Path],
     created_dirs: list[Path],
+    config: Config | None = None,
 ) -> None:
     """Recursively copy and convert a resource directory tree to *dst_dir*."""
     _ensure_dir(dst_dir, created_dirs)
@@ -284,6 +385,7 @@ def _copy_resource_tree_converted(
                 dst_dir / item.name,
                 converter,
                 created_files,
+                config=config,
             )
         elif item.is_dir():
             _copy_resource_tree_converted(
@@ -292,6 +394,7 @@ def _copy_resource_tree_converted(
                 converter,
                 created_files,
                 created_dirs,
+                config=config,
             )
 
 

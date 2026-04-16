@@ -36,6 +36,10 @@ Exit.
 
 After detecting the branch, parse the zing doc's YAML frontmatter (if one was provided as an argument). Extract the `session` value (session ID) and the `steps` mapping (which maps step names like `plan`, `plan-audit`, `build`, `build-audit` to their step IDs).
 
+{% if git.workflow_mode == "worktree" or git.workflow_mode == "ask" -%}
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+{%- endif %}
+
 If there is no zing doc, no frontmatter, or no `session` in the frontmatter, this is a standalone invocation. Call `session_create(title="Code Review — {branch_name}", steps=["code-review"])` to get a new session ID and step IDs. If a zing doc exists, update its frontmatter to include `session: {session_id}` and the `steps:` mapping, then save the file.
 
 Once you have the session ID, if a zing doc exists, resolve the zing file path to an absolute path and call `session_update(session_id, zing_file=abs_path, title="Code Review — {branch_name}")` to associate the zing file with the session.
@@ -45,23 +49,78 @@ Then call `step_start(session_id, steps.build-audit)` where `steps.build-audit` 
 The session ID and step ID will be passed to the shared review steps.
 </step>
 
+<step name="assess_diff_size">
+Parse the `git diff --stat` output obtained in `detect_branch_and_diff` to classify the diff size.
+
+### Counting files and lines
+
+From the `--stat` output:
+- **Files changed**: Count the number of lines that end with `| ` (each changed file appears as one such line). Alternatively, read the summary line at the end of the stat output — it reads like `3 files changed, 42 insertions(+), 5 deletions(-)`.
+- **Total lines changed**: Sum the insertions and deletions from the summary line.
+
+### Classification
+
+- **Small**: fewer than {{ thresholds.small_diff_max_files }} files changed AND fewer than {{ thresholds.small_diff_max_lines }} total lines changed (insertions + deletions)
+- **Large**: anything else (5 or more files, or 100 or more lines)
+
+Store `diff_size` as either `"small"` or `"large"` for use in subsequent steps.
+
+No output to the user is needed here — this is a routing step only.
+</step>
+
 <step name="read_changed_files">
 Follow the `read_changed_files` step from the shared review reference.
 </step>
 
 <step name="big_picture">
-Follow the `big_picture` step from the shared review reference.
+**Skip this step entirely if `diff_size == "small"`** — it is unnecessary overhead for small changes.
+
+Otherwise, follow the `big_picture` step from the shared review reference.
 </step>
 
 <step name="analyze_changes">
 
 Follow the `diff_preparation` step from the shared review reference.
 
-Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
+### Agent dispatch — small diff path
+
+**If `diff_size == "small"`**, launch only **{{ agents.review_small_diff_count }} agents** instead of {{ agents.review_large_diff_count }}:
+- Agent 2: Correctness & State
+- Agent 3: Security & API Surface
+
+Both agents run on Opus. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
+
+After both agents return their JSONL findings, **do NOT call `finding_submit` or `review_wait`**. Instead, proceed directly to the inline findings display below.
+
+#### Inline findings display (small diff)
+
+Parse the agents' JSONL findings. Deduplicate by title (case-insensitive). Then for each finding:
+
+```
+**#{n} — {title}**
+Severity: {severity} | Confidence: {confidence}
+{brief summary — 1–2 sentences}
+
+Auto-applying: {first option label} — {first option description}
+```
+
+After listing all findings (or "No issues found." if there are none), say:
+
+> {N} findings from quick review. Continuing with auto-apply. Say **review** to open the full dashboard instead.
+
+Wait briefly for user input (use AskUserQuestion with a short timeout or just present the message and check if the user responds before continuing). If the user says **"review"** or any variant thereof, submit all findings via `finding_submit()`, call `review_wait()`, and proceed with the full dashboard triage flow (continuing to `check_and_review` → `write_report` → `create_pr`).
+
+Otherwise (user continues or does not respond), proceed to the `auto_apply_small` step, then to `write_report` and `create_pr`.
+
+### Agent dispatch — large diff path
+
+**If `diff_size == "large"`**, follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `git diff --stat`. No additional skill-specific context is needed for agents beyond what the shared reference specifies. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`).
 </step>
 
 <step name="present_summary">
-Give a brief, natural overview of the branch before diving into findings. Something like:
+**Skip this step if `diff_size == "small"`** — the inline findings display in `analyze_changes` serves as the summary.
+
+Otherwise, give a brief, natural overview of the branch before diving into findings. Something like:
 
 ```
 Alright, I've looked through the {count} files changed on `{branch_name}`. Here's what I found — {total_count} things I want to flag:
@@ -75,16 +134,54 @@ Write an empty findings report and exit.
 </step>
 
 <step name="check_and_review">
-Follow the `check_and_review` step from the shared review reference.
+**Skip this step if `diff_size == "small"` and the user did not escalate to full review** — triage is handled inline in `analyze_changes`.
+
+Otherwise, follow the `check_and_review` step from the shared review reference.
 
 - **Accepted/downgraded/discuss findings**: Include in the report (see `write_report` step).
 - **No findings after triage**: Say something like "Looked through everything — nothing survived triage. Changes look solid." Write an empty findings report and exit.
 </step>
 
+<step name="auto_apply_small">
+This step handles auto-apply for small diffs. It runs after the inline findings display in `analyze_changes` when the user does not escalate to full review.
+
+### Process
+
+For each finding (in order), use the **first option** from the finding's `options` list as the selected approach:
+
+1. Read the relevant source file(s) referenced in the finding.
+2. Apply the fix directly using Edit/Write tools, guided by the first option's `label` and `description`.
+3. After applying, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
+4. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), fall back to interactive mode for that finding only: show the finding, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
+
+If there are **zero findings**, skip directly to `write_report` and `create_pr` — no commit is needed.
+
+### After all findings are processed
+
+Show a brief summary:
+```
+Auto-apply complete:
+- {applied_count} fixes applied
+- {fallback_count} required interactive resolution
+```
+
+Stage and commit all changes with:
+```
+Fix code review findings: {brief list of finding titles}
+
+Applied {applied_count} fixes from quick review.
+Findings addressed:
+- #{n}: {finding title}
+...
+```
+
+Then proceed to `write_report` and `create_pr`.
+</step>
+
 <step name="write_report">
 Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
+First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/code-review-{branch_name}-{datetime}.md` where `{datetime}` is the current date and time in {{ report.datetime_format }} format (e.g. `2025-06-15-1423`) and `{branch_name}` has slashes replaced with dashes.
 
 Use this structure:
 
@@ -161,14 +258,51 @@ If "Auto-apply all fixes": proceed to the `auto_apply` step.
 If "Fix with chat": proceed to the `discuss_findings` step.
 
 If "Create a PR":
-1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
-2. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
+
+**Do NOT use `gh pr create --fill`.** `--fill` derives the title from the branch name (dashes turned into spaces) and the body from commit subjects — for a zing-driven build those commits read `Step 1+2+3: …`, `Step 4: …`, etc., which is useless as a PR description. Instead, author the title and body explicitly from the zing spec.
+
+1. **Compose the PR title.** Build it from the zing doc, not the branch name:
+   - If the zing doc's filename or frontmatter contains a ticket identifier (e.g., `BAK-1179`, `ENG-123`), prefix the title with it: `{TICKET-ID}: {short description}`.
+   - The `{short description}` should be a human-readable summary of what the change *does*, not a restatement of the ticket title. Keep it under 70 characters. Imperative mood ("Rewrite X as Y", "Fix Z on W", "Add foo to bar").
+   - If there is no zing doc (standalone invocation), fall back to the first commit's subject line, stripped of any `Step N:` prefix.
+
+2. **Compose the PR body.** Read the zing spec (if one exists) and extract the sections that belong in a PR description. A good body typically contains:
+   - **Summary** — what the change does and *why* (the problem being solved). Pull from the zing's Problem/Overview section. If the zing cites a Sentry issue, Linear ticket, or incident, mention it.
+   - **Measurements / empirical evidence** — if the zing contains benchmark numbers, EXPLAIN ANALYZE results, or before/after comparisons, include them as a table. Senior reviewers want to see the data, not take the author's word for it.
+   - **What's in the diff** — a short per-file or per-change breakdown of what actually changed and why. Mention any refactors that came out of build-audit (e.g., "extracted `build_queryset()` so tests and execute() share one path — came out of review").
+   - **Semantic safety / correctness notes** — if the zing documents things that were verified during review (NULL-handling, race conditions, backwards compatibility, migration safety), call them out. This is what separates a rigorous PR from a yolo one.
+   - **Out of scope** — if the zing has an "Out of scope" section, include it verbatim (or condensed). Reviewers need to know what you considered and rejected.
+   - **Test plan** — a bulleted checklist. Include what was run, what passed, and any manual verification still pending (e.g., "Watch the Sentry issue for occurrence drop after deploy").
+   - Close with a `Closes {TICKET-ID}.` line if a ticket was referenced.
+   - **Always** end the body with a Zing attribution footer on its own line, separated from the rest of the body by a blank line:
+
+     ```
+     ---
+
+     🤖 Created with [Zing](https://github.com/Farmer-Pete/Zing)
+     ```
+
+     This is mandatory on every PR created by this skill, whether or not a zing doc was involved.
+
+   If there is no zing doc, fall back to a minimal body built from `git log {base}...HEAD --format="%s%n%n%b"`, but still try to extract a Summary and Test plan from it.
+
+3. **Invoke `gh pr create --draft`** with explicit `--title` and `--body` flags. Use a HEREDOC for the body to preserve formatting:
+
+   ```bash
+   gh pr create --draft --title "{composed title}" --body "$(cat <<'EOF'
+   {composed body}
+   EOF
+   )"
+   ```
+
+4. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
    Call `notification_send(session_id, title="PR creation failed", body="The pull request could not be created. Manual intervention needed.")` where `session_id` is the session ID from the zing file frontmatter.
    Use AskUserQuestion:
-   - "Try again" (description: "Retry gh pr create --draft --fill")
-   - "Try without --fill" (description: "Run gh pr create --draft without --fill, letting gh prompt for title/body")
+   - "Try again" (description: "Retry gh pr create --draft with the composed title and body")
+   - "Edit title/body first" (description: "Show the composed title and body, let the user tweak before retrying")
    - "Skip PR creation" (description: "Continue without creating a PR")
-3. Show the user the PR URL
+
+5. Show the user the PR URL.
 
 Follow the `attribution_rule` from the shared review reference.
 
@@ -249,13 +383,26 @@ Review is complete when:
 - [ ] Shared review reference was loaded
 - [ ] Current branch and base branch were detected
 - [ ] Full diff was obtained and all changed files were read
+- [ ] Diff size was assessed (small: <{{ thresholds.small_diff_max_files }} files and <{{ thresholds.small_diff_max_lines }} total lines; large: anything else)
+
+**Small diff path:**
+- [ ] Only {{ agents.review_small_diff_count }} agents launched (Correctness & State; Security & API Surface)
+- [ ] Findings displayed inline with auto-apply intent (title, severity, brief summary, proposed option)
+- [ ] User given opportunity to escalate to full review by saying "review"
+- [ ] If escalated: findings submitted via `finding_submit()`, `review_wait()` called, full triage completed
+- [ ] If not escalated: `auto_apply_small` step applied first option from each finding automatically
+- [ ] Zero findings case: "No issues found" shown, proceeded directly to `write_report` and `create_pr`
+
+**Large diff path:**
 - [ ] Big-picture assessment shared (sizing, context, relevance)
-- [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
+- [ ] Changes were analyzed against the full review checklist using all {{ agents.review_large_diff_count }} agents
 - [ ] Each finding has a severity and confidence rating
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
-- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
+
+**Both paths:**
+- [ ] Triaged/auto-applied findings were written to a markdown file in `.zing/` in GFM format
 - [ ] File path was shown to the user
 - [ ] If user chose "Discuss findings", each finding was walked through with opportunity for deeper discussion
 </success_criteria>

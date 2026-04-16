@@ -27,6 +27,10 @@ Store the PR number, head branch, base branch, title, and URL for later use.
 
 After resolving the PR, call `session_create(title="PR Review — #{number} {title}", steps=["code-review"])` to get a new session ID and step IDs.
 
+{% if git.workflow_mode == "worktree" or git.workflow_mode == "ask" -%}
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+{%- endif %}
+
 Then call `step_start(session_id, step_id)` where `step_id` is the code-review step ID returned by `session_create`. This transitions the step from PENDING to STARTED.
 
 The session ID and step ID will be passed to the shared review steps.
@@ -93,7 +97,7 @@ Follow the `check_and_review` step from the shared review reference.
 <step name="write_report">
 Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file as a local record.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in YYYY-MM-DD-HHmm format (e.g. `2025-06-15-1423`).
+First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in {{ report.datetime_format }} format (e.g. `2025-06-15-1423`).
 
 Use this structure:
 

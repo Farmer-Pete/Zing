@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-config">
+  <h1>Configuration</h1>
+  <p class="page-intro">Changes save automatically.</p>
+  {% if config_error %}
+    <div class="config-error-banner" role="alert">
+      <strong>Could not load config:</strong> {{ config_error }}
+    </div>
+  {% endif %}
+  <div class="config-staleness-banner" role="status">
+    Saved changes won't take effect until you <a href="/install">reinstall</a>.
+  </div>
+  {% set categories = [
+    ("git", "Git", config.git),
+    ("thresholds", "Thresholds", config.thresholds),
+    ("models", "Models", config.models),
+    ("agents", "Agents", config.agents),
+    ("report", "Report", config.report),
+  ] %}
+  {% set pairs = {"step_merge_min_words": "step_merge_max_words"} %}
+  {% set pair_seconds = pairs.values() | list %}
+  {% for cat_key, cat_label, cat_obj in categories %}
+    <section class="config-section">
+      <h2>{{ cat_label }}</h2>
+      {% set fields = cat_obj.model_dump() %}
+      {% set ns = namespace(current_group="") %}
+      {% for field_name, field_value in fields.items() %}
+        {% if field_name in pair_seconds %}
+          {# rendered as part of a pair on the previous iteration #}
+        {% else %}
+          {% set first_dot_key = cat_key ~ "." ~ field_name %}
+          {% set first_meta = field_meta.get(first_dot_key, {}) %}
+          {% set field_group = first_meta.get("group", "") %}
+          {% if field_group and field_group != ns.current_group %}
+            <h3 class="config-subgroup">{{ field_group }}</h3>
+            {% set ns.current_group = field_group %}
+          {% endif %}
+          {% if field_name in pairs %}
+            <div class="config-field-row">
+              {% set partner_name = pairs[field_name] %}
+              {% for fname, fvalue in [(field_name, field_value), (partner_name, fields[partner_name])] %}
+                {% set dot_key = cat_key ~ "." ~ fname %}
+                {% set meta = field_meta.get(dot_key, {"label": fname, "field_type": "text", "description": {"short": "", "long": None}}) %}
+                {% set signal_name = dot_key.replace(".", "_") %}
+                {% set key = dot_key %}
+                {% set label = meta.label %}
+                {% set field_type = meta.field_type %}
+                {% set value = fvalue %}
+                {% set description = meta.description %}
+                {% set options = meta.get("options", []) %}
+                {% set show_when = meta.get("show_when", "") %}
+                {% include "fragments/config_field.html" %}
+              {% endfor %}
+            </div>
+          {% else %}
+            {% set dot_key = cat_key ~ "." ~ field_name %}
+            {% set meta = field_meta.get(dot_key, {"label": field_name, "field_type": "text", "description": {"short": "", "long": None}}) %}
+            {% set signal_name = dot_key.replace(".", "_") %}
+            {% set key = dot_key %}
+            {% set label = meta.label %}
+            {% set field_type = meta.field_type %}
+            {% set value = field_value %}
+            {% set description = meta.description %}
+            {% set options = meta.get("options", []) %}
+            {% set show_when = meta.get("show_when", "") %}
+            {% include "fragments/config_field.html" %}
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>
+{% endblock %}

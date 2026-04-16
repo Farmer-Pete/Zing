@@ -22,6 +22,10 @@ gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 
 Store the PR number, head branch, base branch, title, and URL for later use.
 
+{% if git.workflow_mode == "worktree" or git.workflow_mode == "ask" -%}
+If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.
+{%- endif %}
+
 Get the `{owner}/{repo}` from:
 ```
 gh repo view --json nameWithOwner --jq '.nameWithOwner'
@@ -207,7 +211,7 @@ General comments ({issue_comment_count}):
 ...
 ```
 
-Omit any group header if that group has zero items. Truncate long comment bodies to ~100 characters with "..." for the summary view.
+Omit any group header if that group has zero items. Truncate long comment bodies to ~{{ thresholds.comment_truncation_chars }} characters with "..." for the summary view.
 
 ### Create comment-level tasks
 

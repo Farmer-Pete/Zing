@@ -41,7 +41,10 @@ def test_install_help():
 
 def test_install_claude():
     runner = CliRunner()
-    with patch("zing_ai.installer.install_claude") as mock:
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_claude") as mock,
+    ):
         result = runner.invoke(cli, ["install", "--claude"])
     assert result.exit_code == 0
     mock.assert_called_once()
@@ -49,7 +52,10 @@ def test_install_claude():
 
 def test_install_opencode():
     runner = CliRunner()
-    with patch("zing_ai.installer.install_opencode") as mock:
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_opencode") as mock,
+    ):
         result = runner.invoke(cli, ["install", "--opencode"])
     assert result.exit_code == 0
     mock.assert_called_once()
@@ -58,6 +64,7 @@ def test_install_opencode():
 def test_install_all():
     runner = CliRunner()
     with (
+        patch("zing_ai.config.load_config"),
         patch("zing_ai.installer.install_claude") as mock_claude,
         patch("zing_ai.installer.install_opencode") as mock_opencode,
     ):
@@ -70,6 +77,7 @@ def test_install_all():
 def test_install_claude_and_opencode():
     runner = CliRunner()
     with (
+        patch("zing_ai.config.load_config"),
         patch("zing_ai.installer.install_claude") as mock_claude,
         patch("zing_ai.installer.install_opencode") as mock_opencode,
     ):
@@ -149,7 +157,10 @@ def test_resolve_all_with_opencode_is_error():
 
 def test_interactive_choice_1_selects_claude():
     runner = CliRunner()
-    with patch("zing_ai.installer.install_claude") as mock:
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_claude") as mock,
+    ):
         result = runner.invoke(cli, ["install"], input="1\n")
     assert result.exit_code == 0
     mock.assert_called_once()
@@ -157,7 +168,10 @@ def test_interactive_choice_1_selects_claude():
 
 def test_interactive_choice_2_selects_opencode():
     runner = CliRunner()
-    with patch("zing_ai.installer.install_opencode") as mock:
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_opencode") as mock,
+    ):
         result = runner.invoke(cli, ["install"], input="2\n")
     assert result.exit_code == 0
     mock.assert_called_once()
@@ -166,6 +180,7 @@ def test_interactive_choice_2_selects_opencode():
 def test_interactive_choice_3_selects_all():
     runner = CliRunner()
     with (
+        patch("zing_ai.config.load_config"),
         patch("zing_ai.installer.install_claude") as mock_claude,
         patch("zing_ai.installer.install_opencode") as mock_opencode,
     ):
@@ -177,7 +192,10 @@ def test_interactive_choice_3_selects_all():
 
 def test_interactive_invalid_then_valid():
     runner = CliRunner()
-    with patch("zing_ai.installer.install_claude") as mock:
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_claude") as mock,
+    ):
         result = runner.invoke(cli, ["install"], input="x\n1\n")
     assert result.exit_code == 0
     mock.assert_called_once()
@@ -185,7 +203,10 @@ def test_interactive_invalid_then_valid():
 
 def test_interactive_eof_exits_130():
     runner = CliRunner()
-    with patch("click.prompt", side_effect=EOFError):
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("click.prompt", side_effect=EOFError),
+    ):
         result = runner.invoke(cli, ["install"])
     assert result.exit_code == 130
 
@@ -196,6 +217,46 @@ def test_reapply_patches_dispatches():
         result = runner.invoke(cli, ["reapply-patches", "--opencode"])
     assert result.exit_code == 0
     mock.assert_called_once()
+
+
+# -- install with config loading ---------------------------------------------
+
+
+def test_install_loads_default_config():
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_load_config,
+        patch("zing_ai.installer.install_claude") as mock_install,
+    ):
+        result = runner.invoke(cli, ["install", "--claude"])
+    assert result.exit_code == 0, result.output
+    mock_install.assert_called_once()
+    _, kwargs = mock_install.call_args
+    assert "config" in kwargs
+    assert kwargs["config"] is mock_load_config.return_value
+
+
+def test_install_surfaces_config_error():
+    from zing_ai.config import ConfigError
+
+    runner = CliRunner()
+    with patch("zing_ai.config.load_config", side_effect=ConfigError("bad toml")):
+        result = runner.invoke(cli, ["install", "--claude"])
+    assert result.exit_code == 1
+    assert "bad toml" in result.output
+
+
+def test_install_surfaces_install_error():
+    from zing_ai.installer import InstallError
+
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config"),
+        patch("zing_ai.installer.install_claude", side_effect=InstallError("boom")),
+    ):
+        result = runner.invoke(cli, ["install", "--claude"])
+    assert result.exit_code == 1
+    assert "boom" in result.output
 
 
 # -- MCP command --------------------------------------------------------------

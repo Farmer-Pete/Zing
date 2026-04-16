@@ -1,0 +1,28 @@
+<div class="install-status" id="install-status-{{ status.runtime }}">
+  <div class="install-status-header">
+    <h3>{{ status.runtime }}</h3>
+    {% if status.stale %}
+      <span class="status-badge status-pending">Updates pending</span>
+    {% else %}
+      <span class="status-badge status-fresh">Up to date</span>
+    {% endif %}
+  </div>
+  <div class="install-target">{{ status.target_dir }}</div>
+  <p class="install-when">
+    {% if status.installed_at %}
+      Last installed <span title="{{ status.installed_at }}">{{ status.installed_at | humanize_time }}</span>
+    {% else %}
+      Not installed
+    {% endif %}
+  </p>
+  {% if status.error %}
+    <p class="install-error">{{ status.error }}</p>
+  {% endif %}
+  <div class="install-actions">
+    <button class="install-btn{% if not status.stale %} install-btn--fresh{% endif %}"
+            aria-label="{% if status.installed_at %}Reinstall{% else %}Install{% endif %} {{ status.runtime }}"
+            data-on:click="@post('/install/run', { payload: { runtime: '{{ status.runtime }}' } })">
+      {% if status.installed_at %}Reinstall{% else %}Install{% endif %}
+    </button>
+  </div>
+</div>
