@@ -8,6 +8,8 @@ tested with synthetic data.
 
 from __future__ import annotations
 
+import re
+
 from zing_ai.server.models import Session, WorkflowStep
 from zing_ai.server.models_external import (
     GitHubPR,
@@ -24,6 +26,19 @@ AUDIT_STEP_NAMES: frozenset[str] = frozenset(
         "custom-audit",
     }
 )
+
+_TICKET_RE = re.compile(r"[A-Z]+-\d+", re.IGNORECASE)
+
+
+def _parse_ticket_ids(pr: GitHubPR) -> set[str]:
+    """Return the set of ticket identifiers referenced by a PR.
+
+    Scans the PR's head ref, title, and body for matches of ``[A-Z]+-\\d+``
+    (case-insensitive), uppercasing each match so lowercase branch names like
+    ``bak-1179/feature`` normalise to ``BAK-1179``.
+    """
+    text = " ".join(filter(None, [pr.head_ref, pr.title, pr.body]))
+    return {m.upper() for m in _TICKET_RE.findall(text)}
 
 
 def aggregate(
