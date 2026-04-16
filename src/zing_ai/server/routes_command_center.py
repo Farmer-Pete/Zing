@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 
+from datastar_py import ServerSentEventGenerator as SSE
+from datastar_py.consts import ElementPatchMode
+from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, Request
 from fastapi.applications import FastAPI
 from fastapi.responses import HTMLResponse
@@ -62,3 +66,60 @@ async def get_command_center(request: Request) -> HTMLResponse:
             last_error=request.app.state.external_cache.last_error,
         )
     )
+
+
+@router.get("/command-center/events")
+@datastar_response
+async def command_center_events(request: Request):  # noqa: ANN201
+    """SSE endpoint that pushes Command Center updates to the browser."""
+
+    async def _generate():  # noqa: ANN202
+        """Yield SSE events for hub changes, inbox updates, and poll status."""
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+        request.app.state.cc_queues.append(queue)  # type: ignore[attr-defined]
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except TimeoutError:
+                    yield SSE.patch_signals({"_heartbeat": True})
+                    continue
+                kind, _, target = event.partition(":")
+                if kind == "hub_changed":
+                    html = render_hub_fragment(request.app, target)  # type: ignore[arg-type]
+                    if html:
+                        yield SSE.patch_elements(
+                            html,
+                            selector=f"#hub-{target}",
+                            mode=ElementPatchMode.OUTER,
+                        )
+                elif kind == "inbox_changed":
+                    html = render_inbox_fragment(request.app)  # type: ignore[arg-type]
+                    yield SSE.patch_elements(
+                        html,
+                        selector="#inbox-list",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                elif kind in ("hub_added", "hub_removed"):
+                    # Full hub-list re-render.
+                    _, groups = _build_view(request.app)  # type: ignore[arg-type]
+                    html = render("fragments/hubs_list.html", groups=groups)
+                    yield SSE.patch_elements(
+                        html,
+                        selector="#hubs-list",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                elif kind == "poll_status":
+                    cache = request.app.state.external_cache  # type: ignore[attr-defined]
+                    yield SSE.patch_signals(
+                        {
+                            "lastPolledAt": cache.last_polled_at.isoformat()
+                            if cache.last_polled_at
+                            else "",
+                            "lastError": cache.last_error or "",
+                        }
+                    )
+        finally:
+            request.app.state.cc_queues.remove(queue)  # type: ignore[attr-defined]
+
+    return _generate()

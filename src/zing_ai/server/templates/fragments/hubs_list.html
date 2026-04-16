@@ -1,0 +1,9 @@
+{% for team, hubs in groups.items() %}
+    {% set group = {"team": team, "hubs": hubs} %}
+    {% include "fragments/cc_group_header.html" %}
+    <div class="group-body">
+        {% for hub in hubs %}
+            {% include "fragments/cc_hub.html" %}
+        {% endfor %}
+    </div>
+{% endfor %}

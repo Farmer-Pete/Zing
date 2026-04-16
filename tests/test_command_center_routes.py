@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -145,3 +149,159 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
         resp = self.client.get("/command-center")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("hot", resp.text)
+
+
+class TestCommandCenterSSE(CommandCenterTestBase):
+    """Tests for the /command-center/events SSE endpoint."""
+
+    def _get_cc_queues(self) -> list:
+        """Return the cc_queues list from the FastAPI app state."""
+        fastapi_app = self._get_fastapi_app()
+        return fastapi_app.state.cc_queues  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Helper: call the SSE handler directly and collect output chunks.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _collect_cc_events(
+        app_instance,  # noqa: ANN001
+        events: list[str],
+    ) -> str:
+        """Call command_center_events directly, push events via queue, return SSE text."""
+        from unittest.mock import MagicMock
+
+        from zing_ai.server.routes_command_center import command_center_events
+
+        # Find the FastAPI app inside the ASGI stack.
+        starlette_app = app_instance.app  # type: ignore[attr-defined]
+        fastapi_app = None
+        for route in starlette_app.routes:
+            candidate = getattr(route, "app", None)
+            if isinstance(candidate, FastAPI):
+                fastapi_app = candidate
+                break
+        assert fastapi_app is not None
+
+        request = MagicMock()
+        request.app = fastapi_app
+
+        # Pre-populate a queue with our test events.
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+        for ev in events:
+            queue.put_nowait(ev)
+
+        real_wait_for = asyncio.wait_for
+        delivery_count = 0
+
+        async def _fast_wait_for(coro, *, timeout=None):  # noqa: ANN001,ANN201
+            nonlocal delivery_count
+            delivery_count += 1
+            if delivery_count <= len(events):
+                return await real_wait_for(coro, timeout=0.5)
+            coro.close()
+            raise asyncio.CancelledError
+
+        chunks: list[str] = []
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.asyncio.Queue",
+                return_value=queue,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.asyncio.wait_for",
+                _fast_wait_for,
+            ),
+        ):
+            try:
+                response = await command_center_events(request)
+                async for chunk in response.body_iterator:
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode()
+                    chunks.append(chunk)  # type: ignore[arg-type]
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+
+        # Clean up queue if still registered.
+        cc_queues = fastapi_app.state.cc_queues  # type: ignore[attr-defined]
+        if queue in cc_queues:
+            cc_queues.remove(queue)
+
+        return "".join(chunks)
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_sse_connection_appends_queue(self) -> None:
+        """Opening the SSE connection appends a queue to cc_queues."""
+        cc_queues = self._get_cc_queues()
+        initial_len = len(cc_queues)
+
+        # Use TestClient streaming; the connection stays open until we stop iterating.
+        stop_event = threading.Event()
+
+        def _stream() -> None:
+            with self.client.stream("GET", "/command-center/events") as resp:
+                assert resp.status_code == 200
+                # Signal the main thread that the connection is open.
+                stop_event.set()
+                # Block in iteration so the server keeps the queue registered.
+                for _ in resp.iter_lines():
+                    if stop_event.is_set() and len(cc_queues) > initial_len:
+                        break
+
+        t = threading.Thread(target=_stream, daemon=True)
+        t.start()
+        stop_event.wait(timeout=5.0)
+        # Give the server a moment to append the queue.
+        time.sleep(0.1)
+        self.assertGreater(len(cc_queues), initial_len)
+
+    def test_sse_dispatches_inbox_changed(self) -> None:
+        """An inbox_changed event causes a patch to #inbox-list."""
+        body = asyncio.run(
+            self._collect_cc_events(self.app_instance, ["inbox_changed"]),
+        )
+        self.assertIn("#inbox-list", body)
+
+    def test_sse_disconnect_removes_queue(self) -> None:
+        """After the SSE connection closes, the queue is removed from cc_queues."""
+        fastapi_app = self._get_fastapi_app()
+
+        async def _run() -> int:
+            from unittest.mock import MagicMock
+
+            from zing_ai.server.routes_command_center import command_center_events
+
+            request = MagicMock()
+            request.app = fastapi_app
+
+            queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+            # Raise CancelledError immediately so the generator's finally block fires.
+
+            async def _immediate_cancel(coro, *, timeout=None):  # noqa: ANN001,ANN201
+                coro.close()
+                raise asyncio.CancelledError
+
+            with (
+                patch(
+                    "zing_ai.server.routes_command_center.asyncio.Queue",
+                    return_value=queue,
+                ),
+                patch(
+                    "zing_ai.server.routes_command_center.asyncio.wait_for",
+                    _immediate_cancel,
+                ),
+            ):
+                try:
+                    response = await command_center_events(request)
+                    async for _ in response.body_iterator:
+                        pass
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+
+            return len(fastapi_app.state.cc_queues)  # type: ignore[attr-defined]
+
+        remaining = asyncio.run(_run())
+        self.assertEqual(remaining, 0)
