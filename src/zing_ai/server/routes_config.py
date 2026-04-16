@@ -52,7 +52,7 @@ def get_config_page() -> HTMLResponse:
 @router.post("/config/save/{category}")
 def post_save_config(category: str, payload: dict[str, Any]) -> JSONResponse:
     """Save a config section by category name."""
-    valid = {"thresholds", "models", "git", "agents", "report"}
+    valid = {"thresholds", "models", "git", "agents", "report", "command_center"}
     if category not in valid:
         return JSONResponse({"error": f"unknown category: {category}"}, status_code=400)
     try:

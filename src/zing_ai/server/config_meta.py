@@ -268,4 +268,32 @@ FIELD_META: dict[str, dict] = {
             "long": "Default `%Y-%m-%d-%H%M` sorts chronologically by filename.",
         },
     },
+    # category: command_center
+    "command_center.github_repo": {
+        "label": "GitHub repo",
+        "field_type": "text",
+        "description": {
+            "short": "GitHub repo to poll for open PRs (format: owner/repo).",
+            "long": "Used by the Command Center dashboard to surface open PRs and review requests.",
+        },
+        "group": "Command Center",
+    },
+    "command_center.linear_poll_seconds": {
+        "label": "Linear poll interval (s)",
+        "field_type": "number",
+        "description": {
+            "short": "How often the Command Center polls Linear for ticket updates.",
+            "long": "Lower values give fresher data but increase API request volume against Linear's rate limits.",  # noqa: E501
+        },
+        "group": "Command Center",
+    },
+    "command_center.github_poll_seconds": {
+        "label": "GitHub poll interval (s)",
+        "field_type": "number",
+        "description": {
+            "short": "How often the Command Center polls GitHub for open PR updates.",
+            "long": "Lower values give fresher data but increase API request volume against GitHub's rate limits.",  # noqa: E501
+        },
+        "group": "Command Center",
+    },
 }
