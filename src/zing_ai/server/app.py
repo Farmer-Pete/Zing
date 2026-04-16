@@ -125,6 +125,49 @@ def create_app(
     """
     sm = session_manager or SessionManager()
 
+    # Initialise cc_queues up-front so the session-event listener can close
+    # over it. We also assign it to fastapi_app.state below for the SSE route
+    # + poller; both see the same list object.
+    cc_queues_list: list[asyncio.Queue[str]] = cc_queues if cc_queues is not None else []
+
+    # Command Center event types that should trigger an SSE refresh. Each tuple is
+    # (SessionManager event, list of cc events to dispatch). "hub_changed:<key>"
+    # is appended separately after we resolve the session's hub signal_key.
+    _CC_EVENT_DISPATCH: dict[str, tuple[str, ...]] = {
+        # Hub appears / disappears -> full re-render of the hubs list.
+        "session_created": ("inbox_changed", "hub_added"),
+        "session_cleaned_up": ("inbox_changed", "hub_removed"),
+        # Hub state changes -> inbox re-render + targeted hub patch.
+        "session_updated": ("inbox_changed",),
+        "step_started": ("inbox_changed",),
+        "step_ready": ("inbox_changed",),
+        "review_submitted": ("inbox_changed",),
+        "finding_added": ("inbox_changed",),
+        "agents_done": ("inbox_changed",),
+    }
+
+    def _hub_signal_key_for_session(session_id: str) -> str:
+        """Resolve the hub signal_key this session maps to.
+
+        Mirrors ``Hub.signal_key``: ticket-bound sessions use the lowercased
+        ticket id (``BAK-1179`` -> ``bak_1179``); orphan sessions use their
+        session-hub id (``session-<id>`` -> ``session_<id>``).
+        """
+        session = sm.get_session(session_id)
+        if session is not None and session.ticket_id:
+            raw = session.ticket_id
+        else:
+            raw = f"session-{session_id}"
+        return raw.lower().replace("-", "_").replace(" ", "_")
+
+    def _notify_cc_connections(event: str) -> None:
+        """Push an SSE event onto every connected Command Center queue."""
+        for q in list(cc_queues_list):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning("cc_queues queue full; dropping event %s", event)
+
     # Map SessionManager events to the existing SSE/dashboard notification functions
     def _on_session_event(event_type: str, session_id: str) -> None:
         sse_events = {
@@ -157,6 +200,16 @@ def create_app(
             _notify_sse_connections(session_id, sse_events[event_type])
         if event_type in dashboard_events:
             _notify_dashboard_connections(dashboard_events[event_type])
+        # Command Center bridge: dispatch inbox/hub changes to cc_queues so the
+        # /command-center page reflects local session-manager state without
+        # waiting for the next external poll cycle.
+        cc_events = _CC_EVENT_DISPATCH.get(event_type)
+        if cc_events:
+            for ev in cc_events:
+                _notify_cc_connections(ev)
+            # Also emit a targeted hub_changed patch so the SSE handler can
+            # re-render just that hub. No-op if no client has that hub open.
+            _notify_cc_connections(f"hub_changed:{_hub_signal_key_for_session(session_id)}")
 
     sm.add_listener(_on_session_event)
 
@@ -181,7 +234,6 @@ def create_app(
     mcp_starlette = mcp_server.streamable_http_app()
 
     external_cache = external_cache or ExternalCache()
-    cc_queues = cc_queues if cc_queues is not None else []
 
     fastapi_app = FastAPI(
         title="Zing Batch Review",
@@ -189,7 +241,9 @@ def create_app(
     )
     fastapi_app.state.session_manager = sm
     fastapi_app.state.external_cache = external_cache
-    fastapi_app.state.cc_queues = cc_queues
+    # Reuse the same list object the session-event listener closed over; both
+    # the SSE route and the listener mutate it as clients connect/disconnect.
+    fastapi_app.state.cc_queues = cc_queues_list
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has
