@@ -332,6 +332,42 @@ class TestUrgencyComputation(unittest.TestCase):
         self.assertEqual(len(hubs), 1)
         self.assertEqual(hubs[0].urgency, "cool")
 
+    def test_ready_audit_with_only_evaluation_findings_stays_cool(self) -> None:
+        """Evaluation findings are informational — they must not drive 'hot' urgency.
+
+        Regression: the old gate was ``step.state == READY and step.findings``
+        which counted any finding (including purely informational evaluation
+        findings). Now only actionable findings (text/triage) trigger hot.
+        """
+        from zing_ai.server.models import CriterionRating, EvaluationFinding, Rating
+
+        eval_finding = EvaluationFinding(
+            title="Audit complete",
+            criteria=[CriterionRating(name="crit", rating=Rating.STRONG, justification="n/a")],
+        )
+        audit_step = _make_workflow_step(
+            step_name="build-audit",
+            state=SessionState.READY,
+            findings=[eval_finding],
+        )
+        session = _make_session(
+            session_id="audit-only-eval",
+            ticket_id="BAK-1",
+            steps=[audit_step],
+        )
+        issue = _make_issue(identifier="BAK-1")
+
+        _, hubs = aggregate(
+            issues=[issue],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        # Evaluation-only findings don't warrant a hot badge.
+        self.assertEqual(hubs[0].urgency, "cool")
+
     def test_empty_hub_is_cool(self) -> None:
         """A fresh ticket hub with no PRs/sessions/audits is the common initial state.
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from zing_ai.server.models import Session, SessionState
+from zing_ai.server.models import Session, SessionState, WorkflowStep
 from zing_ai.server.models_external import (
     GitHubPR,
     Hub,
@@ -28,6 +28,18 @@ AUDIT_STEP_NAMES: frozenset[str] = frozenset(
         "custom-audit",
     }
 )
+
+
+def _actionable_findings(step: WorkflowStep) -> list:
+    """Return the subset of *step*'s findings that require user action.
+
+    Evaluation findings are informational (criteria + litmus tests + warnings)
+    and don't drive user input. Excluding them from the "hot" urgency gate
+    prevents a hub that's really just been audited for context from screaming
+    for attention.
+    """
+    return [f for f in step.findings if getattr(f, "type", None) != "evaluation"]
+
 
 # Ticket ids look like ``BAK-1179`` / ``FRO-42``. Require two+ letter prefixes
 # and word boundaries so noisy tokens like ``UTF-8``/``SHA-256``/``PR-1`` don't
@@ -58,7 +70,7 @@ def _compute_urgency(hub: Hub, current_username: str) -> HubUrgency:
     """
     # --- hot checks ---
     for audit_step in hub.audits:
-        if audit_step.state == SessionState.READY and audit_step.findings:
+        if audit_step.state == SessionState.READY and _actionable_findings(audit_step):
             return "hot"
 
     for pr in hub.prs:
@@ -203,9 +215,13 @@ def _derive_inbox_items(
         hub_label = hub.id if hub.kind == "ticket" else "Standalone"
 
         # --- Audit findings ---
-        ready_audit_steps = [s for s in hub.audits if s.state == SessionState.READY and s.findings]
+        # Only count findings that require user action (skip informational
+        # evaluation findings). See _actionable_findings.
+        ready_audit_steps = [
+            s for s in hub.audits if s.state == SessionState.READY and _actionable_findings(s)
+        ]
         if ready_audit_steps:
-            n = sum(len(s.findings) for s in ready_audit_steps)
+            n = sum(len(_actionable_findings(s)) for s in ready_audit_steps)
             # Use the first ready step's session for the target URL
             first_step = ready_audit_steps[0]
             session_id = step_to_session_id.get(first_step.step_id, "")
