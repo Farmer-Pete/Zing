@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from zing_ai.config import CommandCenterConfig
+from zing_ai.config import CommandCenterConfig, load_config
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.github_client import GitHubAPIError, GitHubClient
 from zing_ai.server.linear_client import LinearAPIError, LinearClient
@@ -44,9 +44,22 @@ class ExternalPoller:
         self._config = config
         self._linear: LinearClient | None = None
         self._github: GitHubClient | None = None
-        # Validate config + env vars at init; surface in cache.last_error.
+        # Try creating clients at startup; if config/env is incomplete the
+        # error surfaces in cache.last_error and _ensure_clients returns False.
+        self._ensure_clients()
+
+    def _ensure_clients(self) -> bool:
+        """Return True if HTTP clients are available. Try to create them if missing.
+
+        When the user updates ``command_center.github_repo`` via ``/config``
+        (or sets env vars after the server has started), the next call to
+        ``_ensure_clients`` picks up the changes and instantiates the client(s)
+        that were previously ``None``.
+        """
+        if self._linear is not None and self._github is not None:
+            return True
         problems: list[str] = []
-        if not config.github_repo:
+        if not self._config.github_repo:
             problems.append(
                 "GitHub repo not configured (set command_center.github_repo in /config)"
             )
@@ -56,9 +69,10 @@ class ExternalPoller:
             problems.append("GITHUB_TOKEN env var not set")
         if problems:
             self._cache.last_error = " | ".join(problems)
-        else:
-            self._linear = LinearClient(api_key=os.environ["LINEAR_API_KEY"])
-            self._github = GitHubClient(token=os.environ["GITHUB_TOKEN"])
+            return False
+        self._linear = LinearClient(api_key=os.environ["LINEAR_API_KEY"])
+        self._github = GitHubClient(token=os.environ["GITHUB_TOKEN"])
+        return True
 
     async def aclose(self) -> None:
         if self._linear:
@@ -68,13 +82,16 @@ class ExternalPoller:
 
     async def _poll_once(self) -> None:
         """One full poll cycle. Testable in isolation."""
-        if self._linear is None or self._github is None:
-            # Config/env missing; cache.last_error was set in __init__.
+        if not self._ensure_clients():
+            # Config/env missing; _ensure_clients wrote cache.last_error.
             # Still dispatch poll_status so SSE clients that connect AFTER
             # startup see the persistent configuration error (otherwise the
             # error banner only updates on initial page-render).
             self._dispatch("poll_status")
             return
+        # _ensure_clients guarantees both are set when it returns True.
+        assert self._linear is not None  # pyright narrow
+        assert self._github is not None  # pyright narrow
         try:
             issues, prs, username = await asyncio.gather(
                 self._linear.fetch_my_open_issues(),
@@ -124,11 +141,25 @@ class ExternalPoller:
                 logger.warning("SSE queue full; dropping event %s", event)
 
     async def run(self) -> None:
-        """Forever loop. Survives single-iteration failures."""
-        poll_seconds = min(self._config.linear_poll_seconds, self._config.github_poll_seconds)
+        """Forever loop. Survives single-iteration failures.
+
+        Re-reads the on-disk config at the top of every iteration so changes
+        made via ``/config`` (poll intervals, ``github_repo``) take effect
+        without a server restart. The TOML read is microseconds; this runs at
+        most once per ``poll_seconds`` (~60s).
+        """
         while True:
+            # Reload config so /config UI changes apply without restart.
+            try:
+                self._config = load_config().command_center
+            except Exception:
+                logger.warning("Failed to reload config; using previous values")
             try:
                 await self._poll_once()
             except Exception:
                 logger.exception("Poller iteration failed; will retry")
+            poll_seconds = min(
+                self._config.linear_poll_seconds,
+                self._config.github_poll_seconds,
+            )
             await asyncio.sleep(poll_seconds)
