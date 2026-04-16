@@ -103,6 +103,8 @@ class ExternalPoller:
         # don't parse it as local time.
         self._cache.last_polled_at = datetime.now(UTC)
         self._cache.last_error = None
+        # Bump the cache version so _build_view's memo invalidates.
+        self._cache.version += 1
         # Dispatch SSE events for what changed.
         new_issue_ids = {i.identifier for i in issues}
         new_pr_numbers = {p.number for p in prs}

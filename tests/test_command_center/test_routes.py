@@ -70,6 +70,35 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("nothing to do", resp.text)
 
+    def test_build_view_memoises_within_same_fingerprint(self) -> None:
+        """Two consecutive _build_view calls with no state change reuse the cached result.
+
+        Regression: without memo, each SSE event forced a full aggregation
+        pass even when issues/PRs/sessions were unchanged. Now ``cache.version``
+        plus a per-session signature short-circuits the second call.
+        """
+        from unittest.mock import patch
+
+        from zing_ai.server.routes_command_center import _build_view
+
+        fastapi_app = self._get_fastapi_app()
+        fastapi_app.state.external_cache.issues = [_make_issue(identifier="BAK-1")]
+
+        import zing_ai.server.routes_command_center as rcc
+
+        with patch.object(rcc, "aggregate", wraps=rcc.aggregate) as agg_spy:
+            _build_view(fastapi_app)
+            _build_view(fastapi_app)
+
+        # Aggregate runs on the first call, short-circuits on the second.
+        self.assertEqual(agg_spy.call_count, 1)
+
+        # After version bump, the memo invalidates and aggregate runs again.
+        fastapi_app.state.external_cache.version += 1
+        with patch.object(rcc, "aggregate", wraps=rcc.aggregate) as agg_spy2:
+            _build_view(fastapi_app)
+        self.assertEqual(agg_spy2.call_count, 1)
+
     def test_hub_renders_with_signal_key_attributes(self) -> None:
         """Injecting an issue produces a hub with correct Datastar signal key attributes."""
         fastapi_app = self._get_fastapi_app()

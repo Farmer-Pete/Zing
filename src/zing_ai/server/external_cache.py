@@ -27,3 +27,8 @@ class ExternalCache(BaseModel):
     github_username: str = ""
     last_polled_at: datetime | None = None
     last_error: str | None = None
+    # Monotonic counter bumped by :class:`ExternalPoller` whenever the issue/PR
+    # snapshot changes. Used by :func:`routes_command_center._build_view` as a
+    # cheap cache key so consecutive SSE events in the same poll cycle don't
+    # re-aggregate the entire world.
+    version: int = 0

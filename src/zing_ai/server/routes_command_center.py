@@ -49,10 +49,41 @@ def _format_last_polled(dt: datetime | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def _view_fingerprint(cache, sessions: list) -> tuple:  # noqa: ANN001
+    """Cheap fingerprint that captures what ``_build_view`` depends on.
+
+    Uses ``cache.version`` (bumped by the poller on snapshot change) plus a
+    per-session tuple of (id, ticket_id, step count, last-step state). Two
+    SSE events queued within the same poll cycle typically share the same
+    fingerprint, which lets ``_build_view`` skip re-aggregating the world.
+    """
+    sessions_sig = tuple(
+        (
+            s.session_id,
+            s.ticket_id,
+            len(s.steps),
+            s.steps[-1].state.value if s.steps else "",
+        )
+        for s in sessions
+    )
+    return (cache.version, sessions_sig)
+
+
 def _build_view(app: FastAPI) -> tuple[list, dict[str, list]]:
-    """Re-aggregate from cache + sessions, group hubs by team."""
+    """Re-aggregate from cache + sessions, group hubs by team.
+
+    Results are memoised on ``app.state._cc_view_memo`` keyed on
+    :func:`_view_fingerprint`. Back-to-back SSE events (``hub_added`` +
+    ``inbox_changed`` fired by one poll) reuse the same aggregation rather
+    than repeating the full O(issues + prs + sessions) pass per event.
+    """
     cache = app.state.external_cache
     sessions = app.state.session_manager.list_sessions()
+    fingerprint = _view_fingerprint(cache, sessions)
+    memo = getattr(app.state, "_cc_view_memo", None)
+    if memo is not None and memo[0] == fingerprint:
+        return memo[1]
+
     inbox_items, hubs = aggregate(
         cache.issues,
         cache.prs,
@@ -62,7 +93,9 @@ def _build_view(app: FastAPI) -> tuple[list, dict[str, list]]:
     groups: dict[str, list] = defaultdict(list)
     for hub in hubs:
         groups[hub.team or "Standalone"].append(hub)
-    return inbox_items, dict(groups)
+    result = (inbox_items, dict(groups))
+    app.state._cc_view_memo = (fingerprint, result)
+    return result
 
 
 def render_hub_fragment(app: FastAPI, hub_id: str) -> str:
