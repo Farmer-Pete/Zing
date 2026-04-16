@@ -74,12 +74,22 @@ class ReportConfig(BaseModel):
     datetime_format: str = "%Y-%m-%d-%H%M"
 
 
+PollSeconds = Annotated[int, Field(ge=10)]
+
+
+class CommandCenterConfig(BaseModel):
+    github_repo: str = ""  # e.g. "Farmer-Pete/Zing"
+    linear_poll_seconds: PollSeconds = 60
+    github_poll_seconds: PollSeconds = 60
+
+
 class Config(BaseModel):
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
+    command_center: CommandCenterConfig = Field(default_factory=CommandCenterConfig)
 
 
 def config_path() -> Path:

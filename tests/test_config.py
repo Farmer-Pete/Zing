@@ -177,3 +177,49 @@ def test_save_uses_filelock(tmp_path: Path) -> None:
 
     assert len(raised) == 1, "Expected Timeout to be raised when lock is held"
     assert isinstance(raised[0], Timeout)
+
+
+# ---------------------------------------------------------------------------
+# CommandCenterConfig tests
+# ---------------------------------------------------------------------------
+
+
+def test_command_center_defaults() -> None:
+    """A freshly created Config has CommandCenterConfig with expected defaults."""
+    cfg = default_config()
+    assert cfg.command_center.github_repo == ""
+    assert cfg.command_center.linear_poll_seconds == 60
+    assert cfg.command_center.github_poll_seconds == 60
+
+
+def test_command_center_loads_from_toml(tmp_path: Path) -> None:
+    """A [command_center] section in config.toml is merged at load time."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        (
+            "[command_center]\n"
+            'github_repo = "Farmer-Pete/Zing"\n'
+            "linear_poll_seconds = 30\n"
+            "github_poll_seconds = 45\n"
+        ),
+        encoding="utf-8",
+    )
+    with _patch_config_path(tmp_path):
+        loaded = load_config()
+    assert loaded.command_center.github_repo == "Farmer-Pete/Zing"
+    assert loaded.command_center.linear_poll_seconds == 30
+    assert loaded.command_center.github_poll_seconds == 45
+
+
+def test_command_center_roundtrip(tmp_path: Path) -> None:
+    """save_config then load_config preserves CommandCenterConfig values."""
+    with _patch_config_path(tmp_path):
+        cfg = default_config()
+        cfg.command_center.github_repo = "Farmer-Pete/Zing"
+        cfg.command_center.linear_poll_seconds = 120
+        cfg.command_center.github_poll_seconds = 90
+        save_config(cfg)
+        loaded = load_config()
+    assert loaded.command_center.github_repo == "Farmer-Pete/Zing"
+    assert loaded.command_center.linear_poll_seconds == 120
+    assert loaded.command_center.github_poll_seconds == 90
