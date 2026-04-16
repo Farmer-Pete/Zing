@@ -252,14 +252,51 @@ If "Auto-apply all fixes": proceed to the `auto_apply` step.
 If "Fix with chat": proceed to the `discuss_findings` step.
 
 If "Create a PR":
-1. Run `gh pr create --draft --fill` via Bash to create a draft PR (use --fill to auto-populate from commits)
-2. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
+
+**Do NOT use `gh pr create --fill`.** `--fill` derives the title from the branch name (dashes turned into spaces) and the body from commit subjects — for a zing-driven build those commits read `Step 1+2+3: …`, `Step 4: …`, etc., which is useless as a PR description. Instead, author the title and body explicitly from the zing spec.
+
+1. **Compose the PR title.** Build it from the zing doc, not the branch name:
+   - If the zing doc's filename or frontmatter contains a ticket identifier (e.g., `BAK-1179`, `ENG-123`), prefix the title with it: `{TICKET-ID}: {short description}`.
+   - The `{short description}` should be a human-readable summary of what the change *does*, not a restatement of the ticket title. Keep it under 70 characters. Imperative mood ("Rewrite X as Y", "Fix Z on W", "Add foo to bar").
+   - If there is no zing doc (standalone invocation), fall back to the first commit's subject line, stripped of any `Step N:` prefix.
+
+2. **Compose the PR body.** Read the zing spec (if one exists) and extract the sections that belong in a PR description. A good body typically contains:
+   - **Summary** — what the change does and *why* (the problem being solved). Pull from the zing's Problem/Overview section. If the zing cites a Sentry issue, Linear ticket, or incident, mention it.
+   - **Measurements / empirical evidence** — if the zing contains benchmark numbers, EXPLAIN ANALYZE results, or before/after comparisons, include them as a table. Senior reviewers want to see the data, not take the author's word for it.
+   - **What's in the diff** — a short per-file or per-change breakdown of what actually changed and why. Mention any refactors that came out of build-audit (e.g., "extracted `build_queryset()` so tests and execute() share one path — came out of review").
+   - **Semantic safety / correctness notes** — if the zing documents things that were verified during review (NULL-handling, race conditions, backwards compatibility, migration safety), call them out. This is what separates a rigorous PR from a yolo one.
+   - **Out of scope** — if the zing has an "Out of scope" section, include it verbatim (or condensed). Reviewers need to know what you considered and rejected.
+   - **Test plan** — a bulleted checklist. Include what was run, what passed, and any manual verification still pending (e.g., "Watch the Sentry issue for occurrence drop after deploy").
+   - Close with a `Closes {TICKET-ID}.` line if a ticket was referenced.
+   - **Always** end the body with a Zing attribution footer on its own line, separated from the rest of the body by a blank line:
+
+     ```
+     ---
+
+     🤖 Created with [Zing](https://github.com/Farmer-Pete/Zing)
+     ```
+
+     This is mandatory on every PR created by this skill, whether or not a zing doc was involved.
+
+   If there is no zing doc, fall back to a minimal body built from `git log {base}...HEAD --format="%s%n%n%b"`, but still try to extract a Summary and Test plan from it.
+
+3. **Invoke `gh pr create --draft`** with explicit `--title` and `--body` flags. Use a HEREDOC for the body to preserve formatting:
+
+   ```bash
+   gh pr create --draft --title "{composed title}" --body "$(cat <<'EOF'
+   {composed body}
+   EOF
+   )"
+   ```
+
+4. If `gh pr create` fails, show the error message. Before asking the user, send a browser notification so they know input is needed:
    Call `notification_send(session_id, title="PR creation failed", body="The pull request could not be created. Manual intervention needed.")` where `session_id` is the session ID from the zing file frontmatter.
    Use AskUserQuestion:
-   - "Try again" (description: "Retry gh pr create --draft --fill")
-   - "Try without --fill" (description: "Run gh pr create --draft without --fill, letting gh prompt for title/body")
+   - "Try again" (description: "Retry gh pr create --draft with the composed title and body")
+   - "Edit title/body first" (description: "Show the composed title and body, let the user tweak before retrying")
    - "Skip PR creation" (description: "Continue without creating a PR")
-3. Show the user the PR URL
+
+5. Show the user the PR URL.
 
 Follow the `attribution_rule` from the shared review reference.
 
