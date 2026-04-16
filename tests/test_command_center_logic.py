@@ -345,5 +345,168 @@ class TestUrgencyComputation(unittest.TestCase):
         self.assertEqual(hubs[0].urgency, "cool")
 
 
+class TestInboxItems(unittest.TestCase):
+    """_derive_inbox_items builds the prioritised action list."""
+
+    def _make_issue(self, *, identifier: str = "BAK-1") -> LinearIssue:
+        return LinearIssue(
+            id="uuid-" + identifier,
+            identifier=identifier,
+            title="Fix bug",
+            state="In Progress",
+            assignee="alice",
+            team="Back End",
+            url=f"https://linear.app/t/{identifier}",
+            updated_at=datetime(2026, 4, 16, 0, 0, 0),
+        )
+
+    def _make_session(
+        self,
+        *,
+        session_id: str = "sess-1",
+        title: str = "Session 1",
+        ticket_id: str | None = None,
+        steps: list | None = None,
+    ) -> Session:
+        return Session(
+            session_id=session_id,
+            title=title,
+            ticket_id=ticket_id,
+            steps=steps or [],
+        )
+
+    def _make_workflow_step(
+        self,
+        *,
+        step_name: str,
+        sequence: int = 0,
+        state: SessionState = SessionState.PENDING,
+        findings: list | None = None,
+    ) -> WorkflowStep:
+        step = WorkflowStep(step_name=step_name, sequence=sequence)
+        step.state = state
+        if findings is not None:
+            step.findings = findings
+        return step
+
+    def test_audit_ready_creates_inbox_item(self) -> None:
+        """An audit step in READY state with findings generates a high-priority inbox item."""
+        from zing_ai.server.models import TextFinding
+
+        finding = TextFinding(title="Issue found", body="Details here")
+        audit_step = self._make_workflow_step(
+            step_name="build-audit",
+            state=SessionState.READY,
+            findings=[finding],
+        )
+        session = self._make_session(
+            session_id="audit-sess",
+            ticket_id="BAK-1",
+            steps=[audit_step],
+        )
+        issue = self._make_issue(identifier="BAK-1")
+
+        inbox, _ = aggregate(
+            issues=[issue],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(inbox), 1)
+        item = inbox[0]
+        self.assertEqual(item.priority, "high")
+        self.assertIn("1", item.action_text)
+        self.assertIn("audit", item.action_text.lower())
+        self.assertEqual(item.hub_id, "BAK-1")
+        self.assertEqual(item.hub_label, "BAK-1")
+        self.assertEqual(item.detail_text, "build-audit")
+        self.assertIn("audit-sess", item.target_url)
+
+    def test_pr_review_requested_creates_inbox_item(self) -> None:
+        """A PR with current_username in requested_reviewers yields a medium inbox item."""
+        pr = _make_pr(number=42, head_ref="feature/no-ticket")
+        pr.requested_reviewers = ["octocat"]
+        pr.review_decision = None
+
+        inbox, _ = aggregate(
+            issues=[],
+            prs=[pr],
+            sessions=[],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(inbox), 1)
+        item = inbox[0]
+        self.assertEqual(item.priority, "medium")
+        self.assertIn("42", item.action_text)
+        self.assertEqual(item.target_url, pr.url)
+        self.assertEqual(item.hub_id, "pr-42")
+        self.assertEqual(item.hub_label, "Standalone")
+
+    def test_inbox_sorted_high_priority_first(self) -> None:
+        """High-priority audit items appear before medium-priority PR review items."""
+        from zing_ai.server.models import TextFinding
+
+        finding = TextFinding(title="Issue found", body="Details here")
+        audit_step = self._make_workflow_step(
+            step_name="build-audit",
+            state=SessionState.READY,
+            findings=[finding],
+        )
+        session = self._make_session(
+            session_id="audit-sess",
+            ticket_id=None,
+            steps=[audit_step],
+        )
+
+        # PR review item — older so would sort first by time if priority were equal
+        pr = _make_pr(number=99, head_ref="feature/no-ticket")
+        pr.requested_reviewers = ["octocat"]
+        pr.review_decision = "REVIEW_REQUIRED"
+        pr.updated_at = datetime(2025, 1, 1, 0, 0, 0)  # very old
+
+        inbox, _ = aggregate(
+            issues=[],
+            prs=[pr],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertGreaterEqual(len(inbox), 2)
+        self.assertEqual(inbox[0].priority, "high")
+        self.assertEqual(inbox[1].priority, "medium")
+
+    def test_empty_inbox_when_no_actions_pending(self) -> None:
+        """No READY audit steps and no review requests means the inbox stays empty."""
+        from zing_ai.server.models import TextFinding
+
+        # Audit step is COMPLETED (not READY)
+        finding = TextFinding(title="Issue found", body="Details here")
+        audit_step = self._make_workflow_step(
+            step_name="build-audit",
+            state=SessionState.COMPLETED,
+            findings=[finding],
+        )
+        session = self._make_session(
+            session_id="done-sess",
+            ticket_id=None,
+            steps=[audit_step],
+        )
+
+        # PR where current user is NOT in requested_reviewers
+        pr = _make_pr(number=7, head_ref="feature/no-ticket")
+        pr.requested_reviewers = ["someone-else"]
+
+        inbox, _ = aggregate(
+            issues=[],
+            prs=[pr],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(inbox, [])
+
+
 if __name__ == "__main__":
     unittest.main()

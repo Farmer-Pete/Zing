@@ -9,6 +9,7 @@ tested with synthetic data.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from zing_ai.server.models import Session, SessionState
 from zing_ai.server.models_external import (
@@ -151,7 +152,92 @@ def aggregate(
     for hub in hubs:
         hub.urgency = _compute_urgency(hub, current_username)
 
-    return ([], hubs)
+    inbox_items = _derive_inbox_items(hubs, current_username, sessions)
+    return (inbox_items, hubs)
+
+
+def _format_time_waiting(since: datetime) -> str:
+    """Return a compact string like '5m', '2h', '3d' for time elapsed since *since*."""
+    delta = datetime.now() - since
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        return "—"
+    if total_seconds < 3600:
+        minutes = max(total_seconds // 60, 1)
+        return f"{minutes}m"
+    if total_seconds < 86400:
+        return f"{total_seconds // 3600}h"
+    return f"{delta.days}d"
+
+
+def _derive_inbox_items(
+    hubs: list[Hub],
+    current_username: str,
+    sessions: list[Session],
+) -> list[InboxItem]:
+    """Build the prioritized action-item list for the Command Center inbox.
+
+    Rules:
+    - Each audit step in READY state with findings -> high-priority InboxItem.
+    - Each PR with current_username in requested_reviewers and not APPROVED ->
+      medium-priority InboxItem.
+    Items are sorted: high priority first, then by time_waiting descending (longest wait first).
+    """
+    # Build a mapping from WorkflowStep.step_id -> session_id so we can
+    # construct target_url for audit items.
+    step_to_session_id: dict[str, str] = {}
+    for session in sessions:
+        for step in session.steps:
+            step_to_session_id[step.step_id] = session.session_id
+
+    items: list[tuple[int, datetime, InboxItem]] = []  # (priority_rank, since, item)
+
+    for hub in hubs:
+        hub_label = hub.id if hub.kind == "ticket" else "Standalone"
+
+        # --- Audit findings ---
+        ready_audit_steps = [s for s in hub.audits if s.state == SessionState.READY and s.findings]
+        if ready_audit_steps:
+            n = sum(len(s.findings) for s in ready_audit_steps)
+            # Use the first ready step's session for the target URL
+            first_step = ready_audit_steps[0]
+            session_id = step_to_session_id.get(first_step.step_id, "")
+            target_url = f"/{session_id}" if session_id else "/"
+            since = first_step.created_at
+            item = InboxItem(
+                priority="high",
+                action_text=f"Triage {n} audit finding{'s' if n != 1 else ''}",
+                detail_text=first_step.step_name,
+                hub_id=hub.id,
+                hub_label=hub_label,
+                time_waiting=_format_time_waiting(since),
+                target_url=target_url,
+            )
+            items.append((0, since, item))
+
+        # --- PR reviews ---
+        for pr in hub.prs:
+            if current_username in pr.requested_reviewers and pr.review_decision != "APPROVED":
+                one_more_needed = pr.review_decision == "REVIEW_REQUIRED"
+                action_text = f"Review PR #{pr.number}"
+                if one_more_needed:
+                    action_text += " (one more approval needed)"
+                since = pr.updated_at
+                detail_text = pr.title[:80] if pr.title else None
+                item = InboxItem(
+                    priority="medium",
+                    action_text=action_text,
+                    detail_text=detail_text,
+                    hub_id=hub.id,
+                    hub_label=hub_label,
+                    time_waiting=_format_time_waiting(since),
+                    target_url=pr.url,
+                )
+                items.append((1, since, item))
+
+    # Sort: high priority first (rank 0 < 1), then longest wait first (descending since)
+    items.sort(key=lambda x: (x[0], -x[1].timestamp()))
+    return [item for _, _, item in items]
 
 
 def _attach_session_to_hub(session: Session, hub: Hub) -> None:
