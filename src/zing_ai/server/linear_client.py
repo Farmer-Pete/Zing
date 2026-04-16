@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import httpx
 
 from zing_ai.server.models_external import LinearIssue
 
+logger = logging.getLogger(__name__)
+
 
 class LinearAPIError(Exception):
-    """Raised when the Linear API returns an error (HTTP non-200 or errors[] in body)."""
+    """Raised when the Linear API returns an error (HTTP non-200 or errors[] in body).
+
+    Attributes:
+        status_code: HTTP status code (None for GraphQL errors on HTTP 200).
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 _VIEWER_QUERY = "{ viewer { id } }"
@@ -65,7 +76,8 @@ class LinearClient:
             json={"query": query, "variables": variables or {}},
         )
         if resp.status_code != 200:
-            raise LinearAPIError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+            logger.warning("Linear HTTP %s response body: %s", resp.status_code, resp.text[:500])
+            raise LinearAPIError(f"HTTP {resp.status_code}", status_code=resp.status_code)
         body = resp.json()
         # Linear returns errors[] on HTTP 200 for rate limits, auth failures, etc.
         if body.get("errors"):

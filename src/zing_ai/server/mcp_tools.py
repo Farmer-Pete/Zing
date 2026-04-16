@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ import yaml
 from mcp.server.fastmcp import FastMCP
 
 from zing_ai.server.sessions import SessionManager
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 9876
 
@@ -73,24 +76,34 @@ def _extract_ticket_id_from_frontmatter(file_path: str) -> str | None:
 
     The file is expected to start with ``---\n<yaml>\n---\n<body>``.
     Returns ``None`` if the file cannot be read, has no frontmatter, or
-    ``ticket_id`` is not present in the frontmatter.  Never raises.
+    ``ticket_id`` is not present.
+
+    Narrowly catches the expected failure modes (file I/O, malformed YAML)
+    and logs a warning so the user/operator can see why a ``ticket_id`` was
+    silently dropped. Other exceptions (programming errors) propagate —
+    they shouldn't be masked by an overly broad ``except Exception``.
     """
     try:
         with open(file_path, encoding="utf-8") as fh:
             content = fh.read()
-        if not content.startswith("---"):
-            return None
-        # Find the closing '---'
-        end = content.find("\n---", 3)
-        if end == -1:
-            return None
-        frontmatter_text = content[3:end].strip()
-        data = yaml.safe_load(frontmatter_text)
-        if isinstance(data, dict):
-            value = data.get("ticket_id")
-            return str(value) if value is not None else None
-    except Exception:  # noqa: BLE001
+    except OSError as exc:
+        logger.warning("Failed to read %s for ticket_id extraction: %s", file_path, exc)
         return None
+    if not content.startswith("---"):
+        return None
+    # Find the closing '---'
+    end = content.find("\n---", 3)
+    if end == -1:
+        return None
+    frontmatter_text = content[3:end].strip()
+    try:
+        data = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError as exc:
+        logger.warning("Malformed YAML frontmatter in %s: %s", file_path, exc)
+        return None
+    if isinstance(data, dict):
+        value = data.get("ticket_id")
+        return str(value) if value is not None else None
     return None
 
 

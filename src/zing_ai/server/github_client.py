@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 
 from zing_ai.server.models_external import GitHubPR
 
+logger = logging.getLogger(__name__)
+
 
 class GitHubAPIError(Exception):
-    """Raised when the GitHub API returns a non-200 HTTP response."""
+    """Raised when the GitHub API returns a non-200 HTTP response.
+
+    Attributes:
+        status_code: HTTP status code from the failed response.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _map_pr(pr: dict) -> GitHubPR:
@@ -70,7 +82,8 @@ class GitHubClient:
         if self._username is None:
             r = await self._http.get("/user")
             if r.status_code != 200:
-                raise GitHubAPIError(f"HTTP {r.status_code}: {r.text[:200]}")
+                logger.warning("GitHub HTTP %s on /user: %s", r.status_code, r.text[:500])
+                raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
             login = r.json()["login"]
             assert isinstance(login, str)
             self._username = login
@@ -79,12 +92,17 @@ class GitHubClient:
     async def fetch_open_prs(self, repo: str) -> list[GitHubPR]:
         """Return all open pull requests for *repo* (``owner/name`` format).
 
-        Raises :class:`GitHubAPIError` for non-200 HTTP responses.
+        URL-encodes each path segment so a malformed ``repo`` value (typo,
+        hand-edited config) can't inject query/path fragments or traverse the
+        API. Raises :class:`GitHubAPIError` for non-200 HTTP responses.
         """
+        owner, _, name = repo.partition("/")
+        safe_path = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/pulls"
         r = await self._http.get(
-            f"/repos/{repo}/pulls",
+            safe_path,
             params={"state": "open", "per_page": 100},
         )
         if r.status_code != 200:
-            raise GitHubAPIError(f"HTTP {r.status_code}: {r.text[:200]}")
+            logger.warning("GitHub HTTP %s on %s: %s", r.status_code, safe_path, r.text[:500])
+            raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
         return [_map_pr(pr) for pr in r.json()]

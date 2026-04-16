@@ -15,6 +15,7 @@ from tests.test_command_center.conftest import (
 from zing_ai.config import CommandCenterConfig
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
+from zing_ai.server.github_client import GitHubAPIError
 from zing_ai.server.linear_client import LinearAPIError
 
 
@@ -136,6 +137,57 @@ class TestPollOnce(unittest.IsolatedAsyncioTestCase):
         # The failure must be reported to stdout/journal, not just the browser.
         assert any("External poll failed" in msg for msg in log_cm.output)
 
+    async def test_poll_once_handles_github_error(self) -> None:
+        """Symmetric to Linear-error: a GitHubAPIError must surface + dispatch poll_status."""
+        cache = ExternalCache()
+        q: asyncio.Queue[str] = asyncio.Queue()
+        config = _make_config()
+
+        with (
+            patch.dict(os.environ, _GOOD_ENV, clear=False),
+            patch("zing_ai.server.external_poller.LinearClient"),
+            patch("zing_ai.server.external_poller.GitHubClient"),
+        ):
+            poller = ExternalPoller(cache=cache, queues=[q], config=config)
+
+        mock_linear = MagicMock()
+        mock_linear.fetch_my_open_issues = AsyncMock(return_value=[])
+        mock_github = MagicMock()
+        mock_github.fetch_open_prs = AsyncMock(
+            side_effect=GitHubAPIError("HTTP 503", status_code=503)
+        )
+        mock_github.fetch_current_user = AsyncMock(return_value="user")
+
+        poller._linear = mock_linear
+        poller._github = mock_github
+
+        await poller._poll_once()
+
+        assert cache.last_error is not None
+        assert "GitHub API error" in cache.last_error
+        assert "503" in cache.last_error  # terse summary but includes status
+        assert q.get_nowait() == "poll_status"
+
+    async def test_poll_once_dispatches_poll_status_when_config_missing(self) -> None:
+        """Regression: missing env/config must still notify connected SSE clients.
+
+        Without this, clients that connect after startup see no error banner
+        update even though cache.last_error is set in __init__.
+        """
+        cache = ExternalCache()
+        q: asyncio.Queue[str] = asyncio.Queue()
+        config = _make_config(github_repo="")  # missing -> _linear/_github stay None
+
+        with patch.dict(os.environ, {}, clear=True):
+            poller = ExternalPoller(cache=cache, queues=[q], config=config)
+
+        assert poller._linear is None
+        assert poller._github is None
+
+        await poller._poll_once()
+
+        assert q.get_nowait() == "poll_status"
+
     async def test_poll_once_handles_httpx_transport_error(self) -> None:
         """Transport errors (network down, timeout) must surface in cache.last_error."""
         import httpx
@@ -166,7 +218,8 @@ class TestPollOnce(unittest.IsolatedAsyncioTestCase):
         await poller._poll_once()
 
         assert cache.last_error is not None
-        assert "Connection refused" in cache.last_error
+        # Summary keeps last_error short (the full body is logged separately).
+        assert "Network error" in cache.last_error
         event = q.get_nowait()
         assert event == "poll_status"
 
@@ -229,6 +282,30 @@ class TestDispatch(unittest.TestCase):
         for q in queues:
             event = q.get_nowait()
             assert event == "inbox_changed"
+
+    def test_dispatch_skips_full_queue_without_affecting_others(self) -> None:
+        """A queue at maxsize drops the event + logs a warning; other queues still receive it."""
+        import logging as _logging
+
+        cache = ExternalCache()
+        full_q: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        full_q.put_nowait("seed")  # already at capacity
+        normal_q: asyncio.Queue[str] = asyncio.Queue()
+        config = _make_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            poller = ExternalPoller(cache=cache, queues=[full_q, normal_q], config=config)
+
+        with self.assertLogs("zing_ai.server.external_poller", level=_logging.WARNING) as log_cm:
+            poller._dispatch("inbox_changed")
+
+        # Full queue still has just its seed (new event dropped).
+        self.assertEqual(full_q.get_nowait(), "seed")
+        self.assertTrue(full_q.empty())
+        # Other queue received the event normally.
+        self.assertEqual(normal_q.get_nowait(), "inbox_changed")
+        # Drop was logged.
+        self.assertTrue(any("queue full" in m for m in log_cm.output))
 
 
 if __name__ == "__main__":

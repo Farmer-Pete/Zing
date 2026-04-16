@@ -310,7 +310,7 @@ def _map_signals_to_responses(
         if finding.type == "text":
             responses.append(UserResponse(answer=value if isinstance(value, str) else None))
         elif finding.type == "triage":
-            action = None
+            action = ResponseAction.DISCUSS
             if isinstance(value, str) and value in {a.value for a in ResponseAction}:
                 action = ResponseAction(value)
             # Extract selected approach (if any)

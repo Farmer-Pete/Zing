@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import defaultdict
 
@@ -120,6 +121,10 @@ async def command_center_events(request: Request):  # noqa: ANN201
                         }
                     )
         finally:
-            request.app.state.cc_queues.remove(queue)  # type: ignore[attr-defined]
+            # Suppress ValueError in case the queue was already cleared (tests
+            # or admin endpoints may reset cc_queues); letting it raise here
+            # would mask the real cancellation reason in logs.
+            with contextlib.suppress(ValueError):
+                request.app.state.cc_queues.remove(queue)  # type: ignore[attr-defined]
 
     return _generate()
