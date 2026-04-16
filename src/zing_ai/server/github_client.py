@@ -23,6 +23,26 @@ class GitHubAPIError(Exception):
         self.status_code = status_code
 
 
+def _next_link(link_header: str | None) -> str | None:
+    """Return the ``rel="next"`` URL from a GitHub ``Link`` header, if present.
+
+    GitHub paginates with ``Link: <url>; rel="next", <url>; rel="last"``. We
+    only care about the ``next`` target; when exhausted, the server omits
+    ``rel="next"`` and we stop iterating.
+    """
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segments = [s.strip() for s in part.split(";")]
+        if len(segments) < 2:
+            continue
+        url_segment, *rel_segments = segments
+        is_next = any(rel == 'rel="next"' for rel in rel_segments)
+        if is_next and url_segment.startswith("<") and url_segment.endswith(">"):
+            return url_segment[1:-1]
+    return None
+
+
 def _map_pr(pr: dict) -> GitHubPR:
     """Map a raw GitHub API PR dict to a :class:`GitHubPR` model."""
     raw_state = pr["state"]
@@ -94,15 +114,33 @@ class GitHubClient:
 
         URL-encodes each path segment so a malformed ``repo`` value (typo,
         hand-edited config) can't inject query/path fragments or traverse the
-        API. Raises :class:`GitHubAPIError` for non-200 HTTP responses.
+        API. Follows GitHub's ``Link: rel="next"`` pagination so repos with
+        >100 open PRs don't silently truncate to the first page. Raises
+        :class:`GitHubAPIError` for non-200 HTTP responses.
         """
         owner, _, name = repo.partition("/")
         safe_path = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/pulls"
-        r = await self._http.get(
-            safe_path,
-            params={"state": "open", "per_page": 100},
-        )
-        if r.status_code != 200:
-            logger.warning("GitHub HTTP %s on %s: %s", r.status_code, safe_path, r.text[:500])
-            raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
-        return [_map_pr(pr) for pr in r.json()]
+        results: list[GitHubPR] = []
+        # First page: relative path + query params. Subsequent pages: absolute
+        # URL from the Link header (already carries owner/name/per_page/page).
+        next_url: str | None = safe_path
+        next_params: dict[str, str | int] | None = {
+            "state": "open",
+            "per_page": 100,
+        }
+        while next_url is not None:
+            r = await self._http.get(next_url, params=next_params)
+            if r.status_code != 200:
+                logger.warning(
+                    "GitHub HTTP %s on %s: %s",
+                    r.status_code,
+                    next_url,
+                    r.text[:500],
+                )
+                raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
+            results.extend(_map_pr(pr) for pr in r.json())
+            next_url = _next_link(r.headers.get("Link"))
+            # Absolute URLs from the Link header already carry their own query
+            # string; don't re-apply the initial params or they'd double-encode.
+            next_params = None
+        return results

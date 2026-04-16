@@ -152,6 +152,51 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prs[0].requested_reviewers, ["alice", "bob"])
 
     @respx.mock
+    async def test_fetch_open_prs_follows_link_header_pagination(self) -> None:
+        """>100 open PRs must paginate via the Link header, not truncate."""
+        page_1_pr = {
+            "number": 1,
+            "title": "Page 1",
+            "state": "open",
+            "draft": False,
+            "head": {"ref": "feature/1"},
+            "base": {"ref": "main"},
+            "body": None,
+            "requested_reviewers": [],
+            "mergeable_state": "clean",
+            "merged_at": None,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "updated_at": "2026-03-10T12:00:00Z",
+        }
+        page_2_pr = {
+            **page_1_pr,
+            "number": 2,
+            "title": "Page 2",
+            "html_url": "https://github.com/owner/repo/pull/2",
+        }
+
+        next_url = "https://api.github.com/repos/owner/repo/pulls?state=open&per_page=100&page=2"
+        respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
+            return_value=httpx.Response(
+                200,
+                json=[page_1_pr],
+                headers={"Link": f'<{next_url}>; rel="next"'},
+            )
+        )
+        respx.get(next_url).mock(
+            return_value=httpx.Response(200, json=[page_2_pr])
+            # No Link header -> iteration stops.
+        )
+
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_open_prs("owner/repo")
+        finally:
+            await client.aclose()
+
+        self.assertEqual([p.number for p in prs], [1, 2])
+
+    @respx.mock
     async def test_http_404_raises(self) -> None:
         """A 404 response must raise GitHubAPIError."""
         respx.get("https://api.github.com/repos/owner/missing/pulls").mock(
