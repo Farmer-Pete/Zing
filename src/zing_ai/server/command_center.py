@@ -248,15 +248,18 @@ def _derive_inbox_items(
 
 
 def _attach_session_to_hub(session: Session, hub: Hub) -> None:
-    """Partition session into hub.audits (WorkflowStep) or hub.sessions (Session).
+    """Attach *session* to *hub*, surfacing its audit steps alongside the session.
 
-    A session is classified as an audit if any of its steps has a step_name in
-    AUDIT_STEP_NAMES.  In that case, the matching WorkflowStep objects are
-    appended to hub.audits.  Otherwise the whole Session is appended to
-    hub.sessions.
+    A typical Zing session has mixed steps (e.g. ``plan``, ``plan-audit``,
+    ``build``, ``build-audit``). The session is always appended to
+    ``hub.sessions`` so the Sessions spoke shows the parent session's overall
+    progress and ``_compute_urgency`` can observe STARTED non-audit steps
+    (STARTED build = ``active`` urgency). Additionally, any steps whose
+    ``step_name`` is in :data:`AUDIT_STEP_NAMES` are also appended to
+    ``hub.audits`` so the Audits spoke highlights audit-specific state (READY
+    with findings = ``hot`` urgency).
     """
-    audit_steps = [s for s in session.steps if s.step_name in AUDIT_STEP_NAMES]
-    if audit_steps:
-        hub.audits.extend(audit_steps)
-    else:
-        hub.sessions.append(session)
+    hub.sessions.append(session)
+    for step in session.steps:
+        if step.step_name in AUDIT_STEP_NAMES:
+            hub.audits.append(step)

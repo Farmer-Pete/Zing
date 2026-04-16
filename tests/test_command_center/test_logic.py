@@ -22,7 +22,7 @@ from zing_ai.server.command_center import (
     _parse_ticket_id,
     aggregate,
 )
-from zing_ai.server.models import SessionState, TextFinding, WorkflowStep
+from zing_ai.server.models import SessionState, TextFinding
 
 
 class TestAggregateEmptyInputs(unittest.TestCase):
@@ -151,14 +151,25 @@ class TestJoinLogic(unittest.TestCase):
         self.assertEqual(hub.id, "session-orphan-sess")
         self.assertEqual(len(hub.sessions), 1)
 
-    def test_session_with_audit_step_classified_as_audit(self) -> None:
-        """Session with step_name='build-audit' -> WorkflowSteps appear in hub.audits."""
-        audit_step = _make_workflow_step(step_name="build-audit", sequence=0)
-        non_audit_step = _make_workflow_step(step_name="review", sequence=1)
+    def test_session_with_mixed_steps_surfaces_in_both_spokes(self) -> None:
+        """Session with mixed audit + non-audit steps appears in BOTH hub.sessions and hub.audits.
+
+        Regression: the original behaviour partitioned mutually — an audit
+        session would be stripped to just its audit steps and the rest of the
+        session (plus the parent Session itself) was silently dropped. The
+        typical Zing workflow ``['plan', 'plan-audit', 'build', 'build-audit']``
+        must surface both the parent session and its audit steps so
+        ``_compute_urgency`` can observe STARTED non-audit work and the UI
+        can render both spokes.
+        """
+        plan_step = _make_workflow_step(step_name="plan", sequence=0)
+        plan_audit = _make_workflow_step(step_name="plan-audit", sequence=1)
+        build_step = _make_workflow_step(step_name="build", sequence=2)
+        build_audit = _make_workflow_step(step_name="build-audit", sequence=3)
         session = _make_session(
-            session_id="audit-sess",
+            session_id="mixed-sess",
             ticket_id=None,
-            steps=[audit_step, non_audit_step],
+            steps=[plan_step, plan_audit, build_step, build_audit],
         )
 
         _, hubs = aggregate(
@@ -170,10 +181,33 @@ class TestJoinLogic(unittest.TestCase):
 
         self.assertEqual(len(hubs), 1)
         hub = hubs[0]
-        self.assertEqual(len(hub.audits), 1)
-        self.assertIsInstance(hub.audits[0], WorkflowStep)
-        self.assertEqual(hub.audits[0].step_name, "build-audit")
-        self.assertEqual(len(hub.sessions), 0)
+        # Parent session retained — Sessions spoke shows overall progress.
+        self.assertEqual(len(hub.sessions), 1)
+        self.assertIs(hub.sessions[0], session)
+        # Audit steps also surfaced — Audits spoke shows audit-specific state.
+        self.assertEqual(len(hub.audits), 2)
+        self.assertEqual({s.step_name for s in hub.audits}, {"plan-audit", "build-audit"})
+
+    def test_session_with_only_non_audit_steps(self) -> None:
+        """Session with no audit steps appears in hub.sessions, not in hub.audits."""
+        plan_step = _make_workflow_step(step_name="plan", sequence=0)
+        session = _make_session(
+            session_id="plan-sess",
+            ticket_id=None,
+            steps=[plan_step],
+        )
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        hub = hubs[0]
+        self.assertEqual(len(hub.sessions), 1)
+        self.assertEqual(len(hub.audits), 0)
 
 
 class TestUrgencyComputation(unittest.TestCase):
