@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import re
 
-from zing_ai.server.models import Session
+from zing_ai.server.models import Session, SessionState
 from zing_ai.server.models_external import (
     GitHubPR,
     Hub,
+    HubUrgency,
     InboxItem,
     LinearIssue,
 )
@@ -41,6 +42,36 @@ def _parse_ticket_ids(pr: GitHubPR) -> set[str]:
     return {m.upper() for m in _TICKET_RE.findall(text)}
 
 
+def _compute_urgency(hub: Hub, current_username: str) -> HubUrgency:
+    """Determine the urgency tier for a hub.
+
+    - ``hot``: an audit step is READY with findings, or a PR requests review
+      from the current user and is not yet approved.
+    - ``active``: a session step is STARTED, or a PR's CI is running.
+    - ``cool``: everything else.
+    """
+    # --- hot checks ---
+    for audit_step in hub.audits:
+        if audit_step.state == SessionState.READY and audit_step.findings:
+            return "hot"
+
+    for pr in hub.prs:
+        if current_username in pr.requested_reviewers and pr.review_decision != "APPROVED":
+            return "hot"
+
+    # --- active checks ---
+    for session in hub.sessions:
+        for step in session.steps:
+            if step.state == SessionState.STARTED:
+                return "active"
+
+    for pr in hub.prs:
+        if pr.ci_status == "pending" or pr.mergeable_state == "checking":
+            return "active"
+
+    return "cool"
+
+
 def aggregate(
     issues: list[LinearIssue],
     prs: list[GitHubPR],
@@ -52,7 +83,7 @@ def aggregate(
     Returns a pair of (inbox_items, hubs). Later steps fill in the body; for
     now this is the entry point so downstream code can import it.
     """
-    _ = current_username  # used by step 3.5 (inbox derivation)
+    # current_username is used for urgency computation and step 3.5 (inbox derivation)
 
     # --- Build ticket hubs keyed by identifier ---
     ticket_hubs: dict[str, Hub] = {}
@@ -115,6 +146,10 @@ def aggregate(
         )
         _attach_session_to_hub(session, hub)
         hubs.append(hub)
+
+    # --- Compute urgency for all hubs ---
+    for hub in hubs:
+        hub.urgency = _compute_urgency(hub, current_username)
 
     return ([], hubs)
 

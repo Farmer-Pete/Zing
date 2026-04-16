@@ -10,7 +10,7 @@ from zing_ai.server.command_center import (
     _parse_ticket_ids,
     aggregate,
 )
-from zing_ai.server.models import Session, WorkflowStep
+from zing_ai.server.models import Session, SessionState, TextFinding, WorkflowStep
 from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
@@ -206,6 +206,143 @@ class TestJoinLogic(unittest.TestCase):
         self.assertIsInstance(hub.audits[0], WorkflowStep)
         self.assertEqual(hub.audits[0].step_name, "build-audit")
         self.assertEqual(len(hub.sessions), 0)
+
+
+class TestUrgencyComputation(unittest.TestCase):
+    """_compute_urgency is called inside aggregate() and sets hub.urgency correctly."""
+
+    def _make_issue(
+        self,
+        *,
+        identifier: str = "BAK-1",
+        title: str = "Fix bug",
+    ) -> LinearIssue:
+        return LinearIssue(
+            id="uuid-" + identifier,
+            identifier=identifier,
+            title=title,
+            state="In Progress",
+            assignee="alice",
+            team="Back End",
+            url=f"https://linear.app/t/{identifier}",
+            updated_at=datetime(2026, 4, 16, 0, 0, 0),
+        )
+
+    def _make_session(
+        self,
+        *,
+        session_id: str = "sess-1",
+        title: str = "Session 1",
+        ticket_id: str | None = None,
+        steps: list | None = None,
+    ) -> Session:
+        return Session(
+            session_id=session_id,
+            title=title,
+            ticket_id=ticket_id,
+            steps=steps or [],
+        )
+
+    def _make_workflow_step(
+        self,
+        *,
+        step_name: str,
+        sequence: int = 0,
+        state: SessionState = SessionState.PENDING,
+        findings: list | None = None,
+    ) -> WorkflowStep:
+        step = WorkflowStep(step_name=step_name, sequence=sequence)
+        step.state = state
+        if findings is not None:
+            step.findings = findings
+        return step
+
+    def test_hub_with_ready_audit_is_hot(self) -> None:
+        """An audit step in READY state with findings -> urgency == 'hot'."""
+        finding = TextFinding(title="Issue found", body="Details here")
+        audit_step = self._make_workflow_step(
+            step_name="build-audit",
+            state=SessionState.READY,
+            findings=[finding],
+        )
+        session = self._make_session(
+            session_id="audit-sess",
+            ticket_id="BAK-1",
+            steps=[audit_step],
+        )
+        issue = self._make_issue(identifier="BAK-1")
+
+        _, hubs = aggregate(
+            issues=[issue],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0].urgency, "hot")
+
+    def test_hub_with_pr_review_requested_is_hot(self) -> None:
+        """PR with current_username in requested_reviewers and not APPROVED -> urgency == 'hot'."""
+        pr = _make_pr(number=42, head_ref="BAK-1/feature")
+        pr.requested_reviewers = ["octocat"]
+        pr.review_decision = None
+
+        issue = self._make_issue(identifier="BAK-1")
+
+        _, hubs = aggregate(
+            issues=[issue],
+            prs=[pr],
+            sessions=[],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0].urgency, "hot")
+
+    def test_hub_with_running_session_is_active(self) -> None:
+        """A session step in STARTED state -> urgency == 'active' (not hot)."""
+        step = self._make_workflow_step(
+            step_name="review",
+            state=SessionState.STARTED,
+        )
+        session = self._make_session(
+            session_id="active-sess",
+            ticket_id=None,  # orphan session hub
+            steps=[step],
+        )
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0].urgency, "active")
+
+    def test_hub_with_completed_state_is_cool(self) -> None:
+        """A hub with no hot or active signals -> urgency == 'cool'."""
+        step = self._make_workflow_step(
+            step_name="review",
+            state=SessionState.COMPLETED,
+        )
+        session = self._make_session(
+            session_id="cool-sess",
+            ticket_id=None,
+            steps=[step],
+        )
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0].urgency, "cool")
 
 
 if __name__ == "__main__":
