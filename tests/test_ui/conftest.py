@@ -85,9 +85,13 @@ def server(ui_server: _ServerInfo) -> Generator[_ServerInfo]:
     for session in list(ui_server.manager.list_sessions()):
         ui_server.manager.cleanup_session(session.session_id)
 
-    # Reset external cache so tests don't bleed state into each other
+    # Reset external cache so tests don't bleed state into each other. The
+    # ``version`` bump invalidates the ``_build_view`` memo (otherwise the
+    # next test would potentially get a cached view rendered against the
+    # previous test's ``cache.issues``).
     ui_server.external_cache.issues = []
     ui_server.external_cache.prs = []
     ui_server.external_cache.github_username = ""
     ui_server.external_cache.last_polled_at = None
     ui_server.external_cache.last_error = None
+    ui_server.external_cache.version += 1

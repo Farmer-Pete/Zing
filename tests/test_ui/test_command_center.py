@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime
 
 import pytest
@@ -251,23 +250,28 @@ def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -
     )
     cache.issues = [issue]
 
-    page.goto(f"{server.base_url}/command-center")
+    # Wait for the SSE response to start streaming before mutating state.
+    # ``expect_response`` resolves when headers come back, which means the
+    # route's async generator has run past its first ``await`` — and therefore
+    # already appended its queue to ``cc_queues``. That replaces the old
+    # ``time.sleep`` polling with a deterministic signal.
+    with page.expect_response(lambda r: "/command-center/events" in r.url, timeout=5000):
+        page.goto(f"{server.base_url}/command-center")
+
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
     hub = page.locator("#hub-bak_1004")
     expect(hub).to_be_visible(timeout=5000)
     expect(hub.locator(".hub-name")).to_contain_text("Original title", timeout=3000)
 
-    # Wait a moment for the SSE connection to be established (queue to be appended)
-    # The route handler appends a queue when the browser connects to /command-center/events
-    deadline = time.monotonic() + 5.0
-    while not server.cc_queues and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert server.cc_queues, "Expected at least one cc_queue (SSE connection) to be registered"
+    assert server.cc_queues, "Expected SSE queue to be registered after response started"
 
-    # Mutate the cache title
+    # Mutate the cache title. In production the poller bumps ``version`` on
+    # every write; tests simulating a poll must do the same so the memoised
+    # ``_build_view`` invalidates.
     updated_issue = issue.model_copy(update={"title": "Updated title SSE"})
     cache.issues = [updated_issue]
+    cache.version += 1
 
     # Push the hub_changed event to all active SSE queues
     for queue in list(server.cc_queues):
@@ -279,7 +283,11 @@ def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -
 
 def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     """Footer starts with 'Waiting for first poll'; after a poll_status SSE event it updates."""
-    page.goto(f"{server.base_url}/command-center")
+    # Wait for the SSE response to start streaming (queue guaranteed-registered
+    # by then). Replaces the old ``time.sleep`` polling loop.
+    with page.expect_response(lambda r: "/command-center/events" in r.url, timeout=5000):
+        page.goto(f"{server.base_url}/command-center")
+
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
     footer_span = page.locator(".cc-footer span")
@@ -291,11 +299,7 @@ def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
         f"Expected 'Waiting for first poll' in footer, got: {initial_text!r}"
     )
 
-    # Wait for the SSE connection to be established
-    deadline = time.monotonic() + 5.0
-    while not server.cc_queues and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert server.cc_queues, "Expected at least one cc_queue (SSE connection) to be registered"
+    assert server.cc_queues, "Expected SSE queue to be registered after response started"
 
     # Set last_polled_at and push a poll_status event
     now = datetime.now(tz=UTC)
