@@ -10,13 +10,7 @@
             <span class="inbox-count">{{ inbox_items|length }}</span>
         </div>
         <div id="inbox-list" class="inbox-list">
-            {% if inbox_items %}
-                {% for item in inbox_items %}
-                    {% include "fragments/inbox_item.html" %}
-                {% endfor %}
-            {% else %}
-                {% include "fragments/inbox_empty.html" %}
-            {% endif %}
+            {% include "fragments/inbox_list.html" %}
         </div>
     </section>
 

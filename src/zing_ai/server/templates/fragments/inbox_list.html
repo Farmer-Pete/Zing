@@ -1,0 +1,7 @@
+{% if inbox_items %}
+    {% for item in inbox_items %}
+        {% include "fragments/inbox_item.html" %}
+    {% endfor %}
+{% else %}
+    {% include "fragments/inbox_empty.html" %}
+{% endif %}
