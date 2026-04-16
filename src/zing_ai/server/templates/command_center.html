@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Command Center{% endblock %}
+
+{% block content %}
+<div class="cc-page" data-signals="{_cc: true}" data-init="@get('/command-center/events')">
+    <section class="inbox">
+        <div class="inbox-header">
+            <span class="inbox-title">Needs your input</span>
+            <span class="inbox-count">{{ inbox_items|length }}</span>
+        </div>
+        <div id="inbox-list" class="inbox-list">
+            {% if inbox_items %}
+                {% for item in inbox_items %}
+                    {% include "fragments/inbox_item.html" %}
+                {% endfor %}
+            {% else %}
+                {% include "fragments/inbox_empty.html" %}
+            {% endif %}
+        </div>
+    </section>
+
+    <div class="hubs-header">
+        <span>Everything in flight</span>
+        <span class="grouped-by">Grouped by team</span>
+    </div>
+
+    <div id="hubs-list" class="hubs-list">
+        {% for team, hubs in groups.items() %}
+            {% set group = {"team": team, "hubs": hubs} %}
+            {% include "fragments/cc_group_header.html" %}
+            <div class="group-body">
+                {% for hub in hubs %}
+                    {% include "fragments/cc_hub.html" %}
+                {% endfor %}
+            </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
