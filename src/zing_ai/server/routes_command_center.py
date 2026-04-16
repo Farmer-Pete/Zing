@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections import defaultdict
+from datetime import UTC, datetime
 
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.consts import ElementPatchMode
@@ -19,6 +20,33 @@ from zing_ai.server.templates import render
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _format_last_polled(dt: datetime | None) -> str:
+    """Return a compact, glanceable label for *dt*.
+
+    Examples: ``"just now"``, ``"42s ago"``, ``"5m ago"``, ``"2h ago"``,
+    ``"yesterday"``. Returns an empty string when *dt* is ``None`` so the
+    template's fallback ``"Waiting for first poll"`` shows instead.
+    """
+    if dt is None:
+        return ""
+    now = datetime.now(dt.tzinfo) if dt.tzinfo is not None else datetime.now(UTC)
+    # dt may still be naive if someone bypassed the tz-aware write path.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    seconds = int((now - dt).total_seconds())
+    if seconds < 5:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    if seconds < 172800:
+        return "yesterday"
+    return f"{seconds // 86400}d ago"
 
 
 def _build_view(app: FastAPI) -> tuple[list, dict[str, list]]:
@@ -57,14 +85,16 @@ def render_inbox_fragment(app: FastAPI) -> str:
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
     inbox_items, groups = _build_view(request.app)  # type: ignore[arg-type]
+    cache = request.app.state.external_cache  # type: ignore[attr-defined]
     return HTMLResponse(
         render(
             "command_center.html",
             inbox_items=inbox_items,
             groups=groups,
             current_path="/command-center",
-            last_polled_at=request.app.state.external_cache.last_polled_at,
-            last_error=request.app.state.external_cache.last_error,
+            last_polled_at=cache.last_polled_at,
+            last_polled_label=_format_last_polled(cache.last_polled_at),
+            last_error=cache.last_error,
         )
     )
 
@@ -114,9 +144,7 @@ async def command_center_events(request: Request):  # noqa: ANN201
                     cache = request.app.state.external_cache  # type: ignore[attr-defined]
                     yield SSE.patch_signals(
                         {
-                            "lastPolledAt": cache.last_polled_at.isoformat()
-                            if cache.last_polled_at
-                            else "",
+                            "lastPolledLabel": _format_last_polled(cache.last_polled_at),
                             "lastError": cache.last_error or "",
                         }
                     )

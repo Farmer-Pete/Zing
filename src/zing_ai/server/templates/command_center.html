@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{"lastPolledAt": "{{ last_polled_at.isoformat() if last_polled_at else "" }}", "lastError": "{{ last_error or "" }}"}'
+     data-signals='{"lastPolledLabel": "{{ last_polled_label or "" }}", "lastError": "{{ last_error or "" }}"}'
      data-init="@get('/command-center/events')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
@@ -34,7 +34,7 @@
     </div>
 
     <footer class="cc-footer">
-        <span data-text="$lastPolledAt ? `Last synced ${$lastPolledAt}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_at.isoformat() if last_polled_at else "Waiting for first poll" }}</span>
+        <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
     </footer>
 </div>
 {% endblock %}

@@ -148,6 +148,73 @@ class TestSessionUpdate(ServerTestBase):
         finally:
             os.unlink(tmp_path)
 
+    def test_session_update_no_frontmatter(self) -> None:
+        """zing_file without any ``---`` markers must not bind a ticket_id."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-none", "No frontmatter")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("# Just a heading\n\nSome body text, no YAML block.\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-none", zing_file=tmp_path))
+            # Completes without raising; no ticket_id leaks in.
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-none")
+            assert session is not None
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_unclosed_frontmatter(self) -> None:
+        """Opening ``---`` without a closing ``---`` must not raise."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-unclosed", "Unclosed frontmatter")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\nticket_id: BAK-999\n# no closing marker\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-unclosed", zing_file=tmp_path))
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-unclosed")
+            assert session is not None
+            # Parser requires a closing --- to honour the frontmatter; nothing to bind.
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_frontmatter_missing_ticket_id(self) -> None:
+        """Well-formed frontmatter without ``ticket_id`` key leaves session unbound."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-missing-key", "No ticket_id key")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\ntitle: Something\n---\n# Body\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(
+                session_update(session_id="ticket-missing-key", zing_file=tmp_path)
+            )
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-missing-key")
+            assert session is not None
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
 
 class TestStepStart(ServerTestBase):
     """Tests for the step_start MCP tool."""

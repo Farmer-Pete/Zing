@@ -91,6 +91,21 @@ class TestParseTicketId(unittest.TestCase):
         )
         self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
 
+    def test_parse_empty_body_and_no_branch_match(self) -> None:
+        """An empty body and a non-ticket head_ref must yield None, not raise."""
+        pr = _make_pr(head_ref="feature/no-ticket", title="cleanup", body="")
+        self.assertIsNone(_parse_ticket_id(pr))
+
+    def test_parse_none_body_is_tolerated(self) -> None:
+        """`GitHubPR.body is None` shouldn't break the parser (filter handles None)."""
+        pr = _make_pr(head_ref="feature/misc", title="cleanup", body=None)
+        self.assertIsNone(_parse_ticket_id(pr))
+
+    def test_parse_unicode_adjacency(self) -> None:
+        """Emoji/CJK characters adjacent to a ticket id must still match."""
+        pr = _make_pr(head_ref="main", title="fix BAK-1179 \U0001f680", body="closes BAK-1179")
+        self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
+
 
 class TestJoinLogic(unittest.TestCase):
     """aggregate() correctly joins issues, PRs, and sessions into Hubs."""
@@ -116,6 +131,23 @@ class TestJoinLogic(unittest.TestCase):
         self.assertEqual(hub.prs[0].number, 10)
         self.assertEqual(len(hub.sessions), 1)
         self.assertEqual(hub.sessions[0].session_id, "s1")
+
+    def test_two_distinct_issues_produce_two_hubs(self) -> None:
+        """Contract test: ticket_hubs is keyed by issue.identifier.
+
+        Regression guard against accidental key changes (e.g. switching to
+        issue.id) that would collapse distinct tickets into one hub.
+        """
+        i1 = _make_issue(identifier="BAK-1")
+        i2 = _make_issue(identifier="BAK-2")
+        _, hubs = aggregate(
+            issues=[i1, i2],
+            prs=[],
+            sessions=[],
+            current_username="octocat",
+        )
+        self.assertEqual(len(hubs), 2)
+        self.assertEqual({h.id for h in hubs}, {"BAK-1", "BAK-2"})
 
     def test_orphan_pr_becomes_pr_hub(self) -> None:
         """A PR with no matching ticket -> Hub(kind='pr')."""
@@ -297,6 +329,22 @@ class TestUrgencyComputation(unittest.TestCase):
             current_username="octocat",
         )
 
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0].urgency, "cool")
+
+    def test_empty_hub_is_cool(self) -> None:
+        """A fresh ticket hub with no PRs/sessions/audits is the common initial state.
+
+        Regression: the cool branch used to be implicitly covered by hubs
+        with COMPLETED steps; this asserts the truly-empty case too.
+        """
+        issue = _make_issue(identifier="ENG-1")
+        _, hubs = aggregate(
+            issues=[issue],
+            prs=[],
+            sessions=[],
+            current_username="octocat",
+        )
         self.assertEqual(len(hubs), 1)
         self.assertEqual(hubs[0].urgency, "cool")
 
