@@ -261,6 +261,21 @@ def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     )
 
 
+def test_error_banner_shows_when_last_error_set(server: _ServerInfo, page: Page) -> None:
+    """Error banner is visible with error text when cache.last_error is non-empty."""
+    server.external_cache.last_error = "rate limited"
+
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    banner = page.locator(".cc-error")
+    expect(banner).to_be_visible(timeout=5000)
+    expect(banner).to_contain_text("rate limited", timeout=3000)
+
+    # Clean up for other tests
+    server.external_cache.last_error = None
+
+
 def test_no_console_errors_after_datastar_interactions(server: _ServerInfo, page: Page) -> None:
     """No JS console errors occur after page load and hub click interactions."""
     cache = server.external_cache

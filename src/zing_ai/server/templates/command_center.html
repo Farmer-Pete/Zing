@@ -6,6 +6,7 @@
 <div class="cc-page"
      data-signals='{"lastPolledAt": "{{ last_polled_at.isoformat() if last_polled_at else "" }}", "lastError": "{{ last_error or "" }}"}'
      data-init="@get('/command-center/events')">
+    <div class="cc-error" data-show="$lastError" data-text="$lastError">{{ last_error or '' }}</div>
     <section class="inbox">
         <div class="inbox-header">
             <span class="inbox-title">Needs your input</span>
