@@ -109,6 +109,8 @@ class MCPDebugMiddleware:
 def create_app(
     session_manager: SessionManager | None = None,
     port: int = 9876,
+    external_cache: ExternalCache | None = None,
+    cc_queues: list[asyncio.Queue[str]] | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -118,6 +120,8 @@ def create_app(
     Args:
         session_manager: Optional SessionManager instance. Creates a default one if not provided.
         port: The port the server will listen on, used for MCP tool URL construction.
+        external_cache: Optional ExternalCache instance for testing (injects pre-populated state).
+        cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
     """
     sm = session_manager or SessionManager()
 
@@ -176,8 +180,8 @@ def create_app(
 
     mcp_starlette = mcp_server.streamable_http_app()
 
-    external_cache = ExternalCache()
-    cc_queues: list[asyncio.Queue[str]] = []
+    external_cache = external_cache or ExternalCache()
+    cc_queues = cc_queues if cc_queues is not None else []
 
     fastapi_app = FastAPI(
         title="Zing Batch Review",
