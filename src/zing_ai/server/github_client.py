@@ -128,7 +128,13 @@ class GitHubClient:
             "state": "open",
             "per_page": 100,
         }
-        while next_url is not None:
+        # Belt-and-suspenders bound against a misconfigured proxy returning a
+        # self-referential Link header; 50 pages × 100 per_page = 5000 PRs,
+        # well beyond anything a single repo would have open simultaneously.
+        MAX_PAGES = 50
+        for _ in range(MAX_PAGES):
+            if next_url is None:
+                break
             r = await self._http.get(next_url, params=next_params)
             if r.status_code != 200:
                 logger.warning(

@@ -176,16 +176,20 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         }
 
         next_url = "https://api.github.com/repos/owner/repo/pulls?state=open&per_page=100&page=2"
+        # Use side_effect so respx returns page 1 then page 2 in order for
+        # successive calls — avoids ambiguity when both requests would match
+        # the same base URL pattern and (more importantly) prevents an
+        # infinite pagination loop if page-1 were served repeatedly.
         respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(
-                200,
-                json=[page_1_pr],
-                headers={"Link": f'<{next_url}>; rel="next"'},
-            )
-        )
-        respx.get(next_url).mock(
-            return_value=httpx.Response(200, json=[page_2_pr])
-            # No Link header -> iteration stops.
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json=[page_1_pr],
+                    headers={"Link": f'<{next_url}>; rel="next"'},
+                ),
+                # No Link header on page 2 -> loop terminates.
+                httpx.Response(200, json=[page_2_pr]),
+            ]
         )
 
         client = GitHubClient(token="ghp_test")
