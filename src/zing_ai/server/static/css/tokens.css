@@ -11,6 +11,16 @@
     --cyan-dim: #2ba8b6;
     --red-orange: #e84430;
     --off-white: #f8f6f3;
+    /* Tint tokens (for subtle backgrounds, glow shadows, and pill
+       treatments where hard-coding opacity-wrapped brand colors would
+       couple the CSS to specific hex values). */
+    --orange-subtle: #fff5ee;
+    --orange-border: #ffd9c2;
+    --orange-glow: rgba(245, 124, 32, 0.08);
+    --orange-glow-strong: rgba(245, 124, 32, 0.3);
+    --amber-subtle: #fffbeb;
+    --amber-glow: rgba(245, 166, 35, 0.18);
+    --cyan-subtle: #e0f7fa;
     --gray-50: #faf9f7;
     --gray-100: #f3f1ee;
     --gray-200: #e8e5e1;

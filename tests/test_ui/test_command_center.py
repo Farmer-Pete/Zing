@@ -112,7 +112,7 @@ def test_hub_expand_collapse_via_datastar(server: _ServerInfo, page: Page) -> No
     # Dispatch click via JS on the hub element itself (which carries data-on:click).
     # This approach bypasses Playwright's pointer-event interception and ensures
     # the event reaches the Datastar-bound element directly.
-    page.evaluate("document.querySelector('#hub-bak_1002').click()")
+    page.evaluate("document.querySelector('#hub-bak_1002 .hub-header').click()")
     # Wait for Datastar to apply the .open class
     page.wait_for_function(
         "document.querySelector('#hub-bak_1002').classList.contains('open')",
@@ -121,7 +121,7 @@ def test_hub_expand_collapse_via_datastar(server: _ServerInfo, page: Page) -> No
     assert "open" in (hub.get_attribute("class") or ""), "Hub should be open after first click"
 
     # Click again to close
-    page.evaluate("document.querySelector('#hub-bak_1002').click()")
+    page.evaluate("document.querySelector('#hub-bak_1002 .hub-header').click()")
     page.wait_for_function(
         "!document.querySelector('#hub-bak_1002').classList.contains('open')",
         timeout=5000,
@@ -353,14 +353,14 @@ def test_no_console_errors_after_datastar_interactions(server: _ServerInfo, page
     expect(hub).to_be_visible(timeout=5000)
 
     # Perform expand interaction via JS dispatch to bypass pointer-event interception
-    page.evaluate("document.querySelector('#hub-bak_1005').click()")
+    page.evaluate("document.querySelector('#hub-bak_1005 .hub-header').click()")
     page.wait_for_function(
         "document.querySelector('#hub-bak_1005').classList.contains('open')",
         timeout=5000,
     )
 
     # Perform collapse interaction
-    page.evaluate("document.querySelector('#hub-bak_1005').click()")
+    page.evaluate("document.querySelector('#hub-bak_1005 .hub-header').click()")
     page.wait_for_function(
         "!document.querySelector('#hub-bak_1005').classList.contains('open')",
         timeout=5000,

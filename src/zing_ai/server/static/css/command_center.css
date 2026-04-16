@@ -6,9 +6,24 @@
  */
 
 /* ──────────────────────────────────────────────
+   PAGE WRAPPERS (layout affordances for empty state)
+────────────────────────────────────────────── */
+
+.cc-page {
+    padding-top: 1.5rem;
+}
+
+.hubs-list {
+    min-height: 2rem;
+}
+
+/* ──────────────────────────────────────────────
    ERROR BANNER
 ────────────────────────────────────────────── */
 
+/* The banner is server-rendered only when ``last_error`` is non-empty
+   (see command_center.html); Datastar's ``data-show="$lastError"``
+   handles subsequent reactive toggles from SSE ``poll_status`` patches. */
 .cc-error {
     background: var(--red-orange);
     color: #fff;
@@ -26,17 +41,17 @@
 
 .inbox {
     background: linear-gradient(135deg, #fff, #fffaf5);
-    border: 1px solid #ffd9c2;
+    border: 1px solid var(--orange-border);
     border-radius: 10px;
     margin-bottom: 2rem;
     overflow: hidden;
-    box-shadow: 0 2px 16px rgba(245, 124, 32, 0.08);
+    box-shadow: 0 2px 16px var(--orange-glow);
 }
 
 .inbox-header {
     padding: 0.85rem 1.25rem;
-    background: linear-gradient(135deg, #fff5ee, #ffe6d4);
-    border-bottom: 1px solid #ffd9c2;
+    background: linear-gradient(135deg, var(--orange-subtle), #ffe6d4);
+    border-bottom: 1px solid var(--orange-border);
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -77,6 +92,14 @@
     padding: 0.5rem 0.75rem;
 }
 
+.inbox-empty {
+    font-size: 0.85rem;
+    color: var(--gray-500);
+    padding: 0.75rem;
+    text-align: center;
+    font-style: italic;
+}
+
 .inbox-item {
     display: flex;
     align-items: center;
@@ -90,7 +113,7 @@
 }
 
 .inbox-item:hover {
-    background: rgba(245, 124, 32, 0.08);
+    background: var(--orange-glow);
 }
 
 .inbox-item + .inbox-item {
@@ -262,7 +285,7 @@
 /* Hot — needs immediate human input; amber/gold treatment (recolored from red) */
 .hub.hot {
     border-color: var(--amber);
-    box-shadow: 0 0 0 1px var(--amber), 0 4px 16px rgba(245, 166, 35, 0.18);
+    box-shadow: 0 0 0 1px var(--amber), 0 4px 16px var(--amber-glow);
 }
 
 .hub.hot::before {
@@ -474,7 +497,7 @@
 
 /* Hot — amber/yellow; pulsing dot */
 .urgency-hot {
-    background: #fffbeb;
+    background: var(--amber-subtle);
     color: var(--amber);
     border: 1px solid var(--gold);
 }
@@ -489,7 +512,7 @@
 
 /* Active — cyan; pulsing dot */
 .urgency-active {
-    background: #e0f7fa;
+    background: var(--cyan-subtle);
     color: var(--cyan-dim);
     border: 1px solid var(--cyan);
 }

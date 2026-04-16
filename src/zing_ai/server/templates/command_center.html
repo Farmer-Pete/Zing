@@ -6,7 +6,14 @@
 <div class="cc-page"
      data-signals='{"lastPolledAt": "{{ last_polled_at.isoformat() if last_polled_at else "" }}", "lastError": "{{ last_error or "" }}"}'
      data-init="@get('/command-center/events')">
-    <div class="cc-error" data-show="$lastError" data-text="$lastError">{{ last_error or '' }}</div>
+    {# Render inline display:none when there is no server-side error, so the
+       empty red banner doesn't flash before Datastar initialises. The
+       data-show directive overrides the inline style at runtime as $lastError
+       toggles via SSE. #}
+    <div class="cc-error"
+         data-show="$lastError"
+         data-text="$lastError"
+         {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
     <section class="inbox">
         <div class="inbox-header">
             <span class="inbox-title">Needs your input</span>

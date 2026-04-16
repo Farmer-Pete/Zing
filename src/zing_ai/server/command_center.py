@@ -118,7 +118,7 @@ def aggregate(
     for session in sessions:
         if session.ticket_id and session.ticket_id in ticket_hubs:
             hub = ticket_hubs[session.ticket_id]
-            _attach_session_to_hub(session, hub)
+            _partition_session_into_hub(session, hub)
         else:
             orphan_sessions.append(session)
 
@@ -147,7 +147,7 @@ def aggregate(
             assignee=None,
             urgency="cool",
         )
-        _attach_session_to_hub(session, hub)
+        _partition_session_into_hub(session, hub)
         hubs.append(hub)
 
     # --- Compute urgency for all hubs ---
@@ -247,7 +247,7 @@ def _derive_inbox_items(
     return [item for _, _, item in items]
 
 
-def _attach_session_to_hub(session: Session, hub: Hub) -> None:
+def _partition_session_into_hub(session: Session, hub: Hub) -> None:
     """Attach *session* to *hub*, surfacing its audit steps alongside the session.
 
     A typical Zing session has mixed steps (e.g. ``plan``, ``plan-audit``,

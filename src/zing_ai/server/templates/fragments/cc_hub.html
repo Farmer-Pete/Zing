@@ -1,9 +1,19 @@
+{# Datastar nested-signal: each hub registers its own open/closed state under
+   $open.<key> (defaults to false = collapsed). See DESIGN_SYSTEM.md "Hub
+   urgency" section and https://data-star.dev/reference/attribute_plugins/data-signals
+   for the nested-path syntax. #}
 <div class="hub {{ hub.urgency }}"
      data-signals:open.{{ hub.signal_key }}="false"
      data-class="{open: $open.{{ hub.signal_key }}}"
-     data-on:click="$open.{{ hub.signal_key }} = !$open.{{ hub.signal_key }}"
      id="hub-{{ hub.signal_key }}">
-    <div class="hub-header">
+    {# Click target is the header, not the whole card — so clicks on spoke
+       items (PRs, sessions, audits) don't also toggle the hub. role=button
+       + keyboard handler make it operable for keyboard-only users. #}
+    <div class="hub-header"
+         role="button"
+         tabindex="0"
+         data-on:click="$open.{{ hub.signal_key }} = !$open.{{ hub.signal_key }}"
+         data-on:keydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();$open.{{ hub.signal_key }} = !$open.{{ hub.signal_key }}}">
         <span class="chev"></span>
         <span class="hub-id">{{ hub.id }}</span>
         <span class="hub-name">{{ hub.title }}</span>
