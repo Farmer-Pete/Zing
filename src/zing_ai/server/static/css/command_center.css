@@ -486,6 +486,20 @@
 }
 
 /* ──────────────────────────────────────────────
+   FOOTER
+────────────────────────────────────────────── */
+
+.cc-footer {
+    margin-top: 2rem;
+    padding: 0.5rem 0.25rem;
+    border-top: 1px solid var(--gray-100);
+    font-size: 0.65rem;
+    color: var(--gray-300);
+    text-align: right;
+    letter-spacing: 0.02em;
+}
+
+/* ──────────────────────────────────────────────
    ANIMATIONS (prefixed to avoid collisions)
 ────────────────────────────────────────────── */
 

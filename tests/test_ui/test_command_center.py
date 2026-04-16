@@ -226,6 +226,41 @@ def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -
     expect(hub.locator(".hub-name")).to_contain_text("Updated title SSE", timeout=5000)
 
 
+def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
+    """Footer starts with 'Waiting for first poll'; after a poll_status SSE event it updates."""
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    footer_span = page.locator(".cc-footer span")
+    expect(footer_span).to_be_visible(timeout=5000)
+
+    # Before any poll: initial text should say 'Waiting for first poll'
+    initial_text = footer_span.text_content(timeout=3000) or ""
+    assert "Waiting for first poll" in initial_text, (
+        f"Expected 'Waiting for first poll' in footer, got: {initial_text!r}"
+    )
+
+    # Wait for the SSE connection to be established
+    deadline = time.monotonic() + 5.0
+    while not server.cc_queues and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert server.cc_queues, "Expected at least one cc_queue (SSE connection) to be registered"
+
+    # Set last_polled_at and push a poll_status event
+    now = datetime.now(tz=UTC)
+    server.external_cache.last_polled_at = now
+
+    for queue in list(server.cc_queues):
+        queue.put_nowait("poll_status")
+
+    # Datastar should update the span text to include the ISO timestamp
+    expect(footer_span).to_contain_text("Last synced", timeout=5000)
+    updated_text = footer_span.text_content(timeout=3000) or ""
+    assert "Waiting for first poll" not in updated_text, (
+        f"Footer should no longer say 'Waiting for first poll', got: {updated_text!r}"
+    )
+
+
 def test_no_console_errors_after_datastar_interactions(server: _ServerInfo, page: Page) -> None:
     """No JS console errors occur after page load and hub click interactions."""
     cache = server.external_cache

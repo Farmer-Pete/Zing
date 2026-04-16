@@ -3,7 +3,9 @@
 {% block title %}Command Center{% endblock %}
 
 {% block content %}
-<div class="cc-page" data-signals="{_cc: true}" data-init="@get('/command-center/events')">
+<div class="cc-page"
+     data-signals='{"lastPolledAt": "{{ last_polled_at.isoformat() if last_polled_at else "" }}", "lastError": "{{ last_error or "" }}"}'
+     data-init="@get('/command-center/events')">
     <section class="inbox">
         <div class="inbox-header">
             <span class="inbox-title">Needs your input</span>
@@ -22,5 +24,9 @@
     <div id="hubs-list" class="hubs-list">
         {% include "fragments/hubs_list.html" %}
     </div>
+
+    <footer class="cc-footer">
+        <span data-text="$lastPolledAt ? `Last synced ${$lastPolledAt}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_at.isoformat() if last_polled_at else "Waiting for first poll" }}</span>
+    </footer>
 </div>
 {% endblock %}
