@@ -57,6 +57,7 @@
     <link rel="stylesheet" href="/static/css/tokens.css?v={{ asset_version() }}">
     <link rel="stylesheet" href="/static/css/components.css?v={{ asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages.css?v={{ asset_version() }}">
+    <link rel="stylesheet" href="/static/css/command_center.css?v={{ asset_version() }}">
 </head>
 <body>
     <header class="brand-bar">
@@ -73,6 +74,7 @@
     </header>
     <nav class="top-nav">
         <a href="/dashboard"{% if current_path == "/dashboard" %} class="active"{% endif %}>Sessions</a>
+        <a href="/command-center"{% if current_path == "/command-center" %} class="active"{% endif %}>Command Center</a>
         <a href="/config"{% if current_path == "/config" %} class="active"{% endif %}>Config</a>
         <a href="/install"{% if current_path == "/install" %} class="active"{% endif %}>Install</a>
     </nav>

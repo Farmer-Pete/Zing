@@ -12,7 +12,7 @@ pytestmark = pytest.mark.ui
 
 
 def test_top_nav_present(server: _ServerInfo, page: Page) -> None:
-    """Top nav is rendered with Sessions, Config, and Install links."""
+    """Top nav is rendered with Sessions, Command Center, Config, and Install links."""
     page.goto(f"{server.base_url}/dashboard")
     page.wait_for_load_state("domcontentloaded", timeout=3000)
 
@@ -20,8 +20,9 @@ def test_top_nav_present(server: _ServerInfo, page: Page) -> None:
     expect(nav).to_be_visible(timeout=3000)
 
     links = nav.locator("a")
-    expect(links).to_have_count(3, timeout=3000)
+    expect(links).to_have_count(4, timeout=3000)
     expect(nav.locator("a", has_text="Sessions")).to_be_visible(timeout=3000)
+    expect(nav.locator("a", has_text="Command Center")).to_be_visible(timeout=3000)
     expect(nav.locator("a", has_text="Config")).to_be_visible(timeout=3000)
     expect(nav.locator("a", has_text="Install")).to_be_visible(timeout=3000)
 
