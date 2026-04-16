@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import pathlib
@@ -14,8 +15,10 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.mcp_tools import configure, mcp_server
 from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
+from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
 from zing_ai.server.sessions import SessionManager
@@ -158,17 +161,23 @@ def create_app(
 
     mcp_starlette = mcp_server.streamable_http_app()
 
+    external_cache = ExternalCache()
+    cc_queues: list[asyncio.Queue[str]] = []
+
     fastapi_app = FastAPI(
         title="Zing Batch Review",
         description="Batch review UI for Zing AI development pipeline",
     )
     fastapi_app.state.session_manager = sm
+    fastapi_app.state.external_cache = external_cache
+    fastapi_app.state.cc_queues = cc_queues
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has
     # a catch-all `/{session_id}` route that would otherwise swallow /config etc.
     fastapi_app.include_router(config_router)
     fastapi_app.include_router(install_router)
+    fastapi_app.include_router(command_center_router)
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]
