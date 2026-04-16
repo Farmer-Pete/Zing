@@ -114,6 +114,33 @@ class TestSessionLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.update_session("s1", zing_file="/nonexistent/path.md")
 
+    def test_update_session_sets_ticket_id(self) -> None:
+        """update_session persists ticket_id when provided."""
+        self.manager.create_session("s1", "Title")
+
+        updated = self.manager.update_session("s1", ticket_id="ABC-1")
+        assert updated.ticket_id == "ABC-1"
+
+        # Verify persisted by reloading from disk
+        reloaded_mgr = SessionManager(data_dir=self.data_dir)
+        s = reloaded_mgr.get_session("s1")
+        assert s is not None
+        assert s.ticket_id == "ABC-1"
+
+    def test_update_session_ticket_id_none_preserves(self) -> None:
+        """update_session with no ticket_id leaves existing value unchanged."""
+        self.manager.create_session("s1", "Title")
+        self.manager.update_session("s1", ticket_id="ABC-1")
+
+        # Call update_session without ticket_id — should not clear the existing value
+        self.manager.update_session("s1", title="New Title")
+
+        reloaded_mgr = SessionManager(data_dir=self.data_dir)
+        s = reloaded_mgr.get_session("s1")
+        assert s is not None
+        assert s.ticket_id == "ABC-1"
+        assert s.title == "New Title"
+
     def test_create_session_with_steps(self) -> None:
         """Creating a session with steps pre-creates all WorkflowStep objects."""
         step_names = ["plan", "plan-audit", "build", "build-audit"]
