@@ -131,6 +131,57 @@ def test_hub_expand_collapse_via_datastar(server: _ServerInfo, page: Page) -> No
     )
 
 
+def test_hub_expand_via_real_mouse_click_on_header(server: _ServerInfo, page: Page) -> None:
+    """Clicking `.hub-header` with a real mouse (not JS dispatch) must toggle the hub.
+
+    The sibling test uses `page.evaluate('el.click()')` to route around Playwright's
+    pointer-event interception by ancestor elements. This test verifies the *real*
+    user path: a click on `.hub-header` bubbles to `.hub`'s `data-on:click`
+    handler and applies `.open`. If this fails, keyboard+mouse users are stuck.
+    """
+    cache = server.external_cache
+
+    issue = LinearIssue(
+        id="linear-uuid-006",
+        identifier="BAK-1006",
+        title="Real mouse click test",
+        state="Todo",
+        assignee=None,
+        team="Backend",
+        url="https://linear.app/test/issue/BAK-1006",
+        updated_at=datetime.now(tz=UTC),
+    )
+    cache.issues = [issue]
+
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    hub = page.locator("#hub-bak_1006")
+    expect(hub).to_be_visible(timeout=5000)
+
+    # Wait for Datastar to initialise (signals applied to the page).
+    page.wait_for_function(
+        "document.querySelector('.cc-page')"
+        " && document.querySelector('.cc-page').hasAttribute('data-signals')",
+        timeout=5000,
+    )
+
+    # Groups default to open (no .closed class), so the hub body is laid out.
+    assert "open" not in (hub.get_attribute("class") or ""), "Hub should start closed"
+
+    # Real Playwright click on `.hub-header` (element with cursor:pointer).
+    # The click must bubble up to the outer `.hub` div's data-on:click handler.
+    hub.locator(".hub-header").click(timeout=5000)
+    page.wait_for_function(
+        "document.querySelector('#hub-bak_1006').classList.contains('open')",
+        timeout=5000,
+    )
+    assert "open" in (hub.get_attribute("class") or ""), (
+        "Hub should be open after real .hub-header click — if this fails, "
+        "production click path is broken for real users"
+    )
+
+
 def test_yellow_urgency_renders_on_hot_hub(server: _ServerInfo, page: Page) -> None:
     """A hub whose urgency is 'hot' renders with the .hub.hot class and amber-ish border color."""
     manager = server.manager

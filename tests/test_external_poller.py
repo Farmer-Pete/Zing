@@ -152,11 +152,48 @@ class TestPollOnce(unittest.IsolatedAsyncioTestCase):
         poller._linear = mock_linear
         poller._github = mock_github
 
-        await poller._poll_once()
+        with self.assertLogs("zing_ai.server.external_poller", level="WARNING") as log_cm:
+            await poller._poll_once()
 
         assert cache.last_error is not None
         assert "Linear API error" in cache.last_error
         # poll_status must have been dispatched
+        event = q.get_nowait()
+        assert event == "poll_status"
+        # The failure must be reported to stdout/journal, not just the browser.
+        assert any("External poll failed" in msg for msg in log_cm.output)
+
+    async def test_poll_once_handles_httpx_transport_error(self) -> None:
+        """Transport errors (network down, timeout) must surface in cache.last_error."""
+        import httpx
+
+        cache = ExternalCache()
+        q: asyncio.Queue[str] = asyncio.Queue()
+        config = _make_config()
+
+        with (
+            patch.dict(os.environ, _GOOD_ENV, clear=False),
+            patch("zing_ai.server.external_poller.LinearClient"),
+            patch("zing_ai.server.external_poller.GitHubClient"),
+        ):
+            poller = ExternalPoller(cache=cache, queues=[q], config=config)
+
+        mock_linear = MagicMock()
+        mock_linear.fetch_my_open_issues = AsyncMock(
+            side_effect=httpx.ConnectError("Connection refused")
+        )
+        mock_github = MagicMock()
+        mock_github.fetch_open_prs = AsyncMock(return_value=[])
+        mock_github.fetch_current_user = AsyncMock(return_value="user")
+
+        poller._linear = mock_linear
+        poller._github = mock_github
+
+        # Must not raise — transport errors are caught just like API errors.
+        await poller._poll_once()
+
+        assert cache.last_error is not None
+        assert "Connection refused" in cache.last_error
         event = q.get_nowait()
         assert event == "poll_status"
 

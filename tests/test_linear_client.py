@@ -97,6 +97,42 @@ class TestLinearClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.identifier, "BAK-2")
 
     @respx.mock
+    async def test_fetch_my_open_issues_handles_null_team(self) -> None:
+        """Triage issues come back with team=null; the parser must not raise."""
+        issues_response = {
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "issue-triage",
+                            "identifier": "TRI-1",
+                            "title": "Untriaged",
+                            "state": {"name": "Triage"},
+                            "assignee": {"name": "Alice"},
+                            "team": None,
+                            "url": "https://linear.app/issue/TRI-1",
+                            "updatedAt": "2026-01-15T10:30:00Z",
+                        }
+                    ]
+                }
+            }
+        }
+        respx.post("https://api.linear.app/graphql").mock(
+            side_effect=[
+                httpx.Response(200, json=_VIEWER_RESPONSE),
+                httpx.Response(200, json=issues_response),
+            ]
+        )
+        client = LinearClient(api_key="test-key")
+        try:
+            issues = await client.fetch_my_open_issues()
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(issues), 1)
+        self.assertIsNone(issues[0].team)
+
+    @respx.mock
     async def test_http_500_raises(self) -> None:
         """A non-200 HTTP response must raise LinearAPIError."""
         respx.post("https://api.linear.app/graphql").mock(

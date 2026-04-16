@@ -5,6 +5,8 @@ import logging
 import os
 from datetime import datetime
 
+import httpx
+
 from zing_ai.config import CommandCenterConfig
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.github_client import GitHubAPIError, GitHubClient
@@ -57,7 +59,11 @@ class ExternalPoller:
                 self._github.fetch_open_prs(self._config.github_repo),
                 self._github.fetch_current_user(),
             )
-        except (LinearAPIError, GitHubAPIError) as e:
+        except asyncio.CancelledError:
+            # Lifespan shutdown: propagate so run()'s cancellation path fires.
+            raise
+        except (LinearAPIError, GitHubAPIError, httpx.TransportError) as e:
+            logger.warning("External poll failed: %s", e)
             self._cache.last_error = str(e)
             self._dispatch("poll_status")
             return

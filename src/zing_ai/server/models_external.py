@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from zing_ai.server.models import Session, WorkflowStep
+
+# Hub IDs must start with a letter and contain only letters, digits, hyphens,
+# underscores, or spaces — this guarantees `signal_key` produces a valid
+# Datastar/JS identifier (`$open.<key>` dot-notation requires the key to start
+# with a letter and contain no special characters).
+_HUB_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]*$")
 
 
 class LinearIssue(BaseModel):
@@ -16,7 +23,7 @@ class LinearIssue(BaseModel):
     title: str
     state: str  # state.name
     assignee: str | None
-    team: str  # team.name
+    team: str | None  # team.name; null on triage / unassigned-team issues
     url: str
     updated_at: datetime
 
@@ -57,6 +64,17 @@ class Hub(BaseModel):
     sessions: list[Session] = Field(default_factory=list)
     audits: list[WorkflowStep] = Field(default_factory=list)
     linear_issue: LinearIssue | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not _HUB_ID_RE.match(v):
+            raise ValueError(
+                f"Hub.id {v!r} must start with a letter and contain only "
+                "letters, digits, hyphens, underscores, or spaces (guarantees "
+                "signal_key produces a valid JS identifier for Datastar)."
+            )
+        return v
 
     @property
     def signal_key(self) -> str:

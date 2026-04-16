@@ -30,7 +30,10 @@ def _map_pr(pr: dict) -> GitHubPR:
         head_ref=pr["head"]["ref"],
         base_ref=pr["base"]["ref"],
         body=pr.get("body"),
-        requested_reviewers=[u["login"] for u in pr.get("requested_reviewers", [])],
+        # `requested_reviewers` from GitHub mixes user objects ({"login": ...}) and
+        # team objects ({"slug": ..., "name": ...}). v1 surfaces user reviewers only;
+        # team-review requests don't yet drive an inbox item.
+        requested_reviewers=[u["login"] for u in pr.get("requested_reviewers", []) if "login" in u],
         # TODO(v2): review_decision requires a follow-up GET /repos/{repo}/pulls/{n}/reviews
         # or may be available via the GraphQL API. Not present in REST list endpoint; set None.
         review_decision=None,

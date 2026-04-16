@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
+from pydantic import ValidationError
+
 from zing_ai.server.models_external import (
     GitHubPR,
     Hub,
@@ -33,6 +35,34 @@ class TestSignalKey(unittest.TestCase):
     def test_already_lowercase(self) -> None:
         hub = _make_hub("session-abc123")
         self.assertEqual(hub.signal_key, "session_abc123")
+
+
+class TestHubIdValidation(unittest.TestCase):
+    """Hub.id must start with a letter and contain only safe chars."""
+
+    def test_empty_string_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            _make_hub("")
+
+    def test_all_numeric_rejected(self) -> None:
+        # JS dot-notation can't access keys that start with a digit.
+        with self.assertRaises(ValidationError):
+            _make_hub("12345")
+
+    def test_leading_hyphen_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            _make_hub("-BAK-1")
+
+    def test_special_chars_rejected(self) -> None:
+        # Slash / ampersand / paren would produce malformed Datastar keys.
+        for bad in ("BAK/1", "BAK&1", "BAK(1)"):
+            with self.assertRaises(ValidationError):
+                _make_hub(bad)
+
+    def test_consecutive_hyphens_allowed(self) -> None:
+        # Collision with a natural "pr__orphan" is possible but rare; allow it.
+        hub = _make_hub("pr--orphan")
+        self.assertEqual(hub.signal_key, "pr__orphan")
 
 
 class TestLinearIssueModel(unittest.TestCase):

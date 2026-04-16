@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime
 
 from zing_ai.server.command_center import (
     AUDIT_STEP_NAMES,
@@ -443,6 +443,28 @@ class TestInboxItems(unittest.TestCase):
         self.assertEqual(item.target_url, pr.url)
         self.assertEqual(item.hub_id, "pr-42")
         self.assertEqual(item.hub_label, "Standalone")
+
+    def test_pr_inbox_item_with_tz_aware_updated_at_does_not_crash(self) -> None:
+        """Regression: real GitHub timestamps are tz-aware; _format_time_waiting must not raise."""
+
+        pr = _make_pr(number=77, head_ref="feature/tz-bug")
+        pr.requested_reviewers = ["octocat"]
+        pr.review_decision = None
+        # Mirror what github_client._map_pr produces from a real GitHub API response.
+        pr.updated_at = datetime(2026, 4, 16, 0, 0, 0, tzinfo=UTC)
+
+        inbox, _ = aggregate(
+            issues=[],
+            prs=[pr],
+            sessions=[],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(inbox), 1)
+        item = inbox[0]
+        # time_waiting must be a non-empty string ("Xm" / "Xh" / "Xd" / "—") rather than raising.
+        self.assertIsInstance(item.time_waiting, str)
+        self.assertNotEqual(item.time_waiting, "")
 
     def test_inbox_sorted_high_priority_first(self) -> None:
         """High-priority audit items appear before medium-priority PR review items."""

@@ -17,7 +17,7 @@ _ISSUES_QUERY = """
 query MyOpenIssues($viewerId: String!) {
   issues(filter: {
     assignee: { id: { eq: $viewerId } }
-    state: { type: { neq: "completed" } }
+    state: { type: { nin: ["completed", "canceled"] } }
   }) { nodes { id identifier title state { name } assignee { name } team { name } url updatedAt } }
 }
 """
@@ -87,7 +87,7 @@ class LinearClient:
                     title=node["title"],
                     state=node["state"]["name"],
                     assignee=node["assignee"]["name"] if node.get("assignee") else None,
-                    team=node["team"]["name"],
+                    team=node["team"]["name"] if node.get("team") else None,
                     url=node["url"],
                     updated_at=datetime.fromisoformat(updated_raw),
                 )

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -151,8 +152,17 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
         self.assertIn("hot", resp.text)
 
 
+class _SSEAsyncHelpers:
+    """Shared helpers for the async-driven SSE tests.
+
+    Kept separate so ``TestCommandCenterSSEAsync`` can inherit from
+    ``IsolatedAsyncioTestCase`` without inheriting the sync ``setUp`` chain
+    that ``CommandCenterTestBase`` provides.
+    """
+
+
 class TestCommandCenterSSE(CommandCenterTestBase):
-    """Tests for the /command-center/events SSE endpoint."""
+    """Tests for the /command-center/events SSE endpoint (synchronous path)."""
 
     def _get_cc_queues(self) -> list:
         """Return the cc_queues list from the FastAPI app state."""
@@ -258,18 +268,58 @@ class TestCommandCenterSSE(CommandCenterTestBase):
         time.sleep(0.1)
         self.assertGreater(len(cc_queues), initial_len)
 
+
+def _run_async_in_thread[T](coro_factory: Callable[[], Awaitable[T]]) -> T:
+    """Run an async coroutine in a worker thread with its own event loop.
+
+    Necessary because pytest-playwright fixtures install a long-lived asyncio
+    loop on the main thread — ``asyncio.run`` and ``IsolatedAsyncioTestCase``
+    both refuse to start another loop when one is already running in the same
+    thread. A fresh thread has no running loop.
+    """
+    value: list[T] = []
+    error: list[BaseException] = []
+
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            value.append(loop.run_until_complete(coro_factory()))
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+    if error:
+        raise error[0]
+    return value[0]
+
+
+class TestCommandCenterSSEAsync(CommandCenterTestBase):
+    """Async SSE tests that tolerate a co-resident asyncio loop.
+
+    Runs the async test bodies in a worker thread so they always own a fresh
+    event loop, even when pytest-playwright's fixtures have a main-thread loop
+    already running. This keeps the tests green regardless of test ordering.
+    """
+
     def test_sse_dispatches_inbox_changed(self) -> None:
         """An inbox_changed event causes a patch to #inbox-list."""
-        body = asyncio.run(
-            self._collect_cc_events(self.app_instance, ["inbox_changed"]),
-        )
+        app_instance = self.app_instance
+
+        async def _coro() -> str:
+            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["inbox_changed"])
+
+        body = _run_async_in_thread(_coro)
         self.assertIn("#inbox-list", body)
 
     def test_sse_disconnect_removes_queue(self) -> None:
         """After the SSE connection closes, the queue is removed from cc_queues."""
         fastapi_app = self._get_fastapi_app()
 
-        async def _run() -> int:
+        async def _coro() -> int:
             from unittest.mock import MagicMock
 
             from zing_ai.server.routes_command_center import command_center_events
@@ -278,7 +328,6 @@ class TestCommandCenterSSE(CommandCenterTestBase):
             request.app = fastapi_app
 
             queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
-            # Raise CancelledError immediately so the generator's finally block fires.
 
             async def _immediate_cancel(coro, *, timeout=None):  # noqa: ANN001,ANN201
                 coro.close()
@@ -303,5 +352,5 @@ class TestCommandCenterSSE(CommandCenterTestBase):
 
             return len(fastapi_app.state.cc_queues)  # type: ignore[attr-defined]
 
-        remaining = asyncio.run(_run())
+        remaining = _run_async_in_thread(_coro)
         self.assertEqual(remaining, 0)

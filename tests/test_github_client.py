@@ -118,6 +118,40 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third.updated_at, datetime(2026, 3, 12, 16, 45, 0, tzinfo=UTC))
 
     @respx.mock
+    async def test_fetch_open_prs_filters_team_reviewers(self) -> None:
+        """Team reviewer objects (no `login` key) must not raise KeyError."""
+        pr_with_team_reviewer = {
+            "number": 99,
+            "title": "Mixed reviewers",
+            "state": "open",
+            "draft": False,
+            "head_ref": "feature/teams",
+            "head": {"ref": "feature/teams"},
+            "base": {"ref": "main"},
+            "body": None,
+            "requested_reviewers": [
+                {"login": "alice"},
+                {"slug": "backend-team", "name": "Backend"},  # team object — no login
+                {"login": "bob"},
+            ],
+            "mergeable_state": "clean",
+            "html_url": "https://github.com/owner/repo/pull/99",
+            "updated_at": "2026-03-15T09:00:00Z",
+        }
+        respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
+            return_value=httpx.Response(200, json=[pr_with_team_reviewer])
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_open_prs("owner/repo")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(prs), 1)
+        # Team object dropped; only user logins survive.
+        self.assertEqual(prs[0].requested_reviewers, ["alice", "bob"])
+
+    @respx.mock
     async def test_http_404_raises(self) -> None:
         """A 404 response must raise GitHubAPIError."""
         respx.get("https://api.github.com/repos/owner/missing/pulls").mock(

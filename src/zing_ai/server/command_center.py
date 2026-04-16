@@ -157,8 +157,13 @@ def aggregate(
 
 
 def _format_time_waiting(since: datetime) -> str:
-    """Return a compact string like '5m', '2h', '3d' for time elapsed since *since*."""
-    delta = datetime.now() - since
+    """Return a compact string like '5m', '2h', '3d' for time elapsed since *since*.
+
+    Tolerates both naive and tz-aware *since* values: anchors on the same
+    timezone basis as *since* so naive/aware mixing never raises.
+    """
+    now = datetime.now(since.tzinfo) if since.tzinfo is not None else datetime.now()
+    delta = now - since
     total_seconds = int(delta.total_seconds())
     if total_seconds < 0:
         return "—"

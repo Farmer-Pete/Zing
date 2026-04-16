@@ -109,7 +109,7 @@
     animation: cc-pulse 1.5s infinite;
 }
 
-.priority-med {
+.priority-medium {
     background: var(--amber);
 }
 
@@ -222,20 +222,22 @@
     border-radius: 999px;
 }
 
+/* `<details open>` starts expanded; clicking `<summary>` toggles.
+   The chevron rotates when the parent <details> has the `open` attribute. */
+.group[open] .group-chevron {
+    transform: rotate(90deg);
+}
+
 .group-body {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height 0.3s ease, opacity 0.2s ease;
-    opacity: 0;
+    padding-top: 0.5rem;
 }
 
-.group.open .group-body {
-    max-height: 3000px;
-    opacity: 1;
-}
+/* Suppress the native disclosure triangle so our `.group-chevron` renders. */
+.group-header::-webkit-details-marker { display: none; }
+.group-header { list-style: none; }
 
 /* ──────────────────────────────────────────────
    HUB CARDS

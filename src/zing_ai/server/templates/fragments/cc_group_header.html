@@ -1,5 +1,5 @@
 {% set hot_count = group.hubs | selectattr("urgency", "equalto", "hot") | list | length %}
-<div class="group-header">
+<summary class="group-header">
     <span class="group-chevron"></span>
     <span class="group-name">{{ group.team }}</span>
     <span class="group-count">{{ group.hubs | length }}</span>
@@ -8,4 +8,4 @@
             <span class="dot"></span>{{ hot_count }} hot
         </span>
     {% endif %}
-</div>
+</summary>
