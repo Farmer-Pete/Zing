@@ -34,7 +34,8 @@ _ISSUES_RESPONSE = {
                     "url": "https://linear.app/issue/BAK-2",
                     "updatedAt": "2026-02-20T08:00:00+00:00",
                 },
-            ]
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
         }
     }
 }
@@ -113,7 +114,8 @@ class TestLinearClient(unittest.IsolatedAsyncioTestCase):
                             "url": "https://linear.app/issue/TRI-1",
                             "updatedAt": "2026-01-15T10:30:00Z",
                         }
-                    ]
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
                 }
             }
         }
@@ -131,6 +133,87 @@ class TestLinearClient(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(issues), 1)
         self.assertIsNone(issues[0].team)
+
+    @respx.mock
+    async def test_fetch_my_open_issues_empty_nodes(self) -> None:
+        """Empty ``nodes`` array must yield an empty list, not raise."""
+        empty_response = {
+            "data": {
+                "issues": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+        respx.post("https://api.linear.app/graphql").mock(
+            side_effect=[
+                httpx.Response(200, json=_VIEWER_RESPONSE),
+                httpx.Response(200, json=empty_response),
+            ]
+        )
+        client = LinearClient(api_key="test-key")
+        try:
+            issues = await client.fetch_my_open_issues()
+        finally:
+            await client.aclose()
+
+        self.assertEqual(issues, [])
+
+    @respx.mock
+    async def test_fetch_my_open_issues_paginates(self) -> None:
+        """Multiple pages must be fetched and concatenated in order."""
+        page_1 = {
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "p1-1",
+                            "identifier": "BAK-10",
+                            "title": "Page 1, issue 1",
+                            "state": {"name": "In Progress"},
+                            "assignee": {"name": "Alice"},
+                            "team": {"name": "Backend"},
+                            "url": "https://linear.app/issue/BAK-10",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                }
+            }
+        }
+        page_2 = {
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "p2-1",
+                            "identifier": "BAK-11",
+                            "title": "Page 2, issue 1",
+                            "state": {"name": "Todo"},
+                            "assignee": {"name": "Bob"},
+                            "team": {"name": "Backend"},
+                            "url": "https://linear.app/issue/BAK-11",
+                            "updatedAt": "2026-02-01T00:00:00Z",
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": "cursor-2"},
+                }
+            }
+        }
+        respx.post("https://api.linear.app/graphql").mock(
+            side_effect=[
+                httpx.Response(200, json=_VIEWER_RESPONSE),
+                httpx.Response(200, json=page_1),
+                httpx.Response(200, json=page_2),
+            ]
+        )
+        client = LinearClient(api_key="test-key")
+        try:
+            issues = await client.fetch_my_open_issues()
+        finally:
+            await client.aclose()
+
+        self.assertEqual([i.identifier for i in issues], ["BAK-10", "BAK-11"])
 
     @respx.mock
     async def test_http_500_raises(self) -> None:

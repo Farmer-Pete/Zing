@@ -13,12 +13,24 @@ class LinearAPIError(Exception):
 
 _VIEWER_QUERY = "{ viewer { id } }"
 
+# Linear's default page size is 50 and the maximum is 250. Requesting 250 plus
+# paginating via `pageInfo.endCursor` means even large workloads (hundreds of
+# open tickets across teams) surface in full, rather than silently truncating.
+_ISSUES_PAGE_SIZE = 250
+
 _ISSUES_QUERY = """
-query MyOpenIssues($viewerId: String!) {
-  issues(filter: {
-    assignee: { id: { eq: $viewerId } }
-    state: { type: { nin: ["completed", "canceled"] } }
-  }) { nodes { id identifier title state { name } assignee { name } team { name } url updatedAt } }
+query MyOpenIssues($viewerId: String!, $first: Int!, $after: String) {
+  issues(
+    first: $first,
+    after: $after,
+    filter: {
+      assignee: { id: { eq: $viewerId } }
+      state: { type: { nin: ["completed", "canceled"] } }
+    }
+  ) {
+    nodes { id identifier title state { name } assignee { name } team { name } url updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
 }
 """
 
@@ -71,25 +83,43 @@ class LinearClient:
         return self._viewer_id
 
     async def fetch_my_open_issues(self) -> list[LinearIssue]:
-        """Return all open issues assigned to the authenticated user."""
+        """Return all open issues assigned to the authenticated user.
+
+        Pages through Linear's cursor-based pagination so workloads larger
+        than a single page (default 50, max 250) surface completely rather
+        than silently truncating.
+        """
         viewer_id = await self.fetch_viewer_id()
-        data = await self._post(_ISSUES_QUERY, {"viewerId": viewer_id})
         issues: list[LinearIssue] = []
-        for node in data["issues"]["nodes"]:
-            updated_raw: str = node["updatedAt"]
-            # datetime.fromisoformat requires +00:00 not Z (Python < 3.11 compat)
-            if updated_raw.endswith("Z"):
-                updated_raw = updated_raw[:-1] + "+00:00"
-            issues.append(
-                LinearIssue(
-                    id=node["id"],
-                    identifier=node["identifier"],
-                    title=node["title"],
-                    state=node["state"]["name"],
-                    assignee=node["assignee"]["name"] if node.get("assignee") else None,
-                    team=node["team"]["name"] if node.get("team") else None,
-                    url=node["url"],
-                    updated_at=datetime.fromisoformat(updated_raw),
-                )
+        after: str | None = None
+        while True:
+            data = await self._post(
+                _ISSUES_QUERY,
+                {"viewerId": viewer_id, "first": _ISSUES_PAGE_SIZE, "after": after},
             )
+            for node in data["issues"]["nodes"]:
+                updated_raw: str = node["updatedAt"]
+                # datetime.fromisoformat requires +00:00 not Z (Python < 3.11 compat)
+                if updated_raw.endswith("Z"):
+                    updated_raw = updated_raw[:-1] + "+00:00"
+                issues.append(
+                    LinearIssue(
+                        id=node["id"],
+                        identifier=node["identifier"],
+                        title=node["title"],
+                        state=node["state"]["name"],
+                        assignee=node["assignee"]["name"] if node.get("assignee") else None,
+                        team=node["team"]["name"] if node.get("team") else None,
+                        url=node["url"],
+                        updated_at=datetime.fromisoformat(updated_raw),
+                    )
+                )
+            page_info = data["issues"].get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if not after:
+                # Defensive: hasNextPage=True but no cursor shouldn't happen
+                # per Linear's schema; bail out rather than loop forever.
+                break
         return issues
