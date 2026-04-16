@@ -1,0 +1,11 @@
+{% set hot_count = group.hubs | selectattr("urgency", "equalto", "hot") | list | length %}
+<div class="group-header">
+    <span class="group-chevron"></span>
+    <span class="group-name">{{ group.team }}</span>
+    <span class="group-count">{{ group.hubs | length }}</span>
+    {% if hot_count > 0 %}
+        <span class="urgency-badge urgency-hot">
+            <span class="dot"></span>{{ hot_count }} hot
+        </span>
+    {% endif %}
+</div>

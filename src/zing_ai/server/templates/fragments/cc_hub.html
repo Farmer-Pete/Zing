@@ -1,0 +1,23 @@
+<div class="hub {{ hub.urgency }}"
+     data-signals:open.{{ hub.signal_key }}="false"
+     data-class="{open: $open.{{ hub.signal_key }}}"
+     data-on:click="$open.{{ hub.signal_key }} = !$open.{{ hub.signal_key }}"
+     id="hub-{{ hub.signal_key }}">
+    <div class="hub-header">
+        <span class="chev"></span>
+        <span class="hub-id">{{ hub.id }}</span>
+        <span class="hub-name">{{ hub.title }}</span>
+        {% if hub.assignee %}<div class="hub-avatar">{{ hub.assignee[:2] }}</div>{% endif %}
+    </div>
+    <div class="spokes">
+        {% with kind="prs", items=hub.prs %}
+            {% include "fragments/cc_spoke.html" %}
+        {% endwith %}
+        {% with kind="sessions", items=hub.sessions %}
+            {% include "fragments/cc_spoke.html" %}
+        {% endwith %}
+        {% with kind="audits", items=hub.audits %}
+            {% include "fragments/cc_spoke.html" %}
+        {% endwith %}
+    </div>
+</div>
