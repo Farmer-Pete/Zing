@@ -10,7 +10,8 @@ from zing_ai.server.command_center import (
     _parse_ticket_ids,
     aggregate,
 )
-from zing_ai.server.models_external import GitHubPR
+from zing_ai.server.models import Session, WorkflowStep
+from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
 def _make_pr(
@@ -84,6 +85,127 @@ class TestParseTicketIds(unittest.TestCase):
     def test_parse_no_match(self) -> None:
         pr = _make_pr(title="No tickets here", head_ref="feature/cleanup", body=None)
         self.assertEqual(_parse_ticket_ids(pr), set())
+
+
+class TestJoinLogic(unittest.TestCase):
+    """aggregate() correctly joins issues, PRs, and sessions into Hubs."""
+
+    def _make_issue(
+        self,
+        *,
+        identifier: str = "BAK-1",
+        title: str = "Fix bug",
+        team: str = "Back End",
+        assignee: str | None = "alice",
+    ) -> LinearIssue:
+        return LinearIssue(
+            id="uuid-" + identifier,
+            identifier=identifier,
+            title=title,
+            state="In Progress",
+            assignee=assignee,
+            team=team,
+            url=f"https://linear.app/t/{identifier}",
+            updated_at=datetime(2026, 4, 16, 0, 0, 0),
+        )
+
+    def _make_session(
+        self,
+        *,
+        session_id: str = "sess-1",
+        title: str = "Session 1",
+        ticket_id: str | None = None,
+        steps: list | None = None,
+    ) -> Session:
+        return Session(
+            session_id=session_id,
+            title=title,
+            ticket_id=ticket_id,
+            steps=steps or [],
+        )
+
+    def _make_workflow_step(self, *, step_name: str, sequence: int = 0) -> WorkflowStep:
+        return WorkflowStep(step_name=step_name, sequence=sequence)
+
+    def test_ticket_with_one_pr_and_session(self) -> None:
+        """1 issue + 1 matching PR + 1 matching session -> 1 ticket-Hub containing both."""
+        issue = self._make_issue(identifier="BAK-1")
+        pr = _make_pr(number=10, head_ref="BAK-1/feature")
+        session = self._make_session(session_id="s1", ticket_id="BAK-1")
+
+        _, hubs = aggregate(
+            issues=[issue],
+            prs=[pr],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        hub = hubs[0]
+        self.assertEqual(hub.kind, "ticket")
+        self.assertEqual(hub.id, "BAK-1")
+        self.assertEqual(len(hub.prs), 1)
+        self.assertEqual(hub.prs[0].number, 10)
+        self.assertEqual(len(hub.sessions), 1)
+        self.assertEqual(hub.sessions[0].session_id, "s1")
+
+    def test_orphan_pr_becomes_pr_hub(self) -> None:
+        """A PR with no matching ticket -> Hub(kind='pr')."""
+        pr = _make_pr(number=99, head_ref="feature/no-ticket")
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[pr],
+            sessions=[],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        hub = hubs[0]
+        self.assertEqual(hub.kind, "pr")
+        self.assertEqual(hub.id, "pr-99")
+        self.assertEqual(len(hub.prs), 1)
+
+    def test_orphan_session_becomes_session_hub(self) -> None:
+        """A session with no ticket_id -> Hub(kind='session')."""
+        session = self._make_session(session_id="orphan-sess", title="Orphan", ticket_id=None)
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        hub = hubs[0]
+        self.assertEqual(hub.kind, "session")
+        self.assertEqual(hub.id, "session-orphan-sess")
+        self.assertEqual(len(hub.sessions), 1)
+
+    def test_session_with_audit_step_classified_as_audit(self) -> None:
+        """Session with step_name='build-audit' -> WorkflowSteps appear in hub.audits."""
+        audit_step = self._make_workflow_step(step_name="build-audit", sequence=0)
+        non_audit_step = self._make_workflow_step(step_name="review", sequence=1)
+        session = self._make_session(
+            session_id="audit-sess",
+            ticket_id=None,
+            steps=[audit_step, non_audit_step],
+        )
+
+        _, hubs = aggregate(
+            issues=[],
+            prs=[],
+            sessions=[session],
+            current_username="octocat",
+        )
+
+        self.assertEqual(len(hubs), 1)
+        hub = hubs[0]
+        self.assertEqual(len(hub.audits), 1)
+        self.assertIsInstance(hub.audits[0], WorkflowStep)
+        self.assertEqual(hub.audits[0].step_name, "build-audit")
+        self.assertEqual(len(hub.sessions), 0)
 
 
 if __name__ == "__main__":
