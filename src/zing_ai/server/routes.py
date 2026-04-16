@@ -53,6 +53,14 @@ router = APIRouter()
 
 # Per-session list of asyncio queues for active SSE connections.
 # Each SSE connection registers its own queue to receive push notifications.
+#
+# TODO(consistency): new code (see command_center's cc_queues) puts these on
+# fastapi_app.state rather than using module-level globals. These dicts are
+# aliased onto ``app.state.sse_queues`` / ``app.state.dashboard_queues`` in
+# ``create_app`` so new code can dependency-inject them; a future refactor
+# should move the storage entirely onto app.state and thread the app
+# reference through ``_notify_*_connections``. Blocked on migrating the
+# existing test suite's direct imports of these names.
 _sse_queues: dict[str, list[asyncio.Queue[str]]] = defaultdict(list)
 
 # Queues for dashboard SSE connections — notified when any session changes state.

@@ -19,7 +19,13 @@ from zing_ai.config import load_config
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
-from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
+from zing_ai.server.routes import (
+    _dashboard_queues,
+    _notify_dashboard_connections,
+    _notify_sse_connections,
+    _sse_queues,
+    router,
+)
 from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
@@ -244,6 +250,12 @@ def create_app(
     # Reuse the same list object the session-event listener closed over; both
     # the SSE route and the listener mutate it as clients connect/disconnect.
     fastapi_app.state.cc_queues = cc_queues_list
+    # Expose the legacy module-level SSE/dashboard queue stores via app.state
+    # so new code can DI-read them (matching the cc_queues pattern). Same
+    # list/dict object — transitional step toward a full migration off the
+    # module globals; see the TODO(consistency) note in routes.py.
+    fastapi_app.state.sse_queues = _sse_queues
+    fastapi_app.state.dashboard_queues = _dashboard_queues
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has

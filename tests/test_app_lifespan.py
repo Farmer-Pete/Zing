@@ -52,6 +52,23 @@ class TestAppLifespan(unittest.TestCase):
         assert isinstance(fastapi_app.state.external_cache, ExternalCache)
         assert isinstance(fastapi_app.state.cc_queues, list)
 
+    def test_app_state_aliases_module_level_sse_and_dashboard_queues(self) -> None:
+        """fastapi_app.state exposes the legacy _sse_queues / _dashboard_queues.
+
+        Transitional: new code can DI-read these via app.state instead of
+        importing the module globals directly. The same dict/list objects
+        back both the module-level names and app.state for now.
+        """
+        from zing_ai.server.routes import _dashboard_queues, _sse_queues
+
+        app = create_app(session_manager=self.manager)
+        starlette_app = app.app  # type: ignore[attr-defined]
+        fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+
+        # Identity check — not merely equal, but the same object.
+        assert fastapi_app.state.sse_queues is _sse_queues
+        assert fastapi_app.state.dashboard_queues is _dashboard_queues
+
     def test_session_events_dispatch_to_cc_queues(self) -> None:
         """SessionManager events must push inbox_changed + hub_changed to cc_queues.
 
