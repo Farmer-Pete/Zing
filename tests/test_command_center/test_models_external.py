@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pydantic import ValidationError
 
+from tests.test_command_center.conftest import make_hub as _make_hub
 from zing_ai.server.models_external import (
     GitHubPR,
     Hub,
@@ -201,18 +202,6 @@ class TestInboxItemModel(unittest.TestCase):
         item = self._sample()
         restored = InboxItem.model_validate_json(item.model_dump_json())
         self.assertEqual(restored, item)
-
-
-def _make_hub(hub_id: str) -> Hub:
-    """Helper to create a minimal Hub with the given id."""
-    return Hub(
-        id=hub_id,
-        kind="ticket",
-        title="Test",
-        team=None,
-        assignee=None,
-        urgency="active",
-    )
 
 
 if __name__ == "__main__":

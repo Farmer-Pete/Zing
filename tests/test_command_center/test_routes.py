@@ -8,64 +8,21 @@ import threading
 import time
 import unittest
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.test_command_center.conftest import (
+    make_issue as _make_issue,
+)
+from tests.test_command_center.conftest import (
+    make_workflow_step as _make_workflow_step,
+)
 from zing_ai.server.app import create_app
-from zing_ai.server.models import Session, SessionState, WorkflowStep
-from zing_ai.server.models_external import GitHubPR, LinearIssue
+from zing_ai.server.models import Session, SessionState
 from zing_ai.server.sessions import SessionManager
-
-
-def _make_issue(
-    *,
-    identifier: str = "BAK-1",
-    title: str = "Fix bug",
-    team: str = "Back End",
-    assignee: str | None = "alice",
-) -> LinearIssue:
-    return LinearIssue(
-        id="uuid-" + identifier,
-        identifier=identifier,
-        title=title,
-        state="In Progress",
-        assignee=assignee,
-        team=team,
-        url=f"https://linear.app/t/{identifier}",
-        updated_at=datetime(2026, 4, 16, 0, 0, 0),
-    )
-
-
-def _make_pr(
-    *,
-    number: int = 1,
-    title: str = "Title",
-    head_ref: str = "feature",
-    body: str | None = None,
-) -> GitHubPR:
-    return GitHubPR(
-        number=number,
-        title=title,
-        state="open",
-        draft=False,
-        head_ref=head_ref,
-        base_ref="main",
-        body=body,
-        requested_reviewers=[],
-        review_decision=None,
-        mergeable_state="clean",
-        ci_status=None,
-        url=f"https://github.com/o/r/pull/{number}",
-        updated_at=datetime(2026, 4, 16, 0, 0, 0),
-    )
-
-
-def _make_workflow_step(*, step_name: str, sequence: int = 0) -> WorkflowStep:
-    return WorkflowStep(step_name=step_name, sequence=sequence)
 
 
 class CommandCenterTestBase(unittest.TestCase):

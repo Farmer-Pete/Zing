@@ -4,14 +4,18 @@ import asyncio
 import contextlib
 import os
 import unittest
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.test_command_center.conftest import (
+    make_issue as _make_issue,
+)
+from tests.test_command_center.conftest import (
+    make_pr as _make_pr,
+)
 from zing_ai.config import CommandCenterConfig
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.linear_client import LinearAPIError
-from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
 def _make_config(
@@ -24,37 +28,6 @@ def _make_config(
         github_repo=github_repo,
         linear_poll_seconds=linear_poll_seconds,
         github_poll_seconds=github_poll_seconds,
-    )
-
-
-def _make_issue(identifier: str = "BAK-1") -> LinearIssue:
-    return LinearIssue(
-        id="issue-uuid-1",
-        identifier=identifier,
-        title="Test issue",
-        state="In Progress",
-        assignee="Alice",
-        team="Backend",
-        url=f"https://linear.app/issue/{identifier}",
-        updated_at=datetime(2026, 1, 15, 10, 30, tzinfo=UTC),
-    )
-
-
-def _make_pr(number: int = 42) -> GitHubPR:
-    return GitHubPR(
-        number=number,
-        title="Test PR",
-        state="open",
-        draft=False,
-        head_ref="feature/x",
-        base_ref="main",
-        body=None,
-        requested_reviewers=[],
-        review_decision=None,
-        mergeable_state="clean",
-        ci_status=None,
-        url=f"https://github.com/owner/repo/pull/{number}",
-        updated_at=datetime(2026, 3, 10, 12, 0, tzinfo=UTC),
     )
 
 
@@ -107,8 +80,8 @@ class TestPollOnce(unittest.IsolatedAsyncioTestCase):
         ):
             poller = ExternalPoller(cache=cache, queues=queues, config=config)
 
-        issues = [_make_issue("BAK-1"), _make_issue("BAK-2")]
-        prs = [_make_pr(42)]
+        issues = [_make_issue(identifier="BAK-1"), _make_issue(identifier="BAK-2")]
+        prs = [_make_pr(number=42)]
         username = "octocat"
 
         mock_linear = MagicMock()

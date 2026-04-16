@@ -5,38 +5,24 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
+from tests.test_command_center.conftest import (
+    make_issue as _make_issue,
+)
+from tests.test_command_center.conftest import (
+    make_pr as _make_pr,
+)
+from tests.test_command_center.conftest import (
+    make_session as _make_session,
+)
+from tests.test_command_center.conftest import (
+    make_workflow_step as _make_workflow_step,
+)
 from zing_ai.server.command_center import (
     AUDIT_STEP_NAMES,
-    _parse_ticket_ids,
+    _parse_ticket_id,
     aggregate,
 )
-from zing_ai.server.models import Session, SessionState, TextFinding, WorkflowStep
-from zing_ai.server.models_external import GitHubPR, LinearIssue
-
-
-def _make_pr(
-    *,
-    number: int = 1,
-    title: str = "Title",
-    head_ref: str = "feature",
-    body: str | None = None,
-) -> GitHubPR:
-    """Build a GitHubPR with sensible defaults for ticket-parsing tests."""
-    return GitHubPR(
-        number=number,
-        title=title,
-        state="open",
-        draft=False,
-        head_ref=head_ref,
-        base_ref="main",
-        body=body,
-        requested_reviewers=[],
-        review_decision=None,
-        mergeable_state="clean",
-        ci_status=None,
-        url=f"https://github.com/o/r/pull/{number}",
-        updated_at=datetime(2026, 4, 16, 0, 0, 0),
-    )
+from zing_ai.server.models import SessionState, TextFinding, WorkflowStep
 
 
 class TestAggregateEmptyInputs(unittest.TestCase):
@@ -63,75 +49,57 @@ class TestAuditStepNames(unittest.TestCase):
         )
 
 
-class TestParseTicketIds(unittest.TestCase):
-    """_parse_ticket_ids extracts normalised ticket identifiers from PRs."""
+class TestParseTicketId(unittest.TestCase):
+    """_parse_ticket_id returns the first normalised ticket identifier on a PR."""
 
     def test_parse_uppercase_branch(self) -> None:
         pr = _make_pr(head_ref="BAK-1179/feature")
-        self.assertEqual(_parse_ticket_ids(pr), {"BAK-1179"})
+        self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
 
     def test_parse_lowercase_branch(self) -> None:
         pr = _make_pr(head_ref="bak-1179/feature")
-        self.assertEqual(_parse_ticket_ids(pr), {"BAK-1179"})
+        self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
 
     def test_parse_body_closes_keyword(self) -> None:
         pr = _make_pr(body="Closes BAK-1179")
-        self.assertEqual(_parse_ticket_ids(pr), {"BAK-1179"})
+        self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
 
-    def test_parse_multiple_tickets(self) -> None:
-        pr = _make_pr(body="See FRO-892 and BAK-1179")
-        self.assertEqual(_parse_ticket_ids(pr), {"FRO-892", "BAK-1179"})
+    def test_parse_first_match_wins_when_multiple_tickets(self) -> None:
+        """Branch name takes precedence over body mentions — first match wins."""
+        pr = _make_pr(head_ref="FRO-892/something", body="See BAK-1179 and ENG-42")
+        self.assertEqual(_parse_ticket_id(pr), "FRO-892")
 
     def test_parse_no_match(self) -> None:
         pr = _make_pr(title="No tickets here", head_ref="feature/cleanup", body=None)
-        self.assertEqual(_parse_ticket_ids(pr), set())
+        self.assertIsNone(_parse_ticket_id(pr))
+
+    def test_parse_single_letter_prefix_rejected(self) -> None:
+        """Single-letter prefixes aren't real Linear keys; X-5 should not match."""
+        pr = _make_pr(head_ref="feature/X-5", title="tweak X-5 handling", body=None)
+        self.assertIsNone(_parse_ticket_id(pr))
+
+    def test_parse_noisy_body_does_not_beat_branch_match(self) -> None:
+        """A branch-name ticket wins even when the body has noisy tokens like UTF-8.
+
+        First-match ordering means the branch is scanned first; downstream the
+        parser returns ``BAK-1179`` rather than ``UTF-8`` from the body.
+        """
+        pr = _make_pr(
+            head_ref="BAK-1179/fix-encoding",
+            title="fix UTF-8 handling",
+            body="Supports UTF-8 and SHA-256",
+        )
+        self.assertEqual(_parse_ticket_id(pr), "BAK-1179")
 
 
 class TestJoinLogic(unittest.TestCase):
     """aggregate() correctly joins issues, PRs, and sessions into Hubs."""
 
-    def _make_issue(
-        self,
-        *,
-        identifier: str = "BAK-1",
-        title: str = "Fix bug",
-        team: str = "Back End",
-        assignee: str | None = "alice",
-    ) -> LinearIssue:
-        return LinearIssue(
-            id="uuid-" + identifier,
-            identifier=identifier,
-            title=title,
-            state="In Progress",
-            assignee=assignee,
-            team=team,
-            url=f"https://linear.app/t/{identifier}",
-            updated_at=datetime(2026, 4, 16, 0, 0, 0),
-        )
-
-    def _make_session(
-        self,
-        *,
-        session_id: str = "sess-1",
-        title: str = "Session 1",
-        ticket_id: str | None = None,
-        steps: list | None = None,
-    ) -> Session:
-        return Session(
-            session_id=session_id,
-            title=title,
-            ticket_id=ticket_id,
-            steps=steps or [],
-        )
-
-    def _make_workflow_step(self, *, step_name: str, sequence: int = 0) -> WorkflowStep:
-        return WorkflowStep(step_name=step_name, sequence=sequence)
-
     def test_ticket_with_one_pr_and_session(self) -> None:
         """1 issue + 1 matching PR + 1 matching session -> 1 ticket-Hub containing both."""
-        issue = self._make_issue(identifier="BAK-1")
+        issue = _make_issue(identifier="BAK-1")
         pr = _make_pr(number=10, head_ref="BAK-1/feature")
-        session = self._make_session(session_id="s1", ticket_id="BAK-1")
+        session = _make_session(session_id="s1", ticket_id="BAK-1")
 
         _, hubs = aggregate(
             issues=[issue],
@@ -168,7 +136,7 @@ class TestJoinLogic(unittest.TestCase):
 
     def test_orphan_session_becomes_session_hub(self) -> None:
         """A session with no ticket_id -> Hub(kind='session')."""
-        session = self._make_session(session_id="orphan-sess", title="Orphan", ticket_id=None)
+        session = _make_session(session_id="orphan-sess", title="Orphan", ticket_id=None)
 
         _, hubs = aggregate(
             issues=[],
@@ -185,9 +153,9 @@ class TestJoinLogic(unittest.TestCase):
 
     def test_session_with_audit_step_classified_as_audit(self) -> None:
         """Session with step_name='build-audit' -> WorkflowSteps appear in hub.audits."""
-        audit_step = self._make_workflow_step(step_name="build-audit", sequence=0)
-        non_audit_step = self._make_workflow_step(step_name="review", sequence=1)
-        session = self._make_session(
+        audit_step = _make_workflow_step(step_name="build-audit", sequence=0)
+        non_audit_step = _make_workflow_step(step_name="review", sequence=1)
+        session = _make_session(
             session_id="audit-sess",
             ticket_id=None,
             steps=[audit_step, non_audit_step],
@@ -211,66 +179,20 @@ class TestJoinLogic(unittest.TestCase):
 class TestUrgencyComputation(unittest.TestCase):
     """_compute_urgency is called inside aggregate() and sets hub.urgency correctly."""
 
-    def _make_issue(
-        self,
-        *,
-        identifier: str = "BAK-1",
-        title: str = "Fix bug",
-    ) -> LinearIssue:
-        return LinearIssue(
-            id="uuid-" + identifier,
-            identifier=identifier,
-            title=title,
-            state="In Progress",
-            assignee="alice",
-            team="Back End",
-            url=f"https://linear.app/t/{identifier}",
-            updated_at=datetime(2026, 4, 16, 0, 0, 0),
-        )
-
-    def _make_session(
-        self,
-        *,
-        session_id: str = "sess-1",
-        title: str = "Session 1",
-        ticket_id: str | None = None,
-        steps: list | None = None,
-    ) -> Session:
-        return Session(
-            session_id=session_id,
-            title=title,
-            ticket_id=ticket_id,
-            steps=steps or [],
-        )
-
-    def _make_workflow_step(
-        self,
-        *,
-        step_name: str,
-        sequence: int = 0,
-        state: SessionState = SessionState.PENDING,
-        findings: list | None = None,
-    ) -> WorkflowStep:
-        step = WorkflowStep(step_name=step_name, sequence=sequence)
-        step.state = state
-        if findings is not None:
-            step.findings = findings
-        return step
-
     def test_hub_with_ready_audit_is_hot(self) -> None:
         """An audit step in READY state with findings -> urgency == 'hot'."""
         finding = TextFinding(title="Issue found", body="Details here")
-        audit_step = self._make_workflow_step(
+        audit_step = _make_workflow_step(
             step_name="build-audit",
             state=SessionState.READY,
             findings=[finding],
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="audit-sess",
             ticket_id="BAK-1",
             steps=[audit_step],
         )
-        issue = self._make_issue(identifier="BAK-1")
+        issue = _make_issue(identifier="BAK-1")
 
         _, hubs = aggregate(
             issues=[issue],
@@ -288,7 +210,7 @@ class TestUrgencyComputation(unittest.TestCase):
         pr.requested_reviewers = ["octocat"]
         pr.review_decision = None
 
-        issue = self._make_issue(identifier="BAK-1")
+        issue = _make_issue(identifier="BAK-1")
 
         _, hubs = aggregate(
             issues=[issue],
@@ -302,11 +224,11 @@ class TestUrgencyComputation(unittest.TestCase):
 
     def test_hub_with_running_session_is_active(self) -> None:
         """A session step in STARTED state -> urgency == 'active' (not hot)."""
-        step = self._make_workflow_step(
+        step = _make_workflow_step(
             step_name="review",
             state=SessionState.STARTED,
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="active-sess",
             ticket_id=None,  # orphan session hub
             steps=[step],
@@ -324,11 +246,11 @@ class TestUrgencyComputation(unittest.TestCase):
 
     def test_hub_with_completed_state_is_cool(self) -> None:
         """A hub with no hot or active signals -> urgency == 'cool'."""
-        step = self._make_workflow_step(
+        step = _make_workflow_step(
             step_name="review",
             state=SessionState.COMPLETED,
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="cool-sess",
             ticket_id=None,
             steps=[step],
@@ -348,63 +270,22 @@ class TestUrgencyComputation(unittest.TestCase):
 class TestInboxItems(unittest.TestCase):
     """_derive_inbox_items builds the prioritised action list."""
 
-    def _make_issue(self, *, identifier: str = "BAK-1") -> LinearIssue:
-        return LinearIssue(
-            id="uuid-" + identifier,
-            identifier=identifier,
-            title="Fix bug",
-            state="In Progress",
-            assignee="alice",
-            team="Back End",
-            url=f"https://linear.app/t/{identifier}",
-            updated_at=datetime(2026, 4, 16, 0, 0, 0),
-        )
-
-    def _make_session(
-        self,
-        *,
-        session_id: str = "sess-1",
-        title: str = "Session 1",
-        ticket_id: str | None = None,
-        steps: list | None = None,
-    ) -> Session:
-        return Session(
-            session_id=session_id,
-            title=title,
-            ticket_id=ticket_id,
-            steps=steps or [],
-        )
-
-    def _make_workflow_step(
-        self,
-        *,
-        step_name: str,
-        sequence: int = 0,
-        state: SessionState = SessionState.PENDING,
-        findings: list | None = None,
-    ) -> WorkflowStep:
-        step = WorkflowStep(step_name=step_name, sequence=sequence)
-        step.state = state
-        if findings is not None:
-            step.findings = findings
-        return step
-
     def test_audit_ready_creates_inbox_item(self) -> None:
         """An audit step in READY state with findings generates a high-priority inbox item."""
         from zing_ai.server.models import TextFinding
 
         finding = TextFinding(title="Issue found", body="Details here")
-        audit_step = self._make_workflow_step(
+        audit_step = _make_workflow_step(
             step_name="build-audit",
             state=SessionState.READY,
             findings=[finding],
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="audit-sess",
             ticket_id="BAK-1",
             steps=[audit_step],
         )
-        issue = self._make_issue(identifier="BAK-1")
+        issue = _make_issue(identifier="BAK-1")
 
         inbox, _ = aggregate(
             issues=[issue],
@@ -471,12 +352,12 @@ class TestInboxItems(unittest.TestCase):
         from zing_ai.server.models import TextFinding
 
         finding = TextFinding(title="Issue found", body="Details here")
-        audit_step = self._make_workflow_step(
+        audit_step = _make_workflow_step(
             step_name="build-audit",
             state=SessionState.READY,
             findings=[finding],
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="audit-sess",
             ticket_id=None,
             steps=[audit_step],
@@ -505,12 +386,12 @@ class TestInboxItems(unittest.TestCase):
 
         # Audit step is COMPLETED (not READY)
         finding = TextFinding(title="Issue found", body="Details here")
-        audit_step = self._make_workflow_step(
+        audit_step = _make_workflow_step(
             step_name="build-audit",
             state=SessionState.COMPLETED,
             findings=[finding],
         )
-        session = self._make_session(
+        session = _make_session(
             session_id="done-sess",
             ticket_id=None,
             steps=[audit_step],

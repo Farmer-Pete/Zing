@@ -29,18 +29,23 @@ AUDIT_STEP_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_TICKET_RE = re.compile(r"[A-Z]+-\d+", re.IGNORECASE)
+# Ticket ids look like ``BAK-1179`` / ``FRO-42``. Require two+ letter prefixes
+# and word boundaries so noisy tokens like ``UTF-8``/``SHA-256``/``PR-1`` don't
+# masquerade as tickets. Length-1 team keys aren't used by Linear in practice.
+_TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b", re.IGNORECASE)
 
 
-def _parse_ticket_ids(pr: GitHubPR) -> set[str]:
-    """Return the set of ticket identifiers referenced by a PR.
+def _parse_ticket_id(pr: GitHubPR) -> str | None:
+    """Return the first ticket identifier referenced by a PR, if any.
 
-    Scans the PR's head ref, title, and body for matches of ``[A-Z]+-\\d+``
-    (case-insensitive), uppercasing each match so lowercase branch names like
-    ``bak-1179/feature`` normalise to ``BAK-1179``.
+    Scans ``head_ref``, then ``title``, then ``body`` (in that order) for the
+    first match of ``\\b[A-Z]{2,}-\\d+\\b`` and uppercases it. Branch names
+    carry the canonical ticket id in practice, so first-match ordering picks
+    the right hub even when the PR body mentions a second ticket.
     """
     text = " ".join(filter(None, [pr.head_ref, pr.title, pr.body]))
-    return {m.upper() for m in _TICKET_RE.findall(text)}
+    match = _TICKET_RE.search(text)
+    return match.group(0).upper() if match else None
 
 
 def _compute_urgency(hub: Hub, current_username: str) -> HubUrgency:
@@ -102,13 +107,10 @@ def aggregate(
     # --- Attach PRs to ticket hubs; collect orphan PRs ---
     orphan_prs: list[GitHubPR] = []
     for pr in prs:
-        pr_ticket_ids = _parse_ticket_ids(pr)
-        matched = False
-        for ticket_id in pr_ticket_ids:
-            if ticket_id in ticket_hubs:
-                ticket_hubs[ticket_id].prs.append(pr)
-                matched = True
-        if not matched:
+        pr_ticket_id = _parse_ticket_id(pr)
+        if pr_ticket_id is not None and pr_ticket_id in ticket_hubs:
+            ticket_hubs[pr_ticket_id].prs.append(pr)
+        else:
             orphan_prs.append(pr)
 
     # --- Attach sessions to ticket hubs; collect orphan sessions ---
