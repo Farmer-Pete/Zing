@@ -92,10 +92,10 @@ def _build_view(app: FastAPI) -> tuple[list, dict[str, list]]:
     )
     groups: dict[str, list] = defaultdict(list)
     for hub in hubs:
-        groups[hub.team or "Standalone"].append(hub)
-    result = (inbox_items, dict(groups))
+        groups[hub.team or "Standalone"].append(hub)  # type: ignore[union-attr]
+    result = (inbox_items, dict(groups))  # type: ignore[assignment]
     app.state._cc_view_memo = (fingerprint, result)
-    return result
+    return result  # type: ignore[return-value]
 
 
 def render_hub_fragment(app: FastAPI, hub_id: str) -> str:

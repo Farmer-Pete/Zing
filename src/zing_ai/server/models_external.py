@@ -53,13 +53,50 @@ class GitHubPR(BaseModel):
     merged_at: datetime | None = None
 
 
+# ---------------------------------------------------------------------------
+# Kanban models (Step 5)
+# ---------------------------------------------------------------------------
+
+KanbanColumn = Literal["todo", "in_progress", "needs_review", "done"]
+
+
+class KanbanCard(BaseModel):
+    """A card on the Kanban board, grouping a ticket and its related artifacts."""
+
+    key: str  # ticket identifier or PR-only key
+    ticket: LinearIssue | None = None  # None for orphan-PR cards
+    prs: list[GitHubPR] = Field(default_factory=list)
+    sessions: list[Session] = Field(default_factory=list)
+    audit_steps: list[WorkflowStep] = Field(default_factory=list)
+
+
+class KanbanView(BaseModel):
+    """The full Kanban board view, split into four columns."""
+
+    todo: list[KanbanCard] = Field(default_factory=list)
+    in_progress: list[KanbanCard] = Field(default_factory=list)
+    needs_review: list[KanbanCard] = Field(default_factory=list)
+    done: list[KanbanCard] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Legacy models — kept as stubs for backward-compat during Step 5.
+# routes_command_center.py still calls the old aggregate() signature;
+# that will be updated in Step 7.  These stubs keep existing tests green.
+# ---------------------------------------------------------------------------
+
 HubUrgency = Literal["hot", "active", "cool"]
 HubKind = Literal["ticket", "pr", "session"]
 InboxPriority = Literal["high", "medium"]
 
 
 class Hub(BaseModel):
-    """Aggregation model grouping a ticket, PR, or session with related artifacts."""
+    """Aggregation model grouping a ticket, PR, or session with related artifacts.
+
+    .. deprecated::
+        Use :class:`KanbanCard` / :class:`KanbanView` instead.
+        This stub is kept for backward-compat until Step 7 lands.
+    """
 
     id: str  # ticket identifier, "pr-150", or "session-{id}"
     kind: HubKind
@@ -90,7 +127,11 @@ class Hub(BaseModel):
 
 
 class InboxItem(BaseModel):
-    """A single actionable item surfaced in the Command Center inbox."""
+    """A single actionable item surfaced in the Command Center inbox.
+
+    .. deprecated::
+        Kept for backward-compat until Step 7 lands.
+    """
 
     priority: InboxPriority
     action_text: str

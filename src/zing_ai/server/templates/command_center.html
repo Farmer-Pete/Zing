@@ -14,15 +14,7 @@
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
-    <section class="inbox">
-        <div class="inbox-header">
-            <span class="inbox-title">Needs your input</span>
-            <span class="inbox-count">{{ inbox_items|length }}</span>
-        </div>
-        <div id="inbox-list" class="inbox-list">
-            {% include "fragments/inbox_list.html" %}
-        </div>
-    </section>
+    {# inbox_list.html removed in Step 5 — Kanban columns added in Step 8 #}
 
     <div class="hubs-header">
         <span>Everything in flight</span>

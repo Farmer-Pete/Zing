@@ -64,11 +64,11 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Command Center", resp.text)
 
-    def test_empty_inbox_shows_cute_message(self) -> None:
-        """With no inbox items the inbox renders the empty-state message."""
+    def test_page_renders_hubs_list_section(self) -> None:
+        """The page renders the hubs-list section (inbox removed in Step 5)."""
         resp = self.client.get("/command-center")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("nothing to do", resp.text)
+        self.assertIn("hubs-list", resp.text)
 
     def test_build_view_memoises_within_same_fingerprint(self) -> None:
         """Two consecutive _build_view calls with no state change reuse the cached result.
@@ -291,15 +291,15 @@ class TestCommandCenterSSEAsync(CommandCenterTestBase):
     already running. This keeps the tests green regardless of test ordering.
     """
 
-    def test_sse_dispatches_inbox_changed(self) -> None:
-        """An inbox_changed event causes a patch to #inbox-list."""
+    def test_sse_dispatches_hub_added(self) -> None:
+        """A hub_added event causes a patch to #hubs-list."""
         app_instance = self.app_instance
 
         async def _coro() -> str:
-            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["inbox_changed"])
+            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["hub_added"])
 
         body = _run_async_in_thread(_coro)
-        self.assertIn("#inbox-list", body)
+        self.assertIn("#hubs-list", body)
 
     def test_sse_disconnect_removes_queue(self) -> None:
         """After the SSE connection closes, the queue is removed from cc_queues."""
