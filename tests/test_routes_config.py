@@ -38,7 +38,6 @@ class TestSaveCommandCenterConfig(ServerTestBase):
         r = self.client.post(
             "/config/save/command_center",
             json={
-                "github_repo": "owner/repo",
                 "linear_poll_seconds": 120,
                 "github_poll_seconds": 90,
             },
@@ -49,7 +48,6 @@ class TestSaveCommandCenterConfig(ServerTestBase):
         from zing_ai.config import load_config
 
         cc = load_config().command_center
-        self.assertEqual(cc.github_repo, "owner/repo")
         self.assertEqual(cc.linear_poll_seconds, 120)
         self.assertEqual(cc.github_poll_seconds, 90)
 
@@ -69,3 +67,21 @@ class TestSaveCommandCenterConfig(ServerTestBase):
             json={"linear_poll_seconds": "not-a-number"},
         )
         self.assertEqual(r.status_code, 422)
+
+    def test_save_api_keys(self):
+        """Posting API keys persists them correctly."""
+        r = self.client.post(
+            "/config/save/command_center",
+            json={
+                "linear_api_key": "lin_test_123",
+                "github_token": "ghp_test_456",
+            },
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "ok"})
+
+        from zing_ai.config import load_config
+
+        cc = load_config().command_center
+        self.assertEqual(cc.linear_api_key, "lin_test_123")
+        self.assertEqual(cc.github_token, "ghp_test_456")

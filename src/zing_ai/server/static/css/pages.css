@@ -153,6 +153,51 @@
     margin-top: 0.25rem;
 }
 
+/* === GitHub Repos Checklist === */
+.github-repos-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+.github-repo-group {
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.github-repo-group-header {
+    background: var(--gray-50);
+    border-bottom: 1px solid var(--gray-200);
+    font-weight: 600;
+}
+.github-repo-group-items {
+    padding: 0.25rem 0 0.25rem 1.25rem;
+}
+.github-repo-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.github-repo-toggle:hover {
+    background: var(--gray-50);
+}
+.github-repo-toggle input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    accent-color: var(--orange);
+    cursor: pointer;
+}
+.github-repos-empty {
+    font-size: 0.8125rem;
+    color: var(--gray-500);
+    font-style: italic;
+}
+
 /* === Install Page === */
 .install-status {
     background: #fff;

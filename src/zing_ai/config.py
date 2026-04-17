@@ -78,7 +78,9 @@ PollSeconds = Annotated[int, Field(ge=10)]
 
 
 class CommandCenterConfig(BaseModel):
-    github_repo: str = ""  # e.g. "Farmer-Pete/Zing"
+    linear_api_key: str = ""
+    github_token: str = ""
+    github_excluded_repos: list[str] = Field(default_factory=list)
     linear_poll_seconds: PollSeconds = 60
     github_poll_seconds: PollSeconds = 60
 
@@ -160,7 +162,19 @@ def save_config(cfg: Config) -> None:
             raise
 
 
+_HASH_EXCLUDE = {"command_center": {"linear_api_key", "github_token", "github_excluded_repos"}}
+
+
 def config_hash(cfg: Config) -> str:
-    """Return a stable SHA-256 hex digest of the config's serialised values."""
-    payload = json.dumps(cfg.model_dump(), sort_keys=True, default=str).encode()
+    """Return a stable SHA-256 hex digest of the config's serialised values.
+
+    Fields listed in ``_HASH_EXCLUDE`` are stripped before hashing so that
+    credential changes do not trigger a "reinstall needed" banner.
+    """
+    data = cfg.model_dump()
+    for section, keys in _HASH_EXCLUDE.items():
+        if section in data:
+            for key in keys:
+                data[section].pop(key, None)
+    payload = json.dumps(data, sort_keys=True, default=str).encode()
     return hashlib.sha256(payload).hexdigest()

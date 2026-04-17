@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import UTC, datetime
 
 import httpx
@@ -44,6 +43,7 @@ class ExternalPoller:
         self._config = config
         self._linear: LinearClient | None = None
         self._github: GitHubClient | None = None
+        self._last_slow_poll: datetime | None = None
         # Try creating clients at startup; if config/env is incomplete the
         # error surfaces in cache.last_error and _ensure_clients returns False.
         self._ensure_clients()
@@ -51,27 +51,22 @@ class ExternalPoller:
     def _ensure_clients(self) -> bool:
         """Return True if HTTP clients are available. Try to create them if missing.
 
-        When the user updates ``command_center.github_repo`` via ``/config``
-        (or sets env vars after the server has started), the next call to
+        When the user updates credentials via ``/config``, the next call to
         ``_ensure_clients`` picks up the changes and instantiates the client(s)
         that were previously ``None``.
         """
         if self._linear is not None and self._github is not None:
             return True
         problems: list[str] = []
-        if not self._config.github_repo:
-            problems.append(
-                "GitHub repo not configured (set command_center.github_repo in /config)"
-            )
-        if not os.environ.get("LINEAR_API_KEY"):
-            problems.append("LINEAR_API_KEY env var not set")
-        if not os.environ.get("GITHUB_TOKEN"):
-            problems.append("GITHUB_TOKEN env var not set")
+        if not self._config.linear_api_key:
+            problems.append("Linear API key not configured (set in /config)")
+        if not self._config.github_token:
+            problems.append("GitHub token not configured (set in /config)")
         if problems:
             self._cache.last_error = " | ".join(problems)
             return False
-        self._linear = LinearClient(api_key=os.environ["LINEAR_API_KEY"])
-        self._github = GitHubClient(token=os.environ["GITHUB_TOKEN"])
+        self._linear = LinearClient(api_key=self._config.linear_api_key)
+        self._github = GitHubClient(token=self._config.github_token)
         return True
 
     async def aclose(self) -> None:
@@ -79,6 +74,21 @@ class ExternalPoller:
             await self._linear.aclose()
         if self._github:
             await self._github.aclose()
+
+    async def _fetch_prs_for_repos(self, repos: list[str]) -> list:
+        """Fetch open PRs for each repo, skipping repos that error."""
+        assert self._github is not None
+        results = await asyncio.gather(
+            *(self._github.fetch_open_prs(repo) for repo in repos),
+            return_exceptions=True,
+        )
+        prs = []
+        for repo, result in zip(repos, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Skipping %s: %s", repo, result)
+            else:
+                prs.extend(result)
+        return prs
 
     async def _poll_once(self) -> None:
         """One full poll cycle. Testable in isolation."""
@@ -93,11 +103,15 @@ class ExternalPoller:
         assert self._linear is not None  # pyright narrow
         assert self._github is not None  # pyright narrow
         try:
-            issues, prs, username = await asyncio.gather(
+            issues, repos, username = await asyncio.gather(
                 self._linear.fetch_my_open_issues(),
-                self._github.fetch_open_prs(self._config.github_repo),
+                self._github.fetch_writable_repos(),
                 self._github.fetch_current_user(),
             )
+            # Filter out excluded repos, then fetch PRs for each.
+            excluded = set(self._config.github_excluded_repos)
+            active_repos = [r for r in repos if r not in excluded]
+            prs = await self._fetch_prs_for_repos(active_repos)
         except asyncio.CancelledError:
             # Lifespan shutdown: propagate so run()'s cancellation path fires.
             raise
@@ -112,9 +126,10 @@ class ExternalPoller:
             return
         # Build new snapshot. Torn reads accepted (single user, 60s polls).
         prev_issue_ids = {i.identifier for i in self._cache.issues}
-        prev_pr_numbers = {p.number for p in self._cache.prs}
+        prev_pr_urls = {p.url for p in self._cache.prs}
         self._cache.issues = issues
         self._cache.prs = prs
+        self._cache.github_repos = repos
         self._cache.github_username = username
         # Store as tz-aware UTC so the ISO string carries +00:00 and browsers
         # don't parse it as local time.
@@ -124,12 +139,32 @@ class ExternalPoller:
         self._cache.version += 1
         # Dispatch SSE events for what changed.
         new_issue_ids = {i.identifier for i in issues}
-        new_pr_numbers = {p.number for p in prs}
-        if prev_issue_ids != new_issue_ids or prev_pr_numbers != new_pr_numbers:
+        new_pr_urls = {p.url for p in prs}
+        if prev_issue_ids != new_issue_ids or prev_pr_urls != new_pr_urls:
             self._dispatch("hub_added")  # full re-render of hub list
         # For now: just re-render inbox + emit poll_status; per-hub diffing is a v2 nicety.
         self._dispatch("inbox_changed")
         self._dispatch("poll_status")
+        # --- Slow poll (every 5 minutes) ---
+        _SLOW_POLL_SECONDS = 300
+        now = datetime.now(UTC)
+        if (
+            self._last_slow_poll is None
+            or (now - self._last_slow_poll).total_seconds() >= _SLOW_POLL_SECONDS
+        ):
+            try:
+                recent_prs, completed_issues = await asyncio.gather(
+                    self._github.fetch_recent_prs(active_repos, username),
+                    self._linear.fetch_completed_issues(),
+                )
+                self._cache.recent_prs = recent_prs
+                self._cache.completed_issues = completed_issues
+                self._cache.version += 1
+                self._last_slow_poll = now
+            except asyncio.CancelledError:
+                raise
+            except (LinearAPIError, GitHubAPIError, httpx.TransportError) as e:
+                logger.warning("Slow poll failed: %s", e)
 
     def _dispatch(self, event: str) -> None:
         # Snapshot so an SSE handler's disconnect-removal during iteration
@@ -144,14 +179,19 @@ class ExternalPoller:
         """Forever loop. Survives single-iteration failures.
 
         Re-reads the on-disk config at the top of every iteration so changes
-        made via ``/config`` (poll intervals, ``github_repo``) take effect
+        made via ``/config`` (poll intervals, excluded repos) take effect
         without a server restart. The TOML read is microseconds; this runs at
         most once per ``poll_seconds`` (~60s).
         """
         while True:
             # Reload config so /config UI changes apply without restart.
             try:
-                self._config = load_config().command_center
+                new_cc = load_config().command_center
+                if new_cc != self._config:
+                    self._config = new_cc
+                    # Credentials or repo may have changed; force client re-creation.
+                    self._linear = None
+                    self._github = None
             except Exception:
                 logger.warning("Failed to reload config; using previous values")
             try:

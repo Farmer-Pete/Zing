@@ -269,12 +269,24 @@ FIELD_META: dict[str, dict] = {
         },
     },
     # category: command_center
-    "command_center.github_repo": {
-        "label": "GitHub repo",
-        "field_type": "text",
+    "command_center.linear_api_key": {
+        "label": "Linear API key",
+        "field_type": "password",
         "description": {
-            "short": "GitHub repo to poll for open PRs (format: owner/repo).",
-            "long": "Used by the Command Center dashboard to surface open PRs and review requests.",
+            "short": "Personal API key for Linear.",
+            "long": (
+                "Used by the Command Center to poll your open issues."
+                " Generate one at Linear > Settings > API."
+            ),
+        },
+        "group": "Command Center",
+    },
+    "command_center.github_token": {
+        "label": "GitHub token",
+        "field_type": "password",
+        "description": {
+            "short": "Personal access token for GitHub.",
+            "long": "Used by the Command Center to poll open PRs. Needs `repo` scope.",
         },
         "group": "Command Center",
     },
