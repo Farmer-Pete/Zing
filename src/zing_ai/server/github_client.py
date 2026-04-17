@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -77,6 +77,12 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
     author_obj = pr.get("author") or {}
     author = author_obj.get("login") or ""
 
+    # mergedAt is present for merged PRs; parse to datetime if available.
+    merged_at: datetime | None = None
+    raw_merged_at = pr.get("mergedAt")
+    if raw_merged_at:
+        merged_at = datetime.fromisoformat(raw_merged_at.replace("Z", "+00:00"))
+
     return GitHubPR(
         number=pr["number"],
         title=pr["title"],
@@ -93,6 +99,7 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
         ci_status=ci_status,
         url=pr["url"],
         updated_at=datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00")),
+        merged_at=merged_at,
     )
 
 
@@ -227,3 +234,97 @@ class GitHubClient:
         pull_requests = repository.get("pullRequests") or {}
         nodes = pull_requests.get("nodes") or []
         return [_map_pr(pr, repo=repo) for pr in nodes]
+
+    async def fetch_recent_prs(
+        self,
+        repos: list[str],
+        username: str,
+        since_days: int = 7,
+    ) -> list[GitHubPR]:
+        """Return recently merged PRs from *repos* authored or reviewed by *username*.
+
+        For each repo in *repos* (``owner/name`` format), runs a GraphQL query for
+        merged PRs ordered by last updated. Results are filtered client-side to keep
+        only PRs where:
+
+        - ``merged_at`` is within the last *since_days* days, AND
+        - the PR was authored by *username* OR *username* appears in ``reviewRequests``.
+
+        Deduplication is by ``(repo, number)`` key.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=since_days)
+        seen: set[tuple[str, int]] = set()
+        results: list[GitHubPR] = []
+
+        query = """
+        query($owner: String!, $repo: String!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequests(
+              states: [MERGED], first: 50,
+              orderBy: {field: UPDATED_AT, direction: DESC}
+            ) {
+              nodes {
+                number
+                title
+                state
+                isDraft
+                headRefName
+                baseRefName
+                body
+                author { login }
+                reviewDecision
+                mergedAt
+                url
+                updatedAt
+                reviewRequests(first: 10) {
+                  nodes {
+                    requestedReviewer {
+                      ... on User { login }
+                    }
+                  }
+                }
+                commits(last: 1) {
+                  nodes {
+                    commit {
+                      statusCheckRollup { state }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+
+        for repo in repos:
+            owner, _, name = repo.partition("/")
+            try:
+                data = await self._graphql(query, {"owner": owner, "repo": name})
+            except GitHubAPIError:
+                logger.warning("fetch_recent_prs: skipping repo %s due to API error", repo)
+                continue
+
+            repository = data.get("repository") or {}
+            pull_requests = repository.get("pullRequests") or {}
+            nodes = pull_requests.get("nodes") or []
+
+            for node in nodes:
+                pr = _map_pr(node, repo=repo)
+
+                # Skip if outside the time window.
+                if pr.merged_at is None or pr.merged_at < cutoff:
+                    continue
+
+                # Skip if user is not the author and not a requested reviewer.
+                is_author = pr.author == username
+                is_reviewer = username in pr.requested_reviewers
+                if not is_author and not is_reviewer:
+                    continue
+
+                key = (repo, pr.number)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(pr)
+
+        return results

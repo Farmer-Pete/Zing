@@ -50,6 +50,7 @@ class GitHubPR(BaseModel):
     ci_status: str | None
     url: str
     updated_at: datetime
+    merged_at: datetime | None = None
 
 
 HubUrgency = Literal["hot", "active", "cool"]

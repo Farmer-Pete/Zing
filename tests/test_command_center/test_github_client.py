@@ -270,6 +270,143 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("HTTP 401", str(ctx.exception))
 
+    # ------------------------------------------------------------------ #
+    # fetch_recent_prs                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _merged_gql_response(self, nodes: list[dict]) -> dict:
+        """Wrap PR nodes in the GraphQL envelope for merged PRs."""
+        return {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
+
+    @respx.mock
+    async def test_fetch_recent_prs_basic(self) -> None:
+        """fetch_recent_prs returns merged PRs authored by the username within the window."""
+        # Use a mergedAt 3 days ago (well within a 7-day window).
+        merged_at = "2026-04-14T10:00:00Z"
+        node = _make_pr_node(
+            number=10,
+            title="Merged feature",
+            state="MERGED",
+            author_login="alice",
+            updated_at=merged_at,
+        )
+        node["mergedAt"] = merged_at
+
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(200, json=self._merged_gql_response([node]))
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_recent_prs(["owner/repo"], username="alice")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(prs), 1)
+        self.assertEqual(prs[0].number, 10)
+        self.assertEqual(prs[0].state, "merged")
+        self.assertEqual(prs[0].author, "alice")
+        self.assertEqual(prs[0].repo, "owner/repo")
+        self.assertIsNotNone(prs[0].merged_at)
+
+    @respx.mock
+    async def test_fetch_recent_prs_filters_by_date(self) -> None:
+        """fetch_recent_prs excludes PRs whose mergedAt is older than since_days."""
+        old_merged_at = "2026-04-01T10:00:00Z"  # 16 days ago — outside 7-day window
+        recent_merged_at = "2026-04-14T10:00:00Z"  # 3 days ago — inside window
+
+        old_node = _make_pr_node(
+            number=1,
+            title="Old merged PR",
+            state="MERGED",
+            author_login="alice",
+            updated_at=old_merged_at,
+        )
+        old_node["mergedAt"] = old_merged_at
+
+        recent_node = _make_pr_node(
+            number=2,
+            title="Recent merged PR",
+            state="MERGED",
+            author_login="alice",
+            updated_at=recent_merged_at,
+        )
+        recent_node["mergedAt"] = recent_merged_at
+
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(
+                200, json=self._merged_gql_response([old_node, recent_node])
+            )
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_recent_prs(["owner/repo"], username="alice", since_days=7)
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(prs), 1)
+        self.assertEqual(prs[0].number, 2)
+
+    @respx.mock
+    async def test_fetch_recent_prs_filters_by_author_or_reviewer(self) -> None:
+        """fetch_recent_prs keeps PRs where user is author OR reviewer; excludes others."""
+        merged_at = "2026-04-14T10:00:00Z"
+
+        # PR authored by alice — should be included for username "alice"
+        author_node = _make_pr_node(
+            number=1,
+            title="Alice's PR",
+            state="MERGED",
+            author_login="alice",
+            updated_at=merged_at,
+        )
+        author_node["mergedAt"] = merged_at
+
+        # PR authored by bob with alice as reviewer — should be included
+        reviewer_node = _make_pr_node(
+            number=2,
+            title="Bob's PR with alice as reviewer",
+            state="MERGED",
+            author_login="bob",
+            reviewer_logins=["alice"],
+            updated_at=merged_at,
+        )
+        reviewer_node["mergedAt"] = merged_at
+
+        # PR authored by carol with no involvement from alice — should be excluded
+        unrelated_node = _make_pr_node(
+            number=3,
+            title="Carol's PR",
+            state="MERGED",
+            author_login="carol",
+            updated_at=merged_at,
+        )
+        unrelated_node["mergedAt"] = merged_at
+
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(
+                200,
+                json=self._merged_gql_response([author_node, reviewer_node, unrelated_node]),
+            )
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_recent_prs(["owner/repo"], username="alice")
+        finally:
+            await client.aclose()
+
+        numbers = {pr.number for pr in prs}
+        self.assertIn(1, numbers)  # author match
+        self.assertIn(2, numbers)  # reviewer match
+        self.assertNotIn(3, numbers)  # no involvement — excluded
+
 
 if __name__ == "__main__":
     unittest.main()
