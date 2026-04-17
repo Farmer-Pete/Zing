@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -30,7 +30,7 @@ _VIEWER_QUERY = "{ viewer { id } }"
 _ISSUES_PAGE_SIZE = 250
 
 _ISSUES_QUERY = """
-query MyOpenIssues($viewerId: String!, $first: Int!, $after: String) {
+query MyOpenIssues($viewerId: ID!, $first: Int!, $after: String) {
   issues(
     first: $first,
     after: $after,
@@ -39,7 +39,34 @@ query MyOpenIssues($viewerId: String!, $first: Int!, $after: String) {
       state: { type: { nin: ["completed", "canceled"] } }
     }
   ) {
-    nodes { id identifier title state { name } assignee { name } team { name } url updatedAt }
+    nodes {
+      id identifier title priority url updatedAt
+      state { name type }
+      assignee { name }
+      team { name }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+_COMPLETED_ISSUES_QUERY = """
+query MyCompletedIssues($viewerId: ID!, $first: Int!, $after: String, $since: DateTimeComparators) {
+  issues(
+    first: $first,
+    after: $after,
+    filter: {
+      assignee: { id: { eq: $viewerId } }
+      state: { type: { eq: "completed" } }
+      updatedAt: $since
+    }
+  ) {
+    nodes {
+      id identifier title priority url updatedAt
+      state { name type }
+      assignee { name }
+      team { name }
+    }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -120,6 +147,8 @@ class LinearClient:
                         identifier=node["identifier"],
                         title=node["title"],
                         state=node["state"]["name"],
+                        state_type=node["state"]["type"],
+                        priority=node.get("priority", 0),
                         assignee=node["assignee"]["name"] if node.get("assignee") else None,
                         team=node["team"]["name"] if node.get("team") else None,
                         url=node["url"],
@@ -133,5 +162,52 @@ class LinearClient:
             if not after:
                 # Defensive: hasNextPage=True but no cursor shouldn't happen
                 # per Linear's schema; bail out rather than loop forever.
+                break
+        return issues
+
+    async def fetch_completed_issues(self) -> list[LinearIssue]:
+        """Return issues assigned to the authenticated user that were completed in the last 7 days.
+
+        Powers the Done column of the Kanban board.  Pages through cursor-based
+        pagination identically to :meth:`fetch_my_open_issues`.
+        """
+        viewer_id = await self.fetch_viewer_id()
+        since = datetime.now(tz=UTC) - timedelta(days=7)
+        since_filter = {"gte": since.strftime("%Y-%m-%dT%H:%M:%S.000Z")}
+        issues: list[LinearIssue] = []
+        after: str | None = None
+        while True:
+            data = await self._post(
+                _COMPLETED_ISSUES_QUERY,
+                {
+                    "viewerId": viewer_id,
+                    "first": _ISSUES_PAGE_SIZE,
+                    "after": after,
+                    "since": since_filter,
+                },
+            )
+            for node in data["issues"]["nodes"]:
+                updated_raw: str = node["updatedAt"]
+                if updated_raw.endswith("Z"):
+                    updated_raw = updated_raw[:-1] + "+00:00"
+                issues.append(
+                    LinearIssue(
+                        id=node["id"],
+                        identifier=node["identifier"],
+                        title=node["title"],
+                        state=node["state"]["name"],
+                        state_type=node["state"]["type"],
+                        priority=node.get("priority", 0),
+                        assignee=node["assignee"]["name"] if node.get("assignee") else None,
+                        team=node["team"]["name"] if node.get("team") else None,
+                        url=node["url"],
+                        updated_at=datetime.fromisoformat(updated_raw),
+                    )
+                )
+            page_info = data["issues"].get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if not after:
                 break
         return issues

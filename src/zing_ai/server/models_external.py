@@ -22,6 +22,10 @@ class LinearIssue(BaseModel):
     identifier: str  # e.g. "BAK-1179"
     title: str
     state: str  # state.name
+    state_type: str = (
+        "unstarted"  # state.type e.g. "started", "unstarted", "completed", "cancelled"
+    )
+    priority: int = 0  # 0=No priority, 1=Urgent, 2=High, 3=Medium, 4=Low
     assignee: str | None
     team: str | None  # team.name; null on triage / unassigned-team issues
     url: str

@@ -75,6 +75,8 @@ class TestLinearIssueModel(unittest.TestCase):
             identifier="BAK-1179",
             title="Fix the thing",
             state="In Progress",
+            state_type="started",
+            priority=2,
             assignee="alice",
             team="Backend",
             url="https://linear.app/issue/BAK-1179",
@@ -85,12 +87,15 @@ class TestLinearIssueModel(unittest.TestCase):
         issue = self._sample()
         self.assertEqual(issue.identifier, "BAK-1179")
         self.assertEqual(issue.team, "Backend")
+        self.assertEqual(issue.state_type, "started")
+        self.assertEqual(issue.priority, 2)
         self.assertIsNone(
             LinearIssue(
                 id="x",
                 identifier="FRO-1",
                 title="t",
                 state="Todo",
+                state_type="unstarted",
                 assignee=None,
                 team="Frontend",
                 url="https://example.com",

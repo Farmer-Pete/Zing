@@ -24,6 +24,8 @@ def make_issue(
     team: str | None = "Back End",
     assignee: str | None = "alice",
     state: str = "In Progress",
+    state_type: str = "started",
+    priority: int = 0,
     url: str | None = None,
     updated_at: datetime | None = None,
 ) -> LinearIssue:
@@ -33,6 +35,8 @@ def make_issue(
         identifier=identifier,
         title=title,
         state=state,
+        state_type=state_type,
+        priority=priority,
         assignee=assignee,
         team=team,
         url=url or f"https://linear.app/t/{identifier}",
