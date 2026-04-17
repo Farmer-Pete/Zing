@@ -17,11 +17,7 @@ from fastapi.testclient import TestClient
 from tests.test_command_center.conftest import (
     make_issue as _make_issue,
 )
-from tests.test_command_center.conftest import (
-    make_workflow_step as _make_workflow_step,
-)
 from zing_ai.server.app import create_app
-from zing_ai.server.models import Session, SessionState
 from zing_ai.server.sessions import SessionManager
 
 
@@ -64,11 +60,11 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Command Center", resp.text)
 
-    def test_page_renders_hubs_list_section(self) -> None:
-        """The page renders the hubs-list section (inbox removed in Step 5)."""
+    def test_page_renders_kanban_board(self) -> None:
+        """The page renders the kanban-board section."""
         resp = self.client.get("/command-center")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("hubs-list", resp.text)
+        self.assertIn("kanban-board", resp.text)
 
     def test_build_view_memoises_within_same_fingerprint(self) -> None:
         """Two consecutive _build_view calls with no state change reuse the cached result.
@@ -99,43 +95,16 @@ class TestCommandCenterRoutes(CommandCenterTestBase):
             _build_view(fastapi_app)
         self.assertEqual(agg_spy2.call_count, 1)
 
-    def test_hub_renders_with_signal_key_attributes(self) -> None:
-        """Injecting an issue produces a hub with correct Datastar signal key attributes."""
+    def test_kanban_card_renders_for_issue(self) -> None:
+        """Injecting an issue produces a kanban card in the board."""
         fastapi_app = self._get_fastapi_app()
         issue = _make_issue(identifier="BAK-1179", title="Search broken")
         fastapi_app.state.external_cache.issues = [issue]
 
         resp = self.client.get("/command-center")
         self.assertEqual(resp.status_code, 200)
-        # signal_key = "BAK-1179".lower().replace("-", "_") → "bak_1179"
-        self.assertIn('data-signals:open.bak_1179="false"', resp.text)
-
-    def test_yellow_urgency_renders_on_hot_hub(self) -> None:
-        """A hub with a READY audit step and findings renders with class 'hot'."""
-        fastapi_app = self._get_fastapi_app()
-        issue = _make_issue(identifier="BAK-9000", title="Hot issue")
-
-        # Build a session with an audit step in READY state with a finding.
-        audit_step = _make_workflow_step(step_name="build-audit", sequence=0)
-        audit_step.state = SessionState.READY
-        # Add a minimal finding so _compute_urgency sees findings as truthy.
-        from zing_ai.server.models import TextFinding
-
-        audit_step.findings = [TextFinding(title="Found something")]  # type: ignore[list-item]
-
-        session = Session(
-            session_id="sess-hot",
-            title="Hot Session",
-            ticket_id="BAK-9000",
-            steps=[audit_step],
-        )
-        self.manager._sessions["sess-hot"] = session  # type: ignore[attr-defined]
-
-        fastapi_app.state.external_cache.issues = [issue]
-
-        resp = self.client.get("/command-center")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("hot", resp.text)
+        self.assertIn("kanban-board", resp.text)
+        self.assertIn("Search broken", resp.text)
 
 
 class _SSEAsyncHelpers:
@@ -291,15 +260,15 @@ class TestCommandCenterSSEAsync(CommandCenterTestBase):
     already running. This keeps the tests green regardless of test ordering.
     """
 
-    def test_sse_dispatches_hub_added(self) -> None:
-        """A hub_added event causes a patch to #hubs-list."""
+    def test_sse_dispatches_board_changed(self) -> None:
+        """A board_changed event causes a patch to #kanban-board."""
         app_instance = self.app_instance
 
         async def _coro() -> str:
-            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["hub_added"])
+            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["board_changed"])
 
         body = _run_async_in_thread(_coro)
-        self.assertIn("#hubs-list", body)
+        self.assertIn("#kanban-board", body)
 
     def test_sse_disconnect_removes_queue(self) -> None:
         """After the SSE connection closes, the queue is removed from cc_queues."""

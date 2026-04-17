@@ -125,8 +125,6 @@ class ExternalPoller:
             self._dispatch("poll_status")
             return
         # Build new snapshot. Torn reads accepted (single user, 60s polls).
-        prev_issue_ids = {i.identifier for i in self._cache.issues}
-        prev_pr_urls = {p.url for p in self._cache.prs}
         self._cache.issues = issues
         self._cache.prs = prs
         self._cache.github_repos = repos
@@ -138,12 +136,7 @@ class ExternalPoller:
         # Bump the cache version so _build_view's memo invalidates.
         self._cache.version += 1
         # Dispatch SSE events for what changed.
-        new_issue_ids = {i.identifier for i in issues}
-        new_pr_urls = {p.url for p in prs}
-        if prev_issue_ids != new_issue_ids or prev_pr_urls != new_pr_urls:
-            self._dispatch("hub_added")  # full re-render of hub list
-        # For now: just re-render inbox + emit poll_status; per-hub diffing is a v2 nicety.
-        self._dispatch("inbox_changed")
+        self._dispatch("board_changed")
         self._dispatch("poll_status")
         # --- Slow poll (every 5 minutes) ---
         _SLOW_POLL_SECONDS = 300

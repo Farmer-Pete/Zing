@@ -470,34 +470,5 @@ class TestFiltering(unittest.TestCase):
         self.assertEqual(len(_all_cards(view)), 1)
 
 
-# ---------------------------------------------------------------------------
-# Backward compat — legacy 4-arg call still works
-# ---------------------------------------------------------------------------
-
-
-class TestLegacyBackwardCompat(unittest.TestCase):
-    """The old 4-arg aggregate() call still returns a Hub-based tuple."""
-
-    def test_legacy_keyword_call_returns_tuple(self) -> None:
-        """aggregate(issues=..., prs=..., sessions=..., current_username=...) returns Hub tuple."""
-
-        result = aggregate(
-            issues=[],
-            prs=[],
-            sessions=[],
-            current_username="octocat",
-        )
-        # Returns (inbox_items, hubs) tuple
-        self.assertIsInstance(result, tuple)
-        inbox, hubs = result
-        self.assertIsInstance(inbox, list)
-        self.assertIsInstance(hubs, list)
-
-    def test_legacy_positional_call_returns_tuple(self) -> None:
-        """aggregate(issues, prs, sessions, username) positional call returns Hub tuple."""
-        result = aggregate([], [], [], "octocat")
-        self.assertIsInstance(result, tuple)
-
-
 if __name__ == "__main__":
     unittest.main()

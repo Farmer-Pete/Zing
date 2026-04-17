@@ -70,12 +70,10 @@ class TestAppLifespan(unittest.TestCase):
         assert fastapi_app.state.dashboard_queues is _dashboard_queues
 
     def test_session_events_dispatch_to_cc_queues(self) -> None:
-        """SessionManager events must push inbox_changed + hub_changed to cc_queues.
+        """SessionManager events must push board_changed to cc_queues.
 
-        Regression for review finding #14 / b90c76a0: before this fix the
-        ``hub_changed`` SSE branch was dead code because no producer emitted
-        it. Now the session-event listener bridges local state changes to
-        connected Command Center SSE clients.
+        The session-event listener bridges local state changes to connected
+        Command Center SSE clients via a single board_changed event.
         """
         cc_queues: list[asyncio.Queue[str]] = []
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
@@ -90,22 +88,15 @@ class TestAppLifespan(unittest.TestCase):
             title="Test session",
         )
         assert session is not None
-        # Bind to a ticket so the hub_signal_key resolves against that ticket.
+        # Bind to a ticket to fire session_updated as well.
         self.manager.update_session(session.session_id, ticket_id="BAK-1")
 
         drained: list[str] = []
         while not queue.empty():
             drained.append(queue.get_nowait())
 
-        # session_created dispatches inbox_changed + hub_added + hub_changed
-        # (for the orphan session_<id> hub, since ticket_id wasn't set yet).
-        assert "inbox_changed" in drained
-        assert "hub_added" in drained
-        # After update_session(ticket_id='BAK-1') the next hub_changed targets
-        # the ticket-bound hub: signal_key bak_1.
-        assert any(e.startswith("hub_changed:bak_1") for e in drained), (
-            f"Expected hub_changed:bak_1 after ticket bind, got {drained}"
-        )
+        # Both session_created and session_updated dispatch board_changed.
+        assert "board_changed" in drained
 
 
 if __name__ == "__main__":

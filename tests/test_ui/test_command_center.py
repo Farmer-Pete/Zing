@@ -234,8 +234,8 @@ def test_yellow_urgency_renders_on_hot_hub(server: _ServerInfo, page: Page) -> N
         assert b < 100, f"Expected amber blue component < 100, got {b} in {border_color!r}"
 
 
-def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -> None:
-    """Mutating external_cache + pushing hub_changed SSE event patches the DOM within 5 s."""
+def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page) -> None:
+    """Mutating external_cache + pushing board_changed SSE event patches the DOM within 5 s."""
     cache = server.external_cache
 
     issue = LinearIssue(
@@ -260,9 +260,9 @@ def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -
 
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    hub = page.locator("#hub-bak_1004")
-    expect(hub).to_be_visible(timeout=5000)
-    expect(hub.locator(".hub-name")).to_contain_text("Original title", timeout=3000)
+    card = page.locator("#card-bak-1004")
+    expect(card).to_be_visible(timeout=5000)
+    expect(card.locator(".card-title")).to_contain_text("Original title", timeout=3000)
 
     assert server.cc_queues, "Expected SSE queue to be registered after response started"
 
@@ -273,12 +273,12 @@ def test_sse_event_updates_hub_without_reload(server: _ServerInfo, page: Page) -
     cache.issues = [updated_issue]
     cache.version += 1
 
-    # Push the hub_changed event to all active SSE queues
+    # Push the board_changed event to all active SSE queues
     for queue in list(server.cc_queues):
-        queue.put_nowait("hub_changed:bak_1004")
+        queue.put_nowait("board_changed")
 
     # The DOM should reflect the updated title via SSE patch
-    expect(hub.locator(".hub-name")).to_contain_text("Updated title SSE", timeout=5000)
+    expect(card.locator(".card-title")).to_contain_text("Updated title SSE", timeout=5000)
 
 
 def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:

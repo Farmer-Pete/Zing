@@ -378,17 +378,17 @@ class TestSlowPoll(unittest.IsolatedAsyncioTestCase):
 
 class TestDispatch(unittest.TestCase):
     def test_dispatch_to_multiple_queues(self) -> None:
-        """_dispatch('inbox_changed') puts the event into all 3 queues."""
+        """_dispatch('board_changed') puts the event into all 3 queues."""
         cache = ExternalCache()
         queues: list[asyncio.Queue[str]] = [asyncio.Queue() for _ in range(3)]
         config = _make_config()  # no api keys — clients stay None, but dispatch still works
         poller = ExternalPoller(cache=cache, queues=queues, config=config)
 
-        poller._dispatch("inbox_changed")
+        poller._dispatch("board_changed")
 
         for q in queues:
             event = q.get_nowait()
-            assert event == "inbox_changed"
+            assert event == "board_changed"
 
     def test_dispatch_skips_full_queue_without_affecting_others(self) -> None:
         """A queue at maxsize drops the event + logs a warning; other queues still receive it."""
@@ -402,13 +402,13 @@ class TestDispatch(unittest.TestCase):
         poller = ExternalPoller(cache=cache, queues=[full_q, normal_q], config=config)
 
         with self.assertLogs("zing_ai.server.external_poller", level=_logging.WARNING) as log_cm:
-            poller._dispatch("inbox_changed")
+            poller._dispatch("board_changed")
 
         # Full queue still has just its seed (new event dropped).
         self.assertEqual(full_q.get_nowait(), "seed")
         self.assertTrue(full_q.empty())
         # Other queue received the event normally.
-        self.assertEqual(normal_q.get_nowait(), "inbox_changed")
+        self.assertEqual(normal_q.get_nowait(), "board_changed")
         # Drop was logged.
         self.assertTrue(any("queue full" in m for m in log_cm.output))
 

@@ -14,16 +14,8 @@
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
-    {# inbox_list.html removed in Step 5 — Kanban columns added in Step 8 #}
 
-    <div class="hubs-header">
-        <span>Everything in flight</span>
-        <span class="grouped-by">Grouped by team</span>
-    </div>
-
-    <div id="hubs-list" class="hubs-list">
-        {% include "fragments/hubs_list.html" %}
-    </div>
+    {% include "fragments/kanban_board.html" %}
 
     <footer class="cc-footer">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>

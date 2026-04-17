@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from zing_ai.server.models import Session, SessionState, WorkflowStep
-from zing_ai.server.models_external import GitHubPR, Hub, LinearIssue
+from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
 def make_issue(
@@ -111,26 +111,3 @@ def make_workflow_step(
     if findings is not None:
         step.findings = findings
     return step
-
-
-def make_hub(
-    hub_id: str = "BAK-1",
-    *,
-    kind: str = "ticket",
-    title: str = "Sample hub",
-    team: str | None = "Back End",
-    assignee: str | None = None,
-    urgency: str = "cool",
-) -> Hub:
-    """Build a :class:`Hub` suitable for model-level tests.
-
-    Accepts ``hub_id`` positionally so the many ``signal_key`` tests stay short.
-    """
-    return Hub(
-        id=hub_id,
-        kind=kind,  # type: ignore[arg-type]
-        title=title,
-        team=team,
-        assignee=assignee,
-        urgency=urgency,  # type: ignore[arg-type]
-    )

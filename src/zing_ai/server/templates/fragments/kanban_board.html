@@ -1,0 +1,8 @@
+<div id="kanban-board" class="kanban-board">
+  {# Placeholder — full kanban columns rendered in Step 8 #}
+  {% for card in view.todo + view.in_progress + view.needs_review + view.done %}
+  <div class="kanban-card" id="card-{{ card.key | lower | replace('-', '-') }}">
+    <span class="card-title">{{ card.ticket.title if card.ticket else card.key }}</span>
+  </div>
+  {% endfor %}
+</div>
