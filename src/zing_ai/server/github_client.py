@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -283,6 +284,11 @@ class GitHubClient:
                     }
                   }
                 }
+                reviews(first: 20) {
+                  nodes {
+                    author { login }
+                  }
+                }
                 commits(last: 1) {
                   nodes {
                     commit {
@@ -296,28 +302,42 @@ class GitHubClient:
         }
         """
 
-        for repo in repos:
-            owner, _, name = repo.partition("/")
+        async def _fetch_one_repo(repo_str: str) -> list[tuple[GitHubPR, dict]]:
+            """Fetch merged PRs for one repo, returning (pr, node) pairs."""
+            owner, _, name = repo_str.partition("/")
             try:
                 data = await self._graphql(query, {"owner": owner, "repo": name})
             except GitHubAPIError:
-                logger.warning("fetch_recent_prs: skipping repo %s due to API error", repo)
-                continue
-
+                logger.warning("fetch_recent_prs: skipping repo %s due to API error", repo_str)
+                return []
             repository = data.get("repository") or {}
             pull_requests = repository.get("pullRequests") or {}
             nodes = pull_requests.get("nodes") or []
+            return [(_map_pr(node, repo=repo_str), node) for node in nodes]
 
-            for node in nodes:
-                pr = _map_pr(node, repo=repo)
+        # Fetch all repos concurrently.
+        repo_results = await asyncio.gather(
+            *(_fetch_one_repo(r) for r in repos), return_exceptions=True
+        )
 
+        for repo, result in zip(repos, repo_results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("fetch_recent_prs: skipping repo %s: %s", repo, result)
+                continue
+            for pr, node in result:
                 # Skip if outside the time window.
                 if pr.merged_at is None or pr.merged_at < cutoff:
                     continue
 
-                # Skip if user is not the author and not a requested reviewer.
+                # Skip if user is not the author and did not review.
+                # For merged PRs, requested_reviewers is cleared by GitHub,
+                # so we check the reviews list instead.
                 is_author = pr.author == username
-                is_reviewer = username in pr.requested_reviewers
+                reviews_data = node.get("reviews") or {}
+                review_authors = {
+                    r.get("author", {}).get("login", "") for r in (reviews_data.get("nodes") or [])
+                }
+                is_reviewer = username in review_authors
                 if not is_author and not is_reviewer:
                     continue
 

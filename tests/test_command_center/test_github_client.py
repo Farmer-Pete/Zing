@@ -379,6 +379,8 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
             updated_at=merged_at,
         )
         reviewer_node["mergedAt"] = merged_at
+        # Add reviews (submitted reviews) since the code now checks reviews, not reviewRequests
+        reviewer_node["reviews"] = {"nodes": [{"author": {"login": "alice"}}]}
 
         # PR authored by carol with no involvement from alice — should be excluded
         unrelated_node = _make_pr_node(

@@ -58,7 +58,7 @@ query MyCompletedIssues($viewerId: ID!, $first: Int!, $after: String, $since: Da
     filter: {
       assignee: { id: { eq: $viewerId } }
       state: { type: { eq: "completed" } }
-      updatedAt: $since
+      completedAt: $since
     }
   ) {
     nodes {

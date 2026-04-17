@@ -154,6 +154,7 @@ class ExternalPoller:
                 self._cache.completed_issues = completed_issues
                 self._cache.version += 1
                 self._last_slow_poll = now
+                self._dispatch("board_changed")
             except asyncio.CancelledError:
                 raise
             except (LinearAPIError, GitHubAPIError, httpx.TransportError) as e:
@@ -182,7 +183,11 @@ class ExternalPoller:
                 new_cc = load_config().command_center
                 if new_cc != self._config:
                     self._config = new_cc
-                    # Credentials or repo may have changed; force client re-creation.
+                    # Credentials or repo may have changed; close old clients and re-create.
+                    if self._linear:
+                        await self._linear.aclose()
+                    if self._github:
+                        await self._github.aclose()
                     self._linear = None
                     self._github = None
             except Exception:

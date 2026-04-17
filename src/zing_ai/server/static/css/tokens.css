@@ -29,6 +29,13 @@
     --gray-700: #4a4540;
     --text-primary: #1a1714;
     --border: var(--gray-200);
+    /* Kanban column header tokens */
+    --col-progress-bg: #fff3e0;
+    --col-progress-text: #e65100;
+    --col-review-bg: #e0f7fa;
+    --col-review-text: #00838f;
+    --col-done-bg: #e8f5e9;
+    --col-done-text: #2e7d32;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
