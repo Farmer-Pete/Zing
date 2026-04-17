@@ -1,29 +1,22 @@
 /*
  * command_center.css
- * Styles for the Command Center Dashboard (Action Inbox + Context Hubs).
+ * Styles for the Command Center Kanban board.
  * Color values reference tokens defined in tokens.css — do NOT hard-code
  * color literals here unless they are structural (e.g. transparent).
  */
 
 /* ──────────────────────────────────────────────
-   PAGE WRAPPERS (layout affordances for empty state)
+   PAGE WRAPPER
 ────────────────────────────────────────────── */
 
 .cc-page {
     padding-top: 1.5rem;
 }
 
-.hubs-list {
-    min-height: 2rem;
-}
-
 /* ──────────────────────────────────────────────
    ERROR BANNER
 ────────────────────────────────────────────── */
 
-/* The banner is server-rendered only when ``last_error`` is non-empty
-   (see command_center.html); Datastar's ``data-show="$lastError"``
-   handles subsequent reactive toggles from SSE ``poll_status`` patches. */
 .cc-error {
     background: var(--red-orange);
     color: #fff;
@@ -36,493 +29,239 @@
 }
 
 /* ──────────────────────────────────────────────
-   ACTION INBOX
+   BOARD LAYOUT
 ────────────────────────────────────────────── */
 
-.inbox {
-    background: linear-gradient(135deg, #fff, #fffaf5);
-    border: 1px solid var(--orange-border);
-    border-radius: 10px;
-    margin-bottom: 2rem;
-    overflow: hidden;
-    box-shadow: 0 2px 16px var(--orange-glow);
-}
-
-.inbox-header {
-    padding: 0.85rem 1.25rem;
-    background: linear-gradient(135deg, var(--orange-subtle), #ffe6d4);
-    border-bottom: 1px solid var(--orange-border);
+.board {
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
+    gap: 1rem;
+    padding: 0.5rem 0 1.5rem;
+    overflow-x: auto;
+    align-items: flex-start;
 }
 
-.inbox-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: #fff;
-    border: 2px solid var(--orange);
-    color: var(--orange);
-    font-size: 0.85rem;
-    font-weight: 800;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+/* ──────────────────────────────────────────────
+   COLUMN
+────────────────────────────────────────────── */
+
+.column {
+    flex: 1;
+    min-width: 260px;
+    max-width: 320px;
 }
 
-.inbox-title {
-    font-size: 1rem;
-    font-weight: 800;
-}
-
-.inbox-count {
-    margin-left: auto;
-    font-size: 0.65rem;
+.column-header {
+    font-size: 0.75rem;
     font-weight: 700;
-    padding: 0.2rem 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.column-header .count {
+    background: var(--gray-200);
+    color: var(--gray-700);
+    font-size: 0.65rem;
+    padding: 0.1rem 0.45rem;
     border-radius: 999px;
-    background: var(--orange);
-    color: #fff;
+    font-weight: 600;
+}
+
+/* Column-specific header colors */
+.col-todo .column-header    { background: var(--gray-100); color: var(--gray-700); }
+.col-progress .column-header { background: #fff3e0; color: #e65100; }
+.col-review .column-header  { background: #e0f7fa; color: #00838f; }
+.col-done .column-header    { background: #e8f5e9; color: #2e7d32; }
+
+.column-empty {
+    font-size: 0.8rem;
+    color: var(--gray-300);
+    font-style: italic;
+    text-align: center;
+    padding: 1rem 0.5rem;
+}
+
+/* ──────────────────────────────────────────────
+   CARDS
+────────────────────────────────────────────── */
+
+.card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 10px;
+    padding: 0.85rem;
+    margin-bottom: 0.65rem;
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+    cursor: default;
+}
+
+.card:hover {
+    border-color: var(--orange);
+    box-shadow: 0 2px 8px rgba(245, 124, 32, 0.1);
+    transform: translateY(-1px);
+}
+
+.card-ticket {
+    color: var(--cyan);
+    font-weight: 600;
+    font-size: 0.75rem;
+    margin-bottom: 0.2rem;
+}
+
+.card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    line-height: 1.3;
+    color: var(--navy);
+}
+
+.card-desc {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    line-height: 1.4;
+    margin-bottom: 0.5rem;
+}
+
+.card-divider {
+    border: none;
+    border-top: 1px solid var(--gray-100);
+    margin: 0.5rem 0;
+}
+
+.card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.5rem;
+}
+
+/* ──────────────────────────────────────────────
+   TAG PILLS
+────────────────────────────────────────────── */
+
+.tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.5rem;
+}
+
+.tag {
+    font-size: 0.6rem;
+    font-weight: 600;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
 
-.inbox-list {
-    padding: 0.5rem 0.75rem;
-}
+.tag-pr      { background: #e8eaf6; color: #3949ab; }
+.tag-session { background: #fce4ec; color: #c62828; }
+.tag-audit   { background: #fff3e0; color: #e65100; }
+.tag-linear  { background: #e0f2f1; color: #00695c; }
 
-.inbox-empty {
-    font-size: 0.85rem;
-    color: var(--gray-500);
-    padding: 0.75rem;
-    text-align: center;
-    font-style: italic;
-}
+/* ──────────────────────────────────────────────
+   STATUS INDICATORS
+────────────────────────────────────────────── */
 
-.inbox-item {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.65rem 0.75rem;
-    border-radius: 6px;
-    transition: background 0.1s;
-    cursor: pointer;
-    text-decoration: none;
-    color: inherit;
-}
-
-.inbox-item:hover {
-    background: var(--orange-glow);
-}
-
-.inbox-item + .inbox-item {
-    border-top: 1px solid rgba(245, 124, 32, 0.1);
-}
-
-.inbox-priority {
-    width: 8px;
-    height: 8px;
+.status-dot {
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
+    display: inline-block;
     flex-shrink: 0;
 }
 
-.priority-high {
-    background: var(--red-orange);
-    animation: cc-pulse 1.5s infinite;
-}
-
-.priority-medium {
-    background: var(--amber);
-}
-
-.inbox-action {
-    font-size: 0.85rem;
-    font-weight: 600;
-    flex: 1;
-    min-width: 0;
-}
-
-.inbox-detail {
-    font-size: 0.7rem;
-    color: var(--gray-500);
-    margin-top: 0.15rem;
-}
-
-.inbox-context {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.7rem;
-    color: var(--gray-300);
-    flex-shrink: 0;
-}
-
-.inbox-context .ticket {
-    color: var(--cyan);
-    font-weight: 700;
-}
-
-.inbox-time {
-    font-size: 0.65rem;
-    color: var(--gray-300);
-    white-space: nowrap;
-}
-
-.inbox-arrow {
-    color: var(--gray-300);
-    font-size: 0.85rem;
-    flex-shrink: 0;
-    transition: transform 0.15s;
-}
-
-.inbox-item:hover .inbox-arrow {
-    transform: translateX(3px);
-    color: var(--orange);
-}
+.dot-green  { background: #27ae60; }
+.dot-orange { background: var(--orange); }
+.dot-amber  { background: var(--amber); animation: cc-pulse 2s infinite; }
+.dot-cyan   { background: var(--cyan); }
+.dot-gray   { background: var(--gray-300); }
+.dot-red    { background: var(--red-orange); }
 
 /* ──────────────────────────────────────────────
-   HUBS SECTION HEADER
+   PR BADGE
 ────────────────────────────────────────────── */
 
-.hubs-header {
-    display: flex;
+.pr-badge {
+    display: inline-flex;
     align-items: center;
-    gap: 1rem;
-    margin-bottom: 1rem;
-}
-
-.hubs-title {
-    font-size: 0.9rem;
-    font-weight: 700;
+    gap: 0.3rem;
+    font-size: 0.7rem;
     color: var(--gray-700);
+    margin-top: 0.3rem;
 }
+
+.pr-badge svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.pr-open   { color: #27ae60; }
+.pr-merged { color: #7c3aed; }
+.pr-draft  { color: var(--gray-500); }
 
 /* ──────────────────────────────────────────────
-   GROUP SECTIONS
+   SESSION INDICATOR
 ────────────────────────────────────────────── */
 
-.group {
-    margin-bottom: 1.5rem;
-}
-
-.group-header {
+.session-indicator {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 0.7rem;
+    gap: 0.35rem;
+    font-size: 0.65rem;
+    padding: 0.25rem 0.5rem;
+    background: var(--gray-50);
+    border-radius: 6px;
+    margin-top: 0.4rem;
+    border: 1px solid var(--gray-100);
+    color: var(--gray-500);
+}
+
+.session-indicator.active  { background: #fff8e1; border-color: #ffe082; }
+.session-indicator.waiting { background: #fce4ec; border-color: #ef9a9a; }
+.session-indicator.done    { background: #e8f5e9; border-color: #a5d6a7; }
+
+/* ──────────────────────────────────────────────
+   AUDIT BADGE
+────────────────────────────────────────────── */
+
+.audit-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.65rem;
     font-weight: 700;
-    color: var(--gray-500);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 0.4rem 0;
-    margin-bottom: 0.5rem;
-    border-bottom: 1px solid var(--gray-100);
-    cursor: pointer;
-    user-select: none;
-}
-
-.group-chevron {
-    width: 0;
-    height: 0;
-    border-left: 4px solid var(--gray-300);
-    border-top: 3px solid transparent;
-    border-bottom: 3px solid transparent;
-    flex-shrink: 0;
-    transition: transform 0.2s;
-}
-
-.group.open .group-chevron {
-    transform: rotate(90deg);
-}
-
-.group-count {
-    font-size: 0.6rem;
-    color: var(--gray-500);
-    font-weight: 600;
-    background: var(--gray-100);
-    padding: 0.1rem 0.4rem;
+    color: #e65100;
+    background: #fff3e0;
+    border: 1px solid var(--amber);
+    padding: 0.15rem 0.5rem;
     border-radius: 999px;
 }
 
-/* `<details open>` starts expanded; clicking `<summary>` toggles.
-   The chevron rotates when the parent <details> has the `open` attribute. */
-.group[open] .group-chevron {
-    transform: rotate(90deg);
-}
-
-.group-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding-top: 0.5rem;
-}
-
-/* Suppress the native disclosure triangle so our `.group-chevron` renders. */
-.group-header::-webkit-details-marker { display: none; }
-.group-header { list-style: none; }
-
 /* ──────────────────────────────────────────────
-   HUB CARDS
+   ASSIGNEE AVATAR
 ────────────────────────────────────────────── */
 
-.hub {
-    background: #fff;
-    border: 1px solid var(--gray-200);
-    border-radius: 10px;
-    overflow: hidden;
-    transition: border-color 0.15s, box-shadow 0.15s;
-    position: relative;
-}
-
-.hub:hover {
-    border-color: var(--gray-300);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-}
-
-/* ── Hub urgency variants ── */
-
-/* Hot — needs immediate human input; amber/gold treatment (recolored from red) */
-.hub.hot {
-    border-color: var(--amber);
-    box-shadow: 0 0 0 1px var(--amber), 0 4px 16px var(--amber-glow);
-}
-
-.hub.hot::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 4px;
-    background: linear-gradient(180deg, var(--amber), var(--gold));
-    animation: cc-hub-pulse 2s infinite;
-}
-
-/* Active — Claude / CI doing work, no human action needed */
-.hub.active {
-    border-left: 4px solid var(--cyan);
-}
-
-/* Cool — done or quiet; gently faded */
-.hub.cool {
-    opacity: 0.75;
-}
-
-.hub.cool:hover {
-    opacity: 1;
-}
-
-.hub-header {
-    padding: 0.7rem 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.1s;
-}
-
-.hub-header:hover {
-    background: var(--gray-50);
-}
-
-.hub-header .chev {
-    width: 0;
-    height: 0;
-    border-left: 4px solid var(--gray-300);
-    border-top: 3px solid transparent;
-    border-bottom: 3px solid transparent;
-    flex-shrink: 0;
-    transition: transform 0.2s;
-}
-
-.hub.open .hub-header .chev {
-    transform: rotate(90deg);
-}
-
-.hub-id {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: var(--cyan);
-    white-space: nowrap;
-}
-
-.hub-name {
-    font-size: 0.78rem;
-    font-weight: 600;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.hub-type-badge {
-    font-size: 0.5rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 0.1rem 0.4rem;
-    border-radius: 3px;
-    white-space: nowrap;
-}
-
-.hub-chips {
-    display: flex;
-    gap: 0.3rem;
-}
-
-.hub.open .hub-chips {
-    display: none;
-}
-
-.hub-avatar {
+.assignee {
     width: 22px;
     height: 22px;
     border-radius: 50%;
     background: var(--navy);
     color: #fff;
-    font-size: 0.5rem;
+    font-size: 0.55rem;
     font-weight: 700;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-}
-
-/* ──────────────────────────────────────────────
-   SPOKES (expanded hub detail columns)
-────────────────────────────────────────────── */
-
-.spokes {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    border-top: 1px solid transparent;
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height 0.3s ease, opacity 0.2s ease;
-    opacity: 0;
-}
-
-.hub.open .spokes {
-    max-height: 400px;
-    opacity: 1;
-    border-top-color: var(--gray-100);
-}
-
-.spoke {
-    padding: 0.65rem 0.85rem;
-    border-right: 1px solid var(--gray-100);
-}
-
-.spoke:last-child {
-    border-right: none;
-}
-
-.spoke-label {
-    font-size: 0.5rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--gray-500);
-    margin-bottom: 0.35rem;
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-}
-
-.spoke-icon {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.4rem;
-    font-weight: 800;
-}
-
-.spoke-item {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.25rem 0;
-    font-size: 0.65rem;
-}
-
-.spoke-item + .spoke-item {
-    border-top: 1px solid var(--gray-50);
-}
-
-/* Status dot (sd) */
-.sd {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    flex-shrink: 0;
-}
-
-.spoke-text {
-    flex: 1;
-    color: var(--gray-700);
-    min-width: 0;
-}
-
-.spoke-text strong {
-    color: var(--navy);
-}
-
-.spoke-empty {
-    font-size: 0.6rem;
-    color: var(--gray-300);
-    font-style: italic;
-    padding: 0.25rem 0;
-}
-
-/* ──────────────────────────────────────────────
-   URGENCY BADGES
-────────────────────────────────────────────── */
-
-.urgency-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 0.62rem;
-    font-weight: 700;
-    padding: 0.2rem 0.55rem;
-    border-radius: 999px;
-    white-space: nowrap;
-}
-
-/* Hot — amber/yellow; pulsing dot */
-.urgency-hot {
-    background: var(--amber-subtle);
-    color: var(--amber);
-    border: 1px solid var(--gold);
-}
-
-.urgency-hot .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--amber);
-    animation: cc-pulse 1.5s infinite;
-}
-
-/* Active — cyan; pulsing dot */
-.urgency-active {
-    background: var(--cyan-subtle);
-    color: var(--cyan-dim);
-    border: 1px solid var(--cyan);
-}
-
-.urgency-active .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--cyan);
-    animation: cc-pulse 2s infinite;
 }
 
 /* ──────────────────────────────────────────────
@@ -530,7 +269,7 @@
 ────────────────────────────────────────────── */
 
 .cc-footer {
-    margin-top: 2rem;
+    margin-top: 1rem;
     padding: 0.5rem 0.25rem;
     border-top: 1px solid var(--gray-100);
     font-size: 0.65rem;
@@ -540,15 +279,10 @@
 }
 
 /* ──────────────────────────────────────────────
-   ANIMATIONS (prefixed to avoid collisions)
+   ANIMATIONS
 ────────────────────────────────────────────── */
 
 @keyframes cc-pulse {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.4; }
-}
-
-@keyframes cc-hub-pulse {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.55; }
 }

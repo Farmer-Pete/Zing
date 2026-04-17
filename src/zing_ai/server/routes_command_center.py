@@ -114,6 +114,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             last_polled_at=cache.last_polled_at,
             last_polled_label=_format_last_polled(cache.last_polled_at),
             last_error=cache.last_error,
+            body_class="command-center",
         )
     )
 

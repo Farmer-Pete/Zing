@@ -59,7 +59,7 @@
     <link rel="stylesheet" href="/static/css/pages.css?v={{ asset_version() }}">
     <link rel="stylesheet" href="/static/css/command_center.css?v={{ asset_version() }}">
 </head>
-<body>
+<body{% if body_class %} class="{{ body_class }}"{% endif %}>
     <header class="brand-bar">
         <a href="/dashboard"><img src="/static/zing-logo.svg" alt="Zing"></a>
         <button id="notif-opt-in" class="notif-opt-in-btn" style="display:none;"

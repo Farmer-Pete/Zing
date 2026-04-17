@@ -43,6 +43,8 @@ body {
     padding: 0 2rem;
 }
 
+body.command-center { max-width: 1400px; }
+
 body::before {
     content: '';
     position: fixed;
