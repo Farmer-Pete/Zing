@@ -23,7 +23,10 @@ class ExternalCache(BaseModel):
     model_config = ConfigDict(validate_assignment=False, arbitrary_types_allowed=True)
 
     issues: list[LinearIssue] = Field(default_factory=list)
+    completed_issues: list[LinearIssue] = Field(default_factory=list)
     prs: list[GitHubPR] = Field(default_factory=list)
+    recent_prs: list[GitHubPR] = Field(default_factory=list)
+    github_repos: list[str] = Field(default_factory=list)
     github_username: str = ""
     last_polled_at: datetime | None = None
     last_error: str | None = None
