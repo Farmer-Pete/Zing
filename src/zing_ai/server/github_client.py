@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from urllib.parse import quote
 
 import httpx
 
@@ -43,37 +42,57 @@ def _next_link(link_header: str | None) -> str | None:
     return None
 
 
-def _map_pr(pr: dict) -> GitHubPR:
-    """Map a raw GitHub API PR dict to a :class:`GitHubPR` model."""
+def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
+    """Map a raw GitHub GraphQL PR node dict to a :class:`GitHubPR` model."""
     raw_state = pr["state"]
-    merged_at = pr.get("merged_at")
-    if raw_state == "closed" and merged_at is None:
-        state = "closed"
-    elif merged_at is not None:
+    if raw_state == "MERGED":
         state = "merged"
+    elif raw_state == "CLOSED":
+        state = "closed"
     else:
         state = "open"
+
+    # reviewRequests nodes contain requestedReviewer objects; surface user logins only.
+    review_requests = pr.get("reviewRequests") or {}
+    reviewer_nodes = review_requests.get("nodes") or []
+    requested_reviewers = [
+        node["requestedReviewer"]["login"]
+        for node in reviewer_nodes
+        if node.get("requestedReviewer") and "login" in node["requestedReviewer"]
+    ]
+
+    # CI status lives at commits -> last commit -> statusCheckRollup -> state
+    commits = pr.get("commits") or {}
+    commit_nodes = commits.get("nodes") or []
+    ci_status: str | None = None
+    if commit_nodes:
+        rollup = (commit_nodes[-1].get("commit") or {}).get("statusCheckRollup")
+        if rollup:
+            ci_status = rollup.get("state")
+
+    # mergeable: GraphQL returns MERGEABLE / CONFLICTING / UNKNOWN
+    raw_mergeable = pr.get("mergeable") or "UNKNOWN"
+    mergeable_state = raw_mergeable.lower()
+
+    author_obj = pr.get("author") or {}
+    author = author_obj.get("login") or ""
 
     return GitHubPR(
         number=pr["number"],
         title=pr["title"],
         state=state,
-        draft=pr["draft"],
-        head_ref=pr["head"]["ref"],
-        base_ref=pr["base"]["ref"],
+        draft=pr["isDraft"],
+        head_ref=pr["headRefName"],
+        base_ref=pr["baseRefName"],
         body=pr.get("body"),
-        # `requested_reviewers` from GitHub mixes user objects ({"login": ...}) and
-        # team objects ({"slug": ..., "name": ...}). v1 surfaces user reviewers only;
-        # team-review requests don't yet drive an inbox item.
-        requested_reviewers=[u["login"] for u in pr.get("requested_reviewers", []) if "login" in u],
-        # TODO(v2): review_decision requires a follow-up GET /repos/{repo}/pulls/{n}/reviews
-        # or may be available via the GraphQL API. Not present in REST list endpoint; set None.
-        review_decision=None,
-        mergeable_state=pr.get("mergeable_state") or "unknown",
-        # TODO(v2): ci_status requires a follow-up GET /repos/{repo}/commits/{sha}/check-runs
-        ci_status=None,
-        url=pr["html_url"],
-        updated_at=datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00")),
+        author=author,
+        repo=repo,
+        requested_reviewers=requested_reviewers,
+        review_decision=pr.get("reviewDecision"),
+        mergeable_state=mergeable_state,
+        ci_status=ci_status,
+        url=pr["url"],
+        updated_at=datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00")),
     )
 
 
@@ -109,44 +128,102 @@ class GitHubClient:
             self._username = login
         return self._username
 
-    async def fetch_open_prs(self, repo: str) -> list[GitHubPR]:
-        """Return all open pull requests for *repo* (``owner/name`` format).
+    async def fetch_writable_repos(self) -> list[str]:
+        """Return ``owner/name`` strings for every repo the token can push to.
 
-        URL-encodes each path segment so a malformed ``repo`` value (typo,
-        hand-edited config) can't inject query/path fragments or traverse the
-        API. Follows GitHub's ``Link: rel="next"`` pagination so repos with
-        >100 open PRs don't silently truncate to the first page. Raises
-        :class:`GitHubAPIError` for non-200 HTTP responses.
+        Uses ``GET /user/repos`` with ``affiliation=owner,collaborator,organization_member``
+        and filters to repos where ``permissions.push`` is true. Follows Link
+        pagination (max 20 pages = 2000 repos).
         """
-        owner, _, name = repo.partition("/")
-        safe_path = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/pulls"
-        results: list[GitHubPR] = []
-        # First page: relative path + query params. Subsequent pages: absolute
-        # URL from the Link header (already carries owner/name/per_page/page).
-        next_url: str | None = safe_path
+        results: list[str] = []
+        next_url: str | None = "/user/repos"
         next_params: dict[str, str | int] | None = {
-            "state": "open",
+            "affiliation": "owner,collaborator,organization_member",
             "per_page": 100,
+            "sort": "pushed",
         }
-        # Belt-and-suspenders bound against a misconfigured proxy returning a
-        # self-referential Link header; 50 pages × 100 per_page = 5000 PRs,
-        # well beyond anything a single repo would have open simultaneously.
-        MAX_PAGES = 50
+        MAX_PAGES = 20
         for _ in range(MAX_PAGES):
             if next_url is None:
                 break
             r = await self._http.get(next_url, params=next_params)
             if r.status_code != 200:
-                logger.warning(
-                    "GitHub HTTP %s on %s: %s",
-                    r.status_code,
-                    next_url,
-                    r.text[:500],
-                )
+                logger.warning("GitHub HTTP %s on %s: %s", r.status_code, next_url, r.text[:500])
                 raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
-            results.extend(_map_pr(pr) for pr in r.json())
+            for repo in r.json():
+                perms = repo.get("permissions", {})
+                if perms.get("push"):
+                    results.append(repo["full_name"])
             next_url = _next_link(r.headers.get("Link"))
-            # Absolute URLs from the Link header already carry their own query
-            # string; don't re-apply the initial params or they'd double-encode.
             next_params = None
         return results
+
+    async def _graphql(self, query: str, variables: dict) -> dict:
+        """Execute a GitHub GraphQL query and return the ``data`` payload.
+
+        Raises :class:`GitHubAPIError` on HTTP errors or when the response
+        contains a top-level ``errors`` array (HTTP 200 with GraphQL errors).
+        """
+        r = await self._http.post(
+            "https://api.github.com/graphql",
+            json={"query": query, "variables": variables},
+        )
+        if r.status_code != 200:
+            logger.warning("GitHub GraphQL HTTP %s: %s", r.status_code, r.text[:500])
+            raise GitHubAPIError(f"HTTP {r.status_code}", status_code=r.status_code)
+        payload = r.json()
+        if payload.get("errors"):
+            msg = payload["errors"][0].get("message", "GraphQL error")
+            logger.warning("GitHub GraphQL error: %s", msg)
+            raise GitHubAPIError(msg)
+        return payload.get("data") or {}
+
+    async def fetch_open_prs(self, repo: str) -> list[GitHubPR]:
+        """Return all open pull requests for *repo* (``owner/name`` format).
+
+        Uses the GitHub GraphQL API to fetch PR data including author,
+        reviewDecision, and CI status in a single query. Raises
+        :class:`GitHubAPIError` for HTTP errors or GraphQL errors.
+        """
+        owner, _, name = repo.partition("/")
+        query = """
+        query($owner: String!, $repo: String!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes {
+                number
+                title
+                state
+                isDraft
+                headRefName
+                baseRefName
+                body
+                author { login }
+                reviewDecision
+                mergeable
+                url
+                updatedAt
+                reviewRequests(first: 10) {
+                  nodes {
+                    requestedReviewer {
+                      ... on User { login }
+                    }
+                  }
+                }
+                commits(last: 1) {
+                  nodes {
+                    commit {
+                      statusCheckRollup { state }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        data = await self._graphql(query, {"owner": owner, "repo": name})
+        repository = data.get("repository") or {}
+        pull_requests = repository.get("pullRequests") or {}
+        nodes = pull_requests.get("nodes") or []
+        return [_map_pr(pr, repo=repo) for pr in nodes]

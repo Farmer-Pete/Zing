@@ -42,6 +42,8 @@ class GitHubPR(BaseModel):
     head_ref: str
     base_ref: str
     body: str | None
+    author: str = ""
+    repo: str = ""
     requested_reviewers: list[str]
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] | None
     mergeable_state: str

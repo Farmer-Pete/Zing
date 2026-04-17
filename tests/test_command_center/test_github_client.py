@@ -10,49 +10,95 @@ from zing_ai.server.github_client import GitHubAPIError, GitHubClient
 
 _USER_RESPONSE = {"login": "octocat", "id": 1}
 
-_PR_LIST_RESPONSE = [
-    {
-        "number": 42,
-        "title": "Add feature X",
-        "state": "open",
-        "draft": False,
-        "head": {"ref": "feature/x"},
-        "base": {"ref": "main"},
-        "body": "This adds feature X.",
-        "requested_reviewers": [{"login": "alice"}, {"login": "bob"}],
-        "mergeable_state": "clean",
-        "merged_at": None,
-        "html_url": "https://github.com/owner/repo/pull/42",
-        "updated_at": "2026-03-10T12:00:00Z",
-    },
-    {
-        "number": 43,
-        "title": "Fix bug Y",
-        "state": "open",
-        "draft": True,
-        "head": {"ref": "fix/bug-y"},
-        "base": {"ref": "develop"},
-        "body": None,
-        "requested_reviewers": [],
-        "mergeable_state": "unknown",
-        "merged_at": None,
-        "html_url": "https://github.com/owner/repo/pull/43",
-        "updated_at": "2026-03-11T08:30:00Z",
-    },
-    {
-        "number": 44,
-        "title": "Update deps",
-        "state": "open",
-        "draft": False,
-        "head": {"ref": "chore/deps"},
-        "base": {"ref": "main"},
-        "body": "Bump all the things.",
-        "requested_reviewers": [{"login": "carol"}],
-        "mergeable_state": None,
-        "merged_at": None,
-        "html_url": "https://github.com/owner/repo/pull/44",
-        "updated_at": "2026-03-12T16:45:00+00:00",
-    },
+
+# GraphQL response shape — matches the query in GitHubClient.fetch_open_prs
+def _gql_response(nodes: list[dict]) -> dict:
+    """Wrap PR nodes in the GraphQL envelope returned by the GitHub API."""
+    return {
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "nodes": nodes,
+                }
+            }
+        }
+    }
+
+
+def _make_pr_node(
+    *,
+    number: int,
+    title: str,
+    state: str = "OPEN",
+    is_draft: bool = False,
+    head_ref: str = "feature/x",
+    base_ref: str = "main",
+    body: str | None = None,
+    author_login: str = "octocat",
+    review_decision: str | None = None,
+    mergeable: str = "MERGEABLE",
+    url: str = "https://github.com/owner/repo/pull/1",
+    updated_at: str = "2026-03-10T12:00:00Z",
+    reviewer_logins: list[str] | None = None,
+    ci_status: str | None = None,
+) -> dict:
+    """Build a minimal GraphQL PR node dict."""
+    reviewer_nodes = [{"requestedReviewer": {"login": login}} for login in (reviewer_logins or [])]
+    commit_node: dict = {"commit": {}}
+    if ci_status is not None:
+        commit_node = {"commit": {"statusCheckRollup": {"state": ci_status}}}
+    return {
+        "number": number,
+        "title": title,
+        "state": state,
+        "isDraft": is_draft,
+        "headRefName": head_ref,
+        "baseRefName": base_ref,
+        "body": body,
+        "author": {"login": author_login},
+        "reviewDecision": review_decision,
+        "mergeable": mergeable,
+        "url": url,
+        "updatedAt": updated_at,
+        "reviewRequests": {"nodes": reviewer_nodes},
+        "commits": {"nodes": [commit_node]},
+    }
+
+
+_PR_NODES = [
+    _make_pr_node(
+        number=42,
+        title="Add feature X",
+        body="This adds feature X.",
+        author_login="alice",
+        reviewer_logins=["alice", "bob"],
+        review_decision=None,
+        mergeable="MERGEABLE",
+        ci_status=None,
+        url="https://github.com/owner/repo/pull/42",
+        updated_at="2026-03-10T12:00:00Z",
+    ),
+    _make_pr_node(
+        number=43,
+        title="Fix bug Y",
+        is_draft=True,
+        base_ref="develop",
+        head_ref="fix/bug-y",
+        body=None,
+        mergeable="UNKNOWN",
+        url="https://github.com/owner/repo/pull/43",
+        updated_at="2026-03-11T08:30:00Z",
+    ),
+    _make_pr_node(
+        number=44,
+        title="Update deps",
+        head_ref="chore/deps",
+        body="Bump all the things.",
+        reviewer_logins=["carol"],
+        mergeable="UNKNOWN",
+        url="https://github.com/owner/repo/pull/44",
+        updated_at="2026-03-12T16:45:00+00:00",
+    ),
 ]
 
 
@@ -79,8 +125,8 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
     @respx.mock
     async def test_fetch_open_prs(self) -> None:
         """fetch_open_prs returns 3 GitHubPR objects with all fields populated correctly."""
-        respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(200, json=_PR_LIST_RESPONSE)
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(200, json=_gql_response(_PR_NODES))
         )
         client = GitHubClient(token="ghp_test")
         try:
@@ -98,9 +144,11 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.head_ref, "feature/x")
         self.assertEqual(first.base_ref, "main")
         self.assertEqual(first.body, "This adds feature X.")
+        self.assertEqual(first.author, "alice")
+        self.assertEqual(first.repo, "owner/repo")
         self.assertEqual(first.requested_reviewers, ["alice", "bob"])
         self.assertIsNone(first.review_decision)
-        self.assertEqual(first.mergeable_state, "clean")
+        self.assertEqual(first.mergeable_state, "mergeable")
         self.assertIsNone(first.ci_status)
         self.assertEqual(first.url, "https://github.com/owner/repo/pull/42")
         self.assertEqual(first.updated_at, datetime(2026, 3, 10, 12, 0, 0, tzinfo=UTC))
@@ -113,33 +161,56 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
 
         third = prs[2]
         self.assertEqual(third.requested_reviewers, ["carol"])
-        # mergeable_state is None in raw response — should default to "unknown"
         self.assertEqual(third.mergeable_state, "unknown")
         self.assertEqual(third.updated_at, datetime(2026, 3, 12, 16, 45, 0, tzinfo=UTC))
 
     @respx.mock
+    async def test_fetch_open_prs_populates_author_review_decision_ci_status(self) -> None:
+        """GraphQL fields author, reviewDecision, and ci_status are mapped correctly."""
+        node = _make_pr_node(
+            number=10,
+            title="Reviewed PR",
+            author_login="bob",
+            review_decision="APPROVED",
+            ci_status="SUCCESS",
+            url="https://github.com/owner/repo/pull/10",
+        )
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(200, json=_gql_response([node]))
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_open_prs("owner/repo")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(prs), 1)
+        pr = prs[0]
+        self.assertEqual(pr.author, "bob")
+        self.assertEqual(pr.review_decision, "APPROVED")
+        self.assertEqual(pr.ci_status, "SUCCESS")
+
+    @respx.mock
     async def test_fetch_open_prs_filters_team_reviewers(self) -> None:
-        """Team reviewer objects (no `login` key) must not raise KeyError."""
-        pr_with_team_reviewer = {
-            "number": 99,
-            "title": "Mixed reviewers",
-            "state": "open",
-            "draft": False,
-            "head_ref": "feature/teams",
-            "head": {"ref": "feature/teams"},
-            "base": {"ref": "main"},
-            "body": None,
-            "requested_reviewers": [
-                {"login": "alice"},
-                {"slug": "backend-team", "name": "Backend"},  # team object — no login
-                {"login": "bob"},
-            ],
-            "mergeable_state": "clean",
-            "html_url": "https://github.com/owner/repo/pull/99",
-            "updated_at": "2026-03-15T09:00:00Z",
+        """Team reviewer objects (no `login` key) must not appear in requested_reviewers."""
+        # GraphQL returns only User fragments with login; team fragments don't have login.
+        node: dict = _make_pr_node(
+            number=99,
+            title="Mixed reviewers",
+            head_ref="feature/teams",
+            url="https://github.com/owner/repo/pull/99",
+            updated_at="2026-03-15T09:00:00Z",
+        )
+        # Inject a mix: two users and one team (requestedReviewer without login)
+        node["reviewRequests"] = {
+            "nodes": [
+                {"requestedReviewer": {"login": "alice"}},
+                {"requestedReviewer": {}},  # team — no login key
+                {"requestedReviewer": {"login": "bob"}},
+            ]
         }
-        respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(200, json=[pr_with_team_reviewer])
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(200, json=_gql_response([node]))
         )
         client = GitHubClient(token="ghp_test")
         try:
@@ -152,58 +223,9 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prs[0].requested_reviewers, ["alice", "bob"])
 
     @respx.mock
-    async def test_fetch_open_prs_follows_link_header_pagination(self) -> None:
-        """>100 open PRs must paginate via the Link header, not truncate."""
-        page_1_pr = {
-            "number": 1,
-            "title": "Page 1",
-            "state": "open",
-            "draft": False,
-            "head": {"ref": "feature/1"},
-            "base": {"ref": "main"},
-            "body": None,
-            "requested_reviewers": [],
-            "mergeable_state": "clean",
-            "merged_at": None,
-            "html_url": "https://github.com/owner/repo/pull/1",
-            "updated_at": "2026-03-10T12:00:00Z",
-        }
-        page_2_pr = {
-            **page_1_pr,
-            "number": 2,
-            "title": "Page 2",
-            "html_url": "https://github.com/owner/repo/pull/2",
-        }
-
-        next_url = "https://api.github.com/repos/owner/repo/pulls?state=open&per_page=100&page=2"
-        # Use side_effect so respx returns page 1 then page 2 in order for
-        # successive calls — avoids ambiguity when both requests would match
-        # the same base URL pattern and (more importantly) prevents an
-        # infinite pagination loop if page-1 were served repeatedly.
-        respx.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            side_effect=[
-                httpx.Response(
-                    200,
-                    json=[page_1_pr],
-                    headers={"Link": f'<{next_url}>; rel="next"'},
-                ),
-                # No Link header on page 2 -> loop terminates.
-                httpx.Response(200, json=[page_2_pr]),
-            ]
-        )
-
-        client = GitHubClient(token="ghp_test")
-        try:
-            prs = await client.fetch_open_prs("owner/repo")
-        finally:
-            await client.aclose()
-
-        self.assertEqual([p.number for p in prs], [1, 2])
-
-    @respx.mock
     async def test_http_404_raises(self) -> None:
-        """A 404 response must raise GitHubAPIError."""
-        respx.get("https://api.github.com/repos/owner/missing/pulls").mock(
+        """A 404 HTTP response to the GraphQL endpoint must raise GitHubAPIError."""
+        respx.post("https://api.github.com/graphql").mock(
             return_value=httpx.Response(404, json={"message": "Not Found"})
         )
         client = GitHubClient(token="ghp_test")
@@ -214,6 +236,24 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertIn("HTTP 404", str(ctx.exception))
+
+    @respx.mock
+    async def test_graphql_errors_raises(self) -> None:
+        """A GraphQL 200 response with top-level errors must raise GitHubAPIError."""
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(
+                200,
+                json={"errors": [{"message": "Could not resolve to a Repository"}]},
+            )
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            with self.assertRaises(GitHubAPIError) as ctx:
+                await client.fetch_open_prs("owner/nonexistent")
+        finally:
+            await client.aclose()
+
+        self.assertIn("Could not resolve to a Repository", str(ctx.exception))
 
     @respx.mock
     async def test_http_401_raises(self) -> None:
