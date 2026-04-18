@@ -11,6 +11,16 @@
     --cyan-dim: #2ba8b6;
     --red-orange: #e84430;
     --off-white: #f8f6f3;
+    /* Tint tokens (for subtle backgrounds, glow shadows, and pill
+       treatments where hard-coding opacity-wrapped brand colors would
+       couple the CSS to specific hex values). */
+    --orange-subtle: #fff5ee;
+    --orange-border: #ffd9c2;
+    --orange-glow: rgba(245, 124, 32, 0.08);
+    --orange-glow-strong: rgba(245, 124, 32, 0.3);
+    --amber-subtle: #fffbeb;
+    --amber-glow: rgba(245, 166, 35, 0.18);
+    --cyan-subtle: #e0f7fa;
     --gray-50: #faf9f7;
     --gray-100: #f3f1ee;
     --gray-200: #e8e5e1;
@@ -19,6 +29,13 @@
     --gray-700: #4a4540;
     --text-primary: #1a1714;
     --border: var(--gray-200);
+    /* Kanban column header tokens */
+    --col-progress-bg: #fff3e0;
+    --col-progress-text: #e65100;
+    --col-review-bg: #e0f7fa;
+    --col-review-text: #00838f;
+    --col-done-bg: #e8f5e9;
+    --col-done-text: #2e7d32;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -32,6 +49,8 @@ body {
     margin: 0 auto;
     padding: 0 2rem;
 }
+
+body.command-center { max-width: 1400px; }
 
 body::before {
     content: '';
@@ -118,6 +137,7 @@ h2 {
 
 /* === Form Inputs === */
 input[type="text"],
+input[type="password"],
 input[type="number"],
 select {
     width: 100%;
@@ -132,6 +152,7 @@ select {
 }
 
 input[type="text"]:focus,
+input[type="password"]:focus,
 input[type="number"]:focus,
 select:focus {
     outline: none;

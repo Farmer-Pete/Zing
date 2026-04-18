@@ -268,4 +268,35 @@ FIELD_META: dict[str, dict] = {
             "long": "Default `%Y-%m-%d-%H%M` sorts chronologically by filename.",
         },
     },
+    # category: command_center
+    "command_center.linear_api_key": {
+        "label": "Linear API key",
+        "field_type": "password",
+        "description": {
+            "short": "Personal API key for Linear.",
+            "long": (
+                "Used by the Command Center to poll your open issues."
+                " Generate one at Linear > Settings > API."
+            ),
+        },
+        "group": "Command Center",
+    },
+    "command_center.github_token": {
+        "label": "GitHub token",
+        "field_type": "password",
+        "description": {
+            "short": "Personal access token for GitHub.",
+            "long": "Used by the Command Center to poll open PRs. Needs `repo` scope.",
+        },
+        "group": "Command Center",
+    },
+    "command_center.poll_seconds": {
+        "label": "Poll interval (s)",
+        "field_type": "number",
+        "description": {
+            "short": "How often the Command Center polls Linear and GitHub for updates.",
+            "long": "Lower values give fresher data but increase API request volume.",
+        },
+        "group": "Command Center",
+    },
 }

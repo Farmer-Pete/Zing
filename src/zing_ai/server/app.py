@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import pathlib
@@ -14,8 +15,18 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from zing_ai.config import load_config
+from zing_ai.server.external_cache import ExternalCache
+from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
-from zing_ai.server.routes import _notify_dashboard_connections, _notify_sse_connections, router
+from zing_ai.server.routes import (
+    _dashboard_queues,
+    _notify_dashboard_connections,
+    _notify_sse_connections,
+    _sse_queues,
+    router,
+)
+from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
 from zing_ai.server.sessions import SessionManager
@@ -104,6 +115,8 @@ class MCPDebugMiddleware:
 def create_app(
     session_manager: SessionManager | None = None,
     port: int = 9876,
+    external_cache: ExternalCache | None = None,
+    cc_queues: list[asyncio.Queue[str]] | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -113,8 +126,37 @@ def create_app(
     Args:
         session_manager: Optional SessionManager instance. Creates a default one if not provided.
         port: The port the server will listen on, used for MCP tool URL construction.
+        external_cache: Optional ExternalCache instance for testing (injects pre-populated state).
+        cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
     """
     sm = session_manager or SessionManager()
+
+    # Initialise cc_queues up-front so the session-event listener can close
+    # over it. We also assign it to fastapi_app.state below for the SSE route
+    # + poller; both see the same list object.
+    cc_queues_list: list[asyncio.Queue[str]] = cc_queues if cc_queues is not None else []
+
+    # SessionManager event types that should trigger a board_changed SSE refresh.
+    _CC_BOARD_EVENTS: frozenset[str] = frozenset(
+        {
+            "session_created",
+            "session_cleaned_up",
+            "session_updated",
+            "step_started",
+            "step_ready",
+            "review_submitted",
+            "finding_added",
+            "agents_done",
+        }
+    )
+
+    def _notify_cc_connections(event: str) -> None:
+        """Push an SSE event onto every connected Command Center queue."""
+        for q in list(cc_queues_list):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning("cc_queues queue full; dropping event %s", event)
 
     # Map SessionManager events to the existing SSE/dashboard notification functions
     def _on_session_event(event_type: str, session_id: str) -> None:
@@ -148,27 +190,58 @@ def create_app(
             _notify_sse_connections(session_id, sse_events[event_type])
         if event_type in dashboard_events:
             _notify_dashboard_connections(dashboard_events[event_type])
+        # Command Center bridge: emit board_changed so the /command-center page
+        # reflects local session-manager state without waiting for the next
+        # external poll cycle.
+        if event_type in _CC_BOARD_EVENTS:
+            _notify_cc_connections("board_changed")
 
     sm.add_listener(_on_session_event)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
-        async with mcp_server.session_manager.run():
-            yield
+        # Note: state is set on fastapi_app.state, NOT starlette_app.state (different objects).
+        poller = ExternalPoller(
+            cache=fastapi_app.state.external_cache,
+            queues=fastapi_app.state.cc_queues,
+            config=load_config().command_center,
+        )
+        poller_task = asyncio.create_task(poller.run())
+        try:
+            async with mcp_server.session_manager.run():
+                yield
+        finally:
+            poller_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller_task
+            await poller.aclose()
 
     mcp_starlette = mcp_server.streamable_http_app()
+
+    external_cache = external_cache or ExternalCache()
 
     fastapi_app = FastAPI(
         title="Zing Batch Review",
         description="Batch review UI for Zing AI development pipeline",
     )
     fastapi_app.state.session_manager = sm
+    fastapi_app.state.external_cache = external_cache
+    # Reuse the same list object the session-event listener closed over; both
+    # the SSE route and the listener mutate it as clients connect/disconnect.
+    fastapi_app.state.cc_queues = cc_queues_list
+    # Expose the legacy module-level SSE/dashboard queue stores via app.state
+    # so new code can DI-read them (matching the cc_queues pattern). Same
+    # list/dict object — transitional step toward a full migration off the
+    # module globals; see the TODO(consistency) note in routes.py.
+    fastapi_app.state.sse_queues = _sse_queues
+    fastapi_app.state.dashboard_queues = _dashboard_queues
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has
     # a catch-all `/{session_id}` route that would otherwise swallow /config etc.
     fastapi_app.include_router(config_router)
     fastapi_app.include_router(install_router)
+    fastapi_app.include_router(command_center_router)
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]

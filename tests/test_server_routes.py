@@ -168,12 +168,13 @@ class TestSaveResponse(ServerTestBase):
                 "responses": {finding_id: "accept"},
             },
         )
-        # Then save complexity
+        # Then save complexity alongside the action (signals are rebuilt from
+        # scratch on each POST, so the action must be re-sent to be preserved).
         self.client.post(
             "/test-session/save-response",
             json={
                 "step_id": step_id,
-                "responses": {f"{finding_id}_complexity": "complex"},
+                "responses": {finding_id: "accept", f"{finding_id}_complexity": "complex"},
             },
         )
         session = self.manager.get_session("test-session")

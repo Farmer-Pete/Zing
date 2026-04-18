@@ -288,6 +288,7 @@ class Session(BaseModel):
     session_id: str
     title: str
     zing_file: str | None = None
+    ticket_id: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     notifications: list[Notification] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)

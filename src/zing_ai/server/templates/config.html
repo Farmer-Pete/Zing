@@ -17,6 +17,7 @@
     ("models", "Models", config.models),
     ("agents", "Agents", config.agents),
     ("report", "Report", config.report),
+    ("command_center", "Command Center", config.command_center),
   ] %}
   {% set pairs = {"step_merge_min_words": "step_merge_max_words"} %}
   {% set pair_seconds = pairs.values() | list %}
@@ -28,6 +29,8 @@
       {% for field_name, field_value in fields.items() %}
         {% if field_name in pair_seconds %}
           {# rendered as part of a pair on the previous iteration #}
+        {% elif not field_meta.get(cat_key ~ "." ~ field_name) %}
+          {# no UI metadata — rendered by a custom section below #}
         {% else %}
           {% set first_dot_key = cat_key ~ "." ~ field_name %}
           {% set first_meta = field_meta.get(first_dot_key, {}) %}
@@ -70,5 +73,49 @@
       {% endfor %}
     </section>
   {% endfor %}
+  <section class="config-section" id="github-repos-section">
+    <h2>GitHub Repositories</h2>
+    <p class="field-description-short">Repos you have write access to. Uncheck any you don't want to poll for PRs.</p>
+    <div class="github-repos-list">
+      {% if github_repo_groups %}
+        {% for owner, repos in github_repo_groups.items() %}
+          {% set all_enabled = repos | selectattr("enabled") | list | length == repos | length %}
+          <div class="github-repo-group">
+            <label class="github-repo-toggle github-repo-group-header">
+              <input type="checkbox"
+                     {% if all_enabled %}checked{% endif %}
+                     id="group-{{ owner }}"
+                     data-on:change="
+                       document.querySelectorAll('#group-{{ owner }}-repos input[type=checkbox]').forEach(cb => { cb.checked = evt.target.checked; });
+                       @post('/config/github-repos/toggle-group', {payload: {owner: '{{ owner }}', enabled: evt.target.checked}})
+                     ">
+              <span>{{ owner }}/</span>
+            </label>
+            <div class="github-repo-group-items" id="group-{{ owner }}-repos">
+              {% for repo in repos %}
+                <label class="github-repo-toggle">
+                  <input type="checkbox"
+                         {% if repo.enabled %}checked{% endif %}
+                         data-on:change="@post('/config/github-repos/toggle', {payload: {repo: '{{ repo.name }}', enabled: evt.target.checked}})">
+                  <span>{{ repo.short }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="github-repos-empty">Configure a GitHub token above. Repos will appear here after the first poll.</p>
+      {% endif %}
+    </div>
+    <script>
+      document.querySelectorAll('.github-repo-group').forEach(group => {
+        const header = group.querySelector('.github-repo-group-header input[type=checkbox]');
+        const items = group.querySelectorAll('.github-repo-group-items input[type=checkbox]');
+        const total = items.length;
+        const checked = [...items].filter(cb => cb.checked).length;
+        if (checked > 0 && checked < total) header.indeterminate = true;
+      });
+    </script>
+  </section>
 </div>
 {% endblock %}

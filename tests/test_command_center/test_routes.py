@@ -1,0 +1,311 @@
+"""Tests for Command Center route endpoints."""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import threading
+import time
+import unittest
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from tests.test_command_center.conftest import (
+    make_issue as _make_issue,
+)
+from zing_ai.server.app import create_app
+from zing_ai.server.sessions import SessionManager
+
+
+class CommandCenterTestBase(unittest.TestCase):
+    """Base class that sets up a TestClient with an isolated SessionManager."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+        self.app_instance = create_app(session_manager=self.manager)
+        self.client = TestClient(self.app_instance)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _get_fastapi_app(self) -> FastAPI:
+        """Unwrap the ASGI middleware stack to reach the FastAPI instance."""
+        # MCPDebugMiddleware wraps a Starlette app; the last Mount route is fastapi_app.
+        starlette_app = self.app_instance.app  # type: ignore[attr-defined]
+        for route in starlette_app.routes:
+            app = getattr(route, "app", None)
+            if isinstance(app, FastAPI):
+                return app
+        raise RuntimeError("Could not locate FastAPI app inside ASGI stack")
+
+
+class TestCommandCenterRoutes(CommandCenterTestBase):
+    """Tests for the /command-center endpoint."""
+
+    def test_get_command_center_returns_200_with_empty_cache(self) -> None:
+        """GET /command-center returns 200 with an empty ExternalCache."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/html", resp.headers["content-type"])
+
+    def test_page_contains_command_center_in_nav(self) -> None:
+        """The response includes the Command Center nav link."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Command Center", resp.text)
+
+    def test_page_renders_kanban_board(self) -> None:
+        """The page renders the kanban-board section."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("kanban-board", resp.text)
+
+    def test_build_view_memoises_within_same_fingerprint(self) -> None:
+        """Two consecutive _build_view calls with no state change reuse the cached result.
+
+        Regression: without memo, each SSE event forced a full aggregation
+        pass even when issues/PRs/sessions were unchanged. Now ``cache.version``
+        plus a per-session signature short-circuits the second call.
+        """
+        from unittest.mock import patch
+
+        from zing_ai.server.routes_command_center import _build_view
+
+        fastapi_app = self._get_fastapi_app()
+        fastapi_app.state.external_cache.issues = [_make_issue(identifier="BAK-1")]
+
+        import zing_ai.server.routes_command_center as rcc
+
+        with patch.object(rcc, "aggregate", wraps=rcc.aggregate) as agg_spy:
+            _build_view(fastapi_app)
+            _build_view(fastapi_app)
+
+        # Aggregate runs on the first call, short-circuits on the second.
+        self.assertEqual(agg_spy.call_count, 1)
+
+        # After version bump, the memo invalidates and aggregate runs again.
+        fastapi_app.state.external_cache.version += 1
+        with patch.object(rcc, "aggregate", wraps=rcc.aggregate) as agg_spy2:
+            _build_view(fastapi_app)
+        self.assertEqual(agg_spy2.call_count, 1)
+
+    def test_kanban_card_renders_for_issue(self) -> None:
+        """Injecting an issue produces a kanban card in the board."""
+        fastapi_app = self._get_fastapi_app()
+        issue = _make_issue(identifier="BAK-1179", title="Search broken")
+        fastapi_app.state.external_cache.issues = [issue]
+
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("kanban-board", resp.text)
+        self.assertIn("Search broken", resp.text)
+
+
+class _SSEAsyncHelpers:
+    """Shared helpers for the async-driven SSE tests.
+
+    Kept separate so ``TestCommandCenterSSEAsync`` can inherit from
+    ``IsolatedAsyncioTestCase`` without inheriting the sync ``setUp`` chain
+    that ``CommandCenterTestBase`` provides.
+    """
+
+
+class TestCommandCenterSSE(CommandCenterTestBase):
+    """Tests for the /command-center/events SSE endpoint (synchronous path)."""
+
+    def _get_cc_queues(self) -> list:
+        """Return the cc_queues list from the FastAPI app state."""
+        fastapi_app = self._get_fastapi_app()
+        return fastapi_app.state.cc_queues  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Helper: call the SSE handler directly and collect output chunks.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _collect_cc_events(
+        app_instance,  # noqa: ANN001
+        events: list[str],
+    ) -> str:
+        """Call command_center_events directly, push events via queue, return SSE text."""
+        from unittest.mock import MagicMock
+
+        from zing_ai.server.routes_command_center import command_center_events
+
+        # Find the FastAPI app inside the ASGI stack.
+        starlette_app = app_instance.app  # type: ignore[attr-defined]
+        fastapi_app = None
+        for route in starlette_app.routes:
+            candidate = getattr(route, "app", None)
+            if isinstance(candidate, FastAPI):
+                fastapi_app = candidate
+                break
+        assert fastapi_app is not None
+
+        request = MagicMock()
+        request.app = fastapi_app
+
+        # Pre-populate a queue with our test events.
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+        for ev in events:
+            queue.put_nowait(ev)
+
+        real_wait_for = asyncio.wait_for
+        delivery_count = 0
+
+        async def _fast_wait_for(coro, *, timeout=None):  # noqa: ANN001,ANN201
+            nonlocal delivery_count
+            delivery_count += 1
+            if delivery_count <= len(events):
+                return await real_wait_for(coro, timeout=0.5)
+            coro.close()
+            raise asyncio.CancelledError
+
+        chunks: list[str] = []
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.asyncio.Queue",
+                return_value=queue,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.asyncio.wait_for",
+                _fast_wait_for,
+            ),
+        ):
+            try:
+                response = await command_center_events(request)
+                async for chunk in response.body_iterator:
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode()
+                    chunks.append(chunk)  # type: ignore[arg-type]
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+
+        # Clean up queue if still registered.
+        cc_queues = fastapi_app.state.cc_queues  # type: ignore[attr-defined]
+        if queue in cc_queues:
+            cc_queues.remove(queue)
+
+        return "".join(chunks)
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_sse_connection_appends_queue(self) -> None:
+        """Opening the SSE connection appends a queue to cc_queues."""
+        cc_queues = self._get_cc_queues()
+        initial_len = len(cc_queues)
+
+        # Use TestClient streaming; the connection stays open until we stop iterating.
+        stop_event = threading.Event()
+
+        def _stream() -> None:
+            with self.client.stream("GET", "/command-center/events") as resp:
+                assert resp.status_code == 200
+                # Signal the main thread that the connection is open.
+                stop_event.set()
+                # Block in iteration so the server keeps the queue registered.
+                for _ in resp.iter_lines():
+                    if stop_event.is_set() and len(cc_queues) > initial_len:
+                        break
+
+        t = threading.Thread(target=_stream, daemon=True)
+        t.start()
+        stop_event.wait(timeout=5.0)
+        # Give the server a moment to append the queue.
+        time.sleep(0.1)
+        self.assertGreater(len(cc_queues), initial_len)
+
+
+def _run_async_in_thread[T](coro_factory: Callable[[], Awaitable[T]]) -> T:
+    """Run an async coroutine in a worker thread with its own event loop.
+
+    Necessary because pytest-playwright fixtures install a long-lived asyncio
+    loop on the main thread — ``asyncio.run`` and ``IsolatedAsyncioTestCase``
+    both refuse to start another loop when one is already running in the same
+    thread. A fresh thread has no running loop.
+    """
+    value: list[T] = []
+    error: list[BaseException] = []
+
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            value.append(loop.run_until_complete(coro_factory()))
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+    if error:
+        raise error[0]
+    return value[0]
+
+
+class TestCommandCenterSSEAsync(CommandCenterTestBase):
+    """Async SSE tests that tolerate a co-resident asyncio loop.
+
+    Runs the async test bodies in a worker thread so they always own a fresh
+    event loop, even when pytest-playwright's fixtures have a main-thread loop
+    already running. This keeps the tests green regardless of test ordering.
+    """
+
+    def test_sse_dispatches_board_changed(self) -> None:
+        """A board_changed event causes a patch to #kanban-board."""
+        app_instance = self.app_instance
+
+        async def _coro() -> str:
+            return await TestCommandCenterSSE._collect_cc_events(app_instance, ["board_changed"])
+
+        body = _run_async_in_thread(_coro)
+        self.assertIn("#kanban-board", body)
+
+    def test_sse_disconnect_removes_queue(self) -> None:
+        """After the SSE connection closes, the queue is removed from cc_queues."""
+        fastapi_app = self._get_fastapi_app()
+
+        async def _coro() -> int:
+            from unittest.mock import MagicMock
+
+            from zing_ai.server.routes_command_center import command_center_events
+
+            request = MagicMock()
+            request.app = fastapi_app
+
+            queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+
+            async def _immediate_cancel(coro, *, timeout=None):  # noqa: ANN001,ANN201
+                coro.close()
+                raise asyncio.CancelledError
+
+            with (
+                patch(
+                    "zing_ai.server.routes_command_center.asyncio.Queue",
+                    return_value=queue,
+                ),
+                patch(
+                    "zing_ai.server.routes_command_center.asyncio.wait_for",
+                    _immediate_cancel,
+                ),
+            ):
+                try:
+                    response = await command_center_events(request)
+                    async for _ in response.body_iterator:
+                        pass
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+
+            return len(fastapi_app.state.cc_queues)  # type: ignore[attr-defined]
+
+        remaining = _run_async_in_thread(_coro)
+        self.assertEqual(remaining, 0)

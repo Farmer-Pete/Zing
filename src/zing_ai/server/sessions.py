@@ -181,6 +181,7 @@ class SessionManager:
         session_id: str,
         zing_file: str | None = None,
         title: str | None = None,
+        ticket_id: str | None = None,
     ) -> Session:
         """Update fields on an existing session.
 
@@ -190,6 +191,7 @@ class SessionManager:
             session_id: The session to update.
             zing_file: If not None, set the session's zing_file (must be absolute and exist).
             title: If not None, set the session's title.
+            ticket_id: If not None, set the session's ticket_id.
 
         Returns:
             The updated Session.
@@ -211,6 +213,8 @@ class SessionManager:
             session.zing_file = zing_file
         if title is not None:
             session.title = title
+        if ticket_id is not None:
+            session.ticket_id = ticket_id
         self._persist(session)
         self._notify("session_updated", session_id)
         logger.info("Updated session %s", session_id)

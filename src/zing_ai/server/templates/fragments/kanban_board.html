@@ -1,0 +1,14 @@
+<div id="kanban-board" class="board">
+  {% with column_name="To Do", column_cls="col-todo", column_id="col-todo", cards=view.todo %}
+    {% include "fragments/kanban_column.html" %}
+  {% endwith %}
+  {% with column_name="In Progress", column_cls="col-progress", column_id="col-progress", cards=view.in_progress %}
+    {% include "fragments/kanban_column.html" %}
+  {% endwith %}
+  {% with column_name="Needs Review", column_cls="col-review", column_id="col-review", cards=view.needs_review %}
+    {% include "fragments/kanban_column_review.html" %}
+  {% endwith %}
+  {% with column_name="Done", column_cls="col-done", column_id="col-done", cards=view.done %}
+    {% include "fragments/kanban_column.html" %}
+  {% endwith %}
+</div>

@@ -18,6 +18,11 @@
         <option value="{{ opt }}" {% if opt == value %}selected{% endif %}>{{ opt }}</option>
       {% endfor %}
     </select>
+  {% elif field_type == "password" %}
+    <input type="password" id="input-{{ signal_name }}" value="{{ value }}"
+           data-signals='{{ {signal_name: value} | tojson }}'
+           data-bind="{{ signal_name }}"
+           data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', {payload: { '{{ key.split('.')[1] }}': ${{ signal_name }} }})">
   {% elif field_type == "number" %}
     <input type="number" id="input-{{ signal_name }}" value="{{ value }}"
            data-signals='{{ {signal_name: value} | tojson }}'

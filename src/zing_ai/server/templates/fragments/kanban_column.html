@@ -1,0 +1,25 @@
+{#
+  kanban_column.html — renders one Kanban column.
+
+  Expected context variables:
+    column_name  — display name, e.g. "To Do"
+    column_cls   — CSS class for the column, e.g. "col-todo"
+    column_id    — element id, e.g. "col-todo"
+    cards        — list[KanbanCard]
+#}
+<div class="column {{ column_cls }}" id="{{ column_id }}">
+  <div class="column-header">
+    {{ column_name }}
+    <span class="count">{{ cards | length }}</span>
+  </div>
+  <div class="card-list">
+    {% for card in cards %}
+      {% with column_cls=column_cls %}
+        {% include "fragments/kanban_card.html" %}
+      {% endwith %}
+    {% endfor %}
+    {% if not cards %}
+      <div class="column-empty">Nothing here</div>
+    {% endif %}
+  </div>
+</div>

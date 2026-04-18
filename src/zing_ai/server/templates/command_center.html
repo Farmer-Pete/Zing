@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Command Center{% endblock %}
+
+{% block content %}
+<div class="cc-page"
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or ""} | tojson }}'
+     data-init="@get('/command-center/events')">
+    {# Render inline display:none when there is no server-side error, so the
+       empty red banner doesn't flash before Datastar initialises. The
+       data-show directive overrides the inline style at runtime as $lastError
+       toggles via SSE. #}
+    <div class="cc-error"
+         data-show="$lastError"
+         data-text="$lastError"
+         {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
+
+    {% include "fragments/kanban_board.html" %}
+
+    <footer class="cc-footer">
+        <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
+    </footer>
+</div>
+{% endblock %}

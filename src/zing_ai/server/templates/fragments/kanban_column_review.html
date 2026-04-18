@@ -1,0 +1,67 @@
+{#
+  kanban_column_review.html — renders the "Needs Review" column with
+  collapsible groups: mine_passing, mine_failing, others.
+
+  Expected context variables:
+    column_name  — display name, e.g. "Needs Review"
+    column_cls   — CSS class, e.g. "col-review"
+    column_id    — element id, e.g. "col-review"
+    cards        — list[KanbanCard] (pre-sorted by review_group)
+#}
+{% set mine_passing = cards | selectattr("review_group", "equalto", "mine_passing") | list %}
+{% set mine_failing = cards | selectattr("review_group", "equalto", "mine_failing") | list %}
+{% set others = cards | selectattr("review_group", "equalto", "others") | list %}
+
+<div class="column {{ column_cls }}" id="{{ column_id }}">
+  <div class="column-header">
+    {{ column_name }}
+    <span class="count">{{ cards | length }}</span>
+  </div>
+  <div class="card-list">
+    {% if not cards %}
+      <div class="column-empty">Nothing here</div>
+    {% endif %}
+
+    {% if mine_passing %}
+      <details class="review-group" open>
+        <summary class="review-group-header">
+          <span class="review-group-title">Needs my review</span>
+          <span class="review-group-count">{{ mine_passing | length }}</span>
+        </summary>
+        {% for card in mine_passing %}
+          {% with column_cls=column_cls %}
+            {% include "fragments/kanban_card.html" %}
+          {% endwith %}
+        {% endfor %}
+      </details>
+    {% endif %}
+
+    {% if mine_failing %}
+      <details class="review-group" open>
+        <summary class="review-group-header review-group-failing">
+          <span class="review-group-title">Needs my review (CI not passing)</span>
+          <span class="review-group-count">{{ mine_failing | length }}</span>
+        </summary>
+        {% for card in mine_failing %}
+          {% with column_cls=column_cls %}
+            {% include "fragments/kanban_card.html" %}
+          {% endwith %}
+        {% endfor %}
+      </details>
+    {% endif %}
+
+    {% if others %}
+      <details class="review-group" open>
+        <summary class="review-group-header review-group-others">
+          <span class="review-group-title">Waiting on others</span>
+          <span class="review-group-count">{{ others | length }}</span>
+        </summary>
+        {% for card in others %}
+          {% with column_cls=column_cls %}
+            {% include "fragments/kanban_card.html" %}
+          {% endwith %}
+        {% endfor %}
+      </details>
+    {% endif %}
+  </div>
+</div>

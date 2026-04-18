@@ -71,6 +71,150 @@ class TestSessionUpdate(ServerTestBase):
         result = asyncio.run(session_update(session_id="nonexistent", title="Nope"))
         self.assertIn("error", result)
 
+    def test_session_update_explicit_ticket_id(self) -> None:
+        """session_update persists an explicit ticket_id."""
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-explicit", "Ticket Test")
+        result = asyncio.run(session_update(session_id="ticket-explicit", ticket_id="X-1"))
+        self.assertEqual(result["status"], "updated")
+        session = self.manager.get_session("ticket-explicit")
+        assert session is not None
+        self.assertEqual(session.ticket_id, "X-1")
+
+    def test_session_update_yaml_fallback(self) -> None:
+        """session_update extracts ticket_id from YAML frontmatter when not explicit."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-yaml", "YAML Fallback Test")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\nticket_id: Y-2\ntitle: Some task\n---\n# Body\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-yaml", zing_file=tmp_path))
+            self.assertEqual(result["status"], "updated")
+            session = self.manager.get_session("ticket-yaml")
+            assert session is not None
+            self.assertEqual(session.ticket_id, "Y-2")
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_explicit_wins(self) -> None:
+        """Explicit ticket_id takes precedence over YAML frontmatter."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-explicit-wins", "Explicit Wins Test")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\nticket_id: Y-2\n---\n# Body\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(
+                session_update(
+                    session_id="ticket-explicit-wins",
+                    zing_file=tmp_path,
+                    ticket_id="Z-3",
+                )
+            )
+            self.assertEqual(result["status"], "updated")
+            session = self.manager.get_session("ticket-explicit-wins")
+            assert session is not None
+            self.assertEqual(session.ticket_id, "Z-3")
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_malformed_yaml_no_crash(self) -> None:
+        """session_update does not raise when zing_file contains invalid YAML."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-malformed", "Malformed YAML Test")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\n: invalid: yaml: [\n---\n# Body\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-malformed", zing_file=tmp_path))
+            # Should not raise; may return updated or error but never exception
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_no_frontmatter(self) -> None:
+        """zing_file without any ``---`` markers must not bind a ticket_id."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-none", "No frontmatter")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("# Just a heading\n\nSome body text, no YAML block.\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-none", zing_file=tmp_path))
+            # Completes without raising; no ticket_id leaks in.
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-none")
+            assert session is not None
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_unclosed_frontmatter(self) -> None:
+        """Opening ``---`` without a closing ``---`` must not raise."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-unclosed", "Unclosed frontmatter")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\nticket_id: BAK-999\n# no closing marker\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(session_update(session_id="ticket-unclosed", zing_file=tmp_path))
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-unclosed")
+            assert session is not None
+            # Parser requires a closing --- to honour the frontmatter; nothing to bind.
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_session_update_frontmatter_missing_ticket_id(self) -> None:
+        """Well-formed frontmatter without ``ticket_id`` key leaves session unbound."""
+        import os
+        import tempfile
+
+        configure(self.manager, port=9876)
+        self.manager.create_session("ticket-missing-key", "No ticket_id key")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("---\ntitle: Something\n---\n# Body\n")
+            tmp_path = fh.name
+        try:
+            result = asyncio.run(
+                session_update(session_id="ticket-missing-key", zing_file=tmp_path)
+            )
+            self.assertIn("status", result | {"status": result.get("status", "updated")})
+            session = self.manager.get_session("ticket-missing-key")
+            assert session is not None
+            self.assertIsNone(session.ticket_id)
+        finally:
+            os.unlink(tmp_path)
+
 
 class TestStepStart(ServerTestBase):
     """Tests for the step_start MCP tool."""

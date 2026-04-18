@@ -1,0 +1,425 @@
+/*
+ * command_center.css
+ * Styles for the Command Center Kanban board.
+ * Color values reference tokens defined in tokens.css — do NOT hard-code
+ * color literals here unless they are structural (e.g. transparent).
+ */
+
+/* ──────────────────────────────────────────────
+   PAGE WRAPPER
+────────────────────────────────────────────── */
+
+.cc-page {
+    padding-top: 1.5rem;
+}
+
+/* ──────────────────────────────────────────────
+   ERROR BANNER
+────────────────────────────────────────────── */
+
+.cc-error {
+    background: var(--red-orange);
+    color: #fff;
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    width: 100%;
+}
+
+/* ──────────────────────────────────────────────
+   BOARD LAYOUT
+────────────────────────────────────────────── */
+
+.board {
+    display: flex;
+    gap: 1rem;
+    padding: 0.5rem 0 1.5rem;
+    overflow-x: auto;
+    align-items: flex-start;
+}
+
+/* ──────────────────────────────────────────────
+   COLUMN
+────────────────────────────────────────────── */
+
+.column {
+    flex: 1;
+    min-width: 260px;
+    max-width: 320px;
+}
+
+.column-header {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.column-header .count {
+    background: var(--gray-200);
+    color: var(--gray-700);
+    font-size: 0.65rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+/* Column-specific header colors */
+.col-todo .column-header    { background: var(--gray-100); color: var(--gray-700); }
+.col-progress .column-header { background: var(--col-progress-bg); color: var(--col-progress-text); }
+.col-review .column-header  { background: var(--col-review-bg); color: var(--col-review-text); }
+.col-done .column-header    { background: var(--col-done-bg); color: var(--col-done-text); }
+
+.column-empty {
+    font-size: 0.8rem;
+    color: var(--gray-300);
+    font-style: italic;
+    text-align: center;
+    padding: 1rem 0.5rem;
+}
+
+/* ──────────────────────────────────────────────
+   REVIEW GROUPS (collapsible)
+────────────────────────────────────────────── */
+
+.review-group {
+    margin-bottom: 0.5rem;
+}
+
+.review-group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--gray-500);
+    padding: 0.35rem 0.5rem;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    border-radius: 4px;
+    margin-bottom: 0.35rem;
+}
+
+.review-group-header::-webkit-details-marker {
+    display: none;
+}
+
+.review-group-header::before {
+    content: "\25B6";
+    font-size: 0.5rem;
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+details.review-group[open] > .review-group-header::before {
+    transform: rotate(90deg);
+}
+
+.review-group-header:hover {
+    background: var(--gray-50);
+}
+
+.review-group-count {
+    background: var(--gray-200);
+    color: var(--gray-700);
+    font-size: 0.55rem;
+    padding: 0.05rem 0.35rem;
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+.review-group-failing .review-group-title {
+    color: #e65100;
+}
+
+.review-group-others .review-group-title {
+    color: var(--gray-400);
+}
+
+/* ──────────────────────────────────────────────
+   CARDS
+────────────────────────────────────────────── */
+
+.card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 10px;
+    padding: 0.85rem;
+    margin-bottom: 0.65rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+    cursor: default;
+}
+
+.card:hover {
+    border-color: var(--orange);
+    box-shadow: 0 4px 16px rgba(26,23,20,0.08);
+    transform: rotate(-0.7deg) translateY(-1px);
+}
+
+a.card-ticket {
+    color: var(--cyan);
+    font-weight: 600;
+    font-size: 0.75rem;
+    margin-bottom: 0.2rem;
+    text-decoration: none;
+    display: block;
+}
+
+a.card-ticket:hover {
+    text-decoration: underline;
+}
+
+.card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.3;
+    color: var(--navy);
+}
+
+.card-desc {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    line-height: 1.4;
+    margin-bottom: 0.5rem;
+}
+
+.card-divider {
+    border: none;
+    border-top: 1px solid var(--gray-100);
+    margin: 0.5rem 0;
+}
+
+.card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.5rem;
+}
+
+/* ──────────────────────────────────────────────
+   TAG PILLS
+────────────────────────────────────────────── */
+
+.tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.5rem;
+}
+
+.tag {
+    font-size: 0.6rem;
+    font-weight: 600;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.tag-pr      { background: #e8eaf6; color: #3949ab; }
+.tag-session { background: #fce4ec; color: #c62828; }
+.tag-audit   { background: #fff3e0; color: #e65100; }
+.tag-linear  { background: #e0f2f1; color: #00695c; }
+
+/* ──────────────────────────────────────────────
+   STATUS INDICATORS
+────────────────────────────────────────────── */
+
+.status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.dot-green  { background: #27ae60; }
+.dot-orange { background: var(--orange); }
+.dot-amber  { background: var(--amber); animation: cc-pulse 2s infinite; }
+.dot-cyan   { background: var(--cyan); }
+.dot-gray   { background: var(--gray-300); }
+.dot-red    { background: var(--red-orange); }
+
+/* ──────────────────────────────────────────────
+   PR BADGE
+────────────────────────────────────────────── */
+
+a.pr-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.7rem;
+    color: var(--gray-700);
+    margin-top: 0.3rem;
+    text-decoration: none;
+}
+
+a.pr-badge:hover {
+    text-decoration: underline;
+}
+
+.pr-author {
+    color: var(--gray-400);
+    font-weight: 400;
+    margin-left: 0.15rem;
+}
+
+.pr-badge svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.pr-open   { color: #27ae60; }
+.pr-merged { color: #7c3aed; }
+.pr-draft  { color: var(--gray-500); }
+
+/* ──────────────────────────────────────────────
+   CI CHECK DOTS
+────────────────────────────────────────────── */
+
+.ci-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.35rem;
+}
+
+.ci-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.5rem;
+    font-weight: 700;
+    color: #fff;
+    text-decoration: none;
+    cursor: default;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+a.ci-dot[href] {
+    cursor: pointer;
+}
+
+.ci-dot-green { background: #27ae60; }
+.ci-dot-red   { background: #e74c3c; }
+.ci-dot-amber { background: var(--amber); color: var(--navy); }
+.ci-dot-gray  { background: var(--gray-300); }
+
+.ci-failing-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-top: 0.25rem;
+}
+
+.ci-failing-name {
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: #e74c3c;
+    text-decoration: none;
+    line-height: 1.3;
+}
+
+a.ci-failing-name:hover {
+    text-decoration: underline;
+}
+
+/* ──────────────────────────────────────────────
+   SESSION INDICATOR
+────────────────────────────────────────────── */
+
+.session-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.65rem;
+    padding: 0.25rem 0.5rem;
+    background: var(--gray-50);
+    border-radius: 6px;
+    margin-top: 0.4rem;
+    border: 1px solid var(--gray-100);
+    color: var(--gray-500);
+}
+
+.session-indicator.active  { background: #fff8e1; border-color: #ffe082; }
+.session-indicator.waiting { background: #fce4ec; border-color: #ef9a9a; }
+.session-indicator.done    { background: #e8f5e9; border-color: #a5d6a7; }
+
+/* ──────────────────────────────────────────────
+   AUDIT BADGE
+────────────────────────────────────────────── */
+
+.audit-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: #e65100;
+    background: #fff3e0;
+    border: 1px solid var(--amber);
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+}
+
+/* ──────────────────────────────────────────────
+   ASSIGNEE AVATAR
+────────────────────────────────────────────── */
+
+.assignee {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: #fff;
+    font-size: 0.55rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* ──────────────────────────────────────────────
+   FOOTER
+────────────────────────────────────────────── */
+
+.cc-footer {
+    margin-top: 1rem;
+    padding: 0.5rem 0.25rem;
+    border-top: 1px solid var(--gray-100);
+    font-size: 0.65rem;
+    color: var(--gray-300);
+    text-align: right;
+    letter-spacing: 0.02em;
+}
+
+/* ──────────────────────────────────────────────
+   ANIMATIONS
+────────────────────────────────────────────── */
+
+@keyframes cc-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+}
