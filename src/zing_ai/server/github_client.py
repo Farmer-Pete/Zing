@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from zing_ai.server.models_external import GitHubPR
+from zing_ai.server.models_external import CICheck, GitHubPR
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +62,38 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
         if node.get("requestedReviewer") and "login" in node["requestedReviewer"]
     ]
 
-    # CI status lives at commits -> last commit -> statusCheckRollup -> state
+    # CI status lives at commits -> last commit -> statusCheckRollup
     commits = pr.get("commits") or {}
     commit_nodes = commits.get("nodes") or []
     ci_status: str | None = None
+    ci_checks: list[CICheck] = []
     if commit_nodes:
         rollup = (commit_nodes[-1].get("commit") or {}).get("statusCheckRollup")
         if rollup:
-            ci_status = rollup.get("state")
+            raw_state = rollup.get("state")
+            ci_status = raw_state.lower() if raw_state else None
+
+            # Parse individual check runs / status contexts
+            contexts = rollup.get("contexts") or {}
+            for ctx in contexts.get("nodes") or []:
+                name = ctx.get("name") or ctx.get("context")
+                if not name:
+                    continue  # skip entries with no name
+                url = ctx.get("detailsUrl") or ctx.get("targetUrl")
+
+                if "status" in ctx:
+                    # CheckRun: has status + conclusion
+                    status = (ctx.get("status") or "").lower()
+                    conclusion = ctx.get("conclusion")
+                    if conclusion:
+                        conclusion = conclusion.lower()
+                else:
+                    # StatusContext: has state only, which is the final result
+                    raw = (ctx.get("state") or "").lower()
+                    status = "completed" if raw in ("success", "failure", "error") else raw
+                    conclusion = raw if raw in ("success", "failure", "error") else None
+
+                ci_checks.append(CICheck(name=name, status=status, conclusion=conclusion, url=url))
 
     # mergeable: GraphQL returns MERGEABLE / CONFLICTING / UNKNOWN
     raw_mergeable = pr.get("mergeable") or "UNKNOWN"
@@ -98,6 +122,7 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
         review_decision=pr.get("reviewDecision"),
         mergeable_state=mergeable_state,
         ci_status=ci_status,
+        ci_checks=ci_checks,
         url=pr["url"],
         updated_at=datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00")),
         merged_at=merged_at,
@@ -221,7 +246,24 @@ class GitHubClient:
                 commits(last: 1) {
                   nodes {
                     commit {
-                      statusCheckRollup { state }
+                      statusCheckRollup {
+                        state
+                        contexts(first: 50) {
+                          nodes {
+                            ... on CheckRun {
+                              name
+                              status
+                              conclusion
+                              detailsUrl
+                            }
+                            ... on StatusContext {
+                              context
+                              state
+                              targetUrl
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -292,7 +334,24 @@ class GitHubClient:
                 commits(last: 1) {
                   nodes {
                     commit {
-                      statusCheckRollup { state }
+                      statusCheckRollup {
+                        state
+                        contexts(first: 50) {
+                          nodes {
+                            ... on CheckRun {
+                              name
+                              status
+                              conclusion
+                              detailsUrl
+                            }
+                            ... on StatusContext {
+                              context
+                              state
+                              targetUrl
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }

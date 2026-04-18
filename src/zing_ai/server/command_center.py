@@ -66,6 +66,11 @@ def _parse_ticket_id(pr: GitHubPR) -> str | None:
 _DONE_WINDOW = timedelta(days=7)
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Return *dt* as a UTC-aware datetime."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
 def _card_most_recent_activity(card: KanbanCard) -> datetime:
     """Return the most recent activity timestamp for sorting purposes."""
     candidates: list[datetime] = []
@@ -80,100 +85,144 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
             candidates.append(step.created_at)
     if not candidates:
         return datetime.min.replace(tzinfo=UTC)
-    # Normalise all to UTC-aware for comparison
-    aware = []
-    for dt in candidates:
-        if dt.tzinfo is None:
-            aware.append(dt.replace(tzinfo=UTC))
-        else:
-            aware.append(dt)
-    return max(aware)
+    return max(_ensure_utc(dt) for dt in candidates)
+
+
+# -- Signal helpers ----------------------------------------------------------
+
+
+def _has_active_session(card: KanbanCard) -> bool:
+    """Any session has a step in STARTED state."""
+    return any(
+        step.state == SessionState.STARTED for session in card.sessions for step in session.steps
+    )
+
+
+def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
+    """Any linked PR is open with no pending reviews.
+
+    For orphan-PR cards (no ticket), require the PR to be authored by
+    the user so other people's un-reviewed PRs don't clutter the board.
+    """
+    return any(
+        pr.state == "open"
+        and not pr.requested_reviewers
+        and (card.ticket is not None or pr.author == current_username)
+        for pr in card.prs
+    )
+
+
+def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
+    """Any linked PR has reviewers requested and the user is involved."""
+    for pr in card.prs:
+        if (
+            pr.review_decision != "APPROVED"
+            and pr.requested_reviewers
+            and (current_username in pr.requested_reviewers or pr.author == current_username)
+        ):
+            return True
+    return False
+
+
+def _is_recently_done(card: KanbanCard, cutoff: datetime) -> bool:
+    """Ticket completed or PR merged/approved within the cutoff window."""
+    if (
+        card.ticket is not None
+        and card.ticket.state_type == "completed"
+        and _ensure_utc(card.ticket.updated_at) >= cutoff
+    ):
+        return True
+
+    for pr in card.prs:
+        if (
+            pr.state == "merged"
+            and pr.merged_at is not None
+            and _ensure_utc(pr.merged_at) >= cutoff
+        ):
+            return True
+        if pr.review_decision == "APPROVED" and _ensure_utc(pr.updated_at) >= cutoff:
+            return True
+
+    return False
+
+
+# -- Filter ------------------------------------------------------------------
+
+
+def _should_include_card(card: KanbanCard, current_username: str, cutoff: datetime) -> bool:
+    """Return False when the card should be excluded from the board entirely."""
+    # Orphan-PR cards where the user is neither author nor reviewer.
+    if card.ticket is None and card.prs:
+        user_involved = any(
+            pr.author == current_username or current_username in pr.requested_reviewers
+            for pr in card.prs
+        )
+        if not user_involved:
+            return False
+
+    # Stale approved PRs: all PRs approved, none updated within the done window,
+    # and no open ticket driving them.
+    if card.prs and all(pr.review_decision == "APPROVED" for pr in card.prs):
+        any_recent = any(_ensure_utc(pr.updated_at) >= cutoff for pr in card.prs)
+        if not any_recent:
+            has_open_ticket = card.ticket is not None and card.ticket.state_type not in (
+                "completed",
+                "cancelled",
+            )
+            if not has_open_ticket:
+                return False
+
+    return True
+
+
+# -- Review grouping ---------------------------------------------------------
+
+
+def _assign_review_group(card: KanbanCard, current_username: str) -> str:
+    """Return the review sub-group for a needs_review card.
+
+    - ``mine_passing``: user is a requested reviewer and CI is passing
+    - ``mine_failing``: user is a requested reviewer and CI is not passing
+    - ``others``: user is the author waiting on other reviewers
+    """
+    user_is_reviewer = any(current_username in pr.requested_reviewers for pr in card.prs)
+    if user_is_reviewer:
+        ci_passing = all(pr.ci_status == "success" for pr in card.prs if pr.ci_status is not None)
+        return "mine_passing" if ci_passing else "mine_failing"
+    return "others"
+
+
+# -- Classification ----------------------------------------------------------
 
 
 def _classify_card(
     card: KanbanCard,
     current_username: str,
     now: datetime,
-) -> str:
-    """Return the Kanban column name for *card* using the priority rule.
+) -> str | None:
+    """Return the Kanban column name for *card*.
 
-    Priority: in_progress > needs_review > done > todo
+    Returns ``None`` when the card should be excluded from the board.
+
+    Priority: in_progress > needs_review > done > ticket-started > todo
     """
-    in_progress = False
-    needs_review = False
-    done = False
-
     cutoff = now - _DONE_WINDOW
 
-    # --- In Progress ---
-    # Any session has a step in STARTED state
-    for session in card.sessions:
-        for step in session.steps:
-            if step.state == SessionState.STARTED:
-                in_progress = True
-                break
-        if in_progress:
-            break
+    if not _should_include_card(card, current_username, cutoff):
+        return None
 
-    # Any linked PR is open with no pending reviews
-    if not in_progress:
-        for pr in card.prs:
-            if pr.state == "open" and not pr.requested_reviewers:
-                in_progress = True
-                break
-
-    if in_progress:
+    if _has_active_session(card) or _has_open_pr_in_progress(card, current_username):
         return "in_progress"
 
-    # --- Needs Review ---
-    # Any linked PR has review_decision != APPROVED and has requested_reviewers
-    # (either user is a reviewer, or user is author and others are reviewers)
-    for pr in card.prs:
-        if pr.review_decision != "APPROVED" and pr.requested_reviewers:
-            in_review = (current_username in pr.requested_reviewers) or (
-                pr.author == current_username and bool(pr.requested_reviewers)
-            )
-            if in_review:
-                needs_review = True
-                break
-
-    if needs_review:
+    if _has_pr_needing_review(card, current_username):
         return "needs_review"
 
-    # --- Done ---
-    # Ticket state_type == "completed" with updatedAt in last 7 days
-    if card.ticket is not None:
-        ticket_updated = card.ticket.updated_at
-        if ticket_updated.tzinfo is None:
-            ticket_updated = ticket_updated.replace(tzinfo=UTC)
-        if card.ticket.state_type == "completed" and ticket_updated >= cutoff:
-            done = True
-
-    # Any linked PR is merged in last 7 days
-    if not done:
-        for pr in card.prs:
-            if pr.state == "merged" and pr.merged_at is not None:
-                merged_at = pr.merged_at
-                if merged_at.tzinfo is None:
-                    merged_at = merged_at.replace(tzinfo=UTC)
-                if merged_at >= cutoff:
-                    done = True
-                    break
-
-    # Any linked PR was reviewed by user in last 7 days — approximated by
-    # review_decision == APPROVED and PR updated within window by someone
-    if not done:
-        for pr in card.prs:
-            if pr.review_decision == "APPROVED":
-                pr_updated = pr.updated_at
-                if pr_updated.tzinfo is None:
-                    pr_updated = pr_updated.replace(tzinfo=UTC)
-                if pr_updated >= cutoff:
-                    done = True
-                    break
-
-    if done:
+    if _is_recently_done(card, cutoff):
         return "done"
+
+    # Ticket is actively being worked on but no PR signal drove it elsewhere.
+    if card.ticket is not None and card.ticket.state_type == "started":
+        return "in_progress"
 
     return "todo"
 
@@ -319,7 +368,9 @@ def aggregate(
 
         column = _classify_card(card, _username, now)
 
-        if column == "in_progress":
+        if column is None:
+            continue
+        elif column == "in_progress":
             view.in_progress.append(card)
         elif column == "needs_review":
             view.needs_review.append(card)
@@ -337,6 +388,16 @@ def aggregate(
     # Other columns: most recent activity first (descending)
     for col in (view.in_progress, view.needs_review, view.done):
         col.sort(key=_card_most_recent_activity, reverse=True)
+
+    # -----------------------------------------------------------------------
+    # 9. Assign review groups for the needs_review column
+    # -----------------------------------------------------------------------
+    for card in view.needs_review:
+        card.review_group = _assign_review_group(card, _username)
+
+    # Sort needs_review by group order: mine_passing, mine_failing, others
+    _GROUP_ORDER = {"mine_passing": 0, "mine_failing": 1, "others": 2}
+    view.needs_review.sort(key=lambda c: _GROUP_ORDER.get(c.review_group or "", 3))
 
     return view
 

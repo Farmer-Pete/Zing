@@ -53,10 +53,12 @@ def make_pr(
     state: str = "open",
     draft: bool = False,
     base_ref: str = "main",
+    author: str = "octocat",
     requested_reviewers: list[str] | None = None,
     review_decision: str | None = None,
     mergeable_state: str = "clean",
     ci_status: str | None = None,
+    ci_checks: list[Any] | None = None,
     url: str | None = None,
     updated_at: datetime | None = None,
 ) -> GitHubPR:
@@ -69,10 +71,12 @@ def make_pr(
         head_ref=head_ref,
         base_ref=base_ref,
         body=body,
+        author=author,
         requested_reviewers=requested_reviewers or [],
         review_decision=review_decision,  # type: ignore[arg-type]
         mergeable_state=mergeable_state,
         ci_status=ci_status,
+        ci_checks=ci_checks or [],
         url=url or f"https://github.com/o/r/pull/{number}",
         updated_at=updated_at or datetime(2026, 4, 16, 0, 0, 0, tzinfo=UTC),
     )

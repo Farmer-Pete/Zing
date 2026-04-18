@@ -41,12 +41,18 @@ def _make_pr_node(
     updated_at: str = "2026-03-10T12:00:00Z",
     reviewer_logins: list[str] | None = None,
     ci_status: str | None = None,
+    ci_check_nodes: list[dict] | None = None,
 ) -> dict:
     """Build a minimal GraphQL PR node dict."""
     reviewer_nodes = [{"requestedReviewer": {"login": login}} for login in (reviewer_logins or [])]
     commit_node: dict = {"commit": {}}
-    if ci_status is not None:
-        commit_node = {"commit": {"statusCheckRollup": {"state": ci_status}}}
+    if ci_status is not None or ci_check_nodes is not None:
+        rollup: dict = {}
+        if ci_status is not None:
+            rollup["state"] = ci_status
+        if ci_check_nodes is not None:
+            rollup["contexts"] = {"nodes": ci_check_nodes}
+        commit_node = {"commit": {"statusCheckRollup": rollup}}
     return {
         "number": number,
         "title": title,
@@ -188,7 +194,71 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
         pr = prs[0]
         self.assertEqual(pr.author, "bob")
         self.assertEqual(pr.review_decision, "APPROVED")
-        self.assertEqual(pr.ci_status, "SUCCESS")
+        self.assertEqual(pr.ci_status, "success")
+
+    @respx.mock
+    async def test_fetch_open_prs_parses_ci_checks(self) -> None:
+        """Individual CI check runs are parsed into ci_checks list."""
+        check_nodes = [
+            {
+                "name": "Lint",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://example.com/lint",
+            },
+            {
+                "name": "Tests",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "detailsUrl": "https://example.com/tests",
+            },
+            {
+                "name": "Build",
+                "status": "IN_PROGRESS",
+                "conclusion": None,
+                "detailsUrl": None,
+            },
+            # StatusContext entry — state maps to conclusion
+            {
+                "context": "Storybook / Chromatic",
+                "state": "SUCCESS",
+                "targetUrl": "https://example.com/chromatic",
+            },
+            # null-name entry (legacy StatusContext) should be skipped
+            {"context": None, "state": None, "targetUrl": None},
+        ]
+        node = _make_pr_node(
+            number=20,
+            title="CI checks PR",
+            ci_status="FAILURE",
+            ci_check_nodes=check_nodes,
+        )
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(200, json=_gql_response([node]))
+        )
+        client = GitHubClient(token="ghp_test")
+        try:
+            prs = await client.fetch_open_prs("owner/repo")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(len(prs), 1)
+        pr = prs[0]
+        self.assertEqual(pr.ci_status, "failure")
+        self.assertEqual(len(pr.ci_checks), 4)  # null entry skipped
+        self.assertEqual(pr.ci_checks[0].name, "Lint")
+        self.assertEqual(pr.ci_checks[0].conclusion, "success")
+        self.assertEqual(pr.ci_checks[0].url, "https://example.com/lint")
+        self.assertEqual(pr.ci_checks[1].name, "Tests")
+        self.assertEqual(pr.ci_checks[1].conclusion, "failure")
+        self.assertEqual(pr.ci_checks[2].name, "Build")
+        self.assertEqual(pr.ci_checks[2].status, "in_progress")
+        self.assertIsNone(pr.ci_checks[2].conclusion)
+        # StatusContext: state=SUCCESS → conclusion=success
+        self.assertEqual(pr.ci_checks[3].name, "Storybook / Chromatic")
+        self.assertEqual(pr.ci_checks[3].status, "completed")
+        self.assertEqual(pr.ci_checks[3].conclusion, "success")
+        self.assertEqual(pr.ci_checks[3].url, "https://example.com/chromatic")
 
     @respx.mock
     async def test_fetch_open_prs_filters_team_reviewers(self) -> None:

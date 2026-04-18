@@ -25,6 +25,15 @@ class LinearIssue(BaseModel):
     updated_at: datetime
 
 
+class CICheck(BaseModel):
+    """A single CI check run or status context from GitHub."""
+
+    name: str
+    status: str  # queued, in_progress, completed
+    conclusion: str | None = None  # success, failure, neutral, cancelled, skipped, timed_out
+    url: str | None = None
+
+
 class GitHubPR(BaseModel):
     """A GitHub pull request fetched from the GitHub API."""
 
@@ -41,6 +50,7 @@ class GitHubPR(BaseModel):
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] | None
     mergeable_state: str
     ci_status: str | None
+    ci_checks: list[CICheck] = Field(default_factory=list)
     url: str
     updated_at: datetime
     merged_at: datetime | None = None
@@ -61,6 +71,7 @@ class KanbanCard(BaseModel):
     prs: list[GitHubPR] = Field(default_factory=list)
     sessions: list[Session] = Field(default_factory=list)
     audit_steps: list[WorkflowStep] = Field(default_factory=list)
+    review_group: str | None = None  # mine_passing, mine_failing, others (needs_review only)
 
 
 class KanbanView(BaseModel):

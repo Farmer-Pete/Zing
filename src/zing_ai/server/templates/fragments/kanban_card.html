@@ -14,7 +14,7 @@
 
   {# ── Ticket identifier + title ── #}
   {% if card.ticket %}
-    <div class="card-ticket">{{ card.ticket.identifier }}</div>
+    <a href="{{ card.ticket.url }}" target="_blank" rel="noopener" class="card-ticket">{{ card.ticket.identifier }}</a>
     <div class="card-title">{{ card.ticket.title }}</div>
   {% elif card.prs %}
     <div class="card-title">{{ card.prs[0].title }}</div>
@@ -24,7 +24,7 @@
 
   {# ── PR badges ── #}
   {% for pr in card.prs %}
-    <div class="pr-badge{% if pr.merged_at %} pr-merged{% elif pr.draft %} pr-draft{% else %} pr-open{% endif %}">
+    <a href="{{ pr.url }}" target="_blank" rel="noopener" class="pr-badge{% if pr.merged_at %} pr-merged{% elif pr.draft %} pr-draft{% else %} pr-open{% endif %}">
       {% if pr.merged_at %}
         {# Merge icon #}
         <svg viewBox="0 0 16 16" fill="currentColor">
@@ -39,12 +39,37 @@
       #{{ pr.number }}
       {% if pr.merged_at %}&mdash; merged
       {% elif pr.draft %}&mdash; draft
-      {% elif pr.ci_status == "success" %}&mdash; CI passing
-      {% elif pr.ci_status == "failure" %}&mdash; CI failing
-      {% elif pr.ci_status == "pending" %}&mdash; CI running
       {% elif pr.review_decision == "APPROVED" %}&mdash; approved
       {% endif %}
-    </div>
+      {% if pr.author %}<span class="pr-author">{{ pr.author }}</span>{% endif %}
+    </a>
+    {% if pr.ci_checks %}
+      {% set failing = pr.ci_checks | selectattr("conclusion", "equalto", "failure") | list %}
+      <div class="ci-checks">
+        {% for check in pr.ci_checks %}
+          {% if check.conclusion == "success" %}
+            {% set dot_cls = "ci-dot-green" %}
+          {% elif check.conclusion == "failure" %}
+            {% set dot_cls = "ci-dot-red" %}
+          {% elif check.conclusion == "skipped" or check.conclusion == "neutral" or check.conclusion == "cancelled" %}
+            {% set dot_cls = "ci-dot-gray" %}
+          {% else %}
+            {% set dot_cls = "ci-dot-amber" %}
+          {% endif %}
+          <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %}
+             class="ci-dot {{ dot_cls }}"
+             title="{{ check.name }}">{{ check.name[:1] | upper }}</a>
+        {% endfor %}
+      </div>
+      {% if failing %}
+        <div class="ci-failing-list">
+          {% for check in failing %}
+            <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %}
+               class="ci-failing-name">&#10005; {{ check.name }}</a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
   {% endfor %}
 
   {# ── Session indicators ── #}
@@ -71,12 +96,9 @@
     </div>
   {% endfor %}
 
-  {# ── Tags row (PR, session, audit counts) ── #}
-  {% if card.prs or card.sessions or total_findings.count > 0 %}
+  {# ── Tags row (session, audit counts) ── #}
+  {% if card.sessions or total_findings.count > 0 %}
     <div class="tags">
-      {% for pr in card.prs %}
-        <span class="tag tag-pr">PR #{{ pr.number }}</span>
-      {% endfor %}
       {% if card.sessions %}
         <span class="tag tag-session">Claude</span>
       {% endif %}
