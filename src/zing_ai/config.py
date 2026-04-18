@@ -81,8 +81,7 @@ class CommandCenterConfig(BaseModel):
     linear_api_key: str = ""
     github_token: str = ""
     github_excluded_repos: list[str] = Field(default_factory=list)
-    linear_poll_seconds: PollSeconds = 60
-    github_poll_seconds: PollSeconds = 60
+    poll_seconds: PollSeconds = 60
 
 
 class Config(BaseModel):

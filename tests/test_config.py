@@ -219,27 +219,20 @@ def test_command_center_defaults() -> None:
     """A freshly created Config has CommandCenterConfig with expected defaults."""
     cfg = default_config()
     assert cfg.command_center.github_excluded_repos == []
-    assert cfg.command_center.linear_poll_seconds == 60
-    assert cfg.command_center.github_poll_seconds == 60
+    assert cfg.command_center.poll_seconds == 60
 
 
 def test_command_center_loads_from_toml(tmp_path: Path) -> None:
     """A [command_center] section in config.toml is merged at load time."""
     target = tmp_path / "config.toml"
     target.write_text(
-        (
-            "[command_center]\n"
-            'github_excluded_repos = ["owner/old-repo"]\n'
-            "linear_poll_seconds = 30\n"
-            "github_poll_seconds = 45\n"
-        ),
+        ('[command_center]\ngithub_excluded_repos = ["owner/old-repo"]\npoll_seconds = 30\n'),
         encoding="utf-8",
     )
     with _patch_config_path(tmp_path):
         loaded = load_config()
     assert loaded.command_center.github_excluded_repos == ["owner/old-repo"]
-    assert loaded.command_center.linear_poll_seconds == 30
-    assert loaded.command_center.github_poll_seconds == 45
+    assert loaded.command_center.poll_seconds == 30
 
 
 def test_command_center_roundtrip(tmp_path: Path) -> None:
@@ -247,10 +240,8 @@ def test_command_center_roundtrip(tmp_path: Path) -> None:
     with _patch_config_path(tmp_path):
         cfg = default_config()
         cfg.command_center.github_excluded_repos = ["owner/skip-this"]
-        cfg.command_center.linear_poll_seconds = 120
-        cfg.command_center.github_poll_seconds = 90
+        cfg.command_center.poll_seconds = 120
         save_config(cfg)
         loaded = load_config()
     assert loaded.command_center.github_excluded_repos == ["owner/skip-this"]
-    assert loaded.command_center.linear_poll_seconds == 120
-    assert loaded.command_center.github_poll_seconds == 90
+    assert loaded.command_center.poll_seconds == 120

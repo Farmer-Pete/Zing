@@ -290,21 +290,12 @@ FIELD_META: dict[str, dict] = {
         },
         "group": "Command Center",
     },
-    "command_center.linear_poll_seconds": {
-        "label": "Linear poll interval (s)",
+    "command_center.poll_seconds": {
+        "label": "Poll interval (s)",
         "field_type": "number",
         "description": {
-            "short": "How often the Command Center polls Linear for ticket updates.",
-            "long": "Lower values give fresher data but increase API request volume against Linear's rate limits.",  # noqa: E501
-        },
-        "group": "Command Center",
-    },
-    "command_center.github_poll_seconds": {
-        "label": "GitHub poll interval (s)",
-        "field_type": "number",
-        "description": {
-            "short": "How often the Command Center polls GitHub for open PR updates.",
-            "long": "Lower values give fresher data but increase API request volume against GitHub's rate limits.",  # noqa: E501
+            "short": "How often the Command Center polls Linear and GitHub for updates.",
+            "long": "Lower values give fresher data but increase API request volume.",
         },
         "group": "Command Center",
     },

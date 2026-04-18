@@ -70,8 +70,8 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
     if commit_nodes:
         rollup = (commit_nodes[-1].get("commit") or {}).get("statusCheckRollup")
         if rollup:
-            raw_state = rollup.get("state")
-            ci_status = raw_state.lower() if raw_state else None
+            rollup_state = rollup.get("state")
+            ci_status = rollup_state.lower() if rollup_state else None
 
             # Parse individual check runs / status contexts
             contexts = rollup.get("contexts") or {}

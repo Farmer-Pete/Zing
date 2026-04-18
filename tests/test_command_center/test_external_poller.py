@@ -22,16 +22,14 @@ def _make_config(
     linear_api_key: str = "",
     github_token: str = "",
     github_excluded_repos: list[str] | None = None,
-    linear_poll_seconds: int = 60,
-    github_poll_seconds: int = 60,
+    poll_seconds: int = 60,
 ) -> CommandCenterConfig:
     """Build a CommandCenterConfig bypassing pydantic validation for test values."""
     return CommandCenterConfig.model_construct(
         linear_api_key=linear_api_key,
         github_token=github_token,
         github_excluded_repos=github_excluded_repos or [],
-        linear_poll_seconds=linear_poll_seconds,
-        github_poll_seconds=github_poll_seconds,
+        poll_seconds=poll_seconds,
     )
 
 

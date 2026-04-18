@@ -116,7 +116,8 @@ def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
     """Any linked PR has reviewers requested and the user is involved."""
     for pr in card.prs:
         if (
-            pr.review_decision != "APPROVED"
+            pr.state == "open"
+            and pr.review_decision != "APPROVED"
             and pr.requested_reviewers
             and (current_username in pr.requested_reviewers or pr.author == current_username)
         ):

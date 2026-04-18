@@ -38,8 +38,7 @@ class TestSaveCommandCenterConfig(ServerTestBase):
         r = self.client.post(
             "/config/save/command_center",
             json={
-                "linear_poll_seconds": 120,
-                "github_poll_seconds": 90,
+                "poll_seconds": 120,
             },
         )
         self.assertEqual(r.status_code, 200)
@@ -48,8 +47,7 @@ class TestSaveCommandCenterConfig(ServerTestBase):
         from zing_ai.config import load_config
 
         cc = load_config().command_center
-        self.assertEqual(cc.linear_poll_seconds, 120)
-        self.assertEqual(cc.github_poll_seconds, 90)
+        self.assertEqual(cc.poll_seconds, 120)
 
     def test_save_command_center_unknown_field_returns_422(self):
         """Unknown payload fields are rejected with 422."""
@@ -64,7 +62,7 @@ class TestSaveCommandCenterConfig(ServerTestBase):
         """Non-numeric poll seconds are rejected with 422."""
         r = self.client.post(
             "/config/save/command_center",
-            json={"linear_poll_seconds": "not-a-number"},
+            json={"poll_seconds": "not-a-number"},
         )
         self.assertEqual(r.status_code, 422)
 

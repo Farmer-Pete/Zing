@@ -96,15 +96,10 @@
     </div>
   {% endfor %}
 
-  {# ── Tags row (session, audit counts) ── #}
-  {% if card.sessions or total_findings.count > 0 %}
+  {# ── Tags row ── #}
+  {% if card.sessions %}
     <div class="tags">
-      {% if card.sessions %}
-        <span class="tag tag-session">Claude</span>
-      {% endif %}
-      {% if total_findings.count > 0 %}
-        <span class="tag tag-audit">{{ total_findings.count }} finding{{ 's' if total_findings.count != 1 else '' }}</span>
-      {% endif %}
+      <span class="tag tag-session">Claude</span>
     </div>
   {% endif %}
 

@@ -80,7 +80,6 @@
       {% if github_repo_groups %}
         {% for owner, repos in github_repo_groups.items() %}
           {% set all_enabled = repos | selectattr("enabled") | list | length == repos | length %}
-          {% set none_enabled = repos | selectattr("enabled") | list | length == 0 %}
           <div class="github-repo-group">
             <label class="github-repo-toggle github-repo-group-header">
               <input type="checkbox"
@@ -108,6 +107,15 @@
         <p class="github-repos-empty">Configure a GitHub token above. Repos will appear here after the first poll.</p>
       {% endif %}
     </div>
+    <script>
+      document.querySelectorAll('.github-repo-group').forEach(group => {
+        const header = group.querySelector('.github-repo-group-header input[type=checkbox]');
+        const items = group.querySelectorAll('.github-repo-group-items input[type=checkbox]');
+        const total = items.length;
+        const checked = [...items].filter(cb => cb.checked).length;
+        if (checked > 0 && checked < total) header.indeterminate = true;
+      });
+    </script>
   </section>
 </div>
 {% endblock %}
