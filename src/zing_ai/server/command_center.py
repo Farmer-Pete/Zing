@@ -401,22 +401,3 @@ def aggregate(
     view.needs_review.sort(key=lambda c: _GROUP_ORDER.get(c.review_group or "", 3))
 
     return view
-
-
-def _format_time_waiting(since: datetime) -> str:
-    """Return a compact string like '5m', '2h', '3d' for time elapsed since *since*.
-
-    Tolerates both naive and tz-aware *since* values: anchors on the same
-    timezone basis as *since* so naive/aware mixing never raises.
-    """
-    now = datetime.now(since.tzinfo) if since.tzinfo is not None else datetime.now()
-    delta = now - since
-    total_seconds = int(delta.total_seconds())
-    if total_seconds < 0:
-        return "—"
-    if total_seconds < 3600:
-        minutes = max(total_seconds // 60, 1)
-        return f"{minutes}m"
-    if total_seconds < 86400:
-        return f"{total_seconds // 3600}h"
-    return f"{delta.days}d"

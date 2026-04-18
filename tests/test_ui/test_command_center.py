@@ -12,31 +12,27 @@ from zing_ai.server.models_external import LinearIssue
 
 pytestmark = pytest.mark.ui
 
-# Amber token value (#f5a623) as reported by getComputedStyle in rgb form.
-_AMBER_R, _AMBER_G, _AMBER_B = 245, 166, 35
 
-
-def test_empty_inbox_shows_cute_message(server: _ServerInfo, page: Page) -> None:
-    """When no issues/PRs/sessions exist the inbox shows the empty-state message."""
+def test_empty_board_shows_nothing_here(server: _ServerInfo, page: Page) -> None:
+    """When no issues/PRs/sessions exist each column shows the empty-state message."""
     page.goto(f"{server.base_url}/command-center")
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    empty = page.locator(".inbox-empty")
+    empty = page.locator(".column-empty").first
     expect(empty).to_be_visible(timeout=5000)
-    expect(empty).to_contain_text("nothing to do", timeout=3000)
+    expect(empty).to_contain_text("Nothing here", timeout=3000)
 
 
-def test_inbox_item_renders_with_action_and_time(server: _ServerInfo, page: Page) -> None:
-    """An InboxItem derived from a ready audit step is rendered with action text and time."""
-    manager = server.manager
+def test_card_renders_with_ticket_and_title(server: _ServerInfo, page: Page) -> None:
+    """A card derived from a Linear issue renders its identifier and title."""
     cache = server.external_cache
 
-    # Create a Linear issue so a ticket hub is built
     issue = LinearIssue(
         id="linear-uuid-001",
         identifier="BAK-1001",
         title="Test feature",
         state="In Progress",
+        state_type="started",
         assignee=None,
         team="Backend",
         url="https://linear.app/test/issue/BAK-1001",
@@ -44,153 +40,32 @@ def test_inbox_item_renders_with_action_and_time(server: _ServerInfo, page: Page
     )
     cache.issues = [issue]
 
-    # Create a session linked to the issue with a ready build-audit step
-    session = manager.create_session(
-        session_id="cc-inbox-1", title="Test Build", steps=["build-audit"]
-    )
-    manager.update_session("cc-inbox-1", ticket_id="BAK-1001")
-    step = session.steps[0]
-    manager.start_step("cc-inbox-1", step.step_id)
-    manager.add_finding(
-        "cc-inbox-1",
-        step.step_id,
-        {"type": "text", "id": "f1", "title": "A finding"},
-    )
-    manager.mark_step_ready("cc-inbox-1", step.step_id)
-
     page.goto(f"{server.base_url}/command-center")
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    # At least one inbox item should appear
-    inbox_item = page.locator(".inbox-item").first
-    expect(inbox_item).to_be_visible(timeout=5000)
+    card = page.locator("#card-bak-1001")
+    expect(card).to_be_visible(timeout=5000)
 
-    # Action text should mention "audit finding"
-    expect(inbox_item.locator(".inbox-action")).to_contain_text("audit finding", timeout=3000)
+    # Ticket identifier should be a clickable link
+    ticket_link = card.locator(".card-ticket")
+    expect(ticket_link).to_be_visible(timeout=3000)
+    expect(ticket_link).to_contain_text("BAK-1001", timeout=3000)
 
-    # Time waiting should be present and non-empty
-    time_span = inbox_item.locator(".inbox-time")
-    expect(time_span).to_be_visible(timeout=3000)
-    time_text = time_span.text_content(timeout=3000) or ""
-    assert time_text.strip() != "", "Expected non-empty time_waiting text"
+    # Title should be present
+    expect(card.locator(".card-title")).to_contain_text("Test feature", timeout=3000)
 
 
-def test_hub_expand_collapse_via_datastar(server: _ServerInfo, page: Page) -> None:
-    """Hub starts collapsed; clicking header adds .open class; second click removes it."""
-    cache = server.external_cache
-
-    issue = LinearIssue(
-        id="linear-uuid-002",
-        identifier="BAK-1002",
-        title="Expand test",
-        state="Todo",
-        assignee=None,
-        team="Backend",
-        url="https://linear.app/test/issue/BAK-1002",
-        updated_at=datetime.now(tz=UTC),
-    )
-    cache.issues = [issue]
-
-    page.goto(f"{server.base_url}/command-center")
-    page.wait_for_load_state("domcontentloaded", timeout=5000)
-
-    hub = page.locator("#hub-bak_1002")
-    expect(hub).to_be_visible(timeout=5000)
-
-    # Wait for Datastar to initialize: it processes data-signals by setting its own attribute.
-    # We verify the cc-page has retained its data-signals attribute (not stripped by Datastar).
-    page.wait_for_function(
-        "document.querySelector('.cc-page')"
-        " && document.querySelector('.cc-page').hasAttribute('data-signals')",
-        timeout=5000,
-    )
-
-    # Initially no .open class
-    assert "open" not in (hub.get_attribute("class") or ""), "Hub should start closed"
-
-    # Dispatch click via JS on the hub element itself (which carries data-on:click).
-    # This approach bypasses Playwright's pointer-event interception and ensures
-    # the event reaches the Datastar-bound element directly.
-    page.evaluate("document.querySelector('#hub-bak_1002 .hub-header').click()")
-    # Wait for Datastar to apply the .open class
-    page.wait_for_function(
-        "document.querySelector('#hub-bak_1002').classList.contains('open')",
-        timeout=5000,
-    )
-    assert "open" in (hub.get_attribute("class") or ""), "Hub should be open after first click"
-
-    # Click again to close
-    page.evaluate("document.querySelector('#hub-bak_1002 .hub-header').click()")
-    page.wait_for_function(
-        "!document.querySelector('#hub-bak_1002').classList.contains('open')",
-        timeout=5000,
-    )
-    assert "open" not in (hub.get_attribute("class") or ""), (
-        "Hub should be closed after second click"
-    )
-
-
-def test_hub_expand_via_real_mouse_click_on_header(server: _ServerInfo, page: Page) -> None:
-    """Clicking `.hub-header` with a real mouse (not JS dispatch) must toggle the hub.
-
-    The sibling test uses `page.evaluate('el.click()')` to route around Playwright's
-    pointer-event interception by ancestor elements. This test verifies the *real*
-    user path: a click on `.hub-header` bubbles to `.hub`'s `data-on:click`
-    handler and applies `.open`. If this fails, keyboard+mouse users are stuck.
-    """
-    cache = server.external_cache
-
-    issue = LinearIssue(
-        id="linear-uuid-006",
-        identifier="BAK-1006",
-        title="Real mouse click test",
-        state="Todo",
-        assignee=None,
-        team="Backend",
-        url="https://linear.app/test/issue/BAK-1006",
-        updated_at=datetime.now(tz=UTC),
-    )
-    cache.issues = [issue]
-
-    page.goto(f"{server.base_url}/command-center")
-    page.wait_for_load_state("domcontentloaded", timeout=5000)
-
-    hub = page.locator("#hub-bak_1006")
-    expect(hub).to_be_visible(timeout=5000)
-
-    # Wait for Datastar to initialise (signals applied to the page).
-    page.wait_for_function(
-        "document.querySelector('.cc-page')"
-        " && document.querySelector('.cc-page').hasAttribute('data-signals')",
-        timeout=5000,
-    )
-
-    # Groups default to open (no .closed class), so the hub body is laid out.
-    assert "open" not in (hub.get_attribute("class") or ""), "Hub should start closed"
-
-    # Real Playwright click on `.hub-header` (element with cursor:pointer).
-    # The click must bubble up to the outer `.hub` div's data-on:click handler.
-    hub.locator(".hub-header").click(timeout=5000)
-    page.wait_for_function(
-        "document.querySelector('#hub-bak_1006').classList.contains('open')",
-        timeout=5000,
-    )
-    assert "open" in (hub.get_attribute("class") or ""), (
-        "Hub should be open after real .hub-header click — if this fails, "
-        "production click path is broken for real users"
-    )
-
-
-def test_yellow_urgency_renders_on_hot_hub(server: _ServerInfo, page: Page) -> None:
-    """A hub whose urgency is 'hot' renders with the .hub.hot class and amber-ish border color."""
+def test_card_with_audit_findings_shows_badge(server: _ServerInfo, page: Page) -> None:
+    """A card with audit findings shows the audit badge in the footer."""
     manager = server.manager
     cache = server.external_cache
 
     issue = LinearIssue(
         id="linear-uuid-003",
         identifier="BAK-1003",
-        title="Hot hub test",
+        title="Audit badge test",
         state="In Progress",
+        state_type="started",
         assignee=None,
         team="Backend",
         url="https://linear.app/test/issue/BAK-1003",
@@ -198,40 +73,28 @@ def test_yellow_urgency_renders_on_hot_hub(server: _ServerInfo, page: Page) -> N
     )
     cache.issues = [issue]
 
-    # Create an audit session with a ready step + findings → triggers 'hot' urgency
-    session = manager.create_session(session_id="cc-hot-1", title="Hot Hub", steps=["build-audit"])
-    manager.update_session("cc-hot-1", ticket_id="BAK-1003")
+    # Create a session with a ready build-audit step + findings
+    session = manager.create_session(session_id="cc-audit-1", title="Audit", steps=["build-audit"])
+    manager.update_session("cc-audit-1", ticket_id="BAK-1003")
     step = session.steps[0]
-    manager.start_step("cc-hot-1", step.step_id)
+    manager.start_step("cc-audit-1", step.step_id)
     manager.add_finding(
-        "cc-hot-1",
+        "cc-audit-1",
         step.step_id,
-        {"type": "text", "id": "f-hot", "title": "Critical finding"},
+        {"type": "triage", "id": "f-audit", "title": "Critical finding"},
     )
-    manager.mark_step_ready("cc-hot-1", step.step_id)
+    manager.mark_step_ready("cc-audit-1", step.step_id)
 
     page.goto(f"{server.base_url}/command-center")
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    hot_hub = page.locator("#hub-bak_1003")
-    expect(hot_hub).to_be_visible(timeout=5000)
+    card = page.locator("#card-bak-1003")
+    expect(card).to_be_visible(timeout=5000)
 
-    # Assert the .hub.hot class is present
-    classes = hot_hub.get_attribute("class") or ""
-    assert "hot" in classes, f"Expected 'hot' in hub classes, got: {classes!r}"
-
-    # Check that the hub's border color is in the amber range (rgb(245, 166, 35))
-    border_color: str = page.evaluate(
-        "getComputedStyle(document.querySelector('#hub-bak_1003')).borderColor"
-    )
-    # border-color returns e.g. "rgb(245, 166, 35)" or shorthand — just check red component is high
-    # and blue is low (amber = high red, moderate green, low blue)
-    if border_color.startswith("rgb"):
-        parts = border_color.replace("rgb(", "").replace("rgba(", "").replace(")", "").split(",")
-        r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
-        assert r > 200, f"Expected amber red component > 200, got {r} in {border_color!r}"
-        assert g > 100, f"Expected amber green component > 100, got {g} in {border_color!r}"
-        assert b < 100, f"Expected amber blue component < 100, got {b} in {border_color!r}"
+    # Audit badge in footer should be visible
+    badge = card.locator(".audit-badge")
+    expect(badge).to_be_visible(timeout=3000)
+    expect(badge).to_contain_text("finding", timeout=3000)
 
 
 def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page) -> None:
@@ -242,7 +105,8 @@ def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page)
         id="linear-uuid-004",
         identifier="BAK-1004",
         title="Original title",
-        state="Todo",
+        state="In Progress",
+        state_type="started",
         assignee=None,
         team="Backend",
         url="https://linear.app/test/issue/BAK-1004",
@@ -251,10 +115,6 @@ def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page)
     cache.issues = [issue]
 
     # Wait for the SSE response to start streaming before mutating state.
-    # ``expect_response`` resolves when headers come back, which means the
-    # route's async generator has run past its first ``await`` — and therefore
-    # already appended its queue to ``cc_queues``. That replaces the old
-    # ``time.sleep`` polling with a deterministic signal.
     with page.expect_response(lambda r: "/command-center/events" in r.url, timeout=5000):
         page.goto(f"{server.base_url}/command-center")
 
@@ -266,9 +126,7 @@ def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page)
 
     assert server.cc_queues, "Expected SSE queue to be registered after response started"
 
-    # Mutate the cache title. In production the poller bumps ``version`` on
-    # every write; tests simulating a poll must do the same so the memoised
-    # ``_build_view`` invalidates.
+    # Mutate the cache title and bump version so the memo invalidates.
     updated_issue = issue.model_copy(update={"title": "Updated title SSE"})
     cache.issues = [updated_issue]
     cache.version += 1
@@ -283,8 +141,6 @@ def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page)
 
 def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     """Footer starts with 'Waiting for first poll'; after a poll_status SSE event it updates."""
-    # Wait for the SSE response to start streaming (queue guaranteed-registered
-    # by then). Replaces the old ``time.sleep`` polling loop.
     with page.expect_response(lambda r: "/command-center/events" in r.url, timeout=5000):
         page.goto(f"{server.base_url}/command-center")
 
@@ -293,7 +149,6 @@ def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     footer_span = page.locator(".cc-footer span")
     expect(footer_span).to_be_visible(timeout=5000)
 
-    # Before any poll: initial text should say 'Waiting for first poll'
     initial_text = footer_span.text_content(timeout=3000) or ""
     assert "Waiting for first poll" in initial_text, (
         f"Expected 'Waiting for first poll' in footer, got: {initial_text!r}"
@@ -308,7 +163,6 @@ def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     for queue in list(server.cc_queues):
         queue.put_nowait("poll_status")
 
-    # Datastar should update the span text to include the ISO timestamp
     expect(footer_span).to_contain_text("Last synced", timeout=5000)
     updated_text = footer_span.text_content(timeout=3000) or ""
     assert "Waiting for first poll" not in updated_text, (
@@ -331,15 +185,16 @@ def test_error_banner_shows_when_last_error_set(server: _ServerInfo, page: Page)
     server.external_cache.last_error = None
 
 
-def test_no_console_errors_after_datastar_interactions(server: _ServerInfo, page: Page) -> None:
-    """No JS console errors occur after page load and hub click interactions."""
+def test_no_console_errors_after_page_load(server: _ServerInfo, page: Page) -> None:
+    """No JS console errors occur after page load with data on the board."""
     cache = server.external_cache
 
     issue = LinearIssue(
         id="linear-uuid-005",
         identifier="BAK-1005",
         title="Console error check",
-        state="Todo",
+        state="In Progress",
+        state_type="started",
         assignee=None,
         team="Backend",
         url="https://linear.app/test/issue/BAK-1005",
@@ -353,21 +208,10 @@ def test_no_console_errors_after_datastar_interactions(server: _ServerInfo, page
     page.goto(f"{server.base_url}/command-center")
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    hub = page.locator("#hub-bak_1005")
-    expect(hub).to_be_visible(timeout=5000)
+    card = page.locator("#card-bak-1005")
+    expect(card).to_be_visible(timeout=5000)
 
-    # Perform expand interaction via JS dispatch to bypass pointer-event interception
-    page.evaluate("document.querySelector('#hub-bak_1005 .hub-header').click()")
-    page.wait_for_function(
-        "document.querySelector('#hub-bak_1005').classList.contains('open')",
-        timeout=5000,
-    )
+    # Allow a brief moment for any async JS errors to surface
+    page.wait_for_timeout(1000)
 
-    # Perform collapse interaction
-    page.evaluate("document.querySelector('#hub-bak_1005 .hub-header').click()")
-    page.wait_for_function(
-        "!document.querySelector('#hub-bak_1005').classList.contains('open')",
-        timeout=5000,
-    )
-
-    assert errors == [], f"Unexpected JS console errors after Datastar interactions: {errors}"
+    assert errors == [], f"Unexpected JS console errors: {errors}"

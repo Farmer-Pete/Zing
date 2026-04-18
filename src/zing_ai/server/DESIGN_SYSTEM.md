@@ -158,19 +158,6 @@ Living reference for all UI design standards. The Zing brand is **bold**, **fast
 - Animated icon (bounce keyframe, 2s infinite)
 - Friendly, whimsical copy
 
-### Hub Urgency (Command Center)
-Used on the `/command-center` dashboard to signal which hub cards need attention. Three tiers, each rendered as a class on `.hub`:
-
-- **`.hub.hot`** — yellow/amber border + pulsing left bar + `urgency-hot` pill. Indicates the hub has spoke items needing user input (audit READY with un-submitted findings, PR review requested of current user). Background uses `--amber`/`--gold` tokens; the `::before` pulsing bar gradient runs amber → darker amber via the `cc-hub-pulse` keyframe.
-- **`.hub.active`** — cyan left border via `--cyan`. Indicates work in flight (CI running, session STARTED) but no user input needed.
-- **`.hub.cool`** — faded / muted treatment for done, merged, or queued hubs. Reduced opacity on the card body.
-
-Companion classes:
-- `.urgency-badge.urgency-hot` — small yellow pill (e.g., "3 hot") shown in group headers when any hub in the group is hot.
-- `.urgency-badge.urgency-active` — cyan pill variant.
-
-The hot treatment intentionally uses yellow rather than red so it draws attention without reading as alarm/error (the error banner uses `--red-orange`).
-
 ## Interactions
 
 | Element | Effect | Duration |
