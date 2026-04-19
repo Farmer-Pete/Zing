@@ -17,7 +17,10 @@ from zing_ai.launch import (
     create_worktree,
     derive_branch_name,
     detect_action,
+    extract_ticket_id,
+    fetch_pr_data,
     move_ticket_in_progress,
+    parse_pr_url,
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
@@ -537,3 +540,155 @@ class TestBuildClaudeArgs(TestCase):
             args,
             ["claude", "/zing:new BAK-7", "--session-id", "sess-build", "--name", "build session"],
         )
+
+
+# ---------------------------------------------------------------------------
+# parse_pr_url
+# ---------------------------------------------------------------------------
+
+
+class TestParsePrUrl(TestCase):
+    """Tests for parse_pr_url."""
+
+    def test_parses_simple_url(self) -> None:
+        """Standard PR URL returns correct (owner, repo, number)."""
+        owner, repo, number = parse_pr_url("https://github.com/acme/myrepo/pull/42")
+        self.assertEqual(owner, "acme")
+        self.assertEqual(repo, "myrepo")
+        self.assertEqual(number, 42)
+
+    def test_parses_url_with_trailing_path(self) -> None:
+        """PR URL with trailing path segments still extracts core fields."""
+        owner, repo, number = parse_pr_url("https://github.com/acme/myrepo/pull/42/files")
+        self.assertEqual(owner, "acme")
+        self.assertEqual(repo, "myrepo")
+        self.assertEqual(number, 42)
+
+    def test_parses_url_with_multiple_trailing_segments(self) -> None:
+        """PR URL with multiple trailing path segments parses correctly."""
+        owner, repo, number = parse_pr_url("https://github.com/my-org/cool-repo/pull/1234/commits")
+        self.assertEqual(owner, "my-org")
+        self.assertEqual(repo, "cool-repo")
+        self.assertEqual(number, 1234)
+
+    def test_raises_on_non_pr_url(self) -> None:
+        """A GitHub URL that is not a PR URL raises LaunchError."""
+        with self.assertRaises(LaunchError):
+            parse_pr_url("https://github.com/acme/myrepo/issues/42")
+
+    def test_raises_on_invalid_url(self) -> None:
+        """A non-URL string raises LaunchError."""
+        with self.assertRaises(LaunchError):
+            parse_pr_url("not-a-url-at-all")
+
+    def test_raises_on_missing_number(self) -> None:
+        """A PR path without a number raises LaunchError."""
+        with self.assertRaises(LaunchError):
+            parse_pr_url("https://github.com/acme/myrepo/pull/")
+
+
+# ---------------------------------------------------------------------------
+# fetch_pr_data
+# ---------------------------------------------------------------------------
+
+
+class TestFetchPrData(TestCase):
+    """Tests for fetch_pr_data."""
+
+    def test_returns_parsed_json(self) -> None:
+        """When gh succeeds, returns parsed JSON dict."""
+        pr_json = {"headRefName": "bak-123-my-feature", "title": "My PR", "body": "Fixes BAK-123"}
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(pr_json)
+
+        with (
+            patch("zing_ai.launch.shutil.which", return_value="/usr/bin/gh"),
+            patch("zing_ai.launch.subprocess.run", return_value=mock_result),
+        ):
+            data = fetch_pr_data("acme", "myrepo", 42)
+
+        self.assertEqual(data["headRefName"], "bak-123-my-feature")
+        self.assertEqual(data["title"], "My PR")
+
+    def test_raises_when_gh_not_found(self) -> None:
+        """When gh is not on PATH, raises LaunchError with install URL."""
+        with (
+            patch("zing_ai.launch.shutil.which", return_value=None),
+            self.assertRaises(LaunchError) as ctx,
+        ):
+            fetch_pr_data("acme", "myrepo", 42)
+        self.assertIn("https://cli.github.com/", str(ctx.exception))
+
+    def test_raises_on_gh_command_failure(self) -> None:
+        """CalledProcessError from gh bubbles up as LaunchError."""
+        with (
+            patch("zing_ai.launch.shutil.which", return_value="/usr/bin/gh"),
+            patch(
+                "zing_ai.launch.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "gh", stderr="not found"),
+            ),
+            self.assertRaises(LaunchError),
+        ):
+            fetch_pr_data("acme", "myrepo", 99)
+
+    def test_calls_gh_with_correct_args(self) -> None:
+        """subprocess.run is called with expected gh arguments."""
+        pr_json = {"headRefName": "main", "title": "T", "body": ""}
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(pr_json)
+
+        with (
+            patch("zing_ai.launch.shutil.which", return_value="/usr/bin/gh"),
+            patch("zing_ai.launch.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            fetch_pr_data("org", "repo", 7)
+
+        call_args = mock_run.call_args[0][0]
+        self.assertEqual(call_args[0], "gh")
+        self.assertIn("7", call_args)
+        self.assertIn("org/repo", call_args)
+        self.assertIn("headRefName,title,body", call_args)
+
+
+# ---------------------------------------------------------------------------
+# extract_ticket_id
+# ---------------------------------------------------------------------------
+
+
+class TestExtractTicketId(TestCase):
+    """Tests for extract_ticket_id."""
+
+    def test_extracts_from_branch(self) -> None:
+        """Ticket ID in branch name is returned first."""
+        result = extract_ticket_id("BAK-123-my-feature", "", "")
+        self.assertEqual(result, "BAK-123")
+
+    def test_extracts_from_title(self) -> None:
+        """Ticket ID in title is found when branch has none."""
+        result = extract_ticket_id("feature-branch", "Fix FRO-42 bug", "")
+        self.assertEqual(result, "FRO-42")
+
+    def test_extracts_from_body(self) -> None:
+        """Ticket ID in body is found when branch and title have none."""
+        result = extract_ticket_id("feature-branch", "Some PR", "Closes ENG-99")
+        self.assertEqual(result, "ENG-99")
+
+    def test_branch_takes_priority_over_title(self) -> None:
+        """When both branch and title have tickets, branch wins."""
+        result = extract_ticket_id("BAK-10-thing", "Fixes FRO-20", "")
+        self.assertEqual(result, "BAK-10")
+
+    def test_returns_none_when_no_ticket(self) -> None:
+        """Returns None when no ticket ID pattern is found anywhere."""
+        result = extract_ticket_id("feature-branch", "Some PR title", "No ticket here")
+        self.assertIsNone(result)
+
+    def test_uppercases_result(self) -> None:
+        """Returned ticket ID is always uppercased — input already uppercase."""
+        result = extract_ticket_id("BAK-55-feature", "", "")
+        self.assertEqual(result, "BAK-55")
+
+    def test_ignores_short_prefixes(self) -> None:
+        """Single-letter prefixes like 'A-1' are not matched (need 2+ letter prefix)."""
+        result = extract_ticket_id("A-1", "B-42 fix", "X-99")
+        self.assertIsNone(result)

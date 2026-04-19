@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Literal
@@ -25,6 +28,111 @@ from typing import Literal
 
 class LaunchError(Exception):
     """Raised when any launch step fails.  The CLI command catches this and exits non-zero."""
+
+
+# ---------------------------------------------------------------------------
+# Ticket ID regex (same pattern as command_center.py)
+# ---------------------------------------------------------------------------
+
+_TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")
+
+# ---------------------------------------------------------------------------
+# PR URL helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_pr_url(url: str) -> tuple[str, str, int]:
+    """Parse a GitHub pull-request URL and return (owner, repo, number).
+
+    Accepts:
+    - ``https://github.com/{owner}/{repo}/pull/{number}``
+    - ``https://github.com/{owner}/{repo}/pull/{number}/...`` (with trailing segments)
+
+    Args:
+        url: GitHub PR URL string.
+
+    Returns:
+        A ``(owner, repo, number)`` tuple.
+
+    Raises:
+        LaunchError: If the URL is not a recognised GitHub PR URL.
+    """
+    parsed = urllib.parse.urlparse(url)
+    match = re.match(r"^/([^/]+)/([^/]+)/pull/(\d+)", parsed.path)
+    if not match:
+        raise LaunchError(f"Not a valid GitHub PR URL: {url!r}")
+    owner, repo, number_str = match.group(1), match.group(2), match.group(3)
+    return owner, repo, int(number_str)
+
+
+def fetch_pr_data(owner: str, repo: str, number: int) -> dict:
+    """Fetch PR metadata from GitHub using the ``gh`` CLI.
+
+    Runs ``gh pr view <number> --repo <owner>/<repo> --json headRefName,title,body``
+    and returns the parsed JSON dict.
+
+    Args:
+        owner: Repository owner (user or org).
+        repo: Repository name.
+        number: Pull-request number.
+
+    Returns:
+        Parsed JSON dict with keys ``headRefName``, ``title``, and ``body``.
+
+    Raises:
+        LaunchError: If ``gh`` is not on PATH or the command fails.
+    """
+    if shutil.which("gh") is None:
+        raise LaunchError(
+            "GitHub CLI (gh) is required for PR-based launches."
+            " Install it from https://cli.github.com/"
+        )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                f"{owner}/{repo}",
+                "--json",
+                "headRefName,title,body",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise LaunchError(
+            f"gh pr view failed for {owner}/{repo}#{number}: {exc.stderr.strip()}"
+        ) from exc
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise LaunchError(f"gh pr view returned non-JSON output: {exc}") from exc
+
+
+def extract_ticket_id(branch: str, title: str, body: str) -> str | None:
+    """Search *branch*, *title*, and *body* for a Linear ticket ID.
+
+    Uses the ``_TICKET_RE`` pattern (``r"\\b[A-Z]{2,}-\\d+\\b"``) and returns
+    the first match found, checked in the order: branch → title → body.
+
+    Args:
+        branch: PR head branch name.
+        title: PR title.
+        body: PR body / description.
+
+    Returns:
+        Uppercased ticket ID string (e.g. ``"BAK-123"``), or ``None`` if not found.
+    """
+    for text in (branch, title, body):
+        if text:
+            match = _TICKET_RE.search(text)
+            if match:
+                return match.group(0).upper()
+    return None
 
 
 # ---------------------------------------------------------------------------
