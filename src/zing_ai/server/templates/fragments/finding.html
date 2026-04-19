@@ -41,7 +41,7 @@
         <div class="triage-options-label">Suggested approaches:</div>
         {% for option in finding.options %}
         <label class="option-card">
-            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="{{ option.label }}" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach']})">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="{{ option.label }}" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept', selected: $responses['{{ finding.id }}_approach']})">
             <div class="option-content">
                 <div class="option-label">{{ option.label }}</div>
                 <div class="option-description">{{ option.description }}</div>
@@ -49,7 +49,7 @@
         </label>
         {% endfor %}
         <label class="option-card">
-            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="__other__" data-on:change="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach']})">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="__other__" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept', selected: $responses['{{ finding.id }}_approach']})">
             <div class="option-content">
                 <div class="option-label">Other</div>
                 <div class="option-description">Describe a different approach</div>

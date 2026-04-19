@@ -47,6 +47,7 @@ class GitHubPR(BaseModel):
     author: str = ""
     repo: str = ""
     requested_reviewers: list[str]
+    reviewers: list[str] = Field(default_factory=list)  # users who submitted reviews
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] | None
     mergeable_state: str
     ci_status: str | None
@@ -72,6 +73,7 @@ class KanbanCard(BaseModel):
     sessions: list[Session] = Field(default_factory=list)
     audit_steps: list[WorkflowStep] = Field(default_factory=list)
     review_group: str | None = None  # mine_passing, mine_failing, others (needs_review only)
+    done_group: str | None = None  # ready_to_merge, completed (done only)
 
 
 class KanbanView(BaseModel):

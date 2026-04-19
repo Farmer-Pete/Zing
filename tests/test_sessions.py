@@ -7,7 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from zing_ai.server.models import ResponseAction, SessionState, UserResponse, WorkflowStep
+from zing_ai.server.models import (
+    ResponseAction,
+    SessionState,
+    UserResponse,
+    WorkflowStep,
+    ZingSession,
+)
 from zing_ai.server.sessions import SessionManager
 
 _STEP = "review"
@@ -80,6 +86,7 @@ class TestSessionLifecycle(unittest.TestCase):
             zing_file=self.zing_file,
             title="New Title",
         )
+        assert isinstance(updated, ZingSession)
         assert updated.title == "New Title"
         assert updated.zing_file == self.zing_file
 
@@ -87,6 +94,7 @@ class TestSessionLifecycle(unittest.TestCase):
         reloaded = SessionManager(data_dir=self.data_dir)
         s = reloaded.get_session("s1")
         assert s is not None
+        assert isinstance(s, ZingSession)
         assert s.title == "New Title"
         assert s.zing_file == self.zing_file
 
@@ -96,11 +104,13 @@ class TestSessionLifecycle(unittest.TestCase):
 
         # Update only title
         updated = self.manager.update_session("s1", title="New Title")
+        assert isinstance(updated, ZingSession)
         assert updated.title == "New Title"
         assert updated.zing_file == self.zing_file
 
         # Update only zing_file (using setUp.py as a different valid file)
         updated2 = self.manager.update_session("s1", zing_file=self.zing_file)
+        assert isinstance(updated2, ZingSession)
         assert updated2.title == "New Title"
         assert updated2.zing_file == self.zing_file
 
@@ -173,6 +183,7 @@ class TestSessionLifecycle(unittest.TestCase):
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert len(session.steps) == 1
         assert session.steps[0].state == SessionState.STARTED
 
@@ -204,6 +215,7 @@ class TestSessionLifecycle(unittest.TestCase):
         assert finding.type == "text"
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.total_findings == 1
         assert len(session.steps[0].findings) == 1
 
@@ -230,6 +242,7 @@ class TestSessionLifecycle(unittest.TestCase):
         assert finding.type == "evaluation"
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.total_findings == 1
 
     def test_add_finding_triage_without_metadata(self) -> None:
@@ -294,6 +307,7 @@ class TestSessionLifecycle(unittest.TestCase):
         )
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert len(session.steps[0].findings) == 1, (
             f"Expected 1 finding after dedup, got {len(session.steps[0].findings)}"
         )
@@ -365,6 +379,7 @@ class TestSessionLifecycle(unittest.TestCase):
         # Session should NOT be completed — second step is still pending
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.state != SessionState.COMPLETED
 
         # Complete second step
@@ -422,10 +437,12 @@ class TestConcurrentSessions(unittest.TestCase):
         s2 = self.manager.get_session("s2")
         assert s1 is not None
         assert s2 is not None
+        assert isinstance(s1, ZingSession)
+        assert isinstance(s2, ZingSession)
         assert s1.total_findings == 1
         assert s2.total_findings == 1
-        assert s1.steps[0].findings[0].type == "text"  # type: ignore[union-attr]
-        assert s2.steps[0].findings[0].type == "triage"  # type: ignore[union-attr]
+        assert s1.steps[0].findings[0].type == "text"
+        assert s2.steps[0].findings[0].type == "triage"
 
     def test_agent_completion_isolated(self) -> None:
         """Completing an agent in one session doesn't affect another."""
@@ -440,6 +457,8 @@ class TestConcurrentSessions(unittest.TestCase):
         s2 = self.manager.get_session("s2")
         assert s1 is not None
         assert s2 is not None
+        assert isinstance(s1, ZingSession)
+        assert isinstance(s2, ZingSession)
         assert s1.steps[0].state == SessionState.STARTED
         assert s2.steps[0].state == SessionState.STARTED
         assert len(s2.steps[0].agents) == 0
@@ -644,6 +663,7 @@ class TestPersistence(unittest.TestCase):
         mgr2 = SessionManager(data_dir=self.data_dir)
         session = mgr2.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.title == "Persistent"
         assert session.total_findings == 1
         assert len(session.steps[0].agents) == 1
@@ -684,6 +704,7 @@ class TestPersistence(unittest.TestCase):
         mgr = SessionManager(data_dir=self.data_dir)
         session = mgr.get_session("old1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert len(session.steps) == 1
         assert session.steps[0].step_name == "review"
         assert len(session.steps[0].findings) == 1
@@ -732,6 +753,7 @@ class TestWorkflowStepLooping(unittest.TestCase):
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert len(session.steps) == 2
 
     def test_start_step_auto_completes_prior_steps(self) -> None:
@@ -741,12 +763,14 @@ class TestWorkflowStepLooping(unittest.TestCase):
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.steps[0].state.value == "started"
 
         self.manager.start_step("s1", session.steps[1].step_id)
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert session.steps[0].state.value == "completed"
         assert session.steps[1].state.value == "started"
 
@@ -761,10 +785,11 @@ class TestWorkflowStepLooping(unittest.TestCase):
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         assert len(session.steps[0].findings) == 1
         assert len(session.steps[1].findings) == 1
-        assert session.steps[0].findings[0].title == "First"  # type: ignore[union-attr]
-        assert session.steps[1].findings[0].title == "Second"  # type: ignore[union-attr]
+        assert session.steps[0].findings[0].title == "First"
+        assert session.steps[1].findings[0].title == "Second"
 
 
 class TestWaitForReview(unittest.TestCase):
@@ -1120,6 +1145,7 @@ class TestAddLog(unittest.TestCase):
 
         updated_session = self.manager.get_session("s1")
         assert updated_session is not None
+        assert isinstance(updated_session, ZingSession)
         updated_step = updated_session.steps[0]
         assert len(updated_step.logs) == 3
 
@@ -1169,6 +1195,7 @@ class TestNotifications(unittest.TestCase):
         notif = self.manager.add_notification("s1", "Alert", body="Details", url="/s1")
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         # create_session adds one auto-notification, add_notification adds another
         assert len(session.notifications) == 2
         assert session.notifications[-1].title == "Alert"
@@ -1184,6 +1211,7 @@ class TestNotifications(unittest.TestCase):
         mgr2 = SessionManager(data_dir=self.data_dir)
         session = mgr2.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         titles = [n.title for n in session.notifications]
         assert "Persisted alert" in titles
 
@@ -1203,6 +1231,7 @@ class TestNotifications(unittest.TestCase):
 
         session = self.manager.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         titles = [n.title for n in session.notifications]
         assert f"Review ready: {_STEP}" in titles
 
@@ -1218,6 +1247,7 @@ class TestNotifications(unittest.TestCase):
         mgr2 = SessionManager(data_dir=self.data_dir)
         session = mgr2.get_session("s1")
         assert session is not None
+        assert isinstance(session, ZingSession)
         titles = [n.title for n in session.notifications]
         assert "New session: Test" in titles
         assert f"Review ready: {_STEP}" in titles
@@ -1237,6 +1267,82 @@ class TestNotifications(unittest.TestCase):
             if et == f"notification_added:{notif.id}" and sid == "s1"
         ]
         assert len(matching) == 1
+
+
+class TestClaudeCodeSession(unittest.TestCase):
+    """Tests for ClaudeCodeSession creation and persistence."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_create_claude_code_session(self) -> None:
+        """Creating a ClaudeCodeSession returns correct fields."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        session = self.manager.create_claude_code_session(
+            session_id="cc-1",
+            title="PR #42 Review",
+            ticket_id="BAK-123",
+            worktree_path="/tmp/worktree",
+            skill="pr-audit",
+            pr_number=42,
+            pr_repo="acme/repo",
+        )
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.session_id == "cc-1"
+        assert session.title == "PR #42 Review"
+        assert session.ticket_id == "BAK-123"
+        assert session.worktree_path == "/tmp/worktree"
+        assert session.skill == "pr-audit"
+        assert session.pr_number == 42
+        assert session.pr_repo == "acme/repo"
+        assert session.state == SessionState.STARTED
+
+    def test_create_duplicate_raises(self) -> None:
+        """Duplicate session_id raises ValueError."""
+        self.manager.create_claude_code_session(session_id="cc-dup", title="First")
+        with self.assertRaises(ValueError, msg="Session already exists"):
+            self.manager.create_claude_code_session(session_id="cc-dup", title="Second")
+
+    def test_invalid_session_id_raises(self) -> None:
+        """Invalid session_id is rejected."""
+        with self.assertRaises(ValueError):
+            self.manager.create_claude_code_session(session_id="../bad", title="Bad")
+
+    def test_persisted_and_reloaded(self) -> None:
+        """ClaudeCodeSession survives round-trip through disk persistence."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(
+            session_id="cc-persist",
+            title="Persist Test",
+            ticket_id="FRO-99",
+            pr_number=99,
+            pr_repo="acme/frontend",
+        )
+        # Create a new manager that loads from the same directory
+        manager2 = SessionManager(data_dir=self.data_dir)
+        sessions = manager2.list_sessions()
+        matching = [s for s in sessions if s.session_id == "cc-persist"]
+        assert len(matching) == 1
+        loaded = matching[0]
+        assert isinstance(loaded, ClaudeCodeSession)
+        assert loaded.title == "Persist Test"
+        assert loaded.ticket_id == "FRO-99"
+        assert loaded.pr_number == 99
+        assert loaded.pr_repo == "acme/frontend"
+
+    def test_listed_in_list_sessions(self) -> None:
+        """ClaudeCodeSession appears in list_sessions()."""
+        self.manager.create_claude_code_session(session_id="cc-list", title="List Test")
+        sessions = self.manager.list_sessions()
+        ids = [s.session_id for s in sessions]
+        assert "cc-list" in ids
 
 
 if __name__ == "__main__":

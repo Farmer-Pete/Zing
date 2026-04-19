@@ -6,6 +6,9 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from tests.test_command_center.conftest import (
+    make_claude_code_session as _make_cc_session,
+)
+from tests.test_command_center.conftest import (
     make_issue as _make_issue,
 )
 from tests.test_command_center.conftest import (
@@ -99,7 +102,7 @@ class TestAggregateGrouping(unittest.TestCase):
         view = _agg(prs=[pr])
         cards = _all_cards(view)
         self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0].key, "pr-99")
+        self.assertEqual(cards[0].key, "pr-org/repo-99")
         self.assertIsNone(cards[0].ticket)
 
     def test_session_with_ticket_id_joins_card(self) -> None:
@@ -468,6 +471,167 @@ class TestFiltering(unittest.TestCase):
         pr = _make_pr(number=7, head_ref="feature/misc", state="open")
         view = _agg(prs=[pr])
         self.assertEqual(len(_all_cards(view)), 1)
+
+
+class TestClaudeCodeSessionClassification(unittest.TestCase):
+    """ClaudeCodeSession should NOT affect column classification."""
+
+    def test_claude_code_session_does_not_pin_to_in_progress(self) -> None:
+        """A card with a ClaudeCodeSession should NOT be pinned to in_progress."""
+        issue = _make_issue(identifier="BAK-10", state_type="unstarted")
+        session = _make_cc_session(ticket_id="BAK-10")
+        view = _agg(issues=[issue], sessions=[session])
+        # Card should be in todo, not in_progress
+        todo_keys = [c.key for c in view.todo]
+        ip_keys = [c.key for c in view.in_progress]
+        self.assertIn("BAK-10", todo_keys)
+        self.assertNotIn("BAK-10", ip_keys)
+
+    def test_completed_ticket_with_claude_session_goes_to_done(self) -> None:
+        """Completed ticket with stale ClaudeCodeSession should be in done, not in_progress."""
+        issue = _make_issue(
+            identifier="BAK-11",
+            state_type="completed",
+            updated_at=RECENT,
+        )
+        session = _make_cc_session(ticket_id="BAK-11")
+        view = _agg(issues=[], completed_issues=[issue], sessions=[session])
+        done_keys = [c.key for c in view.done]
+        ip_keys = [c.key for c in view.in_progress]
+        self.assertIn("BAK-11", done_keys)
+        self.assertNotIn("BAK-11", ip_keys)
+
+
+class TestReviewerDoneClassification(unittest.TestCase):
+    """PRs where the user submitted a review should be classified as done."""
+
+    def test_user_reviewed_pr_is_done(self) -> None:
+        """Open PR where user submitted review and is not re-requested goes to done."""
+        pr = _make_pr(
+            number=42,
+            head_ref="feat/thing",
+            state="open",
+            author="other-dev",
+            reviewers=["octocat"],
+            requested_reviewers=["someone-else"],
+            review_decision="CHANGES_REQUESTED",
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        done_keys = [c.key for c in view.done]
+        self.assertTrue(any("42" in k for k in done_keys))
+
+    def test_user_in_requested_reviewers_not_done(self) -> None:
+        """User still in requested_reviewers should NOT be in done via reviewer path."""
+        pr = _make_pr(
+            number=43,
+            head_ref="feat/other",
+            state="open",
+            author="other-dev",
+            reviewers=[],
+            requested_reviewers=["octocat"],
+            review_decision="REVIEW_REQUIRED",
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        done_keys = [c.key for c in view.done]
+        self.assertFalse(any("43" in k for k in done_keys))
+
+
+class TestShouldIncludeCardReviewers(unittest.TestCase):
+    """_should_include_card should include orphan PRs where user submitted a review."""
+
+    def test_orphan_pr_included_when_user_is_reviewer(self) -> None:
+        """Orphan PR where user is in reviewers (submitted review) is included."""
+        pr = _make_pr(
+            number=50,
+            head_ref="feat/x",
+            state="open",
+            author="other-dev",
+            reviewers=["octocat"],
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        all_keys = [c.key for c in _all_cards(view)]
+        self.assertTrue(any("50" in k for k in all_keys))
+
+    def test_orphan_pr_excluded_when_user_not_involved(self) -> None:
+        """Orphan PR where user is not author, reviewer, or requested is excluded."""
+        pr = _make_pr(
+            number=51,
+            head_ref="feat/y",
+            state="open",
+            author="other-dev",
+            reviewers=["someone-else"],
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        all_keys = [c.key for c in _all_cards(view)]
+        self.assertFalse(any("51" in k for k in all_keys))
+
+
+class TestSessionPrNumberLinking(unittest.TestCase):
+    """Sessions should link to orphan PR cards by PR number."""
+
+    def test_zing_session_linked_by_title(self) -> None:
+        """ZingSession with '#42' in title attaches to orphan PR card."""
+        pr = _make_pr(number=42, head_ref="feat/thing", author="octocat")
+        session = _make_session(
+            session_id="pr-review-42-feat-thing-abc123",
+            title="PR Review \u2014 #42 feat: thing",
+        )
+        view = _agg(prs=[pr], sessions=[session], current_username="octocat")
+        cards_with_sessions = [c for c in _all_cards(view) if c.sessions]
+        self.assertEqual(len(cards_with_sessions), 1)
+        self.assertEqual(len(cards_with_sessions[0].sessions), 1)
+
+    def test_claude_code_session_linked_by_pr_number(self) -> None:
+        """ClaudeCodeSession with explicit pr_number attaches to orphan PR card."""
+        pr = _make_pr(number=99, head_ref="fix/bug", author="octocat")
+        session = _make_cc_session(
+            session_id="cc-99",
+            title="PR #99 Review",
+            pr_number=99,
+            pr_repo="org/repo",
+        )
+        view = _agg(prs=[pr], sessions=[session], current_username="octocat")
+        cards_with_sessions = [c for c in _all_cards(view) if c.sessions]
+        self.assertEqual(len(cards_with_sessions), 1)
+
+
+class TestDoneGrouping(unittest.TestCase):
+    """Done column should group cards into ready_to_merge and completed."""
+
+    def test_approved_open_pr_is_ready_to_merge(self) -> None:
+        """Open PR approved by user gets ready_to_merge group in Done."""
+        pr = _make_pr(
+            number=60,
+            head_ref="feat/approved",
+            state="open",
+            author="other-dev",
+            reviewers=["octocat"],
+            review_decision="APPROVED",
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        done_cards = view.done
+        ready = [c for c in done_cards if c.done_group == "ready_to_merge"]
+        self.assertEqual(len(ready), 1)
+
+    def test_merged_pr_is_completed(self) -> None:
+        """Merged PR gets completed group."""
+        pr = _make_pr(
+            number=61,
+            head_ref="feat/merged",
+            state="merged",
+            author="octocat",
+            merged_at=RECENT,
+            updated_at=RECENT,
+        )
+        view = _agg(recent_prs=[pr], current_username="octocat")
+        done_cards = view.done
+        completed = [c for c in done_cards if c.done_group == "completed"]
+        self.assertEqual(len(completed), 1)
 
 
 if __name__ == "__main__":

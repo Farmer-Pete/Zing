@@ -167,6 +167,14 @@ The review commands use the MCP server and `curl` to coordinate agent workflows.
 uv tool install zing-ai
 ```
 
+### Install from a local checkout (editable)
+
+```
+uv tool install -e /path/to/Zing
+```
+
+Changes to the source take effect immediately without reinstalling.
+
 ### Install from GitHub
 
 **Bleeding edge** (latest features, may have rough edges):

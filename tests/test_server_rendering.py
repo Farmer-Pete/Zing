@@ -22,6 +22,7 @@ from zing_ai.server.models import (
     TextFinding,
     TriageFinding,
     WarningSign,
+    ZingSession,
 )
 from zing_ai.server.routes import finding_fragment
 from zing_ai.server.templates import render
@@ -450,7 +451,7 @@ class TestNotificationTimeline(unittest.TestCase):
 
     def _make_session(self, notifications: list[Notification] | None = None) -> Session:
         """Create a minimal Session object for template rendering."""
-        return Session(
+        return ZingSession(
             session_id="notif-test",
             title="Test Session",
             notifications=notifications or [],

@@ -8,14 +8,17 @@ from pydantic import TypeAdapter, ValidationError
 
 from zing_ai.server.models import (
     Category,
+    ClaudeCodeSession,
     Complexity,
     Confidence,
     Finding,
     Notification,
+    Session,
     Severity,
     TriageFinding,
     UserResponse,
     WorkflowStep,
+    ZingSession,
 )
 
 
@@ -333,6 +336,103 @@ class TestNotificationModel(unittest.TestCase):
         data = n.model_dump()
         assert data["body"] == ""
         assert data["url"] is None
+
+
+class TestSessionDiscriminatedUnion(unittest.TestCase):
+    """Test the Session discriminated union and backward compatibility."""
+
+    _adapter = TypeAdapter(Session)
+
+    def test_old_session_json_loads_as_zing_session(self) -> None:
+        """Old session JSON without session_type defaults to ZingSession."""
+        data = {
+            "session_id": "legacy-session-abc123",
+            "title": "Legacy session",
+            "ticket_id": "ENG-42",
+            "steps": [],
+            "notifications": [],
+        }
+        session = self._adapter.validate_python(data)
+        assert isinstance(session, ZingSession)
+        assert session.session_type == "zing"
+        assert session.session_id == "legacy-session-abc123"
+        assert session.ticket_id == "ENG-42"
+
+    def test_zing_session_explicit_type(self) -> None:
+        """ZingSession with explicit session_type='zing' parses correctly."""
+        data = {
+            "session_id": "zing-session-001",
+            "title": "A zing session",
+            "session_type": "zing",
+        }
+        session = self._adapter.validate_python(data)
+        assert isinstance(session, ZingSession)
+        assert session.session_type == "zing"
+
+    def test_claude_code_session_loads_correctly(self) -> None:
+        """ClaudeCodeSession with session_type='claude_code' parses correctly."""
+        data = {
+            "session_id": "claude-session-001",
+            "title": "Claude Code session",
+            "session_type": "claude_code",
+            "ticket_id": "FRO-99",
+            "worktree_path": "/tmp/worktree",
+            "skill": "zing:build",
+        }
+        session = self._adapter.validate_python(data)
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.session_type == "claude_code"
+        assert session.worktree_path == "/tmp/worktree"
+        assert session.skill == "zing:build"
+        assert session.ticket_id == "FRO-99"
+
+    def test_claude_code_session_defaults(self) -> None:
+        """ClaudeCodeSession optional fields default to None."""
+        session = ClaudeCodeSession(session_id="s1", title="T")
+        assert session.worktree_path is None
+        assert session.skill is None
+        assert session.ticket_id is None
+
+    def test_session_json_roundtrip_zing(self) -> None:
+        """ZingSession round-trips through JSON serialization."""
+        original = ZingSession(session_id="zing-rt", title="Roundtrip", ticket_id="ENG-1")
+        json_bytes = self._adapter.dump_json(original)
+        restored = self._adapter.validate_json(json_bytes)
+        assert isinstance(restored, ZingSession)
+        assert restored.session_id == "zing-rt"
+        assert restored.ticket_id == "ENG-1"
+        assert restored.session_type == "zing"
+
+    def test_session_json_roundtrip_claude_code(self) -> None:
+        """ClaudeCodeSession round-trips through JSON serialization."""
+        original = ClaudeCodeSession(
+            session_id="cc-rt",
+            title="Claude RT",
+            ticket_id="FRO-5",
+            worktree_path="/tmp/wt",
+            skill="zing:plan",
+        )
+        json_bytes = self._adapter.dump_json(original)
+        restored = self._adapter.validate_json(json_bytes)
+        assert isinstance(restored, ClaudeCodeSession)
+        assert restored.session_id == "cc-rt"
+        assert restored.worktree_path == "/tmp/wt"
+        assert restored.skill == "zing:plan"
+
+    def test_zing_session_migration_flat_findings(self) -> None:
+        """Old flat-findings format migrates to steps on ZingSession."""
+        from datetime import datetime
+
+        data = {
+            "session_id": "old-flat",
+            "title": "Old format",
+            "created_at": datetime.now().isoformat(),
+            "findings": [{"type": "text", "title": "A finding"}],
+        }
+        session = self._adapter.validate_python(data)
+        assert isinstance(session, ZingSession)
+        assert len(session.steps) == 1
+        assert session.steps[0].step_name == "review"
 
 
 if __name__ == "__main__":

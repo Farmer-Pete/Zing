@@ -72,10 +72,18 @@
     {% endif %}
   {% endfor %}
 
-  {# ── Session indicators ── #}
-  {% for session in card.sessions %}
+  {# ── Claude Code session indicators ── #}
+  {% for session in card.sessions if session.session_type == 'claude_code' %}
+    <div class="session-indicator claude-code">
+      <span class="status-dot dot-blue"></span>
+      <span>Claude Code: {{ session.title }}</span>
+    </div>
+  {% endfor %}
+
+  {# ── Zing session indicators (existing rendering) ── #}
+  {% for session in card.sessions if session.session_type == 'zing' %}
     {% set state_val = session.state.value %}
-    <div class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
+    <a href="/{{ session.session_id }}" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
       {% if state_val == 'started' %}
         <span class="status-dot dot-amber"></span>
       {% elif state_val == 'pending' %}
@@ -93,13 +101,34 @@
         {% else %}{{ state_val }}
         {% endif %}
       </span>
-    </div>
+    </a>
   {% endfor %}
 
   {# ── Tags row ── #}
   {% if card.sessions %}
     <div class="tags">
       <span class="tag tag-session">Claude</span>
+    </div>
+  {% endif %}
+
+  {# ── Launch button ── #}
+  {% if card.ticket %}
+    {% set launch_cmd = "zing-ai launch " + card.key %}
+    {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
+    <button class="launch-btn" data-launch-cmd="{{ launch_cmd | e }}" data-launch-label="{{ launch_label | e }}">
+      {{ launch_label }}
+    </button>
+  {% elif card.prs %}
+    {% set is_author = card.prs[0].author == current_username %}
+    <div class="launch-btn-group">
+      <button class="launch-btn" data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}" data-launch-label="Start Review">
+        Start Review
+      </button>
+      {% if is_author %}
+        <button class="launch-btn launch-btn-secondary" data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}" data-launch-label="Respond to Review">
+          Respond to Review
+        </button>
+      {% endif %}
     </div>
   {% endif %}
 
