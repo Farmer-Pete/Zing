@@ -115,20 +115,17 @@
   {% if card.ticket %}
     {% set launch_cmd = "zing-ai launch " + card.key %}
     {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
-    <button class="launch-btn"
-            data-on:click="navigator.clipboard.writeText({{ launch_cmd | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent={{ launch_label | tojson }}, 1500)">
+    <button class="launch-btn" data-launch-cmd="{{ launch_cmd | e }}" data-launch-label="{{ launch_label | e }}">
       {{ launch_label }}
     </button>
   {% elif card.prs %}
     {% set is_author = card.prs[0].author == current_username %}
     <div class="launch-btn-group">
-      <button class="launch-btn"
-              data-on:click="navigator.clipboard.writeText({{ ('zing-ai launch ' + card.prs[0].url) | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent='Start Review', 1500)">
+      <button class="launch-btn" data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}" data-launch-label="Start Review">
         Start Review
       </button>
       {% if is_author %}
-        <button class="launch-btn launch-btn-secondary"
-                data-on:click="navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-respond ' + card.prs[0].url) | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent='Respond to Review', 1500)">
+        <button class="launch-btn launch-btn-secondary" data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}" data-launch-label="Respond to Review">
           Respond to Review
         </button>
       {% endif %}

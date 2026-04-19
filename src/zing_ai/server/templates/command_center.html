@@ -15,7 +15,20 @@
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
 
-    {% include "fragments/kanban_board.html" %}
+{% include "fragments/kanban_board.html" %}
+
+    <script>
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-launch-cmd]');
+        if (!btn) return;
+        var cmd = btn.getAttribute('data-launch-cmd');
+        var label = btn.getAttribute('data-launch-label');
+        navigator.clipboard.writeText(cmd).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = label; }, 1500);
+        });
+    });
+    </script>
 
     <footer class="cc-footer">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
