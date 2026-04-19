@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from zing_ai.server.models import Session, SessionState, WorkflowStep
+from zing_ai.server.models import Session, SessionState, WorkflowStep, ZingSession
 from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
@@ -90,7 +90,7 @@ def make_session(
     steps: list[WorkflowStep] | None = None,
 ) -> Session:
     """Build a :class:`Session` with sensible defaults for tests."""
-    return Session(
+    return ZingSession(
         session_id=session_id,
         title=title,
         ticket_id=ticket_id,

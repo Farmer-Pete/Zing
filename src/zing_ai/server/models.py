@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
 
 class Location(BaseModel):
@@ -280,18 +280,24 @@ class WorkflowStep(BaseModel):
         return data
 
 
-class Session(BaseModel):
-    """A review session containing workflow steps with findings and responses."""
+class SessionBase(BaseModel):
+    """Shared base for all session types."""
 
     model_config = ConfigDict(extra="ignore")
 
     session_id: str
     title: str
-    zing_file: str | None = None
     ticket_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ZingSession(SessionBase):
+    """A review session containing workflow steps with findings and responses."""
+
+    session_type: Literal["zing"] = "zing"
+    zing_file: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     notifications: list[Notification] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.now)
 
     @model_validator(mode="before")
     @classmethod
@@ -340,6 +346,34 @@ class Session(BaseModel):
     def total_findings(self) -> int:
         """Return the total number of findings across all steps."""
         return sum(len(step.findings) for step in self.steps)
+
+
+class ClaudeCodeSession(SessionBase):
+    """An interactive Claude Code session launched from the Command Center."""
+
+    session_type: Literal["claude_code"] = "claude_code"
+    worktree_path: str | None = None
+    skill: str | None = None
+
+    @property
+    def state(self) -> SessionState:
+        """Return the session state. ClaudeCodeSessions are always STARTED."""
+        return SessionState.STARTED
+
+
+def _session_discriminator(data: Any) -> str:
+    """Return session_type, defaulting to 'zing' for old JSON files that lack it."""
+    if isinstance(data, dict):
+        return data.get("session_type", "zing")
+    if hasattr(data, "session_type"):
+        return data.session_type
+    return "zing"
+
+
+Session = Annotated[
+    Annotated[ZingSession, Tag("zing")] | Annotated[ClaudeCodeSession, Tag("claude_code")],
+    Discriminator(_session_discriminator),
+]
 
 
 class ReviewItem(BaseModel):

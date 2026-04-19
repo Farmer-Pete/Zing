@@ -29,6 +29,7 @@ from zing_ai.server.models import (
     SessionState,
     UserResponse,
     WorkflowStep,
+    ZingSession,
 )
 
 _LOG_LEVEL = os.environ.get("ZING_LOG_LEVEL", "INFO").upper()
@@ -43,6 +44,7 @@ if not logger.handlers:
 _DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "zing-ai" / "sessions"
 _SAFE_SESSION_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 _FINDING_ADAPTER = TypeAdapter(Finding)
+_SESSION_ADAPTER = TypeAdapter(Session)
 
 
 class SessionManager:
@@ -105,22 +107,29 @@ class SessionManager:
         for path in self._data_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                session = Session.model_validate(data)
+                session = _SESSION_ADAPTER.validate_python(data)
                 self._sessions[session.session_id] = session
-                # Index steps by step_id and create events
-                for i, step in enumerate(session.steps):
-                    self._steps_by_id[step.step_id] = (session.session_id, i)
-                for step in session.steps:
-                    key = self._event_key(session.session_id, step.step_id)
-                    self._events[key] = asyncio.Event()
-                    if step.state == SessionState.COMPLETED:
-                        self._events[key].set()
-                logger.info(
-                    "Loaded session %s from disk (state=%s, steps=%d)",
-                    session.session_id,
-                    session.state.value,
-                    len(session.steps),
-                )
+                # Index steps by step_id and create events (ZingSession only)
+                if isinstance(session, ZingSession):
+                    for i, step in enumerate(session.steps):
+                        self._steps_by_id[step.step_id] = (session.session_id, i)
+                    for step in session.steps:
+                        key = self._event_key(session.session_id, step.step_id)
+                        self._events[key] = asyncio.Event()
+                        if step.state == SessionState.COMPLETED:
+                            self._events[key].set()
+                    logger.info(
+                        "Loaded session %s from disk (state=%s, steps=%d)",
+                        session.session_id,
+                        session.state.value,
+                        len(session.steps),
+                    )
+                else:
+                    logger.info(
+                        "Loaded session %s from disk (type=%s)",
+                        session.session_id,
+                        session.session_type,
+                    )
             except Exception:
                 logger.exception("Failed to load session from %s", path)
 
@@ -130,7 +139,7 @@ class SessionManager:
         title: str,
         zing_file: str | None = None,
         steps: list[str] | None = None,
-    ) -> Session:
+    ) -> ZingSession:
         """Create a new review session.
 
         Args:
@@ -159,7 +168,7 @@ class SessionManager:
                 logger.warning("Rejected zing_file (not markdown): %s", zing_file)
                 msg = f"zing_file must be a markdown file (.md), got: {zing_file}"
                 raise ValueError(msg)
-        session = Session(session_id=session_id, title=title, zing_file=zing_file)
+        session = ZingSession(session_id=session_id, title=title, zing_file=zing_file)
         if steps:
             for i, step_name in enumerate(steps):
                 step = WorkflowStep(step_name=step_name, sequence=i)
@@ -198,6 +207,9 @@ class SessionManager:
         """
         session = self._get_session_or_raise(session_id)
         if zing_file is not None:
+            if not isinstance(session, ZingSession):
+                msg = f"zing_file can only be set on ZingSession, got: {session.session_type}"
+                raise ValueError(msg)
             if not os.path.isabs(zing_file):
                 logger.warning("Rejected zing_file (not absolute): %s", zing_file)
                 msg = f"zing_file must be an absolute path, got: {zing_file}"
@@ -292,27 +304,31 @@ class SessionManager:
             KeyError: If no step with that name exists in the session.
         """
         session = self._get_session_or_raise(session_id)
+        if not isinstance(session, ZingSession):
+            raise KeyError(f"Session {session_id} is not a ZingSession")
         for step in reversed(session.steps):
             if step.step_name == step_name:
                 return step
         raise KeyError(f"No step '{step_name}' found in session '{session_id}'")
 
-    def get_step_by_id(self, step_id: str) -> tuple[Session, WorkflowStep]:
+    def get_step_by_id(self, step_id: str) -> tuple[ZingSession, WorkflowStep]:
         """Return the session and step for a given step_id.
 
         Args:
             step_id: The UUID of the step.
 
         Returns:
-            Tuple of (Session, WorkflowStep).
+            Tuple of (ZingSession, WorkflowStep).
 
         Raises:
-            KeyError: If no step with that ID exists.
+            KeyError: If no step with that ID exists, or the session is not a ZingSession.
         """
         if step_id not in self._steps_by_id:
             raise KeyError(f"No step with id '{step_id}' found")
         session_id, step_index = self._steps_by_id[step_id]
         session = self._get_session_or_raise(session_id)
+        if not isinstance(session, ZingSession):
+            raise KeyError(f"Session {session_id} is not a ZingSession")
         return session, session.steps[step_index]
 
     def add_finding(self, session_id: str, step_id: str, finding_data: dict[str, Any]) -> Finding:
@@ -753,7 +769,7 @@ class SessionManager:
             session_id: The session to remove.
         """
         session = self._sessions.pop(session_id, None)
-        if session:
+        if session and isinstance(session, ZingSession):
             for step in session.steps:
                 self._steps_by_id.pop(step.step_id, None)
                 key = self._event_key(session_id, step.step_id)
@@ -778,6 +794,8 @@ class SessionManager:
     ) -> Notification:
         """Create a notification, append it to the session, persist, and notify."""
         session = self._get_session_or_raise(session_id)
+        if not isinstance(session, ZingSession):
+            raise KeyError(f"Session {session_id} is not a ZingSession")
         notification = Notification(title=title, body=body, url=url)
         session.notifications.append(notification)
         self._persist(session)

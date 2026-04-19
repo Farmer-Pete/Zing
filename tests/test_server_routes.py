@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from tests.test_server_base import _STEP, ServerTestBase
 from zing_ai.server.mcp_tools import configure, review_wait
+from zing_ai.server.models import ZingSession
 from zing_ai.server.routes import _dashboard_queues, _sse_queues
 
 
@@ -72,6 +73,7 @@ class TestSaveResponse(ServerTestBase):
         )
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].answer, "Saved text")
@@ -134,6 +136,7 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(resp.json()["saved"], 1)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         assert step.responses[0].complexity is not None
@@ -152,6 +155,7 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         assert step.responses[0].complexity is not None
@@ -179,6 +183,7 @@ class TestSaveResponse(ServerTestBase):
         )
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
@@ -198,6 +203,7 @@ class TestSaveResponse(ServerTestBase):
         )
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "drop")
@@ -216,6 +222,7 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         # No response should have been saved since the only field was invalid
         if step.responses:
@@ -234,6 +241,7 @@ class TestSaveResponse(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         if step.responses:
             self.assertIsNone(step.responses[0].complexity)
@@ -329,6 +337,7 @@ class TestSubmit(ServerTestBase):
 
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         self.assertEqual(session.state.value, "completed")
         step = session.steps[0]
         assert step.responses is not None
@@ -368,6 +377,7 @@ class TestSubmit(ServerTestBase):
 
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         # Evaluation finding gets empty response (auto-acknowledged)
@@ -441,6 +451,7 @@ class TestSubmit(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].selected, "__other__")
@@ -477,6 +488,7 @@ class TestSubmit(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
@@ -520,6 +532,7 @@ class TestSubmit(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("test-session")
         assert session is not None
+        assert isinstance(session, ZingSession)
         step = session.steps[0]
         assert step.responses is not None
         self.assertEqual(step.responses[0].action, "accept")
@@ -879,6 +892,8 @@ class TestConcurrentSessions(ServerTestBase):
         session_b = self.manager.get_session("session-b")
         assert session_a is not None
         assert session_b is not None
+        assert isinstance(session_a, ZingSession)
+        assert isinstance(session_b, ZingSession)
 
         self.assertEqual(session_a.total_findings, 1)
         self.assertEqual(session_b.total_findings, 1)
@@ -1182,6 +1197,7 @@ class TestNotificationSSEOutput(ServerTestBase):
         self._create_session(session_id="empty-notif")
         session = self.manager.get_session("empty-notif")
         assert session is not None
+        assert isinstance(session, ZingSession)
         session.notifications.clear()
 
         body = asyncio.run(
@@ -1200,6 +1216,7 @@ class TestNotificationSSEOutput(ServerTestBase):
         self._create_session(session_id=session_id)
         session = self.manager.get_session(session_id)
         assert session is not None
+        assert isinstance(session, ZingSession)
         session.notifications.clear()
 
         body = asyncio.run(

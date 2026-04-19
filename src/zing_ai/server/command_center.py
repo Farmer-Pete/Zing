@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
-from zing_ai.server.models import Session, SessionState, WorkflowStep
+from zing_ai.server.models import Session, SessionState, WorkflowStep, ZingSession
 from zing_ai.server.models_external import (
     GitHubPR,
     KanbanCard,
@@ -81,8 +81,9 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
         if pr.merged_at is not None:
             candidates.append(pr.merged_at)
     for session in card.sessions:
-        for step in session.steps:
-            candidates.append(step.created_at)
+        if isinstance(session, ZingSession):
+            for step in session.steps:
+                candidates.append(step.created_at)
     if not candidates:
         return datetime.min.replace(tzinfo=UTC)
     return max(_ensure_utc(dt) for dt in candidates)
@@ -94,7 +95,10 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
 def _has_active_session(card: KanbanCard) -> bool:
     """Any session has a step in STARTED state."""
     return any(
-        step.state == SessionState.STARTED for session in card.sessions for step in session.steps
+        step.state == SessionState.STARTED
+        for session in card.sessions
+        if isinstance(session, ZingSession)
+        for step in session.steps
     )
 
 
@@ -329,10 +333,11 @@ def aggregate(
             continue  # exclude standalone sessions
         if session.ticket_id in cards:
             cards[session.ticket_id].sessions.append(session)
-            # Surface audit steps
-            for step in session.steps:
-                if step.step_name in AUDIT_STEP_NAMES:
-                    cards[session.ticket_id].audit_steps.append(step)
+            # Surface audit steps (ZingSession only — ClaudeCodeSession has no steps)
+            if isinstance(session, ZingSession):
+                for step in session.steps:
+                    if step.step_name in AUDIT_STEP_NAMES:
+                        cards[session.ticket_id].audit_steps.append(step)
 
     # -----------------------------------------------------------------------
     # 5. Orphan PR cards (no matching ticket)

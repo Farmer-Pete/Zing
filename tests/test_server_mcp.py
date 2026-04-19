@@ -17,7 +17,7 @@ from zing_ai.server.mcp_tools import (
     step_log,
     step_start,
 )
-from zing_ai.server.models import ResponseAction, TriageFinding, UserResponse
+from zing_ai.server.models import ResponseAction, TriageFinding, UserResponse, ZingSession
 
 
 class TestSessionCreate(ServerTestBase):
@@ -303,6 +303,7 @@ class TestStepLog(ServerTestBase):
 
         session = self.manager.get_session("log-test")
         assert session is not None
+        assert isinstance(session, ZingSession)
         self.assertEqual(len(session.steps[0].logs), 1)
         self.assertEqual(session.steps[0].logs[0].message, "Starting build...")
 
@@ -409,6 +410,7 @@ class TestMCPFindingSubmit(ServerTestBase):
 
         session = self.manager.get_session("sf-text")
         assert session is not None
+        assert isinstance(session, ZingSession)
         self.assertEqual(len(session.steps[0].findings), 1)
         self.assertEqual(session.steps[0].findings[0].type, "text")
         self.assertEqual(session.steps[0].findings[0].title, "What do you think?")
@@ -434,6 +436,7 @@ class TestMCPFindingSubmit(ServerTestBase):
 
         session = self.manager.get_session("sf-triage-no-meta")
         assert session is not None
+        assert isinstance(session, ZingSession)
         finding = session.steps[0].findings[0]
         assert isinstance(finding, TriageFinding)
         self.assertEqual(finding.type, "triage")
@@ -510,6 +513,7 @@ class TestNotificationSend(ServerTestBase):
 
         session = self.manager.get_session("notif-opts")
         assert session is not None
+        assert isinstance(session, ZingSession)
         notification = session.notifications[-1]
         self.assertEqual(notification.title, "Deploy ready")
         self.assertEqual(notification.body, "Version 2.1 is staged")
