@@ -98,7 +98,12 @@ def _build_view(app: FastAPI) -> KanbanView:
 def render_board_fragment(app: FastAPI) -> str:
     """Render the full kanban board. Used by SSE board_changed events."""
     view = _build_view(app)
-    return render("fragments/kanban_board.html", view=view)  # hub disappeared between events
+    cache = app.state.external_cache
+    return render(
+        "fragments/kanban_board.html",
+        view=view,
+        current_username=cache.github_username or "",
+    )  # hub disappeared between events
 
 
 @router.get("/command-center", response_class=HTMLResponse)
@@ -115,6 +120,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             last_polled_label=_format_last_polled(cache.last_polled_at),
             last_error=cache.last_error,
             body_class="command-center",
+            current_username=cache.github_username or "",
         )
     )
 

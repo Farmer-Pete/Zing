@@ -72,8 +72,16 @@
     {% endif %}
   {% endfor %}
 
-  {# ── Session indicators ── #}
-  {% for session in card.sessions %}
+  {# ── Claude Code session indicators ── #}
+  {% for session in card.sessions if session.session_type == 'claude_code' %}
+    <div class="session-indicator claude-code">
+      <span class="status-dot dot-blue"></span>
+      <span>Claude Code: {{ session.title }}</span>
+    </div>
+  {% endfor %}
+
+  {# ── Zing session indicators (existing rendering) ── #}
+  {% for session in card.sessions if session.session_type == 'zing' %}
     {% set state_val = session.state.value %}
     <div class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
       {% if state_val == 'started' %}
@@ -100,6 +108,30 @@
   {% if card.sessions %}
     <div class="tags">
       <span class="tag tag-session">Claude</span>
+    </div>
+  {% endif %}
+
+  {# ── Launch button ── #}
+  {% if card.ticket %}
+    {% set launch_cmd = "zing-ai launch " + card.key %}
+    {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
+    <button class="launch-btn"
+            data-on-click="navigator.clipboard.writeText({{ launch_cmd | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent={{ launch_label | tojson }}, 1500)">
+      {{ launch_label }}
+    </button>
+  {% elif card.prs %}
+    {% set is_author = card.prs[0].author == current_username %}
+    <div class="launch-btn-group">
+      <button class="launch-btn"
+              data-on-click="navigator.clipboard.writeText({{ ('zing-ai launch ' + card.prs[0].url) | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent='Start Review', 1500)">
+        Start Review
+      </button>
+      {% if is_author %}
+        <button class="launch-btn launch-btn-secondary"
+                data-on-click="navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-respond ' + card.prs[0].url) | tojson }}); $el.textContent='Copied!'; setTimeout(() => $el.textContent='Respond to Review', 1500)">
+          Respond to Review
+        </button>
+      {% endif %}
     </div>
   {% endif %}
 
