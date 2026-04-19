@@ -411,8 +411,8 @@ def _linear_request(api_key: str, query: str, variables: dict | None = None) -> 
 def derive_branch_name(ticket_id: str, api_key: str) -> str:
     """Fetch the suggested branch name for a Linear issue.
 
-    Calls ``{ issue(id: "<ticket_id>") { branchName } }`` via the Linear GraphQL
-    API and returns the ``branchName`` string.
+    Calls ``{ issue(id: $id) { branchName } }`` via the Linear GraphQL API
+    and returns the ``branchName`` string.
 
     Args:
         ticket_id: Linear issue identifier, e.g. ``"BAK-123"``.
@@ -424,8 +424,8 @@ def derive_branch_name(ticket_id: str, api_key: str) -> str:
     Raises:
         LaunchError: If the API call fails or the issue is not found.
     """
-    query = f'{{ issue(id: "{ticket_id}") {{ branchName }} }}'
-    resp = _linear_request(api_key, query)
+    query = "query($id: String!) { issue(id: $id) { branchName } }"
+    resp = _linear_request(api_key, query, variables={"id": ticket_id})
     try:
         branch_name = resp["data"]["issue"]["branchName"]
     except (KeyError, TypeError) as exc:
@@ -452,8 +452,8 @@ def move_ticket_in_progress(ticket_id: str, api_key: str) -> None:
         LaunchError: If any API call fails or required data is missing.
     """
     # Step 1: fetch team id
-    team_query = f'{{ issue(id: "{ticket_id}") {{ id team {{ id }} }} }}'
-    team_resp = _linear_request(api_key, team_query)
+    team_query = "query($id: String!) { issue(id: $id) { id team { id } } }"
+    team_resp = _linear_request(api_key, team_query, variables={"id": ticket_id})
     try:
         issue_data = team_resp["data"]["issue"]
         issue_id = issue_data["id"]
@@ -462,17 +462,21 @@ def move_ticket_in_progress(ticket_id: str, api_key: str) -> None:
         raise LaunchError(f"Could not retrieve team for {ticket_id}: {team_resp}") from exc
 
     # Step 2: fetch "In Progress" state id
-    state_query = f"""
-    {{
-      workflowStates(filter: {{
-        team: {{ id: {{ eq: "{team_id}" }} }},
-        name: {{ eq: "In Progress" }}
-      }}) {{
-        nodes {{ id }}
-      }}
-    }}
+    state_query = """
+    query($teamId: ID!, $name: String!) {
+      workflowStates(filter: {
+        team: { id: { eq: $teamId } },
+        name: { eq: $name }
+      }) {
+        nodes { id }
+      }
+    }
     """
-    state_resp = _linear_request(api_key, state_query)
+    state_resp = _linear_request(
+        api_key,
+        state_query,
+        variables={"teamId": team_id, "name": "In Progress"},
+    )
     try:
         nodes = state_resp["data"]["workflowStates"]["nodes"]
         state_id = nodes[0]["id"]
@@ -482,14 +486,18 @@ def move_ticket_in_progress(ticket_id: str, api_key: str) -> None:
         ) from exc
 
     # Step 3: update issue
-    mutation = f"""
-    mutation {{
-      issueUpdate(id: "{issue_id}", input: {{ stateId: "{state_id}" }}) {{
+    mutation = """
+    mutation($issueId: String!, $stateId: String!) {
+      issueUpdate(id: $issueId, input: { stateId: $stateId }) {
         success
-      }}
-    }}
+      }
+    }
     """
-    update_resp = _linear_request(api_key, mutation)
+    update_resp = _linear_request(
+        api_key,
+        mutation,
+        variables={"issueId": issue_id, "stateId": state_id},
+    )
     try:
         success = update_resp["data"]["issueUpdate"]["success"]
     except (KeyError, TypeError) as exc:
@@ -503,85 +511,53 @@ def move_ticket_in_progress(ticket_id: str, api_key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _call_mcp_http(server_url: str, tool_name: str, arguments: dict) -> dict:
-    """Call an MCP tool via a plain HTTP POST (JSON-RPC 2.0 style).
+def create_session_on_server(
+    server_url: str,
+    session_id: str,
+    title: str,
+    ticket_id: str | None,
+    worktree_path: str | None,
+    skill: str | None,
+) -> None:
+    """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
-    This mirrors the pattern used in ``sim.py``'s ``_call_mcp()`` but uses
-    ``urllib.request`` so the function has no extra dependencies.
+    Makes a plain ``POST /api/sessions/claude-code`` with a JSON body — no
+    JSON-RPC envelope.
 
     Args:
-        server_url: Base URL of the MCP server, e.g. ``"http://localhost:9876/mcp"``.
-        tool_name: Name of the MCP tool to invoke.
-        arguments: Tool arguments dict.
-
-    Returns:
-        Parsed response dict.
+        server_url: Base URL of the Zing server, e.g. ``"http://127.0.0.1:9876"``.
+        session_id: Unique session identifier.
+        title: Human-readable session title.
+        ticket_id: Linear ticket ID, or ``None``.
+        worktree_path: Absolute worktree path, or ``None``.
+        skill: Skill/command name, or ``None``.
 
     Raises:
-        LaunchError: On HTTP errors, connection failures, or non-JSON responses.
+        LaunchError: If the HTTP call fails.
     """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        },
+    payload: dict = {
+        "session_id": session_id,
+        "title": title,
+        "ticket_id": ticket_id,
+        "worktree_path": worktree_path,
+        "skill": skill,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
-        server_url,
+        f"{server_url.rstrip('/')}/api/sessions/claude-code",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode())
+            resp.read()
     except urllib.error.HTTPError as exc:
-        raise LaunchError(f"MCP server HTTP {exc.code}: {exc.reason}") from exc
+        raise LaunchError(f"Zing server HTTP {exc.code}: {exc.reason}") from exc
     except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
         raise LaunchError(
-            f"Could not connect to Zing MCP server at {server_url}. Is 'zing-ai mcp' running?"
+            f"Could not connect to Zing server at {server_url}. Is 'zing-ai mcp' running?"
         ) from exc
-    except json.JSONDecodeError as exc:
-        raise LaunchError(f"MCP server returned non-JSON response: {exc}") from exc
-
-
-def create_mcp_session(
-    server_url: str,
-    session_id: str,
-    title: str,
-    ticket_id: str,
-    worktree_path: str | None,
-    skill: str | None,
-) -> None:
-    """Create a ``ClaudeCodeSession`` on the MCP server.
-
-    Args:
-        server_url: MCP server URL.
-        session_id: Unique session identifier.
-        title: Human-readable session title.
-        ticket_id: Linear ticket ID associated with this session.
-        worktree_path: Absolute path of the worktree, or ``None``.
-        skill: Skill/command name, or ``None``.
-
-    Raises:
-        LaunchError: If the MCP call fails.
-    """
-    arguments: dict = {
-        "session_id": session_id,
-        "title": title,
-        "ticket_id": ticket_id,
-        "type": "ClaudeCodeSession",
-    }
-    if worktree_path is not None:
-        arguments["worktree_path"] = worktree_path
-    if skill is not None:
-        arguments["skill"] = skill
-
-    _call_mcp_http(server_url, "session_create", arguments)
 
 
 def detect_action(
@@ -590,35 +566,36 @@ def detect_action(
 ) -> tuple[Literal["resume", "new"], str | None]:
     """Check whether an existing Claude Code session exists for *ticket_id*.
 
-    Calls the MCP server to list sessions and finds any ``ClaudeCodeSession``
-    with a matching ``ticket_id``.
+    Calls ``GET /api/sessions?ticket_id=<id>`` and finds any session with
+    ``session_type == "claude_code"``.
 
     Args:
         ticket_id: Linear ticket ID to look for.
-        server_url: MCP server URL.
+        server_url: Base URL of the Zing server.
 
     Returns:
         ``("resume", session_id)`` if a matching session is found, otherwise
         ``("new", None)``.
 
     Raises:
-        LaunchError: If the MCP call fails.
+        LaunchError: If the HTTP call fails.
     """
-    resp = _call_mcp_http(server_url, "session_list", {})
-    # Response may be a JSON-RPC result wrapping the list, or the list directly.
-    sessions: list[dict] = []
-    if isinstance(resp, list):
-        sessions = resp
-    elif isinstance(resp, dict):
-        # JSON-RPC 2.0 envelope
-        result = resp.get("result", resp)
-        if isinstance(result, list):
-            sessions = result
-        elif isinstance(result, dict):
-            sessions = result.get("sessions", [])
+    url = f"{server_url.rstrip('/')}/api/sessions?ticket_id={ticket_id}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sessions: list[dict] = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        raise LaunchError(f"Zing server HTTP {exc.code}: {exc.reason}") from exc
+    except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
+        raise LaunchError(
+            f"Could not connect to Zing server at {server_url}. Is 'zing-ai mcp' running?"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise LaunchError(f"Zing server returned non-JSON response: {exc}") from exc
 
     for session in sessions:
-        if session.get("type") == "ClaudeCodeSession" and session.get("ticket_id") == ticket_id:
+        if session.get("session_type") == "claude_code":
             return ("resume", session["session_id"])
 
     return ("new", None)

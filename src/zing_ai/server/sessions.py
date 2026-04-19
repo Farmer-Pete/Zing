@@ -20,6 +20,7 @@ from pydantic import TypeAdapter
 from zing_ai.server.models import (
     Agent,
     AgentState,
+    ClaudeCodeSession,
     Finding,
     LogEntry,
     Notification,
@@ -183,6 +184,46 @@ class SessionManager:
         self._notify("session_created", session_id)
         self._notify(f"notification_added:{notif.id}", session_id)
         logger.info("Created session %s: %s", session_id, title)
+        return session
+
+    def create_claude_code_session(
+        self,
+        session_id: str,
+        title: str,
+        ticket_id: str | None = None,
+        worktree_path: str | None = None,
+        skill: str | None = None,
+    ) -> ClaudeCodeSession:
+        """Create a new ClaudeCodeSession and persist it.
+
+        Args:
+            session_id: Caller-provided unique session identifier.
+            title: Human-readable session title.
+            ticket_id: Linear ticket ID, or None.
+            worktree_path: Absolute worktree path, or None.
+            skill: Skill/command name, or None.
+
+        Returns:
+            The newly created ClaudeCodeSession.
+
+        Raises:
+            ValueError: If session_id is invalid or already exists.
+        """
+        self._validate_session_id(session_id)
+        if session_id in self._sessions:
+            msg = f"Session already exists: {session_id}"
+            raise ValueError(msg)
+        session = ClaudeCodeSession(
+            session_id=session_id,
+            title=title,
+            ticket_id=ticket_id,
+            worktree_path=worktree_path,
+            skill=skill,
+        )
+        self._sessions[session_id] = session
+        self._persist(session)
+        self._notify("session_created", session_id)
+        logger.info("Created ClaudeCodeSession %s: %s", session_id, title)
         return session
 
     def update_session(

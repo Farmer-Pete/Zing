@@ -16,6 +16,7 @@ from datastar_py.consts import ElementPatchMode
 from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from zing_ai.server.html_fragments import (
     build_notification_script as _build_notification_script,
@@ -707,6 +708,73 @@ async def post_cleanup(
     manager.cleanup_session(session_id)
     logger.info("Session %s cleaned up via dashboard", session_id)
     return SSE.redirect("/dashboard")
+
+
+# ---------------------------------------------------------------------------
+# REST API endpoints for external callers (e.g. zing-ai launch)
+# ---------------------------------------------------------------------------
+
+
+class _CreateClaudeCodeSessionBody(BaseModel):  # type: ignore[misc]
+    """Request body for POST /api/sessions/claude-code."""
+
+    session_id: str
+    title: str
+    ticket_id: str | None = None
+    worktree_path: str | None = None
+    skill: str | None = None
+
+
+@router.post("/api/sessions/claude-code")
+async def post_create_claude_code_session(
+    body: _CreateClaudeCodeSessionBody,
+    request: Request,
+) -> JSONResponse:
+    """Create a ClaudeCodeSession and persist it via SessionManager.
+
+    Args:
+        body: Session creation parameters.
+        request: The incoming request.
+
+    Returns:
+        JSON with ``status`` and ``session_id``.
+    """
+    manager = request.app.state.session_manager
+    try:
+        session = manager.create_claude_code_session(
+            session_id=body.session_id,
+            title=body.title,
+            ticket_id=body.ticket_id,
+            worktree_path=body.worktree_path,
+            skill=body.skill,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"status": "created", "session_id": session.session_id})
+
+
+@router.get("/api/sessions")
+async def get_sessions(
+    request: Request,
+    ticket_id: str | None = None,
+) -> JSONResponse:
+    """Return a list of sessions, optionally filtered by ticket_id.
+
+    Args:
+        request: The incoming request.
+        ticket_id: Optional filter — only return sessions with this ticket_id.
+
+    Returns:
+        JSON list of session dicts.
+    """
+    manager = request.app.state.session_manager
+    sessions = manager.list_sessions()
+    result = []
+    for session in sessions:
+        d = session.model_dump(mode="json")
+        if ticket_id is None or session.ticket_id == ticket_id:
+            result.append(d)
+    return JSONResponse(result)
 
 
 @router.get("/{session_id}", response_model=None)

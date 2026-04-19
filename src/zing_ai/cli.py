@@ -176,15 +176,15 @@ _TICKET_RE = re.compile(r"^[A-Z]+-\d+$")
 @cli.command()
 @click.argument("target")  # ticket ID or PR URL
 @click.option("--resume/--no-resume", default=True, help="Auto-resume existing session if found")
-@click.option("--server-url", default="http://127.0.0.1:9876/mcp", help="Zing MCP server URL")
-def launch(target: str, resume: bool, server_url: str) -> None:
+@click.option("--port", default=9876, type=int, help="Port the Zing server is listening on.")
+def launch(target: str, resume: bool, port: int) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
         LaunchError,
         build_claude_args,
         checkout_pr_branch,
-        create_mcp_session,
+        create_session_on_server,
         create_worktree,
         derive_branch_name,
         detect_action,
@@ -196,6 +196,8 @@ def launch(target: str, resume: bool, server_url: str) -> None:
         rollback_worktree,
         run_init_script,
     )
+
+    server_url = f"http://127.0.0.1:{port}"
 
     try:
         # Load config
@@ -216,13 +218,13 @@ def launch(target: str, resume: bool, server_url: str) -> None:
         except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
             raise LaunchError(f"Could not read Linear API key from {lr_config_path}: {e}") from e
 
-        # Check MCP server is running
+        # Check server is running
         check_req = urllib.request.Request(server_url, method="GET")
         try:
             urllib.request.urlopen(check_req)
         except urllib.error.URLError as e:
             raise LaunchError(
-                f"Zing MCP server is not running at {server_url}. Start it with 'zing-ai mcp'."
+                f"Zing server is not running at {server_url}. Start it with 'zing-ai mcp'."
             ) from e
 
         # Detect target type: ticket ID or PR URL
@@ -289,7 +291,7 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                 # workflow_mode == "none"
                 work_dir = Path.cwd()
 
-            # Subsequent steps — roll back worktree on failure
+            succeeded = False
             try:
                 run_init_script(
                     repo_root=repo_root,
@@ -297,20 +299,8 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                     worktree_path=work_dir,
                     branch=branch_name,
                 )
-            except LaunchError:
-                if worktree_path is not None:
-                    rollback_worktree(worktree_path)
-                raise
-
-            try:
                 move_ticket_in_progress(ticket_id, api_key)
-            except LaunchError:
-                if worktree_path is not None:
-                    rollback_worktree(worktree_path)
-                raise
-
-            try:
-                create_mcp_session(
+                create_session_on_server(
                     server_url=server_url,
                     session_id=session_id,
                     title=ticket_id,
@@ -318,10 +308,10 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                     worktree_path=str(work_dir) if work_dir else None,
                     skill="new",
                 )
-            except LaunchError:
-                if worktree_path is not None:
+                succeeded = True
+            finally:
+                if not succeeded and worktree_path is not None:
                     rollback_worktree(worktree_path)
-                raise
 
             args = build_claude_args(
                 skill="new",
@@ -379,6 +369,7 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                 # workflow_mode == "none"
                 work_dir = Path.cwd()
 
+            succeeded = False
             try:
                 run_init_script(
                     repo_root=repo_root,
@@ -386,13 +377,7 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                     worktree_path=work_dir,
                     branch=branch_name,
                 )
-            except LaunchError:
-                if worktree_path is not None:
-                    rollback_worktree(worktree_path)
-                raise
-
-            try:
-                create_mcp_session(
+                create_session_on_server(
                     server_url=server_url,
                     session_id=session_id,
                     title=pr_name,
@@ -400,10 +385,10 @@ def launch(target: str, resume: bool, server_url: str) -> None:
                     worktree_path=str(work_dir) if work_dir else None,
                     skill="pr-audit",
                 )
-            except LaunchError:
-                if worktree_path is not None:
+                succeeded = True
+            finally:
+                if not succeeded and worktree_path is not None:
                     rollback_worktree(worktree_path)
-                raise
 
             args = build_claude_args(
                 skill="pr-audit",

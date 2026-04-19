@@ -13,7 +13,7 @@ from zing_ai.launch import (
     LaunchError,
     build_claude_args,
     checkout_pr_branch,
-    create_mcp_session,
+    create_session_on_server,
     create_worktree,
     derive_branch_name,
     detect_action,
@@ -384,22 +384,24 @@ class TestMoveTicketInProgress(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# create_mcp_session
+# create_session_on_server
 # ---------------------------------------------------------------------------
 
 
-class TestCreateMcpSession(TestCase):
-    """Tests for create_mcp_session."""
+class TestCreateSessionOnServer(TestCase):
+    """Tests for create_session_on_server."""
 
     def test_posts_correct_payload(self) -> None:
         resp_mock = MagicMock()
-        resp_mock.read.return_value = json.dumps({"result": "ok"}).encode()
+        resp_mock.read.return_value = json.dumps(
+            {"status": "created", "session_id": "sess-abc"}
+        ).encode()
         resp_mock.__enter__ = lambda s: s
         resp_mock.__exit__ = MagicMock(return_value=False)
 
         with patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock) as mock_open:
-            create_mcp_session(
-                server_url="http://localhost:9876/mcp",
+            create_session_on_server(
+                server_url="http://localhost:9876",
                 session_id="sess-abc",
                 title="My session",
                 ticket_id="BAK-42",
@@ -409,37 +411,35 @@ class TestCreateMcpSession(TestCase):
 
         # Inspect the Request object passed to urlopen
         req = mock_open.call_args[0][0]
+        self.assertIn("/api/sessions/claude-code", req.full_url)
         body = json.loads(req.data.decode())
-        self.assertEqual(body["method"], "tools/call")
-        params = body["params"]
-        self.assertEqual(params["name"], "session_create")
-        args = params["arguments"]
-        self.assertEqual(args["session_id"], "sess-abc")
-        self.assertEqual(args["ticket_id"], "BAK-42")
-        self.assertEqual(args["type"], "ClaudeCodeSession")
-        self.assertEqual(args["worktree_path"], "/tmp/wt")
+        self.assertEqual(body["session_id"], "sess-abc")
+        self.assertEqual(body["ticket_id"], "BAK-42")
+        self.assertEqual(body["worktree_path"], "/tmp/wt")
+        self.assertEqual(body["skill"], "new")
 
-    def test_omits_optional_fields_when_none(self) -> None:
+    def test_includes_none_fields_in_payload(self) -> None:
         resp_mock = MagicMock()
-        resp_mock.read.return_value = json.dumps({}).encode()
+        resp_mock.read.return_value = json.dumps(
+            {"status": "created", "session_id": "sess-xyz"}
+        ).encode()
         resp_mock.__enter__ = lambda s: s
         resp_mock.__exit__ = MagicMock(return_value=False)
 
         with patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock) as mock_open:
-            create_mcp_session(
-                server_url="http://localhost:9876/mcp",
+            create_session_on_server(
+                server_url="http://localhost:9876",
                 session_id="sess-xyz",
                 title="Minimal",
-                ticket_id="BAK-1",
+                ticket_id=None,
                 worktree_path=None,
                 skill=None,
             )
 
         req = mock_open.call_args[0][0]
         body = json.loads(req.data.decode())
-        args = body["params"]["arguments"]
-        self.assertNotIn("worktree_path", args)
-        self.assertNotIn("skill", args)
+        self.assertIsNone(body["worktree_path"])
+        self.assertIsNone(body["skill"])
 
 
 # ---------------------------------------------------------------------------
@@ -458,38 +458,37 @@ class TestDetectAction(TestCase):
         return patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock)
 
     def test_returns_resume_when_session_found(self) -> None:
+        # GET /api/sessions?ticket_id=BAK-123 returns a plain list
         sessions = [
-            {"type": "ClaudeCodeSession", "ticket_id": "BAK-123", "session_id": "sess-abc"},
-            {"type": "ReviewSession", "ticket_id": "BAK-123", "session_id": "sess-xyz"},
+            {"session_type": "claude_code", "ticket_id": "BAK-123", "session_id": "sess-abc"},
+            {"session_type": "zing", "ticket_id": "BAK-123", "session_id": "sess-xyz"},
         ]
-        with self._mock_urlopen({"result": sessions}):
-            action, sid = detect_action("BAK-123", "http://localhost:9876/mcp")
+        with self._mock_urlopen(sessions):
+            action, sid = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "resume")
         self.assertEqual(sid, "sess-abc")
 
     def test_returns_new_when_no_matching_session(self) -> None:
-        sessions = [
-            {"type": "ClaudeCodeSession", "ticket_id": "BAK-999", "session_id": "sess-other"},
-        ]
-        with self._mock_urlopen({"result": sessions}):
-            action, sid = detect_action("BAK-123", "http://localhost:9876/mcp")
+        sessions: list = []
+        with self._mock_urlopen(sessions):
+            action, sid = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
 
     def test_returns_new_when_session_list_empty(self) -> None:
-        with self._mock_urlopen({"result": []}):
-            action, sid = detect_action("BAK-123", "http://localhost:9876/mcp")
+        with self._mock_urlopen([]):
+            action, sid = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
 
-    def test_handles_flat_list_response(self) -> None:
+    def test_returns_new_when_only_non_claude_code_sessions(self) -> None:
         sessions = [
-            {"type": "ClaudeCodeSession", "ticket_id": "BAK-5", "session_id": "sess-flat"},
+            {"session_type": "zing", "ticket_id": "BAK-5", "session_id": "sess-zing"},
         ]
         with self._mock_urlopen(sessions):
-            action, sid = detect_action("BAK-5", "http://localhost:9876/mcp")
-        self.assertEqual(action, "resume")
-        self.assertEqual(sid, "sess-flat")
+            action, sid = detect_action("BAK-5", "http://localhost:9876")
+        self.assertEqual(action, "new")
+        self.assertIsNone(sid)
 
 
 # ---------------------------------------------------------------------------
