@@ -773,11 +773,11 @@ async def get_sessions(
     """
     manager = request.app.state.session_manager
     sessions = manager.list_sessions()
-    result = []
-    for session in sessions:
-        d = session.model_dump(mode="json")
-        if ticket_id is None or session.ticket_id == ticket_id:
-            result.append(d)
+    result = [
+        session.model_dump(mode="json")
+        for session in sessions
+        if ticket_id is None or session.ticket_id == ticket_id
+    ]
     return JSONResponse(result)
 
 

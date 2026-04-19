@@ -1269,5 +1269,81 @@ class TestNotifications(unittest.TestCase):
         assert len(matching) == 1
 
 
+class TestClaudeCodeSession(unittest.TestCase):
+    """Tests for ClaudeCodeSession creation and persistence."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_create_claude_code_session(self) -> None:
+        """Creating a ClaudeCodeSession returns correct fields."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        session = self.manager.create_claude_code_session(
+            session_id="cc-1",
+            title="PR #42 Review",
+            ticket_id="BAK-123",
+            worktree_path="/tmp/worktree",
+            skill="pr-audit",
+            pr_number=42,
+            pr_repo="acme/repo",
+        )
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.session_id == "cc-1"
+        assert session.title == "PR #42 Review"
+        assert session.ticket_id == "BAK-123"
+        assert session.worktree_path == "/tmp/worktree"
+        assert session.skill == "pr-audit"
+        assert session.pr_number == 42
+        assert session.pr_repo == "acme/repo"
+        assert session.state == SessionState.STARTED
+
+    def test_create_duplicate_raises(self) -> None:
+        """Duplicate session_id raises ValueError."""
+        self.manager.create_claude_code_session(session_id="cc-dup", title="First")
+        with self.assertRaises(ValueError, msg="Session already exists"):
+            self.manager.create_claude_code_session(session_id="cc-dup", title="Second")
+
+    def test_invalid_session_id_raises(self) -> None:
+        """Invalid session_id is rejected."""
+        with self.assertRaises(ValueError):
+            self.manager.create_claude_code_session(session_id="../bad", title="Bad")
+
+    def test_persisted_and_reloaded(self) -> None:
+        """ClaudeCodeSession survives round-trip through disk persistence."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(
+            session_id="cc-persist",
+            title="Persist Test",
+            ticket_id="FRO-99",
+            pr_number=99,
+            pr_repo="acme/frontend",
+        )
+        # Create a new manager that loads from the same directory
+        manager2 = SessionManager(data_dir=self.data_dir)
+        sessions = manager2.list_sessions()
+        matching = [s for s in sessions if s.session_id == "cc-persist"]
+        assert len(matching) == 1
+        loaded = matching[0]
+        assert isinstance(loaded, ClaudeCodeSession)
+        assert loaded.title == "Persist Test"
+        assert loaded.ticket_id == "FRO-99"
+        assert loaded.pr_number == 99
+        assert loaded.pr_repo == "acme/frontend"
+
+    def test_listed_in_list_sessions(self) -> None:
+        """ClaudeCodeSession appears in list_sessions()."""
+        self.manager.create_claude_code_session(session_id="cc-list", title="List Test")
+        sessions = self.manager.list_sessions()
+        ids = [s.session_id for s in sessions]
+        assert "cc-list" in ids
+
+
 if __name__ == "__main__":
     unittest.main()

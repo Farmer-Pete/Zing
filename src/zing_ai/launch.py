@@ -32,10 +32,12 @@ class LaunchError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Ticket ID regex (same pattern as command_center.py)
+# Ticket ID pattern — canonical source. Other modules import this.
 # ---------------------------------------------------------------------------
 
-_TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")
+TICKET_ID_PATTERN = r"[A-Z]{2,}-\d+"
+
+_TICKET_RE = re.compile(rf"\b{TICKET_ID_PATTERN}\b")
 
 # ---------------------------------------------------------------------------
 # PR URL helpers
@@ -284,9 +286,19 @@ def checkout_pr_branch(
             cwd=repo_root,
         )
 
-    # Reuse existing worktree if it already exists at the expected path
+    # Reuse existing worktree if it already exists and is a valid git checkout
     if worktree_path.is_dir():
-        return worktree_path
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=worktree_path,
+            )
+            return worktree_path
+        except subprocess.CalledProcessError:
+            pass  # directory exists but isn't a valid worktree — fall through to create
 
     try:
         subprocess.run(

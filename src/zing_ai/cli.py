@@ -170,9 +170,6 @@ def mcp_cmd(port: int) -> None:
     uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=3)
 
 
-_TICKET_RE = re.compile(r"^[A-Z]+-\d+$")
-
-
 @cli.command()
 @click.argument("target")  # ticket ID or PR URL
 @click.option("--resume/--no-resume", default=True, help="Auto-resume existing session if found")
@@ -184,6 +181,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
+        TICKET_ID_PATTERN,
         LaunchError,
         build_claude_args,
         checkout_pr_branch,
@@ -213,14 +211,6 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
         git_cfg = cfg.git
         workflow_mode = git_cfg.workflow_mode
 
-        # Read Linear API key from ~/.config/lr/config.json
-        lr_config_path = Path.home() / ".config" / "lr" / "config.json"
-        try:
-            lr_config = json.loads(lr_config_path.read_text())
-            api_key = lr_config["workspaces"][lr_config["activeWorkspace"]]["apiKey"]
-        except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
-            raise LaunchError(f"Could not read Linear API key from {lr_config_path}: {e}") from e
-
         # Check server is running (any HTTP response means it's up)
         check_req = urllib.request.Request(server_url, method="GET")
         try:
@@ -233,7 +223,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
             ) from e
 
         # Detect target type: ticket ID or PR URL
-        is_ticket = bool(_TICKET_RE.match(target))
+        is_ticket = bool(re.match(rf"^{TICKET_ID_PATTERN}$", target))
 
         if is_ticket:
             ticket_id = target
@@ -253,7 +243,16 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                 os.execvp("claude", args)
                 return  # unreachable, but satisfies type checkers
 
-            # New ticket flow
+            # New ticket flow — read Linear API key (only needed for tickets)
+            lr_config_path = Path.home() / ".config" / "lr" / "config.json"
+            try:
+                lr_config = json.loads(lr_config_path.read_text())
+                api_key = lr_config["workspaces"][lr_config["activeWorkspace"]]["apiKey"]
+            except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
+                raise LaunchError(
+                    f"Could not read Linear API key from {lr_config_path}: {e}"
+                ) from e
+
             repo_root = resolve_repo_root(Path.cwd())
             branch_name = derive_branch_name(ticket_id, api_key)
 

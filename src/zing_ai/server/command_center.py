@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
+from zing_ai.launch import TICKET_ID_PATTERN
 from zing_ai.server.models import (
     ClaudeCodeSession,
     Session,
@@ -46,10 +47,10 @@ def _actionable_findings(step: WorkflowStep) -> list:
     return [f for f in step.findings if getattr(f, "type", None) != "evaluation"]
 
 
-# Ticket ids look like ``BAK-1179`` / ``FRO-42``. Require two+ letter prefixes
-# and word boundaries so noisy tokens like ``UTF-8``/``SHA-256``/``PR-1`` don't
-# masquerade as tickets. Length-1 team keys aren't used by Linear in practice.
-_TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b", re.IGNORECASE)
+# Ticket ids look like ``BAK-1179`` / ``FRO-42``. Uses the shared pattern from
+# launch.py with word boundaries and case-insensitive matching so noisy tokens
+# like ``UTF-8``/``SHA-256``/``PR-1`` don't masquerade as tickets.
+_TICKET_RE = re.compile(rf"\b{TICKET_ID_PATTERN}\b", re.IGNORECASE)
 _PR_NUMBER_RE = re.compile(r"#(\d+)\b")
 
 
@@ -114,6 +115,7 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
         if pr.merged_at is not None:
             candidates.append(pr.merged_at)
     for session in card.sessions:
+        candidates.append(session.created_at)
         if isinstance(session, ZingSession):
             for step in session.steps:
                 candidates.append(step.created_at)
@@ -126,15 +128,18 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
 
 
 def _has_active_session(card: KanbanCard) -> bool:
-    """Any session is active (ClaudeCodeSession or ZingSession with a STARTED step)."""
-    for session in card.sessions:
-        if isinstance(session, ClaudeCodeSession):
-            return True
-        if isinstance(session, ZingSession) and any(
-            step.state == SessionState.STARTED for step in session.steps
-        ):
-            return True
-    return False
+    """Any ZingSession has a step in STARTED state.
+
+    ClaudeCodeSession is intentionally excluded — it has no lifecycle
+    states, so treating it as always-active would permanently pin cards
+    to In Progress.  It still renders as a session indicator on the card.
+    """
+    return any(
+        step.state == SessionState.STARTED
+        for session in card.sessions
+        if isinstance(session, ZingSession)
+        for step in session.steps
+    )
 
 
 def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
@@ -419,23 +424,32 @@ def aggregate(
     # -----------------------------------------------------------------------
     orphan_cards: dict[str, KanbanCard] = {}
     for pr in orphan_prs:
-        key = f"pr-{pr.number}"
+        key = f"pr-{pr.repo}-{pr.number}" if pr.repo else f"pr-{pr.number}"
         orphan_cards[key] = KanbanCard(
             key=key,
             ticket=None,
             prs=[pr],
         )
 
-    # Attach sessions that matched by PR number (from step 4)
+    # Attach sessions that matched by PR number (from step 4).
+    # ClaudeCodeSession has pr_repo for exact matching; ZingSession falls back
+    # to matching by PR number suffix across all orphan card keys.
     for session in pr_sessions:
         pr_num = _session_pr_number(session)
-        key = f"pr-{pr_num}"
-        if key in orphan_cards:
-            orphan_cards[key].sessions.append(session)
+        pr_repo = getattr(session, "pr_repo", None) or ""
+        key = f"pr-{pr_repo}-{pr_num}" if pr_repo else None
+        if key and key in orphan_cards:
+            target_card = orphan_cards[key]
+        else:
+            # Fallback: match by PR number suffix (for ZingSessions without repo info)
+            suffix = f"-{pr_num}"
+            target_card = next((c for k, c in orphan_cards.items() if k.endswith(suffix)), None)
+        if target_card is not None:
+            target_card.sessions.append(session)
             if isinstance(session, ZingSession):
                 for step in session.steps:
                     if step.step_name in AUDIT_STEP_NAMES:
-                        orphan_cards[key].audit_steps.append(step)
+                        target_card.audit_steps.append(step)
 
     # -----------------------------------------------------------------------
     # 6. Collect all cards and filter empties

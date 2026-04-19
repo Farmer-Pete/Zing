@@ -13,7 +13,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from zing_ai.server.models import Session, SessionState, WorkflowStep, ZingSession
+from zing_ai.server.models import (
+    ClaudeCodeSession,
+    Session,
+    SessionState,
+    WorkflowStep,
+    ZingSession,
+)
 from zing_ai.server.models_external import GitHubPR, LinearIssue
 
 
@@ -55,12 +61,15 @@ def make_pr(
     base_ref: str = "main",
     author: str = "octocat",
     requested_reviewers: list[str] | None = None,
+    reviewers: list[str] | None = None,
     review_decision: str | None = None,
+    repo: str = "org/repo",
     mergeable_state: str = "clean",
     ci_status: str | None = None,
     ci_checks: list[Any] | None = None,
     url: str | None = None,
     updated_at: datetime | None = None,
+    merged_at: datetime | None = None,
 ) -> GitHubPR:
     """Build a :class:`GitHubPR` with sensible defaults for tests."""
     return GitHubPR(
@@ -72,13 +81,16 @@ def make_pr(
         base_ref=base_ref,
         body=body,
         author=author,
+        repo=repo,
         requested_reviewers=requested_reviewers or [],
+        reviewers=reviewers or [],
         review_decision=review_decision,  # type: ignore[arg-type]
         mergeable_state=mergeable_state,
         ci_status=ci_status,
         ci_checks=ci_checks or [],
         url=url or f"https://github.com/o/r/pull/{number}",
         updated_at=updated_at or datetime(2026, 4, 16, 0, 0, 0, tzinfo=UTC),
+        merged_at=merged_at,
     )
 
 
@@ -95,6 +107,24 @@ def make_session(
         title=title,
         ticket_id=ticket_id,
         steps=steps or [],
+    )
+
+
+def make_claude_code_session(
+    *,
+    session_id: str = "cc-1",
+    title: str = "Claude Code Session",
+    ticket_id: str | None = None,
+    pr_number: int | None = None,
+    pr_repo: str | None = None,
+) -> ClaudeCodeSession:
+    """Build a :class:`ClaudeCodeSession` with sensible defaults for tests."""
+    return ClaudeCodeSession(
+        session_id=session_id,
+        title=title,
+        ticket_id=ticket_id,
+        pr_number=pr_number,
+        pr_repo=pr_repo,
     )
 
 
