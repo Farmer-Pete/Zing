@@ -236,12 +236,16 @@ def _user_involved_in_done_card(card: KanbanCard, current_username: str) -> bool
     """Return True if the user authored or reviewed any PR on this card.
 
     For ticket-only cards (no PRs), always include them (they're the user's
-    assigned tickets).
+    assigned tickets).  Checks both ``requested_reviewers`` (pending reviews)
+    and ``reviewers`` (submitted reviews) to cover approved PRs where the
+    reviewer is no longer in ``requested_reviewers``.
     """
     if not card.prs:
         return True  # ticket-only card, no PR filter needed
     return any(
-        pr.author == current_username or current_username in pr.requested_reviewers
+        pr.author == current_username
+        or current_username in pr.requested_reviewers
+        or current_username in pr.reviewers
         for pr in card.prs
     )
 

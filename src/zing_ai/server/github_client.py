@@ -62,6 +62,17 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
         if node.get("requestedReviewer") and "login" in node["requestedReviewer"]
     ]
 
+    # latestReviews nodes contain author objects; surface user logins only.
+    latest_reviews = pr.get("latestReviews") or {}
+    review_nodes = latest_reviews.get("nodes") or []
+    reviewers = list(
+        {
+            node["author"]["login"]
+            for node in review_nodes
+            if node.get("author") and "login" in node["author"]
+        }
+    )
+
     # CI status lives at commits -> last commit -> statusCheckRollup
     commits = pr.get("commits") or {}
     commit_nodes = commits.get("nodes") or []
@@ -119,6 +130,7 @@ def _map_pr(pr: dict, *, repo: str = "") -> GitHubPR:
         author=author,
         repo=repo,
         requested_reviewers=requested_reviewers,
+        reviewers=reviewers,
         review_decision=pr.get("reviewDecision"),
         mergeable_state=mergeable_state,
         ci_status=ci_status,
@@ -241,6 +253,11 @@ class GitHubClient:
                     requestedReviewer {
                       ... on User { login }
                     }
+                  }
+                }
+                latestReviews(first: 10) {
+                  nodes {
+                    author { login }
                   }
                 }
                 commits(last: 1) {
