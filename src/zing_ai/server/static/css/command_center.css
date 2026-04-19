@@ -147,6 +147,10 @@ details.review-group[open] > .review-group-header::before {
     color: var(--gray-400);
 }
 
+.review-group-ready-to-merge .review-group-title {
+    color: #2e7d32;
+}
+
 /* ──────────────────────────────────────────────
    CARDS
 ────────────────────────────────────────────── */

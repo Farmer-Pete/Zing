@@ -232,6 +232,32 @@ def _classify_card(
     return "todo"
 
 
+def _user_involved_in_done_card(card: KanbanCard, current_username: str) -> bool:
+    """Return True if the user authored or reviewed any PR on this card.
+
+    For ticket-only cards (no PRs), always include them (they're the user's
+    assigned tickets).
+    """
+    if not card.prs:
+        return True  # ticket-only card, no PR filter needed
+    return any(
+        pr.author == current_username or current_username in pr.requested_reviewers
+        for pr in card.prs
+    )
+
+
+def _assign_done_group(card: KanbanCard) -> str:
+    """Return the done sub-group for a done card.
+
+    - ``ready_to_merge``: has an open PR that is approved but not yet merged
+    - ``completed``: merged PRs or completed tickets
+    """
+    for pr in card.prs:
+        if pr.state == "open" and pr.review_decision == "APPROVED":
+            return "ready_to_merge"
+    return "completed"
+
+
 def _todo_sort_key(card: KanbanCard) -> tuple:
     """Sort key for todo column.
 
@@ -381,7 +407,8 @@ def aggregate(
         elif column == "needs_review":
             view.needs_review.append(card)
         elif column == "done":
-            view.done.append(card)
+            if _user_involved_in_done_card(card, _username):
+                view.done.append(card)
         else:
             view.todo.append(card)
 
@@ -404,5 +431,14 @@ def aggregate(
     # Sort needs_review by group order: mine_passing, mine_failing, others
     _GROUP_ORDER = {"mine_passing": 0, "mine_failing": 1, "others": 2}
     view.needs_review.sort(key=lambda c: _GROUP_ORDER.get(c.review_group or "", 3))
+
+    # -----------------------------------------------------------------------
+    # 10. Assign done groups and sort: ready_to_merge first, then completed
+    # -----------------------------------------------------------------------
+    for card in view.done:
+        card.done_group = _assign_done_group(card)
+
+    _DONE_GROUP_ORDER = {"ready_to_merge": 0, "completed": 1}
+    view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))
 
     return view

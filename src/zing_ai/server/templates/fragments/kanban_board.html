@@ -9,6 +9,6 @@
     {% include "fragments/kanban_column_review.html" %}
   {% endwith %}
   {% with column_name="Done", column_cls="col-done", column_id="col-done", cards=view.done %}
-    {% include "fragments/kanban_column.html" %}
+    {% include "fragments/kanban_column_done.html" %}
   {% endwith %}
 </div>

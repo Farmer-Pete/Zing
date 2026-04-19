@@ -1,0 +1,46 @@
+{#
+  kanban_column_done.html — renders the "Done" column with
+  optional "Ready to Merge" section at the top.
+
+  Expected context variables:
+    column_name  — display name, e.g. "Done"
+    column_cls   — CSS class, e.g. "col-done"
+    column_id    — element id, e.g. "col-done"
+    cards        — list[KanbanCard] (pre-sorted by done_group)
+#}
+{% set ready_to_merge = cards | selectattr("done_group", "equalto", "ready_to_merge") | list %}
+{% set completed = cards | selectattr("done_group", "equalto", "completed") | list %}
+
+<div class="column {{ column_cls }}" id="{{ column_id }}">
+  <div class="column-header">
+    {{ column_name }}
+    <span class="count">{{ cards | length }}</span>
+  </div>
+  <div class="card-list">
+    {% if not cards %}
+      <div class="column-empty">Nothing here</div>
+    {% endif %}
+
+    {% if ready_to_merge %}
+      <details class="review-group" open>
+        <summary class="review-group-header review-group-ready-to-merge">
+          <span class="review-group-title">Ready to merge</span>
+          <span class="review-group-count">{{ ready_to_merge | length }}</span>
+        </summary>
+        {% for card in ready_to_merge %}
+          {% with column_cls=column_cls %}
+            {% include "fragments/kanban_card.html" %}
+          {% endwith %}
+        {% endfor %}
+      </details>
+    {% endif %}
+
+    {% if completed %}
+      {% for card in completed %}
+        {% with column_cls=column_cls %}
+          {% include "fragments/kanban_card.html" %}
+        {% endwith %}
+      {% endfor %}
+    {% endif %}
+  </div>
+</div>
