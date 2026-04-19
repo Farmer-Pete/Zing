@@ -271,7 +271,7 @@ class TestRunInitScript(TestCase):
             mock_run.assert_not_called()
 
     def test_runs_script_with_correct_env_vars(self) -> None:
-        """Script is invoked from worktree dir with the correct env vars."""
+        """Script is invoked from repo root with the correct env vars."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as repo_dir:
@@ -293,7 +293,7 @@ class TestRunInitScript(TestCase):
             self.assertEqual(env["ZING_WORKTREE_PATH"], str(worktree_path))
             self.assertEqual(env["ZING_SPEC_FILE"], "")
             self.assertEqual(env["ZING_SESSION_ID"], "")
-            self.assertEqual(kwargs["cwd"], worktree_path)
+            self.assertEqual(kwargs["cwd"], repo_root)
 
     def test_raises_on_script_failure(self) -> None:
         import tempfile
@@ -500,26 +500,50 @@ class TestBuildClaudeArgs(TestCase):
     """Tests for build_claude_args."""
 
     def test_new_ticket_session(self) -> None:
-        args = build_claude_args("new", "BAK-123", "sess-abc", "my session")
+        args = build_claude_args("new", "sess-abc", "my session", target="BAK-123")
         self.assertEqual(
             args,
             ["claude", "/zing:new BAK-123", "--session-id", "sess-abc", "--name", "my session"],
         )
 
     def test_pr_audit_session(self) -> None:
-        args = build_claude_args("pr-audit", None, "sess-xyz", "pr session")
+        pr_url = "https://github.com/acme/repo/pull/42"
+        args = build_claude_args("pr-audit", "sess-xyz", "pr session", target=pr_url)
         self.assertEqual(
             args,
-            ["claude", "/zing:pr-audit", "--session-id", "sess-xyz", "--name", "pr session"],
+            [
+                "claude",
+                f"/zing:pr-audit {pr_url}",
+                "--session-id",
+                "sess-xyz",
+                "--name",
+                "pr session",
+            ],
+        )
+
+    def test_pr_audit_visual_session(self) -> None:
+        """Any pr-* skill produces /zing:<skill> <target>."""
+        pr_url = "https://github.com/acme/repo/pull/99"
+        args = build_claude_args("pr-audit-visual", "sess-vis", "visual review", target=pr_url)
+        self.assertEqual(
+            args,
+            [
+                "claude",
+                f"/zing:pr-audit-visual {pr_url}",
+                "--session-id",
+                "sess-vis",
+                "--name",
+                "visual review",
+            ],
         )
 
     def test_resume_session(self) -> None:
-        args = build_claude_args("resume", "BAK-123", "sess-old", "old session")
+        args = build_claude_args("resume", "sess-old", "old session")
         self.assertEqual(args, ["claude", "--resume", "sess-old"])
 
-    def test_new_without_ticket_id(self) -> None:
-        """When ticket_id is None for a new session, omit it from the slash command."""
-        args = build_claude_args("new", None, "sess-no-ticket", "unticketed")
+    def test_new_without_target(self) -> None:
+        """When target is None, omit it from the slash command."""
+        args = build_claude_args("new", "sess-no-ticket", "unticketed")
         self.assertEqual(
             args,
             [
@@ -533,11 +557,18 @@ class TestBuildClaudeArgs(TestCase):
         )
 
     def test_custom_skill(self) -> None:
-        """Any skill other than 'resume' or 'pr-audit' produces a new-session argv."""
-        args = build_claude_args("build", "BAK-7", "sess-build", "build session")
+        """Any skill produces /zing:<skill> <target>."""
+        args = build_claude_args("build", "sess-build", "build session", target="BAK-7")
         self.assertEqual(
             args,
-            ["claude", "/zing:new BAK-7", "--session-id", "sess-build", "--name", "build session"],
+            [
+                "claude",
+                "/zing:build BAK-7",
+                "--session-id",
+                "sess-build",
+                "--name",
+                "build session",
+            ],
         )
 
 

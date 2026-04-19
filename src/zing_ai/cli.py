@@ -177,7 +177,10 @@ _TICKET_RE = re.compile(r"^[A-Z]+-\d+$")
 @click.argument("target")  # ticket ID or PR URL
 @click.option("--resume/--no-resume", default=True, help="Auto-resume existing session if found")
 @click.option("--port", default=9876, type=int, help="Port the Zing server is listening on.")
-def launch(target: str, resume: bool, port: int) -> None:
+@click.option(
+    "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
+)
+def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
@@ -218,10 +221,12 @@ def launch(target: str, resume: bool, port: int) -> None:
         except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
             raise LaunchError(f"Could not read Linear API key from {lr_config_path}: {e}") from e
 
-        # Check server is running
+        # Check server is running (any HTTP response means it's up)
         check_req = urllib.request.Request(server_url, method="GET")
         try:
             urllib.request.urlopen(check_req)
+        except urllib.error.HTTPError:
+            pass  # Server is running, just returned a non-2xx status
         except urllib.error.URLError as e:
             raise LaunchError(
                 f"Zing server is not running at {server_url}. Start it with 'zing-ai mcp'."
@@ -242,7 +247,6 @@ def launch(target: str, resume: bool, port: int) -> None:
             if action == "resume" and existing_session_id is not None:
                 args = build_claude_args(
                     skill="resume",
-                    ticket_id=ticket_id,
                     session_id=existing_session_id,
                     name=ticket_id,
                 )
@@ -315,20 +319,22 @@ def launch(target: str, resume: bool, port: int) -> None:
 
             args = build_claude_args(
                 skill="new",
-                ticket_id=ticket_id,
                 session_id=session_id,
                 name=ticket_id,
+                target=ticket_id,
             )
+            os.chdir(work_dir)
             os.execvp("claude", args)
 
         else:
             # PR URL flow
+            pr_skill = skill or "pr-audit"
             owner, repo, pr_number = parse_pr_url(target)
             pr_data = fetch_pr_data(owner, repo, pr_number)
             branch_name = pr_data["headRefName"]
             pr_title = pr_data.get("title", "")
             pr_body = pr_data.get("body", "") or ""
-            ticket_id = extract_ticket_id(branch_name, pr_title, pr_body) or ""
+            ticket_id = extract_ticket_id(branch_name, pr_title, pr_body)
             pr_name = f"PR #{pr_number} Review"
 
             repo_root = resolve_repo_root(Path.cwd())
@@ -383,7 +389,9 @@ def launch(target: str, resume: bool, port: int) -> None:
                     title=pr_name,
                     ticket_id=ticket_id,
                     worktree_path=str(work_dir) if work_dir else None,
-                    skill="pr-audit",
+                    skill=pr_skill,
+                    pr_number=pr_number,
+                    pr_repo=f"{owner}/{repo}",
                 )
                 succeeded = True
             finally:
@@ -391,11 +399,12 @@ def launch(target: str, resume: bool, port: int) -> None:
                     rollback_worktree(worktree_path)
 
             args = build_claude_args(
-                skill="pr-audit",
-                ticket_id=ticket_id,
+                skill=pr_skill,
                 session_id=session_id,
                 name=pr_name,
+                target=target,
             )
+            os.chdir(work_dir)
             os.execvp("claude", args)
 
     except LaunchError as e:

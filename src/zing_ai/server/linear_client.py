@@ -51,7 +51,9 @@ query MyOpenIssues($viewerId: ID!, $first: Int!, $after: String) {
 """
 
 _COMPLETED_ISSUES_QUERY = """
-query MyCompletedIssues($viewerId: ID!, $first: Int!, $after: String, $since: DateTimeComparators) {
+query MyCompletedIssues(
+  $viewerId: ID!, $first: Int!, $after: String, $since: NullableDateComparator
+) {
   issues(
     first: $first,
     after: $after,

@@ -354,6 +354,8 @@ class ClaudeCodeSession(SessionBase):
     session_type: Literal["claude_code"] = "claude_code"
     worktree_path: str | None = None
     skill: str | None = None
+    pr_number: int | None = None
+    pr_repo: str | None = None
 
     @property
     def state(self) -> SessionState:

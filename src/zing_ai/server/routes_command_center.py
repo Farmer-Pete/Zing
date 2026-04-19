@@ -61,8 +61,8 @@ def _view_fingerprint(cache, sessions: list) -> tuple:  # noqa: ANN001
         (
             s.session_id,
             s.ticket_id,
-            len(s.steps),
-            s.steps[-1].state.value if s.steps else "",
+            len(steps) if (steps := getattr(s, "steps", None)) else 0,
+            steps[-1].state.value if steps else "",
         )
         for s in sessions
     )

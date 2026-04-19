@@ -193,6 +193,8 @@ class SessionManager:
         ticket_id: str | None = None,
         worktree_path: str | None = None,
         skill: str | None = None,
+        pr_number: int | None = None,
+        pr_repo: str | None = None,
     ) -> ClaudeCodeSession:
         """Create a new ClaudeCodeSession and persist it.
 
@@ -202,6 +204,8 @@ class SessionManager:
             ticket_id: Linear ticket ID, or None.
             worktree_path: Absolute worktree path, or None.
             skill: Skill/command name, or None.
+            pr_number: GitHub PR number, or None.
+            pr_repo: GitHub repo as ``"owner/repo"``, or None.
 
         Returns:
             The newly created ClaudeCodeSession.
@@ -219,6 +223,8 @@ class SessionManager:
             ticket_id=ticket_id,
             worktree_path=worktree_path,
             skill=skill,
+            pr_number=pr_number,
+            pr_repo=pr_repo,
         )
         self._sessions[session_id] = session
         self._persist(session)

@@ -14,6 +14,7 @@ Workflow mode notes
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -274,6 +275,19 @@ def checkout_pr_branch(
     relative = worktree_root_template.format(repo=repo_name, branch=branch_name)
     worktree_path = (repo_root / relative).resolve()
 
+    # Best-effort fetch so the branch exists locally for worktree add
+    with contextlib.suppress(subprocess.CalledProcessError):
+        subprocess.run(
+            ["git", "fetch", "origin", branch_name],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+
+    # Reuse existing worktree if it already exists at the expected path
+    if worktree_path.is_dir():
+        return worktree_path
+
     try:
         subprocess.run(
             ["git", "worktree", "add", str(worktree_path), branch_name],
@@ -321,10 +335,10 @@ def run_init_script(
     worktree_path: Path,
     branch: str,
 ) -> None:
-    """Run the repository's init script inside the worktree directory, if present.
+    """Run the repository's init script from the repo root, if present.
 
     Looks for ``<repo_root>/<script_name>``.  If the file exists, runs it as a
-    subprocess from *worktree_path* with the following environment variables:
+    subprocess from *repo_root* with the following environment variables:
 
     - ``ZING_BRANCH`` — *branch*
     - ``ZING_WORKTREE_PATH`` — absolute string of *worktree_path*
@@ -356,7 +370,7 @@ def run_init_script(
             check=True,
             capture_output=True,
             text=True,
-            cwd=worktree_path,
+            cwd=repo_root,
             env=env,
         )
     except subprocess.CalledProcessError as exc:
@@ -518,6 +532,8 @@ def create_session_on_server(
     ticket_id: str | None,
     worktree_path: str | None,
     skill: str | None,
+    pr_number: int | None = None,
+    pr_repo: str | None = None,
 ) -> None:
     """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
@@ -531,6 +547,8 @@ def create_session_on_server(
         ticket_id: Linear ticket ID, or ``None``.
         worktree_path: Absolute worktree path, or ``None``.
         skill: Skill/command name, or ``None``.
+        pr_number: GitHub PR number, or ``None``.
+        pr_repo: GitHub repo as ``"owner/repo"``, or ``None``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -541,6 +559,8 @@ def create_session_on_server(
         "ticket_id": ticket_id,
         "worktree_path": worktree_path,
         "skill": skill,
+        "pr_number": pr_number,
+        "pr_repo": pr_repo,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -608,26 +628,25 @@ def detect_action(
 
 def build_claude_args(
     skill: str,
-    ticket_id: str | None,
     session_id: str,
     name: str,
+    target: str | None = None,
 ) -> list[str]:
     """Build the argv list to pass to ``os.execvp("claude", ...)`` .
 
-    Three modes are supported:
+    Modes:
 
     - ``skill == "resume"``: ``["claude", "--resume", session_id]``
-    - ``skill == "pr-audit"``: ``["claude", "/zing:pr-audit", "--session-id", session_id,
-      "--name", name]``
-    - anything else (e.g. ``"new"``): ``["claude", "/zing:new <ticket_id>", "--session-id",
+    - anything else: ``["claude", "/zing:<skill> <target>", "--session-id",
       session_id, "--name", name]``
 
     Args:
-        skill: One of ``"resume"``, ``"pr-audit"``, or a new-session skill (e.g. ``"new"``).
-        ticket_id: Linear ticket ID, used in the new-session slash command.  May be ``None``
-            for resume/pr-audit flows.
+        skill: Skill name (e.g. ``"resume"``, ``"new"``, ``"pr-audit"``,
+            ``"pr-audit-visual"``).
         session_id: Claude session identifier.
         name: Session display name.
+        target: Argument passed to the slash command (ticket ID for new-ticket
+            flows, PR URL for PR flows).  Omitted from the command when ``None``.
 
     Returns:
         List of strings suitable for ``os.execvp``.
@@ -635,9 +654,5 @@ def build_claude_args(
     if skill == "resume":
         return ["claude", "--resume", session_id]
 
-    if skill == "pr-audit":
-        return ["claude", "/zing:pr-audit", "--session-id", session_id, "--name", name]
-
-    # Default: new ticket session
-    slash_cmd = f"/zing:new {ticket_id}" if ticket_id else "/zing:new"
+    slash_cmd = f"/zing:{skill} {target}" if target else f"/zing:{skill}"
     return ["claude", slash_cmd, "--session-id", session_id, "--name", name]

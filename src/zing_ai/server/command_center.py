@@ -11,7 +11,13 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
-from zing_ai.server.models import Session, SessionState, WorkflowStep, ZingSession
+from zing_ai.server.models import (
+    ClaudeCodeSession,
+    Session,
+    SessionState,
+    WorkflowStep,
+    ZingSession,
+)
 from zing_ai.server.models_external import (
     GitHubPR,
     KanbanCard,
@@ -44,6 +50,33 @@ def _actionable_findings(step: WorkflowStep) -> list:
 # and word boundaries so noisy tokens like ``UTF-8``/``SHA-256``/``PR-1`` don't
 # masquerade as tickets. Length-1 team keys aren't used by Linear in practice.
 _TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b", re.IGNORECASE)
+_PR_NUMBER_RE = re.compile(r"#(\d+)\b")
+
+
+def _session_pr_number(session: Session) -> int | None:
+    """Extract a PR number from a session, if available.
+
+    For ``ClaudeCodeSession``, uses the explicit ``pr_number`` field only.
+    For ``ZingSession``, parses ``#<number>`` from the title (e.g.
+    ``"PR Review — #1858 feat: ..."``) or session_id (e.g.
+    ``"pr-review-1858-..."``)
+
+    Title/ID parsing is intentionally skipped for ``ClaudeCodeSession``
+    because those sessions may carry a ``ticket_id`` that failed to match
+    a card — falling back to title parsing would incorrectly attach them
+    to an orphan PR card.
+    """
+    if isinstance(session, ClaudeCodeSession):
+        return session.pr_number  # explicit field only, may be None
+    # ZingSession: try title first: "PR Review — #1858 ..."
+    match = _PR_NUMBER_RE.search(session.title)
+    if match:
+        return int(match.group(1))
+    # Try session_id: "pr-review-1858-..."
+    id_match = re.match(r"pr-review-(\d+)-", session.session_id)
+    if id_match:
+        return int(id_match.group(1))
+    return None
 
 
 def _parse_ticket_id(pr: GitHubPR) -> str | None:
@@ -93,13 +126,15 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
 
 
 def _has_active_session(card: KanbanCard) -> bool:
-    """Any session has a step in STARTED state."""
-    return any(
-        step.state == SessionState.STARTED
-        for session in card.sessions
-        if isinstance(session, ZingSession)
-        for step in session.steps
-    )
+    """Any session is active (ClaudeCodeSession or ZingSession with a STARTED step)."""
+    for session in card.sessions:
+        if isinstance(session, ClaudeCodeSession):
+            return True
+        if isinstance(session, ZingSession) and any(
+            step.state == SessionState.STARTED for step in session.steps
+        ):
+            return True
+    return False
 
 
 def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
@@ -129,8 +164,8 @@ def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
     return False
 
 
-def _is_recently_done(card: KanbanCard, cutoff: datetime) -> bool:
-    """Ticket completed or PR merged/approved within the cutoff window."""
+def _is_recently_done(card: KanbanCard, cutoff: datetime, current_username: str = "") -> bool:
+    """Ticket completed, PR merged/approved, or user submitted a review within the cutoff."""
     if (
         card.ticket is not None
         and card.ticket.state_type == "completed"
@@ -147,6 +182,15 @@ def _is_recently_done(card: KanbanCard, cutoff: datetime) -> bool:
             return True
         if pr.review_decision == "APPROVED" and _ensure_utc(pr.updated_at) >= cutoff:
             return True
+        # User submitted a review — their review work is done
+        if (
+            pr.state == "open"
+            and current_username
+            and current_username in pr.reviewers
+            and current_username not in pr.requested_reviewers
+            and _ensure_utc(pr.updated_at) >= cutoff
+        ):
+            return True
 
     return False
 
@@ -156,13 +200,15 @@ def _is_recently_done(card: KanbanCard, cutoff: datetime) -> bool:
 
 def _should_include_card(card: KanbanCard, current_username: str, cutoff: datetime) -> bool:
     """Return False when the card should be excluded from the board entirely."""
-    # Orphan-PR cards where the user is neither author nor reviewer.
+    # Orphan-PR cards where the user is neither author nor reviewer and has no session.
     if card.ticket is None and card.prs:
         user_involved = any(
-            pr.author == current_username or current_username in pr.requested_reviewers
+            pr.author == current_username
+            or current_username in pr.requested_reviewers
+            or current_username in pr.reviewers
             for pr in card.prs
         )
-        if not user_involved:
+        if not user_involved and not card.sessions:
             return False
 
     # Stale approved PRs: all PRs approved, none updated within the done window,
@@ -222,7 +268,7 @@ def _classify_card(
     if _has_pr_needing_review(card, current_username):
         return "needs_review"
 
-    if _is_recently_done(card, cutoff):
+    if _is_recently_done(card, cutoff, current_username):
         return "done"
 
     # Ticket is actively being worked on but no PR signal drove it elsewhere.
@@ -352,37 +398,50 @@ def aggregate(
                 orphan_prs.append(pr)
 
     # -----------------------------------------------------------------------
-    # 4. Attach sessions; skip standalone sessions (no ticket_id)
+    # 4. Attach sessions; skip standalone sessions (no ticket_id and no pr_number)
     # -----------------------------------------------------------------------
+    # Sessions that have a pr_number but no ticket_id will be attached to
+    # orphan PR cards (keyed as "pr-{number}") in step 5 below.
+    pr_sessions: list[Session] = []
     for session in _sessions:
-        if not session.ticket_id:
-            continue  # exclude standalone sessions
-        if session.ticket_id in cards:
+        if session.ticket_id and session.ticket_id in cards:
             cards[session.ticket_id].sessions.append(session)
             # Surface audit steps (ZingSession only — ClaudeCodeSession has no steps)
             if isinstance(session, ZingSession):
                 for step in session.steps:
                     if step.step_name in AUDIT_STEP_NAMES:
                         cards[session.ticket_id].audit_steps.append(step)
+        elif _session_pr_number(session) is not None:
+            pr_sessions.append(session)
 
     # -----------------------------------------------------------------------
     # 5. Orphan PR cards (no matching ticket)
     # -----------------------------------------------------------------------
-    orphan_cards: list[KanbanCard] = []
+    orphan_cards: dict[str, KanbanCard] = {}
     for pr in orphan_prs:
-        orphan_cards.append(
-            KanbanCard(
-                key=f"pr-{pr.number}",
-                ticket=None,
-                prs=[pr],
-            )
+        key = f"pr-{pr.number}"
+        orphan_cards[key] = KanbanCard(
+            key=key,
+            ticket=None,
+            prs=[pr],
         )
+
+    # Attach sessions that matched by PR number (from step 4)
+    for session in pr_sessions:
+        pr_num = _session_pr_number(session)
+        key = f"pr-{pr_num}"
+        if key in orphan_cards:
+            orphan_cards[key].sessions.append(session)
+            if isinstance(session, ZingSession):
+                for step in session.steps:
+                    if step.step_name in AUDIT_STEP_NAMES:
+                        orphan_cards[key].audit_steps.append(step)
 
     # -----------------------------------------------------------------------
     # 6. Collect all cards and filter empties
     # -----------------------------------------------------------------------
     all_cards: list[KanbanCard] = [c for c in cards.values() if c.ticket is not None or c.prs] + [
-        c for c in orphan_cards if c.prs
+        c for c in orphan_cards.values() if c.prs
     ]
 
     # -----------------------------------------------------------------------
