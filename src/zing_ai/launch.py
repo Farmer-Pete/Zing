@@ -239,6 +239,10 @@ def create_worktree(
     worktree_path = (repo_root / relative).resolve()
     full_branch = f"{branch_prefix}{branch_name}"
 
+    # If the worktree directory already exists, reuse it.
+    if worktree_path.is_dir():
+        return worktree_path
+
     try:
         subprocess.run(
             ["git", "worktree", "add", "-b", full_branch, str(worktree_path)],
@@ -248,7 +252,21 @@ def create_worktree(
             cwd=repo_root,
         )
     except subprocess.CalledProcessError as exc:
-        raise LaunchError(f"git worktree add failed: {exc.stderr.strip()}") from exc
+        stderr = exc.stderr.strip()
+        # Branch already exists — create worktree without -b (reuse branch).
+        if "already exists" in stderr:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", str(worktree_path), full_branch],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_root,
+                )
+            except subprocess.CalledProcessError as exc2:
+                raise LaunchError(f"git worktree add failed: {exc2.stderr.strip()}") from exc2
+        else:
+            raise LaunchError(f"git worktree add failed: {stderr}") from exc
 
     return worktree_path
 
