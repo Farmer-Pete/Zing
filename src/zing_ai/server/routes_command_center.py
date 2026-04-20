@@ -33,6 +33,7 @@ from zing_ai.launch import (
     rollback_worktree,
 )
 from zing_ai.server.command_center import aggregate
+from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.templates import render
 
@@ -113,16 +114,81 @@ def _build_view(app: FastAPI) -> KanbanView:
     return view  # type: ignore[return-value]
 
 
+class _WorktreeEntry:
+    """Container for a ClaudeCodeSession worktree entry with orphan flag."""
+
+    def __init__(self, session: ClaudeCodeSession, orphaned: bool) -> None:
+        self.session = session
+        self.orphaned = orphaned
+
+
+def _build_tray_data(
+    view: KanbanView,
+    sessions: list,
+    live_tmux_sessions: set[str],
+) -> dict:
+    """Build running_sessions, worktree_entries, running_count, orphan_count for the tray.
+
+    Args:
+        view: The current KanbanView (all columns).
+        sessions: All sessions from the session manager.
+        live_tmux_sessions: Set of currently alive tmux session names.
+
+    Returns:
+        A dict with keys: running_sessions, worktree_entries, running_count, orphan_count.
+    """
+    # Collect all card keys in the done column and all existing card keys.
+    done_keys: set[str] = {card.key for card in view.done}
+    all_card_keys: set[str] = {
+        card.key
+        for col in (view.todo, view.in_progress, view.needs_review, view.done)
+        for card in col
+    }
+
+    running_sessions: list[ClaudeCodeSession] = []
+    worktree_entries: list[_WorktreeEntry] = []
+
+    for session in sessions:
+        if not isinstance(session, ClaudeCodeSession):
+            continue
+
+        # Track running sessions (alive in tmux).
+        if session.tmux_session and session.tmux_session in live_tmux_sessions:
+            running_sessions.append(session)
+
+        # Build worktree entries for sessions with a worktree_path.
+        if session.worktree_path:
+            ticket_id = session.ticket_id
+            # Orphaned: card is in done column, or no card exists at all.
+            if ticket_id is None or ticket_id in done_keys or ticket_id not in all_card_keys:
+                orphaned = True
+            else:
+                orphaned = False
+            worktree_entries.append(_WorktreeEntry(session=session, orphaned=orphaned))
+
+    orphan_count = sum(1 for e in worktree_entries if e.orphaned)
+
+    return {
+        "running_sessions": running_sessions,
+        "worktree_entries": worktree_entries,
+        "running_count": len(running_sessions),
+        "orphan_count": orphan_count,
+    }
+
+
 def render_board_fragment(app: FastAPI) -> str:
     """Render the full kanban board. Used by SSE board_changed events."""
     view = _build_view(app)
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
+    sessions = app.state.session_manager.list_sessions()
+    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
+        **tray_data,
     )  # hub disappeared between events
 
 
@@ -370,3 +436,68 @@ async def launch_background(request: Request, body: _LaunchBackgroundBody) -> JS
             launching_set.discard(card_key)
 
     return await _run_launch()
+
+
+# ---------------------------------------------------------------------------
+# Session management actions
+# ---------------------------------------------------------------------------
+
+
+def _push_board_changed(app: FastAPI) -> None:
+    """Push a board_changed event to all SSE queues."""
+    for q in app.state.cc_queues:
+        q.put_nowait("board_changed")
+
+
+class _KillSessionBody(BaseModel):
+    session_id: str
+
+
+@router.post("/command-center/kill-session")
+async def kill_session(request: Request, body: _KillSessionBody) -> JSONResponse:
+    """Kill a running tmux session and remove the session record."""
+    manager = request.app.state.session_manager
+    session = manager.get_session(body.session_id)
+
+    if session is None or not isinstance(session, ClaudeCodeSession) or not session.tmux_session:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+
+    subprocess.run(
+        ["tmux", "kill-session", "-t", session.tmux_session],
+        capture_output=True,
+    )
+
+    manager.cleanup_session(body.session_id)
+    _push_board_changed(request.app)
+    return JSONResponse({"status": "killed"})
+
+
+class _CleanupWorktreeBody(BaseModel):
+    session_id: str
+
+
+@router.post("/command-center/cleanup-worktree")
+async def cleanup_worktree(request: Request, body: _CleanupWorktreeBody) -> JSONResponse:
+    """Roll back a worktree and remove the session record."""
+    manager = request.app.state.session_manager
+    session = manager.get_session(body.session_id)
+
+    if session is None or not isinstance(session, ClaudeCodeSession) or not session.worktree_path:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+
+    live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
+    if session.tmux_session and session.tmux_session in live_tmux_sessions:
+        return JSONResponse(
+            {"error": "Cannot clean up worktree while session is running"},
+            status_code=409,
+        )
+
+    try:
+        rollback_worktree(Path(session.worktree_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Worktree rollback failed for session %s: %s", body.session_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    manager.cleanup_session(body.session_id)
+    _push_board_changed(request.app)
+    return JSONResponse({"status": "cleaned_up"})

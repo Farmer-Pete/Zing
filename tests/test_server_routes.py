@@ -1622,3 +1622,245 @@ class TestLaunchBackground(unittest.TestCase):
         self.assertEqual(resp.status_code, 500)
         self.assertIn("error", resp.json())
         mock_rollback.assert_called_once_with(worktree_path)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for kill-session / cleanup-worktree tests
+# ---------------------------------------------------------------------------
+
+
+class TestKillSessionAndCleanupWorktree(unittest.TestCase):
+    """Tests for POST /command-center/kill-session and /command-center/cleanup-worktree."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        self.manager = SessionManager(data_dir=self.data_dir)
+        self.cc_queues: list[asyncio.Queue] = []
+        asgi_app = create_app(
+            session_manager=self.manager,
+            cc_queues=self.cc_queues,
+        )
+        self.client = TestClient(asgi_app, raise_server_exceptions=True)
+
+        # Dig out the FastAPI app so we can set state directly.
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+        self.fastapi_app.state.launching_set = set()
+        self.fastapi_app.state.live_tmux_sessions = set()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _create_cc_session(
+        self,
+        session_id: str = "cc-kill-1",
+        tmux_session: str | None = "zing-test",
+        worktree_path: str | None = None,
+        ticket_id: str | None = None,
+    ) -> None:
+        """Create a ClaudeCodeSession via the API."""
+        payload: dict = {"session_id": session_id, "title": "Test CC"}
+        if tmux_session is not None:
+            payload["tmux_session"] = tmux_session
+        if worktree_path is not None:
+            payload["worktree_path"] = worktree_path
+        if ticket_id is not None:
+            payload["ticket_id"] = ticket_id
+        self.client.post("/api/sessions/claude-code", json=payload)
+
+    # ------------------------------------------------------------------
+    # kill-session tests
+    # ------------------------------------------------------------------
+
+    def test_kill_session_success(self) -> None:
+        """POST kill-session kills the tmux session and cleans up."""
+        from unittest.mock import patch
+
+        self._create_cc_session(session_id="cc-kill-ok", tmux_session="zing-kill-ok")
+
+        with patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run:
+            resp = self.client.post(
+                "/command-center/kill-session",
+                json={"session_id": "cc-kill-ok"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "killed")
+
+        # tmux kill-session should have been called.
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("kill-session", call_args)
+        self.assertIn("zing-kill-ok", call_args)
+
+        # Session should be gone.
+        self.assertIsNone(self.manager.get_session("cc-kill-ok"))
+
+    def test_kill_session_not_found(self) -> None:
+        """POST kill-session returns 404 for an unknown session_id."""
+        resp = self.client.post(
+            "/command-center/kill-session",
+            json={"session_id": "no-such-session"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_kill_session_zing_session_returns_404(self) -> None:
+        """POST kill-session returns 404 when session is a ZingSession (not ClaudeCodeSession)."""
+        from pathlib import Path
+
+        from zing_ai.server.sessions import SessionManager
+
+        mgr = SessionManager(data_dir=Path(self._tmp.name))
+        mgr.create_session("zing-s1", "Zing Session", steps=["review"])
+        # Inject into the manager used by the app.
+        self.manager.create_session("zing-s2", "Zing Session 2", steps=["review"])
+
+        resp = self.client.post(
+            "/command-center/kill-session",
+            json={"session_id": "zing-s2"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_kill_session_no_tmux_returns_404(self) -> None:
+        """POST kill-session returns 404 when session has no tmux_session."""
+        self._create_cc_session(session_id="cc-no-tmux", tmux_session=None)
+        resp = self.client.post(
+            "/command-center/kill-session",
+            json={"session_id": "cc-no-tmux"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # ------------------------------------------------------------------
+    # cleanup-worktree tests
+    # ------------------------------------------------------------------
+
+    def test_cleanup_worktree_success(self) -> None:
+        """POST cleanup-worktree rolls back worktree and cleans up session."""
+        from unittest.mock import patch
+
+        self._create_cc_session(
+            session_id="cc-wt-ok",
+            tmux_session="zing-wt-ok",
+            worktree_path="/tmp/worktrees/repo-feature",
+        )
+        # tmux is NOT alive → cleanup is allowed.
+        self.fastapi_app.state.live_tmux_sessions = set()
+
+        with patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback:
+            resp = self.client.post(
+                "/command-center/cleanup-worktree",
+                json={"session_id": "cc-wt-ok"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "cleaned_up")
+
+        from pathlib import Path
+
+        mock_rollback.assert_called_once_with(Path("/tmp/worktrees/repo-feature"))
+        self.assertIsNone(self.manager.get_session("cc-wt-ok"))
+
+    def test_cleanup_worktree_while_running(self) -> None:
+        """POST cleanup-worktree returns 409 when session tmux is still alive."""
+        self._create_cc_session(
+            session_id="cc-wt-alive",
+            tmux_session="zing-wt-alive",
+            worktree_path="/tmp/worktrees/repo-alive",
+        )
+        # Mark tmux as alive.
+        self.fastapi_app.state.live_tmux_sessions = {"zing-wt-alive"}
+
+        resp = self.client.post(
+            "/command-center/cleanup-worktree",
+            json={"session_id": "cc-wt-alive"},
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("running", resp.json()["error"])
+
+    def test_cleanup_worktree_not_found(self) -> None:
+        """POST cleanup-worktree returns 404 for unknown session."""
+        resp = self.client.post(
+            "/command-center/cleanup-worktree",
+            json={"session_id": "no-such"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cleanup_worktree_no_worktree_returns_404(self) -> None:
+        """POST cleanup-worktree returns 404 when session has no worktree_path."""
+        self._create_cc_session(
+            session_id="cc-no-wt",
+            tmux_session="zing-no-wt",
+            worktree_path=None,
+        )
+        resp = self.client.post(
+            "/command-center/cleanup-worktree",
+            json={"session_id": "cc-no-wt"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # ------------------------------------------------------------------
+    # Orphan detection test
+    # ------------------------------------------------------------------
+
+    def test_orphan_detection(self) -> None:
+        """_build_tray_data correctly flags orphaned worktree entries."""
+        from zing_ai.server.models_external import KanbanCard, KanbanView
+        from zing_ai.server.routes_command_center import _build_tray_data
+
+        # Create sessions: one whose ticket is in done, one whose ticket is active,
+        # and one with no ticket_id at all.
+        self._create_cc_session(
+            session_id="cc-orphan-done",
+            tmux_session="zing-done",
+            worktree_path="/tmp/wt/done",
+            ticket_id="BAK-100",
+        )
+        self._create_cc_session(
+            session_id="cc-orphan-active",
+            tmux_session="zing-active",
+            worktree_path="/tmp/wt/active",
+            ticket_id="BAK-200",
+        )
+        self._create_cc_session(
+            session_id="cc-orphan-no-ticket",
+            tmux_session="zing-no-ticket",
+            worktree_path="/tmp/wt/no-ticket",
+            ticket_id=None,
+        )
+
+        # Build a minimal KanbanView: BAK-100 is in done, BAK-200 is in todo.
+        done_card = KanbanCard(key="BAK-100")
+        active_card = KanbanCard(key="BAK-200")
+        view = KanbanView(todo=[active_card], done=[done_card])
+
+        sessions = self.manager.list_sessions()
+        live_tmux: set[str] = {"zing-active"}  # only cc-orphan-active is running
+        data = _build_tray_data(view, sessions, live_tmux)
+
+        # running_sessions: only the one whose tmux is in live_tmux_sessions
+        running_ids = {s.session_id for s in data["running_sessions"]}
+        self.assertIn("cc-orphan-active", running_ids)
+        self.assertNotIn("cc-orphan-done", running_ids)
+        self.assertNotIn("cc-orphan-no-ticket", running_ids)
+
+        # worktree_entries: all three have worktree_path
+        entry_map = {e.session.session_id: e for e in data["worktree_entries"]}
+        self.assertIn("cc-orphan-done", entry_map)
+        self.assertIn("cc-orphan-active", entry_map)
+        self.assertIn("cc-orphan-no-ticket", entry_map)
+
+        # Orphan flags
+        self.assertTrue(entry_map["cc-orphan-done"].orphaned)  # in done column
+        self.assertFalse(entry_map["cc-orphan-active"].orphaned)  # in active column
+        self.assertTrue(entry_map["cc-orphan-no-ticket"].orphaned)  # no ticket_id
+
+        # Counts
+        self.assertEqual(data["running_count"], 1)
+        self.assertEqual(data["orphan_count"], 2)
