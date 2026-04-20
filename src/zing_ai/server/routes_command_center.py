@@ -272,13 +272,18 @@ async def launch_background(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        raw = await request.body()
+        logger.error("launch-background: invalid JSON body: %s", raw[:500])
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
     # Datastar sends payload under a "payload" key in the signal store.
     payload = body.get("payload", body)
     card_key = payload.get("card_key")
     if not card_key:
+        logger.error("launch-background: missing card_key in body: %s", body)
         return JSONResponse({"error": "card_key is required"}, status_code=400)
+
+    logger.debug("launch-background: card_key=%s, body keys=%s", card_key, list(body.keys()))
 
     # In-flight dedup lock — initialise lazily if not set by create_app.
     launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
@@ -286,6 +291,7 @@ async def launch_background(request: Request) -> JSONResponse:
         request.app.state.launching_set = launching_set
 
     if card_key in launching_set:
+        logger.warning("launch-background: duplicate launch for card %s", card_key)
         return JSONResponse({"error": "Launch already in progress for this card"}, status_code=409)
 
     launching_set.add(card_key)
@@ -299,6 +305,7 @@ async def launch_background(request: Request) -> JSONResponse:
     code_dir = config.git.code_dir
     if not code_dir:
         launching_set.discard(card_key)
+        logger.error("launch-background: code_dir is not configured")
         return JSONResponse({"error": "code_dir is not configured"}, status_code=422)
 
     # Locate the card in the current kanban view (search all columns).
@@ -341,6 +348,14 @@ async def launch_background(request: Request) -> JSONResponse:
 
     if repo_name is None:
         launching_set.discard(card_key)
+        logger.error(
+            "launch-background: cannot determine repo for card %s "
+            "(has_ticket=%s, has_prs=%s, card_found=%s)",
+            card_key,
+            card is not None and card.ticket is not None,
+            card is not None and bool(card.prs),
+            card is not None,
+        )
         return JSONResponse(
             {"error": f"Cannot determine repository for card {card_key}"},
             status_code=422,
@@ -350,6 +365,7 @@ async def launch_background(request: Request) -> JSONResponse:
     repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
     if repo_root is None:
         launching_set.discard(card_key)
+        logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
         return JSONResponse(
             {"error": f"Repository {repo_name} not found under {code_dir}"},
             status_code=404,
@@ -361,10 +377,18 @@ async def launch_background(request: Request) -> JSONResponse:
             branch_name = derive_branch_name(ticket_id, config.command_center.linear_api_key)
         except LaunchError as exc:
             launching_set.discard(card_key)
+            logger.error("launch-background: derive_branch_name failed for %s: %s", ticket_id, exc)
             return JSONResponse({"error": str(exc)}, status_code=500)
 
     if branch_name is None:
         launching_set.discard(card_key)
+        logger.error(
+            "launch-background: cannot determine branch for card %s "
+            "(ticket_id=%s, has_linear_key=%s)",
+            card_key,
+            ticket_id,
+            bool(config.command_center.linear_api_key),
+        )
         return JSONResponse(
             {"error": f"Cannot determine branch for card {card_key}"},
             status_code=422,
