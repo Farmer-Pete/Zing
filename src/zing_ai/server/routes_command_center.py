@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import subprocess
 import uuid
@@ -16,7 +17,6 @@ from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, Request
 from fastapi.applications import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
 
 from zing_ai.config import load_config
 from zing_ai.launch import (
@@ -266,14 +266,19 @@ async def command_center_events(request: Request):  # noqa: ANN201
 # ---------------------------------------------------------------------------
 
 
-class _LaunchBackgroundBody(BaseModel):
-    card_key: str
-
-
 @router.post("/command-center/launch-background")
-async def launch_background(request: Request, body: _LaunchBackgroundBody) -> JSONResponse:
+async def launch_background(request: Request) -> JSONResponse:
     """Launch a background Claude Code session for a Kanban card."""
-    card_key = body.card_key
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    # Datastar sends payload under a "payload" key in the signal store.
+    payload = body.get("payload", body)
+    card_key = payload.get("card_key")
+    if not card_key:
+        return JSONResponse({"error": "card_key is required"}, status_code=400)
 
     # In-flight dedup lock — initialise lazily if not set by create_app.
     launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
@@ -457,15 +462,19 @@ def _push_board_changed(app: FastAPI) -> None:
         q.put_nowait("board_changed")
 
 
-class _KillSessionBody(BaseModel):
-    session_id: str
-
-
 @router.post("/command-center/kill-session")
-async def kill_session(request: Request, body: _KillSessionBody) -> JSONResponse:
+async def kill_session(request: Request) -> JSONResponse:
     """Kill a running tmux session and remove the session record."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    payload = body.get("payload", body)
+    session_id = payload.get("session_id")
+    if not session_id:
+        return JSONResponse({"error": "session_id is required"}, status_code=400)
     manager = request.app.state.session_manager
-    session = manager.get_session(body.session_id)
+    session = manager.get_session(session_id)
 
     if session is None or not isinstance(session, ClaudeCodeSession) or not session.tmux_session:
         return JSONResponse({"error": "session not found"}, status_code=404)
@@ -475,20 +484,24 @@ async def kill_session(request: Request, body: _KillSessionBody) -> JSONResponse
         capture_output=True,
     )
 
-    manager.cleanup_session(body.session_id)
+    manager.cleanup_session(session_id)
     _push_board_changed(request.app)
     return JSONResponse({"status": "killed"})
 
 
-class _CleanupWorktreeBody(BaseModel):
-    session_id: str
-
-
 @router.post("/command-center/cleanup-worktree")
-async def cleanup_worktree(request: Request, body: _CleanupWorktreeBody) -> JSONResponse:
+async def cleanup_worktree(request: Request) -> JSONResponse:
     """Roll back a worktree and remove the session record."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    payload = body.get("payload", body)
+    session_id = payload.get("session_id")
+    if not session_id:
+        return JSONResponse({"error": "session_id is required"}, status_code=400)
     manager = request.app.state.session_manager
-    session = manager.get_session(body.session_id)
+    session = manager.get_session(session_id)
 
     if session is None or not isinstance(session, ClaudeCodeSession) or not session.worktree_path:
         return JSONResponse({"error": "session not found"}, status_code=404)
@@ -503,9 +516,9 @@ async def cleanup_worktree(request: Request, body: _CleanupWorktreeBody) -> JSON
     try:
         rollback_worktree(Path(session.worktree_path))
     except Exception as exc:  # noqa: BLE001
-        logger.error("Worktree rollback failed for session %s: %s", body.session_id, exc)
+        logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
-    manager.cleanup_session(body.session_id)
+    manager.cleanup_session(session_id)
     _push_board_changed(request.app)
     return JSONResponse({"status": "cleaned_up"})
