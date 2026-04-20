@@ -753,3 +753,113 @@ def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = N
         ],
         check=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Repo discovery
+# ---------------------------------------------------------------------------
+
+
+def find_repo_path(
+    code_dir: str,
+    repo_full_name: str,
+    cache: dict[str, Path] | None = None,
+) -> Path | None:
+    """Scan *code_dir* for a local checkout of *repo_full_name* (``"owner/repo"``).
+
+    Searches immediate children (depth 1) of *code_dir*.  For each subdirectory
+    the function:
+
+    1. Confirms it is a git repository via ``git rev-parse --is-inside-work-tree``.
+    2. Skips linked worktrees (only the main checkout is matched).
+    3. Resolves the origin remote URL and normalises it to ``"owner/repo"``.
+    4. Stores the mapping in *cache* for future calls.
+
+    Args:
+        code_dir: Root directory that contains local repository checkouts.
+        repo_full_name: GitHub repository in ``"owner/repo"`` format.
+        cache: Optional dict used to memoise results.  Modified in-place.
+
+    Returns:
+        :class:`~pathlib.Path` to the matching directory, or ``None`` if not found.
+
+    Raises:
+        LaunchError: If *code_dir* is empty or does not exist.
+    """
+    if not code_dir:
+        raise LaunchError(
+            "code_dir is not configured. Set [git] code_dir in ~/.config/zing-ai/config.toml"
+        )
+
+    code_path = Path(code_dir)
+    if not code_path.exists():
+        raise LaunchError(f"code_dir '{code_dir}' does not exist")
+
+    if cache is not None and repo_full_name in cache:
+        return cache[repo_full_name]
+
+    # Use a local dict to accumulate results; merge into caller's cache at the end.
+    local: dict[str, Path] = {}
+
+    # Scan immediate children only (depth 1).
+    for child in sorted(code_path.iterdir()):
+        if not child.is_dir():
+            continue
+
+        # 1. Check it is a git repo.
+        is_git = subprocess.run(
+            ["git", "-C", str(child), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+        )
+        if is_git.returncode != 0:
+            continue
+
+        # 2. Skip linked worktrees — only match the main checkout.
+        wt_result = subprocess.run(
+            ["git", "-C", str(child), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+        )
+        if wt_result.returncode != 0:
+            continue
+
+        # The first "worktree <path>" line names the main checkout.
+        main_wt_path: Path | None = None
+        for line in wt_result.stdout.splitlines():
+            if line.startswith("worktree "):
+                main_wt_path = Path(line[len("worktree ") :].strip())
+                break
+
+        if main_wt_path is not None and child.resolve() != main_wt_path.resolve():
+            # This directory is a linked worktree — skip it.
+            continue
+
+        # 3. Get origin remote URL.
+        remote_result = subprocess.run(
+            ["git", "-C", str(child), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+        )
+        if remote_result.returncode != 0:
+            continue
+
+        remote_url = remote_result.stdout.strip()
+
+        # Parse owner/repo from HTTPS or SSH remote URL.
+        # HTTPS: https://github.com/owner/repo.git
+        # SSH:   git@github.com:owner/repo.git
+        https_match = re.search(r"github\.com/([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+        ssh_match = re.search(r"github\.com:([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+        m = https_match or ssh_match
+        if not m:
+            continue
+
+        full_name = m.group(1)
+        local[full_name] = child
+
+    # Merge results into caller's cache.
+    if cache is not None:
+        cache.update(local)
+        return cache.get(repo_full_name)
+
+    return local.get(repo_full_name)

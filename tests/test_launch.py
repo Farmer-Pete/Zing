@@ -20,6 +20,7 @@ from zing_ai.launch import (
     exec_or_detach,
     extract_ticket_id,
     fetch_pr_data,
+    find_repo_path,
     move_ticket_in_progress,
     parse_pr_url,
     require_tmux,
@@ -839,3 +840,150 @@ class TestCreateSessionOnServerWithTmux(TestCase):
         req = mock_open.call_args[0][0]
         body = json.loads(req.data.decode())
         self.assertEqual(body["tmux_session"], "zing-fro-123")
+
+
+# ---------------------------------------------------------------------------
+# find_repo_path
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo(path: Path, remote_url: str) -> None:
+    """Create a bare-minimum git repo with one commit and an origin remote."""
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@test.com"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Test"],
+        check=True,
+        capture_output=True,
+    )
+    (path / "README.md").write_text("hello")
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "remote", "add", "origin", remote_url],
+        check=True,
+        capture_output=True,
+    )
+
+
+class TestFindRepoPath(TestCase):
+    """Tests for find_repo_path."""
+
+    def test_find_repo_path_https_match(self, tmp_path: Path | None = None) -> None:
+        """Returns the correct path when the repo has an HTTPS remote URL."""
+        import pytest
+
+        tmp = pytest.importorskip  # noqa: F841 — just confirm pytest available
+        # Use a dedicated tmp dir via the standard approach below
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            code_dir = Path(td)
+            repo_dir = code_dir / "myrepo"
+            repo_dir.mkdir()
+            _init_git_repo(repo_dir, "https://github.com/acme/myrepo.git")
+
+            result = find_repo_path(str(code_dir), "acme/myrepo")
+            self.assertEqual(result, repo_dir)
+
+    def test_find_repo_path_ssh_match(self) -> None:
+        """Returns the correct path when the repo has an SSH remote URL."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            code_dir = Path(td)
+            repo_dir = code_dir / "ssh-repo"
+            repo_dir.mkdir()
+            _init_git_repo(repo_dir, "git@github.com:org/ssh-repo.git")
+
+            result = find_repo_path(str(code_dir), "org/ssh-repo")
+            self.assertEqual(result, repo_dir)
+
+    def test_find_repo_path_no_match(self) -> None:
+        """Returns None when no repo in code_dir matches the requested name."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            code_dir = Path(td)
+            repo_dir = code_dir / "other-repo"
+            repo_dir.mkdir()
+            _init_git_repo(repo_dir, "https://github.com/acme/other-repo.git")
+
+            result = find_repo_path(str(code_dir), "acme/nonexistent")
+            self.assertIsNone(result)
+
+    def test_find_repo_path_skips_worktrees(self) -> None:
+        """Linked worktrees are skipped; only the main checkout is matched."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            code_dir = Path(td)
+            repo_dir = code_dir / "main-repo"
+            repo_dir.mkdir()
+            _init_git_repo(repo_dir, "https://github.com/acme/main-repo.git")
+
+            # Create a branch so we can add a worktree pointing to it.
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "checkout", "-b", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "checkout", "main"],
+                capture_output=True,
+            )
+            # Fallback: use master if main doesn't exist.
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "checkout", "master"],
+                capture_output=True,
+            )
+
+            worktree_dir = code_dir / "linked-wt"
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "worktree", "add", str(worktree_dir), "feature"],
+                check=True,
+                capture_output=True,
+            )
+
+            # Only the main repo should be returned, not the linked worktree.
+            result = find_repo_path(str(code_dir), "acme/main-repo")
+            self.assertEqual(result, repo_dir)
+
+    def test_find_repo_path_empty_code_dir(self) -> None:
+        """Raises LaunchError when code_dir is an empty string."""
+        with self.assertRaises(LaunchError) as ctx:
+            find_repo_path("", "acme/repo")
+        self.assertIn("code_dir is not configured", str(ctx.exception))
+
+    def test_find_repo_path_cached(self) -> None:
+        """Returns cached result on second call without running subprocess."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            code_dir = Path(td)
+            repo_dir = code_dir / "cached-repo"
+            repo_dir.mkdir()
+            _init_git_repo(repo_dir, "https://github.com/acme/cached-repo.git")
+
+            cache: dict[str, Path] = {}
+
+            # First call populates the cache.
+            result1 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
+            self.assertEqual(result1, repo_dir)
+            self.assertIn("acme/cached-repo", cache)
+
+            # Second call must use the cache — patch subprocess.run to confirm
+            # it is never called.
+            with patch("zing_ai.launch.subprocess.run") as mock_run:
+                result2 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
+
+            self.assertEqual(result2, repo_dir)
+            mock_run.assert_not_called()
