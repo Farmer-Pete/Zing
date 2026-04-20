@@ -444,7 +444,13 @@ async def launch_background(request: Request) -> JSONResponse:
                     tmux_session=tmux_name,
                 )
 
-                args = build_claude_args(skill, session_id, title, target)
+                args = build_claude_args(
+                    skill,
+                    session_id,
+                    title,
+                    target,
+                    claude_flags=config.command_center.claude_flags,
+                )
                 exec_or_detach(args, wt, tmux_session=tmux_name)
 
                 return session_id, wt
