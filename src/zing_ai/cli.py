@@ -245,7 +245,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                     skill="resume",
                     session_id=existing_session_id,
                     name=ticket_id,
-                    claude_flags=cfg.git.claude_flags,
+                    claude_flags=cfg.command_center.claude_flags,
                 )
                 tmux_name = build_tmux_session_name(ticket_id) if detach else None
                 exec_or_detach(args, Path.cwd(), tmux_name)
@@ -331,7 +331,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                 session_id=session_id,
                 name=ticket_id,
                 target=ticket_id,
-                claude_flags=cfg.git.claude_flags,
+                claude_flags=cfg.command_center.claude_flags,
             )
             exec_or_detach(args, work_dir, tmux_name)
 
@@ -414,7 +414,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                 session_id=session_id,
                 name=pr_name,
                 target=target,
-                claude_flags=cfg.git.claude_flags,
+                claude_flags=cfg.command_center.claude_flags,
             )
             exec_or_detach(args, work_dir, tmux_name)
 
