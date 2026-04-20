@@ -29,6 +29,46 @@
 }
 
 /* ──────────────────────────────────────────────
+   TOAST NOTIFICATIONS
+────────────────────────────────────────────── */
+
+#cc-toast-container {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+}
+
+.cc-toast {
+    padding: 0.65rem 1rem;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    box-shadow: 0 4px 14px rgba(15,27,45,0.15);
+    pointer-events: auto;
+    transform: translateX(120%);
+    opacity: 0;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    max-width: 360px;
+}
+.cc-toast.visible {
+    transform: translateX(0);
+    opacity: 1;
+}
+.cc-toast-error {
+    background: var(--red-orange);
+    color: #fff;
+}
+.cc-toast-success {
+    background: #27ae60;
+    color: #fff;
+}
+
+/* ──────────────────────────────────────────────
    BOARD LAYOUT
 ────────────────────────────────────────────── */
 

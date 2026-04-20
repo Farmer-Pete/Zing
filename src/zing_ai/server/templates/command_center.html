@@ -14,12 +14,28 @@
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
-    {# Secondary error banner for JS-driven errors (not controlled by Datastar signals) #}
-    <div class="cc-error" id="cc-js-error" style="display: none"></div>
+    {# Toast container for transient notifications #}
+    <div id="cc-toast-container"></div>
 
 {% include "fragments/kanban_board.html" %}
 
     <script>
+    // Toast notification helper
+    function showToast(message, type) {
+        var container = document.getElementById('cc-toast-container');
+        var toast = document.createElement('div');
+        toast.className = 'cc-toast cc-toast-' + (type || 'error');
+        toast.textContent = message;
+        container.appendChild(toast);
+        // Trigger reflow then add visible class for animation
+        toast.offsetHeight;
+        toast.classList.add('visible');
+        setTimeout(function() {
+            toast.classList.remove('visible');
+            setTimeout(function() { toast.remove(); }, 300);
+        }, 5000);
+    }
+
     // Clipboard copy for data-launch-cmd buttons
     document.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-launch-cmd]');
@@ -38,7 +54,6 @@
         if (!btn || btn.disabled) return;
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
-        var errorBanner = document.getElementById('cc-js-error');
 
         btn.disabled = true;
         btn.innerHTML = '&#9203; Launching\u2026';
@@ -50,24 +65,17 @@
         }).then(function(resp) {
             return resp.json().then(function(data) {
                 if (!resp.ok) {
-                    var msg = data.error || ('Launch failed (HTTP ' + resp.status + ')');
-                    if (errorBanner) {
-                        errorBanner.textContent = msg;
-                        errorBanner.style.display = '';
-                    }
+                    showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
                     btn.innerHTML = '&#10007; Failed';
                     setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
                 } else {
+                    showToast('Session launched for ' + cardKey, 'success');
                     btn.innerHTML = '&#10003; Launched!';
-                    if (errorBanner) errorBanner.style.display = 'none';
                     setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
                 }
             });
         }).catch(function(err) {
-            if (errorBanner) {
-                errorBanner.textContent = 'Launch failed: ' + err.message;
-                errorBanner.style.display = '';
-            }
+            showToast('Launch failed: ' + err.message, 'error');
             btn.innerHTML = '&#10007; Failed';
             setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
         });
