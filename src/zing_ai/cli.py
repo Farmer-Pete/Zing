@@ -234,8 +234,8 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
         if is_ticket:
             ticket_id = target
 
-            # Check for existing session
-            if resume:
+            # Check for existing session (skip if --skill is explicitly set)
+            if resume and not skill:
                 action, existing_session_id = detect_action(ticket_id, server_url)
             else:
                 action, existing_session_id = "new", None
