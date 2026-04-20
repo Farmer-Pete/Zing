@@ -647,6 +647,7 @@ def build_claude_args(
     session_id: str,
     name: str,
     target: str | None = None,
+    claude_flags: str = "",
 ) -> list[str]:
     """Build the argv list to pass to ``os.execvp("claude", ...)`` .
 
@@ -656,6 +657,9 @@ def build_claude_args(
     - anything else: ``["claude", "/zing:<skill> <target>", "--session-id",
       session_id, "--name", name]``
 
+    Extra flags from *claude_flags* (a space-separated string) are appended
+    after the base arguments.
+
     Args:
         skill: Skill name (e.g. ``"resume"``, ``"new"``, ``"pr-audit"``,
             ``"pr-audit-visual"``).
@@ -663,15 +667,18 @@ def build_claude_args(
         name: Session display name.
         target: Argument passed to the slash command (ticket ID for new-ticket
             flows, PR URL for PR flows).  Omitted from the command when ``None``.
+        claude_flags: Extra CLI flags to append (e.g. ``"--model sonnet --verbose"``).
 
     Returns:
         List of strings suitable for ``os.execvp``.
     """
+    extra = shlex.split(claude_flags) if claude_flags else []
+
     if skill == "resume":
-        return ["claude", "--resume", session_id]
+        return ["claude", "--resume", session_id, *extra]
 
     slash_cmd = f"/zing:{skill} {target}" if target else f"/zing:{skill}"
-    return ["claude", slash_cmd, "--session-id", session_id, "--name", name]
+    return ["claude", slash_cmd, "--session-id", session_id, "--name", name, *extra]
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,7 @@ class GitConfig(BaseModel):
     worktree_root: str = "../{repo}-{branch}"
     zing_init_script: str = ".zing-init.sh"
     code_dir: str = ""
+    claude_flags: str = ""
 
 
 class AgentsConfig(BaseModel):
