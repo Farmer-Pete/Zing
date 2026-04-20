@@ -197,6 +197,9 @@ async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
     view = _build_view(request.app)
     cache = request.app.state.external_cache
+    live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
+    sessions = request.app.state.session_manager.list_sessions()
+    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
     return HTMLResponse(
         render(
             "command_center.html",
@@ -207,6 +210,8 @@ async def get_command_center(request: Request) -> HTMLResponse:
             last_error=cache.last_error,
             body_class="command-center",
             current_username=cache.github_username or "",
+            live_tmux_sessions=live_tmux_sessions,
+            **tray_data,
         )
     )
 

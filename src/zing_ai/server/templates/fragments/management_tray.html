@@ -33,7 +33,7 @@
     <div class="mgmt-section-title">Worktrees ({{ worktree_entries | length }})</div>
     {% for entry in worktree_entries %}
       <div class="mgmt-row">
-        <span class="mgmt-row-name">{{ entry.session.worktree_path | basename }}</span>
+        <span class="mgmt-row-name">{{ entry.session.worktree_path.split('/')[-1] }}</span>
         <span class="mgmt-row-detail">
           {{ entry.session.ticket_id or '' }}
           {% if entry.orphaned %}<span class="mgmt-orphan-tag">orphaned</span>{% endif %}
