@@ -117,10 +117,12 @@ def render_board_fragment(app: FastAPI) -> str:
     """Render the full kanban board. Used by SSE board_changed events."""
     view = _build_view(app)
     cache = app.state.external_cache
+    live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
+        live_tmux_sessions=live_tmux_sessions,
     )  # hub disappeared between events
 
 

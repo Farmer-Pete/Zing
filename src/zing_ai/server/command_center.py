@@ -515,3 +515,24 @@ def aggregate(
     view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))
 
     return view
+
+
+def get_live_tmux_sessions() -> set[str]:
+    """Return the set of active tmux session names.
+
+    Runs ``tmux list-sessions`` to get the current session list.
+    Returns an empty set if tmux is not installed, not running, or has no sessions.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
