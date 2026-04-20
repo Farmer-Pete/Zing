@@ -147,6 +147,7 @@ def _build_tray_data(
 
     running_sessions: list[ClaudeCodeSession] = []
     worktree_entries: list[_WorktreeEntry] = []
+    seen_worktree_paths: set[str] = set()
 
     for session in sessions:
         if not isinstance(session, ClaudeCodeSession):
@@ -157,7 +158,9 @@ def _build_tray_data(
             running_sessions.append(session)
 
         # Build worktree entries for sessions with a worktree_path.
-        if session.worktree_path:
+        # Deduplicate by path — multiple sessions can reference the same worktree.
+        if session.worktree_path and session.worktree_path not in seen_worktree_paths:
+            seen_worktree_paths.add(session.worktree_path)
             ticket_id = session.ticket_id
             # Orphaned: card is in done column, or no card exists at all.
             if ticket_id is None or ticket_id in done_keys or ticket_id not in all_card_keys:
