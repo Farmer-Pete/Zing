@@ -29,6 +29,46 @@
 }
 
 /* ──────────────────────────────────────────────
+   TOAST NOTIFICATIONS
+────────────────────────────────────────────── */
+
+#cc-toast-container {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+}
+
+.cc-toast {
+    padding: 0.65rem 1rem;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    box-shadow: 0 4px 14px rgba(15,27,45,0.15);
+    pointer-events: auto;
+    transform: translateX(120%);
+    opacity: 0;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    max-width: 360px;
+}
+.cc-toast.visible {
+    transform: translateX(0);
+    opacity: 1;
+}
+.cc-toast-error {
+    background: var(--red-orange);
+    color: #fff;
+}
+.cc-toast-success {
+    background: #27ae60;
+    color: #fff;
+}
+
+/* ──────────────────────────────────────────────
    BOARD LAYOUT
 ────────────────────────────────────────────── */
 
@@ -409,6 +449,17 @@ a.ci-failing-name:hover {
    FOOTER
 ────────────────────────────────────────────── */
 
+.cc-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 0.25rem 0.5rem;
+    font-size: 0.65rem;
+    color: var(--gray-300);
+    letter-spacing: 0.02em;
+}
+
 .cc-footer {
     margin-top: 1rem;
     padding: 0.5rem 0.25rem;
@@ -417,6 +468,26 @@ a.ci-failing-name:hover {
     color: var(--gray-300);
     text-align: right;
     letter-spacing: 0.02em;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.cc-refresh-btn {
+    background: none;
+    border: 1px solid var(--gray-200);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.cc-refresh-btn:hover {
+    color: var(--gray-700);
+    border-color: var(--gray-300);
 }
 
 /* ──────────────────────────────────────────────
@@ -483,6 +554,9 @@ a.ci-failing-name:hover {
 /* Blue dot for Claude Code sessions */
 .dot-blue { background: #3b82f6; }
 
+/* Alive variant pulses to indicate a running tmux session */
+.dot-blue.alive { animation: cc-pulse 2s infinite; }
+
 /* Claude Code session indicator — blue-tinted to distinguish from Zing (amber) */
 .session-indicator.claude-code {
     background: #eff6ff;
@@ -498,3 +572,89 @@ a.ci-failing-name:hover {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.4; }
 }
+
+/* ──────────────────────────────────────────────
+   MANAGEMENT TRAY
+────────────────────────────────────────────── */
+
+/* FAB */
+.mgmt-fab {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: #fff;
+    font-size: 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 100;
+    box-shadow: 0 4px 14px rgba(15,27,45,0.3);
+    transition: background 0.15s ease, transform 0.25s ease, opacity 0.25s ease;
+    border: none;
+}
+.mgmt-fab:hover {
+    background: var(--navy-mid);
+    transform: scale(1.05);
+}
+.mgmt-fab.hidden {
+    transform: translateY(80px);
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Count badge */
+.mgmt-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--red-orange);
+    color: #fff;
+    font-size: 0.6rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Slide-up panel */
+.mgmt-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-height: 40vh;
+    background: #fff;
+    border-top: 1px solid var(--gray-200);
+    box-shadow: 0 -4px 20px rgba(15,27,45,0.1);
+    z-index: 99;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+    overflow-y: auto;
+    padding: 1rem 2rem;
+}
+.mgmt-panel.open {
+    transform: translateY(0);
+}
+
+/* Panel header, sections, rows */
+.mgmt-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.mgmt-panel-title { font-weight: 700; font-size: 0.875rem; color: var(--navy); text-transform: uppercase; letter-spacing: 0.05em; }
+.mgmt-panel-close { background: none; border: none; font-size: 1.25rem; cursor: pointer; color: var(--gray-500); }
+.mgmt-section { margin-bottom: 1rem; }
+.mgmt-section-title { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--gray-500); margin-bottom: 0.5rem; }
+.mgmt-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.4rem 0; border-bottom: 1px solid var(--gray-100); }
+.mgmt-row-name { font-weight: 600; font-size: 0.8rem; color: var(--navy); flex: 1; }
+.mgmt-row-detail { font-size: 0.7rem; color: var(--gray-500); flex: 1; }
+.mgmt-row-action { padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; cursor: pointer; border: 1px solid var(--gray-200); background: var(--gray-50); }
+.mgmt-btn-danger { color: var(--red-orange); border-color: var(--red-orange); }
+.mgmt-btn-danger:hover { background: rgba(232,68,48,0.05); }
+.mgmt-row-empty { font-size: 0.75rem; color: var(--gray-400); font-style: italic; padding: 0.5rem 0; }
+.mgmt-orphan-tag { font-size: 0.55rem; font-weight: 700; text-transform: uppercase; background: #fff3e0; color: #e65100; padding: 0.1rem 0.3rem; border-radius: 999px; margin-left: 0.25rem; }

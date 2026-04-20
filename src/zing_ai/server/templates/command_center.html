@@ -4,34 +4,109 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or ""} | tojson }}'
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": []} | tojson }}'
      data-init="@get('/command-center/events')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
        toggles via SSE. #}
-    <div class="cc-error"
+    <div class="cc-error" id="cc-error"
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
+    {# Toast container for transient notifications #}
+    <div id="cc-toast-container"></div>
+
+    <div class="cc-toolbar">
+        <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
+        <button class="cc-refresh-btn" id="cc-refresh-btn" onclick="(function(btn){
+            btn.disabled = true; btn.textContent = 'Refreshing\u2026';
+            fetch('/command-center/refresh', {method:'POST'}).then(function(r){
+                btn.textContent = r.ok ? '\u2713 Refreshed' : 'Failed';
+                setTimeout(function(){ btn.textContent = '\u21BB Refresh'; btn.disabled = false; }, 1500);
+            }).catch(function(){ btn.textContent = 'Failed'; setTimeout(function(){ btn.textContent = '\u21BB Refresh'; btn.disabled = false; }, 1500); });
+        })(this)">&#x21BB; Refresh</button>
+    </div>
 
 {% include "fragments/kanban_board.html" %}
 
+    <div id="mgmt-tray">
+    {% include "fragments/management_tray.html" %}
+    </div>
+
     <script>
+    // Toast notification helper
+    function showToast(message, type) {
+        var container = document.getElementById('cc-toast-container');
+        var toast = document.createElement('div');
+        toast.className = 'cc-toast cc-toast-' + (type || 'error');
+        toast.textContent = message;
+        container.appendChild(toast);
+        // Trigger reflow then add visible class for animation
+        toast.offsetHeight;
+        toast.classList.add('visible');
+        setTimeout(function() {
+            toast.classList.remove('visible');
+            setTimeout(function() { toast.remove(); }, 300);
+        }, 5000);
+    }
+
+    // Clipboard copy for data-launch-cmd buttons
     document.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-launch-cmd]');
         if (!btn) return;
         var cmd = btn.getAttribute('data-launch-cmd');
         var label = btn.getAttribute('data-launch-label');
         navigator.clipboard.writeText(cmd).then(function() {
-            btn.textContent = 'Copied!';
-            setTimeout(function() { btn.textContent = label; }, 1500);
+            btn.innerHTML = '&#10003; Copied!';
+            setTimeout(function() { btn.innerHTML = label; }, 1500);
         });
+    });
+
+    // Background launch for data-launch-bg buttons
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-launch-bg]');
+        if (!btn || btn.disabled) return;
+        var cardKey = btn.getAttribute('data-launch-bg');
+        var label = btn.getAttribute('data-launch-bg-label');
+
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Launching\u2026';
+
+        fetch('/command-center/launch-background', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({card_key: cardKey})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) {
+                    showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
+                    btn.innerHTML = '&#10007; Failed';
+                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                } else {
+                    showToast('Session launched for ' + cardKey, 'success');
+                    btn.innerHTML = '&#10003; Launched!';
+                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
+                }
+            });
+        }).catch(function(err) {
+            showToast('Launch failed: ' + err.message, 'error');
+            btn.innerHTML = '&#10007; Failed';
+            setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+        });
+    });
+
+    // ESC to close management tray
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            var panel = document.getElementById('mgmt-panel');
+            if (panel && panel.classList.contains('open')) {
+                panel.classList.remove('open');
+                document.getElementById('mgmt-fab').classList.remove('hidden');
+            }
+        }
     });
     </script>
 
-    <footer class="cc-footer">
-        <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
-    </footer>
 </div>
 {% endblock %}

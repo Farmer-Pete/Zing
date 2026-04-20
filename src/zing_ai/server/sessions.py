@@ -195,6 +195,7 @@ class SessionManager:
         skill: str | None = None,
         pr_number: int | None = None,
         pr_repo: str | None = None,
+        tmux_session: str | None = None,
     ) -> ClaudeCodeSession:
         """Create a new ClaudeCodeSession and persist it.
 
@@ -206,6 +207,7 @@ class SessionManager:
             skill: Skill/command name, or None.
             pr_number: GitHub PR number, or None.
             pr_repo: GitHub repo as ``"owner/repo"``, or None.
+            tmux_session: Tmux session name, or None.
 
         Returns:
             The newly created ClaudeCodeSession.
@@ -225,6 +227,7 @@ class SessionManager:
             skill=skill,
             pr_number=pr_number,
             pr_repo=pr_repo,
+            tmux_session=tmux_session,
         )
         self._sessions[session_id] = session
         self._persist(session)

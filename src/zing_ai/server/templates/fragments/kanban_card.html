@@ -74,16 +74,30 @@
 
   {# ── Claude Code session indicators ── #}
   {% for session in card.sessions if session.session_type == 'claude_code' %}
+    {% set is_alive = session.tmux_session and session.tmux_session in live_tmux_sessions %}
     <div class="session-indicator claude-code">
-      <span class="status-dot dot-blue"></span>
-      <span>Claude Code: {{ session.title }}</span>
+      <span class="status-dot dot-blue{% if is_alive %} alive{% endif %}"></span>
+      {% if is_alive %}
+        <span>Running: {{ session.title }}</span>
+      {% elif session.tmux_session %}
+        <span style="color: var(--gray-400)">Stopped: {{ session.title }}</span>
+      {% else %}
+        <span>Claude Code: {{ session.title }}</span>
+      {% endif %}
     </div>
+    {% if session.tmux_session %}
+      <button class="launch-btn launch-btn-secondary"
+              data-launch-cmd="tmux attach -t {{ session.tmux_session | e }}"
+              data-launch-label="Attach to Session">
+        Attach to Session
+      </button>
+    {% endif %}
   {% endfor %}
 
   {# ── Zing session indicators (existing rendering) ── #}
   {% for session in card.sessions if session.session_type == 'zing' %}
     {% set state_val = session.state.value %}
-    <a href="/{{ session.session_id }}" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
+    <a href="/{{ session.session_id }}" target="_blank" rel="noopener" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
       {% if state_val == 'started' %}
         <span class="status-dot dot-amber"></span>
       {% elif state_val == 'pending' %}
@@ -113,20 +127,37 @@
 
   {# ── Launch button ── #}
   {% if card.ticket %}
-    {% set launch_cmd = "zing-ai launch " + card.key %}
     {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
-    <button class="launch-btn" data-launch-cmd="{{ launch_cmd | e }}" data-launch-label="{{ launch_label | e }}">
-      {{ launch_label }}
-    </button>
+    <div class="launch-btn-group">
+      <button class="launch-btn"
+              data-launch-bg="{{ card.key | e }}"
+              data-launch-bg-label="&#9654; {{ launch_label }}">
+        &#9654; {{ launch_label }}
+      </button>
+      <button class="launch-btn launch-btn-secondary"
+              data-launch-cmd="zing-ai launch {{ card.key | e }}"
+              data-launch-label="&#x2398; Copy Command">
+        &#x2398; Copy Command
+      </button>
+    </div>
   {% elif card.prs %}
     {% set is_author = card.prs[0].author == current_username %}
     <div class="launch-btn-group">
-      <button class="launch-btn" data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}" data-launch-label="Start Review">
-        Start Review
+      <button class="launch-btn"
+              data-launch-bg="{{ card.key | e }}"
+              data-launch-bg-label="&#9654; Review PR">
+        &#9654; Review PR
+      </button>
+      <button class="launch-btn launch-btn-secondary"
+              data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}"
+              data-launch-label="&#x2398; Start Review">
+        &#x2398; Start Review
       </button>
       {% if is_author %}
-        <button class="launch-btn launch-btn-secondary" data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}" data-launch-label="Respond to Review">
-          Respond to Review
+        <button class="launch-btn launch-btn-secondary"
+                data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}"
+                data-launch-label="&#x2398; Respond">
+          &#x2398; Respond
         </button>
       {% endif %}
     </div>

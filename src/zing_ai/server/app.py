@@ -16,9 +16,11 @@ from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from zing_ai.config import load_config
+from zing_ai.server.command_center import get_live_tmux_sessions
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
+from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.routes import (
     _dashboard_queues,
     _notify_dashboard_connections,
@@ -206,14 +208,38 @@ def create_app(
             queues=fastapi_app.state.cc_queues,
             config=load_config().command_center,
         )
+        fastapi_app.state.poller = poller
         poller_task = asyncio.create_task(poller.run())
+
+        def _sync_tmux_alive(live: set[str]) -> None:
+            """Set _tmux_alive on each ClaudeCodeSession based on live tmux names."""
+            for session in sm.list_sessions():
+                if isinstance(session, ClaudeCodeSession) and session.tmux_session:
+                    session._tmux_alive = session.tmux_session in live
+
+        async def _poll_tmux() -> None:
+            """Poll tmux every 5 seconds and store live session names on app state."""
+            # Initial call before first SSE render
+            live = await asyncio.to_thread(get_live_tmux_sessions)
+            fastapi_app.state.live_tmux_sessions = live
+            _sync_tmux_alive(live)
+            while True:
+                await asyncio.sleep(5)
+                live = await asyncio.to_thread(get_live_tmux_sessions)
+                fastapi_app.state.live_tmux_sessions = live
+                _sync_tmux_alive(live)
+
+        tmux_task = asyncio.create_task(_poll_tmux())
         try:
             async with mcp_server.session_manager.run():
                 yield
         finally:
             poller_task.cancel()
+            tmux_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await poller_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await tmux_task
             await poller.aclose()
 
     mcp_starlette = mcp_server.streamable_http_app()
@@ -235,6 +261,7 @@ def create_app(
     # module globals; see the TODO(consistency) note in routes.py.
     fastapi_app.state.sse_queues = _sse_queues
     fastapi_app.state.dashboard_queues = _dashboard_queues
+    fastapi_app.state.live_tmux_sessions = set()
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has

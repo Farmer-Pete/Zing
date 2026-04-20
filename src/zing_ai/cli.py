@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -177,22 +176,26 @@ def mcp_cmd(port: int) -> None:
 @click.option(
     "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
 )
-def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
+@click.option("--detach", is_flag=True, default=False, help="Run in a detached tmux session.")
+def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
         TICKET_ID_PATTERN,
         LaunchError,
         build_claude_args,
+        build_tmux_session_name,
         checkout_pr_branch,
         create_session_on_server,
         create_worktree,
         derive_branch_name,
         detect_action,
+        exec_or_detach,
         extract_ticket_id,
         fetch_pr_data,
         move_ticket_in_progress,
         parse_pr_url,
+        require_tmux,
         resolve_repo_root,
         rollback_worktree,
         run_init_script,
@@ -222,6 +225,9 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                 f"Zing server is not running at {server_url}. Start it with 'zing-ai mcp'."
             ) from e
 
+        if detach:
+            require_tmux()
+
         # Detect target type: ticket ID or PR URL
         is_ticket = bool(re.match(rf"^{TICKET_ID_PATTERN}$", target))
 
@@ -230,18 +236,30 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
 
             # Check for existing session
             if resume:
-                action, existing_session_id = detect_action(ticket_id, server_url)
+                action, existing_session_id, existing_worktree = detect_action(
+                    ticket_id, server_url
+                )
             else:
-                action, existing_session_id = "new", None
+                action, existing_session_id, existing_worktree = "new", None, None
 
             if action == "resume" and existing_session_id is not None:
                 args = build_claude_args(
                     skill="resume",
                     session_id=existing_session_id,
                     name=ticket_id,
+                    claude_flags=cfg.command_center.claude_flags,
                 )
-                os.execvp("claude", args)
-                return  # unreachable, but satisfies type checkers
+                resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
+                tmux_name = build_tmux_session_name(ticket_id) if detach else None
+                # Try resume; if Claude can't find the conversation, fall
+                # through to the new-session flow instead of failing.
+                result = subprocess.run(args, cwd=resume_cwd)
+                if result.returncode == 0:
+                    return
+                click.echo(
+                    f"Resume failed (exit {result.returncode}); starting a new session instead.",
+                    err=True,
+                )
 
             # New ticket flow — read Linear API key (only needed for tickets)
             lr_config_path = Path.home() / ".config" / "lr" / "config.json"
@@ -294,6 +312,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                 # workflow_mode == "none"
                 work_dir = Path.cwd()
 
+            tmux_name = build_tmux_session_name(ticket_id) if detach else None
             succeeded = False
             try:
                 run_init_script(
@@ -303,13 +322,15 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                     branch=branch_name,
                 )
                 move_ticket_in_progress(ticket_id, api_key)
+                ticket_skill = skill or "new"
                 create_session_on_server(
                     server_url=server_url,
                     session_id=session_id,
                     title=ticket_id,
                     ticket_id=ticket_id,
                     worktree_path=str(work_dir) if work_dir else None,
-                    skill="new",
+                    skill=ticket_skill,
+                    tmux_session=tmux_name,
                 )
                 succeeded = True
             finally:
@@ -317,13 +338,13 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                     rollback_worktree(worktree_path)
 
             args = build_claude_args(
-                skill="new",
+                skill=ticket_skill,
                 session_id=session_id,
                 name=ticket_id,
                 target=ticket_id,
+                claude_flags=cfg.command_center.claude_flags,
             )
-            os.chdir(work_dir)
-            os.execvp("claude", args)
+            exec_or_detach(args, work_dir, tmux_name)
 
         else:
             # PR URL flow
@@ -374,6 +395,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                 # workflow_mode == "none"
                 work_dir = Path.cwd()
 
+            tmux_name = build_tmux_session_name(target, pr_number=pr_number) if detach else None
             succeeded = False
             try:
                 run_init_script(
@@ -391,6 +413,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                     skill=pr_skill,
                     pr_number=pr_number,
                     pr_repo=f"{owner}/{repo}",
+                    tmux_session=tmux_name,
                 )
                 succeeded = True
             finally:
@@ -402,9 +425,9 @@ def launch(target: str, resume: bool, port: int, skill: str | None) -> None:
                 session_id=session_id,
                 name=pr_name,
                 target=target,
+                claude_flags=cfg.command_center.claude_flags,
             )
-            os.chdir(work_dir)
-            os.execvp("claude", args)
+            exec_or_detach(args, work_dir, tmux_name)
 
     except LaunchError as e:
         click.echo(str(e), err=True)

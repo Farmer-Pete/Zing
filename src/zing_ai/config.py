@@ -61,6 +61,7 @@ class GitConfig(BaseModel):
     branch_prefix: str = "zing/"
     worktree_root: str = "../{repo}-{branch}"
     zing_init_script: str = ".zing-init.sh"
+    code_dir: str = ""
 
 
 class AgentsConfig(BaseModel):
@@ -82,6 +83,7 @@ class CommandCenterConfig(BaseModel):
     github_token: str = ""
     github_excluded_repos: list[str] = Field(default_factory=list)
     poll_seconds: PollSeconds = 60
+    claude_flags: str = ""
 
 
 class Config(BaseModel):

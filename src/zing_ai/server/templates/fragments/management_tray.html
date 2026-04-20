@@ -1,0 +1,52 @@
+{# Management tray: FAB + slide-up panel for session/worktree management #}
+<div class="mgmt-fab" id="mgmt-fab" onclick="document.getElementById('mgmt-panel').classList.toggle('open'); this.classList.toggle('hidden')">
+  {# Terminal/grid icon #}
+  &#9881;
+  {% if running_count + orphan_count > 0 %}
+    <span class="mgmt-badge">{{ running_count + orphan_count }}</span>
+  {% endif %}
+</div>
+
+<div class="mgmt-panel" id="mgmt-panel">
+  <div class="mgmt-panel-header">
+    <span class="mgmt-panel-title">Sessions & Worktrees</span>
+    <button class="mgmt-panel-close" onclick="document.getElementById('mgmt-panel').classList.remove('open'); document.getElementById('mgmt-fab').classList.remove('hidden')">&times;</button>
+  </div>
+
+  <div class="mgmt-section">
+    <div class="mgmt-section-title">Running Sessions ({{ running_sessions | length }})</div>
+    {% for session in running_sessions %}
+      <div class="mgmt-row">
+        <span class="mgmt-row-name">{{ session.tmux_session }}</span>
+        <span class="mgmt-row-detail">{{ session.ticket_id or session.title }}</span>
+        <button class="mgmt-row-action mgmt-btn-danger"
+                data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}'}})">
+          Kill
+        </button>
+      </div>
+    {% else %}
+      <div class="mgmt-row-empty">No running sessions</div>
+    {% endfor %}
+  </div>
+
+  <div class="mgmt-section">
+    <div class="mgmt-section-title">Worktrees ({{ worktree_entries | length }})</div>
+    {% for entry in worktree_entries %}
+      <div class="mgmt-row">
+        <span class="mgmt-row-name">{{ entry.session.worktree_path.split('/')[-1] }}</span>
+        <span class="mgmt-row-detail">
+          {{ entry.session.ticket_id or '' }}
+          {% if entry.orphaned %}<span class="mgmt-orphan-tag">orphaned</span>{% endif %}
+        </span>
+        {% if entry.orphaned %}
+          <button class="mgmt-row-action mgmt-btn-danger"
+                  data-on:click="@post('/command-center/cleanup-worktree', {payload: {session_id: '{{ entry.session.session_id | e }}'}})">
+            Clean up
+          </button>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="mgmt-row-empty">No worktrees</div>
+    {% endfor %}
+  </div>
+</div>

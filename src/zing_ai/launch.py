@@ -18,6 +18,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.error
@@ -238,6 +239,10 @@ def create_worktree(
     worktree_path = (repo_root / relative).resolve()
     full_branch = f"{branch_prefix}{branch_name}"
 
+    # If the worktree directory already exists, reuse it.
+    if worktree_path.is_dir():
+        return worktree_path
+
     try:
         subprocess.run(
             ["git", "worktree", "add", "-b", full_branch, str(worktree_path)],
@@ -247,7 +252,21 @@ def create_worktree(
             cwd=repo_root,
         )
     except subprocess.CalledProcessError as exc:
-        raise LaunchError(f"git worktree add failed: {exc.stderr.strip()}") from exc
+        stderr = exc.stderr.strip()
+        # Branch already exists — create worktree without -b (reuse branch).
+        if "already exists" in stderr:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", str(worktree_path), full_branch],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_root,
+                )
+            except subprocess.CalledProcessError as exc2:
+                raise LaunchError(f"git worktree add failed: {exc2.stderr.strip()}") from exc2
+        else:
+            raise LaunchError(f"git worktree add failed: {stderr}") from exc
 
     return worktree_path
 
@@ -546,6 +565,7 @@ def create_session_on_server(
     skill: str | None,
     pr_number: int | None = None,
     pr_repo: str | None = None,
+    tmux_session: str | None = None,
 ) -> None:
     """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
@@ -561,6 +581,7 @@ def create_session_on_server(
         skill: Skill/command name, or ``None``.
         pr_number: GitHub PR number, or ``None``.
         pr_repo: GitHub repo as ``"owner/repo"``, or ``None``.
+        tmux_session: tmux session name for detached launches, or ``None``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -573,6 +594,7 @@ def create_session_on_server(
         "skill": skill,
         "pr_number": pr_number,
         "pr_repo": pr_repo,
+        "tmux_session": tmux_session,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -595,7 +617,7 @@ def create_session_on_server(
 def detect_action(
     ticket_id: str,
     server_url: str,
-) -> tuple[Literal["resume", "new"], str | None]:
+) -> tuple[Literal["resume", "new"], str | None, str | None]:
     """Check whether an existing Claude Code session exists for *ticket_id*.
 
     Calls ``GET /api/sessions?ticket_id=<id>`` and finds any session with
@@ -606,8 +628,8 @@ def detect_action(
         server_url: Base URL of the Zing server.
 
     Returns:
-        ``("resume", session_id)`` if a matching session is found, otherwise
-        ``("new", None)``.
+        ``("resume", session_id, worktree_path)`` if a matching session is
+        found, otherwise ``("new", None, None)``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -628,9 +650,9 @@ def detect_action(
 
     for session in sessions:
         if session.get("session_type") == "claude_code":
-            return ("resume", session["session_id"])
+            return ("resume", session["session_id"], session.get("worktree_path"))
 
-    return ("new", None)
+    return ("new", None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +665,7 @@ def build_claude_args(
     session_id: str,
     name: str,
     target: str | None = None,
+    claude_flags: str = "",
 ) -> list[str]:
     """Build the argv list to pass to ``os.execvp("claude", ...)`` .
 
@@ -652,6 +675,9 @@ def build_claude_args(
     - anything else: ``["claude", "/zing:<skill> <target>", "--session-id",
       session_id, "--name", name]``
 
+    Extra flags from *claude_flags* (a space-separated string) are appended
+    after the base arguments.
+
     Args:
         skill: Skill name (e.g. ``"resume"``, ``"new"``, ``"pr-audit"``,
             ``"pr-audit-visual"``).
@@ -659,12 +685,210 @@ def build_claude_args(
         name: Session display name.
         target: Argument passed to the slash command (ticket ID for new-ticket
             flows, PR URL for PR flows).  Omitted from the command when ``None``.
+        claude_flags: Extra CLI flags to append (e.g. ``"--model sonnet --verbose"``).
 
     Returns:
         List of strings suitable for ``os.execvp``.
     """
+    extra = shlex.split(claude_flags) if claude_flags else []
+
     if skill == "resume":
-        return ["claude", "--resume", session_id]
+        return ["claude", "--resume", session_id, *extra]
 
     slash_cmd = f"/zing:{skill} {target}" if target else f"/zing:{skill}"
-    return ["claude", slash_cmd, "--session-id", session_id, "--name", name]
+    return ["claude", slash_cmd, "--session-id", session_id, "--name", name, *extra]
+
+
+# ---------------------------------------------------------------------------
+# tmux helpers
+# ---------------------------------------------------------------------------
+
+_TMUX_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+
+
+def _sanitize_tmux_name(name: str) -> str:
+    """Replace characters unsafe for tmux session names with underscores."""
+    return _TMUX_UNSAFE_RE.sub("_", name)
+
+
+def build_tmux_session_name(target: str, pr_number: int | None = None) -> str:
+    """Build a tmux session name for a launch target.
+
+    Args:
+        target: Ticket ID, branch name, or other identifier for the session.
+        pr_number: If provided, overrides ``target`` and produces a PR-based name.
+
+    Returns:
+        A tmux-safe session name string.
+    """
+    if pr_number is not None:
+        return f"zing-pr-{pr_number}"
+    if re.fullmatch(TICKET_ID_PATTERN, target):
+        return f"zing-{target.lower()}"
+    return f"zing-{_sanitize_tmux_name(target)}"
+
+
+def require_tmux() -> None:
+    """Check that tmux is available on PATH.
+
+    Raises:
+        LaunchError: If tmux is not found.
+    """
+    if shutil.which("tmux") is None:
+        raise LaunchError("tmux is required for --detach mode but was not found on PATH")
+
+
+def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = None) -> None:
+    """Execute a command in the foreground or in a detached tmux session.
+
+    When ``tmux_session`` is ``None``, the current process is replaced via
+    ``os.execvp`` (foreground mode).  When set, a new detached tmux session
+    is created.
+
+    Args:
+        args: Command and arguments, e.g. ``["claude", "/zing:new BAK-1", ...]``.
+        work_dir: Working directory for the process.
+        tmux_session: tmux session name.  ``None`` means foreground (exec).
+
+    Raises:
+        LaunchError: If the tmux session name already exists.
+    """
+    if tmux_session is None:
+        os.execvp(args[0], args)
+        return  # unreachable — satisfies type checkers
+
+    # Check for name collision
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", tmux_session],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        raise LaunchError(f"tmux session '{tmux_session}' already exists")
+
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            tmux_session,
+            "-c",
+            str(work_dir),
+            shlex.join(args),
+        ],
+        check=True,
+    )
+
+    import click  # lazy — launch.py avoids top-level Click dependency
+
+    click.echo(f"Session started. Attach with: tmux attach -t {tmux_session}")
+
+
+# ---------------------------------------------------------------------------
+# Repo discovery
+# ---------------------------------------------------------------------------
+
+
+def find_repo_path(
+    code_dir: str,
+    repo_full_name: str,
+    cache: dict[str, Path] | None = None,
+) -> Path | None:
+    """Scan *code_dir* for a local checkout of *repo_full_name* (``"owner/repo"``).
+
+    Searches immediate children (depth 1) of *code_dir*.  For each subdirectory
+    the function:
+
+    1. Confirms it is a git repository via ``git rev-parse --is-inside-work-tree``.
+    2. Skips linked worktrees (only the main checkout is matched).
+    3. Resolves the origin remote URL and normalises it to ``"owner/repo"``.
+    4. Stores the mapping in *cache* for future calls.
+
+    Args:
+        code_dir: Root directory that contains local repository checkouts.
+        repo_full_name: GitHub repository in ``"owner/repo"`` format.
+        cache: Optional dict used to memoise results.  Modified in-place.
+
+    Returns:
+        :class:`~pathlib.Path` to the matching directory, or ``None`` if not found.
+
+    Raises:
+        LaunchError: If *code_dir* is empty or does not exist.
+    """
+    if not code_dir:
+        raise LaunchError(
+            "code_dir is not configured. Set [git] code_dir in ~/.config/zing-ai/config.toml"
+        )
+
+    code_path = Path(code_dir).expanduser()
+    if not code_path.exists():
+        raise LaunchError(f"code_dir '{code_dir}' does not exist")
+
+    if cache is not None and repo_full_name in cache:
+        return cache[repo_full_name]
+
+    # Use a local dict to accumulate results; merge into caller's cache at the end.
+    local: dict[str, Path] = {}
+
+    # Scan immediate children only (depth 1).
+    for child in sorted(code_path.iterdir()):
+        if not child.is_dir():
+            continue
+
+        # 1. Check it is a git repo.
+        is_git = subprocess.run(
+            ["git", "-C", str(child), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+        )
+        if is_git.returncode != 0:
+            continue
+
+        # 2. Skip linked worktrees — only match the main checkout.
+        wt_result = subprocess.run(
+            ["git", "-C", str(child), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+        )
+        if wt_result.returncode != 0:
+            continue
+
+        # The first "worktree <path>" line names the main checkout.
+        main_wt_path: Path | None = None
+        for line in wt_result.stdout.splitlines():
+            if line.startswith("worktree "):
+                main_wt_path = Path(line[len("worktree ") :].strip())
+                break
+
+        if main_wt_path is not None and child.resolve() != main_wt_path.resolve():
+            # This directory is a linked worktree — skip it.
+            continue
+
+        # 3. Get origin remote URL.
+        remote_result = subprocess.run(
+            ["git", "-C", str(child), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+        )
+        if remote_result.returncode != 0:
+            continue
+
+        remote_url = remote_result.stdout.strip()
+
+        # Parse owner/repo from HTTPS or SSH remote URL.
+        # HTTPS: https://github.com/owner/repo.git
+        # SSH:   git@github.com:owner/repo.git
+        https_match = re.search(r"github\.com/([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+        ssh_match = re.search(r"github\.com:([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+        m = https_match or ssh_match
+        if not m:
+            continue
+
+        full_name = m.group(1)
+        local[full_name] = child
+
+    # Merge results into caller's cache.
+    if cache is not None:
+        cache.update(local)
+        return cache.get(repo_full_name)
+
+    return local.get(repo_full_name)

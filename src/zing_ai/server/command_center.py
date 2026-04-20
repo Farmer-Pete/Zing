@@ -1,9 +1,9 @@
-"""Pure aggregation logic for the Command Center dashboard.
+"""Aggregation logic for the Command Center dashboard.
 
 Takes typed snapshots from Linear, GitHub, and the in-memory SessionManager
-and produces the Kanban view rendered on ``/command-center``. No I/O
-lives here — everything is a pure function of its inputs so it can be unit
-tested with synthetic data.
+and produces the Kanban view rendered on ``/command-center``. Most functions
+are pure (no I/O) and can be unit tested with synthetic data.
+``get_live_tmux_sessions`` is the exception — it shells out to ``tmux``.
 """
 
 from __future__ import annotations
@@ -515,3 +515,24 @@ def aggregate(
     view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))
 
     return view
+
+
+def get_live_tmux_sessions() -> set[str]:
+    """Return the set of active tmux session names.
+
+    Runs ``tmux list-sessions`` to get the current session list.
+    Returns an empty set if tmux is not installed, not running, or has no sessions.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.splitlines() if line}

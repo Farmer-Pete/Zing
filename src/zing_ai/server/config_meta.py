@@ -226,6 +226,14 @@ FIELD_META: dict[str, dict] = {
         },
         "show_when": "$git_workflow_mode === 'worktree' || $git_workflow_mode === 'ask'",
     },
+    "git.code_dir": {
+        "label": "Code directory",
+        "field_type": "text",
+        "description": {
+            "short": "Path to the directory containing your git repositories (e.g. ~/Code).",
+            "long": "Path to the directory containing your git repositories (e.g. ~/Code).",
+        },
+    },
     # category: agents
     "agents.plan_exploration_count": {
         "label": "Plan exploration agent count",
@@ -296,6 +304,15 @@ FIELD_META: dict[str, dict] = {
         "description": {
             "short": "How often the Command Center polls Linear and GitHub for updates.",
             "long": "Lower values give fresher data but increase API request volume.",
+        },
+        "group": "Command Center",
+    },
+    "command_center.claude_flags": {
+        "label": "Claude flags",
+        "field_type": "text",
+        "description": {
+            "short": "Extra flags passed to `claude` on launch.",
+            "long": "Extra flags passed to `claude` on launch (e.g. `--model sonnet`).",
         },
         "group": "Command Center",
     },
