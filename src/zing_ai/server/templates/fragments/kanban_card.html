@@ -130,8 +130,8 @@
     {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
     <div class="launch-btn-group">
       <button class="launch-btn"
-              data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}'}})"
-              data-attr:disabled="$launchingCards.includes('{{ card.key | e }}')">
+              data-launch-bg="{{ card.key | e }}"
+              data-launch-bg-label="&#9654; {{ launch_label }}">
         &#9654; {{ launch_label }}
       </button>
       <button class="launch-btn launch-btn-secondary"
@@ -144,8 +144,8 @@
     {% set is_author = card.prs[0].author == current_username %}
     <div class="launch-btn-group">
       <button class="launch-btn"
-              data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}'}})"
-              data-attr:disabled="$launchingCards.includes('{{ card.key | e }}')">
+              data-launch-bg="{{ card.key | e }}"
+              data-launch-bg-label="&#9654; Review PR">
         &#9654; Review PR
       </button>
       <button class="launch-btn launch-btn-secondary"
