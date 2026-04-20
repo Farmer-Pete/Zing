@@ -142,11 +142,20 @@
   {% elif card.prs %}
     {% set is_author = card.prs[0].author == current_username %}
     <div class="launch-btn-group">
-      <button class="launch-btn" data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}" data-launch-label="Start Review">
+      <button class="launch-btn"
+              data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}'}})"
+              data-attr:disabled="$launchingCards.includes('{{ card.key | e }}')">
+        Launch in Background
+      </button>
+      <button class="launch-btn launch-btn-secondary"
+              data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}"
+              data-launch-label="Start Review">
         Start Review
       </button>
       {% if is_author %}
-        <button class="launch-btn launch-btn-secondary" data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}" data-launch-label="Respond to Review">
+        <button class="launch-btn launch-btn-secondary"
+                data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}"
+                data-launch-label="Respond to Review">
           Respond to Review
         </button>
       {% endif %}
