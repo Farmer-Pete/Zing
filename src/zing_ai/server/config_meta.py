@@ -226,6 +226,14 @@ FIELD_META: dict[str, dict] = {
         },
         "show_when": "$git_workflow_mode === 'worktree' || $git_workflow_mode === 'ask'",
     },
+    "git.code_dir": {
+        "label": "Code directory",
+        "field_type": "text",
+        "description": {
+            "short": "Absolute path to the directory containing your git repositories.",
+            "long": "Absolute path to the directory containing your git repositories.",
+        },
+    },
     # category: agents
     "agents.plan_exploration_count": {
         "label": "Plan exploration agent count",
