@@ -872,15 +872,20 @@ def _init_git_repo(path: Path, remote_url: str) -> None:
     (path / "README.md").write_text("hello")
     subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
     subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
+        ["git", "-C", str(path), "commit", "--no-verify", "-m", "init"],
         check=True,
         capture_output=True,
     )
-    subprocess.run(
+    result = subprocess.run(
         ["git", "-C", str(path), "remote", "add", "origin", remote_url],
-        check=True,
         capture_output=True,
     )
+    if result.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote_url],
+            check=True,
+            capture_output=True,
+        )
 
 
 class TestFindRepoPath(TestCase):
