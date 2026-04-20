@@ -126,17 +126,21 @@
   {% endif %}
 
   {# ── Launch button ── #}
+  {# Icons: ▶ (play/terminal) for background launch, 📋 (clipboard) for copy #}
+  {% set icon_launch = '<svg viewBox="0 0 16 16" fill="currentColor" class="btn-icon"><path d="M4 2l10 6-10 6V2z"/></svg>' %}
+  {% set icon_copy = '<svg viewBox="0 0 16 16" fill="currentColor" class="btn-icon"><path d="M5 2a1 1 0 00-1 1v9a1 1 0 001 1h6a1 1 0 001-1V3a1 1 0 00-1-1H5zm5 10H6V4h4v8z"/><path d="M3 5v8a2 2 0 002 2h5v-1H5a1 1 0 01-1-1V5H3z"/></svg>' %}
   {% if card.ticket %}
+    {% set launch_label = "Resume Session" if card.sessions | selectattr("session_type", "equalto", "claude_code") | list else "Plan Ticket" %}
     <div class="launch-btn-group">
       <button class="launch-btn"
               data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}'}})"
               data-attr:disabled="$launchingCards.includes('{{ card.key | e }}')">
-        Launch in Background
+        {{ icon_launch | safe }} {{ launch_label }}
       </button>
       <button class="launch-btn launch-btn-secondary"
               data-launch-cmd="zing-ai launch {{ card.key | e }}"
-              data-launch-label="Copy Command">
-        Copy Command
+              data-launch-label="{{ icon_copy | safe }} Copy Command">
+        {{ icon_copy | safe }} Copy Command
       </button>
     </div>
   {% elif card.prs %}
@@ -145,18 +149,18 @@
       <button class="launch-btn"
               data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}'}})"
               data-attr:disabled="$launchingCards.includes('{{ card.key | e }}')">
-        Launch in Background
+        {{ icon_launch | safe }} Review PR
       </button>
       <button class="launch-btn launch-btn-secondary"
               data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}"
-              data-launch-label="Start Review">
-        Start Review
+              data-launch-label="{{ icon_copy | safe }} Start Review">
+        {{ icon_copy | safe }} Start Review
       </button>
       {% if is_author %}
         <button class="launch-btn launch-btn-secondary"
                 data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}"
-                data-launch-label="Respond to Review">
-          Respond to Review
+                data-launch-label="{{ icon_copy | safe }} Respond">
+          {{ icon_copy | safe }} Respond
         </button>
       {% endif %}
     </div>
