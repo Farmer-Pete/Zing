@@ -312,13 +312,14 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                     branch=branch_name,
                 )
                 move_ticket_in_progress(ticket_id, api_key)
+                ticket_skill = skill or "new"
                 create_session_on_server(
                     server_url=server_url,
                     session_id=session_id,
                     title=ticket_id,
                     ticket_id=ticket_id,
                     worktree_path=str(work_dir) if work_dir else None,
-                    skill="new",
+                    skill=ticket_skill,
                     tmux_session=tmux_name,
                 )
                 succeeded = True
@@ -327,7 +328,7 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                     rollback_worktree(worktree_path)
 
             args = build_claude_args(
-                skill="new",
+                skill=ticket_skill,
                 session_id=session_id,
                 name=ticket_id,
                 target=ticket_id,
