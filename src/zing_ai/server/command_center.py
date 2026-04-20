@@ -1,9 +1,9 @@
-"""Pure aggregation logic for the Command Center dashboard.
+"""Aggregation logic for the Command Center dashboard.
 
 Takes typed snapshots from Linear, GitHub, and the in-memory SessionManager
-and produces the Kanban view rendered on ``/command-center``. No I/O
-lives here — everything is a pure function of its inputs so it can be unit
-tested with synthetic data.
+and produces the Kanban view rendered on ``/command-center``. Most functions
+are pure (no I/O) and can be unit tested with synthetic data.
+``get_live_tmux_sessions`` is the exception — it shells out to ``tmux``.
 """
 
 from __future__ import annotations

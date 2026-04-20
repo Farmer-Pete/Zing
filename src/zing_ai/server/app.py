@@ -20,6 +20,7 @@ from zing_ai.server.command_center import get_live_tmux_sessions
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
+from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.routes import (
     _dashboard_queues,
     _notify_dashboard_connections,
@@ -209,15 +210,23 @@ def create_app(
         )
         poller_task = asyncio.create_task(poller.run())
 
+        def _sync_tmux_alive(live: set[str]) -> None:
+            """Set _tmux_alive on each ClaudeCodeSession based on live tmux names."""
+            for session in sm.list_sessions():
+                if isinstance(session, ClaudeCodeSession) and session.tmux_session:
+                    session._tmux_alive = session.tmux_session in live
+
         async def _poll_tmux() -> None:
             """Poll tmux every 5 seconds and store live session names on app state."""
             # Initial call before first SSE render
-            fastapi_app.state.live_tmux_sessions = await asyncio.to_thread(get_live_tmux_sessions)
+            live = await asyncio.to_thread(get_live_tmux_sessions)
+            fastapi_app.state.live_tmux_sessions = live
+            _sync_tmux_alive(live)
             while True:
                 await asyncio.sleep(5)
-                fastapi_app.state.live_tmux_sessions = await asyncio.to_thread(
-                    get_live_tmux_sessions
-                )
+                live = await asyncio.to_thread(get_live_tmux_sessions)
+                fastapi_app.state.live_tmux_sessions = live
+                _sync_tmux_alive(live)
 
         tmux_task = asyncio.create_task(_poll_tmux())
         try:
