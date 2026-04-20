@@ -184,15 +184,21 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
-    sessions = app.state.session_manager.list_sessions()
-    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
-        **tray_data,
-    )  # hub disappeared between events
+    )
+
+
+def _render_tray_fragment(app: FastAPI) -> str:
+    """Render the management tray. Used by SSE board_changed events."""
+    view = _build_view(app)
+    live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
+    sessions = app.state.session_manager.list_sessions()
+    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
+    return render("fragments/management_tray.html", **tray_data)
 
 
 @router.get("/command-center", response_class=HTMLResponse)
@@ -242,6 +248,12 @@ async def command_center_events(request: Request):  # noqa: ANN201
                         html,
                         selector="#kanban-board",
                         mode=ElementPatchMode.OUTER,
+                    )
+                    tray_html = _render_tray_fragment(request.app)
+                    yield SSE.patch_elements(
+                        tray_html,
+                        selector="#mgmt-tray",
+                        mode=ElementPatchMode.INNER,
                     )
                 elif kind == "poll_status":
                     cache = request.app.state.external_cache
