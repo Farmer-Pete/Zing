@@ -791,7 +791,7 @@ def find_repo_path(
             "code_dir is not configured. Set [git] code_dir in ~/.config/zing-ai/config.toml"
         )
 
-    code_path = Path(code_dir)
+    code_path = Path(code_dir).expanduser()
     if not code_path.exists():
         raise LaunchError(f"code_dir '{code_dir}' does not exist")
 
