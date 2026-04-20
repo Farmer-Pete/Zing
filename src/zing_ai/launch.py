@@ -779,6 +779,10 @@ def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = N
         check=True,
     )
 
+    import click  # lazy — launch.py avoids top-level Click dependency
+
+    click.echo(f"Session started. Attach with: tmux attach -t {tmux_session}")
+
 
 # ---------------------------------------------------------------------------
 # Repo discovery
