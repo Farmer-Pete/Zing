@@ -125,6 +125,32 @@
     max-width: 140px;
 }
 
+.directory-picker {
+    grid-area: input;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+.directory-picker input {
+    flex: 1;
+}
+.browse-btn {
+    padding: 0.375rem 0.75rem;
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--gray-700);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+.browse-btn:hover {
+    background: var(--gray-100);
+    border-color: var(--gray-300);
+}
+
 .config-field .field-status {
     grid-area: status;
     font-size: 0.75rem;
