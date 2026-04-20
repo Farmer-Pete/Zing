@@ -483,6 +483,9 @@ a.ci-failing-name:hover {
 /* Blue dot for Claude Code sessions */
 .dot-blue { background: #3b82f6; }
 
+/* Alive variant pulses to indicate a running tmux session */
+.dot-blue.alive { animation: cc-pulse 2s infinite; }
+
 /* Claude Code session indicator — blue-tinted to distinguish from Zing (amber) */
 .session-indicator.claude-code {
     background: #eff6ff;
