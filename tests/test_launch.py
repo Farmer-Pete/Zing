@@ -463,35 +463,44 @@ class TestDetectAction(TestCase):
     def test_returns_resume_when_session_found(self) -> None:
         # GET /api/sessions?ticket_id=BAK-123 returns a plain list
         sessions = [
-            {"session_type": "claude_code", "ticket_id": "BAK-123", "session_id": "sess-abc"},
+            {
+                "session_type": "claude_code",
+                "ticket_id": "BAK-123",
+                "session_id": "sess-abc",
+                "worktree_path": "/tmp/wt",
+            },
             {"session_type": "zing", "ticket_id": "BAK-123", "session_id": "sess-xyz"},
         ]
         with self._mock_urlopen(sessions):
-            action, sid = detect_action("BAK-123", "http://localhost:9876")
+            action, sid, wt = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "resume")
         self.assertEqual(sid, "sess-abc")
+        self.assertEqual(wt, "/tmp/wt")
 
     def test_returns_new_when_no_matching_session(self) -> None:
         sessions: list = []
         with self._mock_urlopen(sessions):
-            action, sid = detect_action("BAK-123", "http://localhost:9876")
+            action, sid, wt = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
+        self.assertIsNone(wt)
 
     def test_returns_new_when_session_list_empty(self) -> None:
         with self._mock_urlopen([]):
-            action, sid = detect_action("BAK-123", "http://localhost:9876")
+            action, sid, wt = detect_action("BAK-123", "http://localhost:9876")
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
+        self.assertIsNone(wt)
 
     def test_returns_new_when_only_non_claude_code_sessions(self) -> None:
         sessions = [
             {"session_type": "zing", "ticket_id": "BAK-5", "session_id": "sess-zing"},
         ]
         with self._mock_urlopen(sessions):
-            action, sid = detect_action("BAK-5", "http://localhost:9876")
+            action, sid, wt = detect_action("BAK-5", "http://localhost:9876")
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
+        self.assertIsNone(wt)
 
 
 # ---------------------------------------------------------------------------

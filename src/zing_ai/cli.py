@@ -236,9 +236,11 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
 
             # Check for existing session
             if resume:
-                action, existing_session_id = detect_action(ticket_id, server_url)
+                action, existing_session_id, existing_worktree = detect_action(
+                    ticket_id, server_url
+                )
             else:
-                action, existing_session_id = "new", None
+                action, existing_session_id, existing_worktree = "new", None, None
 
             if action == "resume" and existing_session_id is not None:
                 args = build_claude_args(
@@ -247,10 +249,11 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                     name=ticket_id,
                     claude_flags=cfg.command_center.claude_flags,
                 )
+                resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
                 tmux_name = build_tmux_session_name(ticket_id) if detach else None
                 # Try resume; if Claude can't find the conversation, fall
                 # through to the new-session flow instead of failing.
-                result = subprocess.run(args, cwd=Path.cwd())
+                result = subprocess.run(args, cwd=resume_cwd)
                 if result.returncode == 0:
                     return
                 click.echo(

@@ -617,7 +617,7 @@ def create_session_on_server(
 def detect_action(
     ticket_id: str,
     server_url: str,
-) -> tuple[Literal["resume", "new"], str | None]:
+) -> tuple[Literal["resume", "new"], str | None, str | None]:
     """Check whether an existing Claude Code session exists for *ticket_id*.
 
     Calls ``GET /api/sessions?ticket_id=<id>`` and finds any session with
@@ -628,8 +628,8 @@ def detect_action(
         server_url: Base URL of the Zing server.
 
     Returns:
-        ``("resume", session_id)`` if a matching session is found, otherwise
-        ``("new", None)``.
+        ``("resume", session_id, worktree_path)`` if a matching session is
+        found, otherwise ``("new", None, None)``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -650,9 +650,9 @@ def detect_action(
 
     for session in sessions:
         if session.get("session_type") == "claude_code":
-            return ("resume", session["session_id"])
+            return ("resume", session["session_id"], session.get("worktree_path"))
 
-    return ("new", None)
+    return ("new", None, None)
 
 
 # ---------------------------------------------------------------------------
