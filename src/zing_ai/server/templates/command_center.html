@@ -28,6 +28,15 @@
             setTimeout(function() { btn.textContent = label; }, 1500);
         });
     });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            var panel = document.getElementById('mgmt-panel');
+            if (panel && panel.classList.contains('open')) {
+                panel.classList.remove('open');
+                document.getElementById('mgmt-fab').classList.remove('hidden');
+            }
+        }
+    });
     </script>
 
     <footer class="cc-footer">
