@@ -449,6 +449,17 @@ a.ci-failing-name:hover {
    FOOTER
 ────────────────────────────────────────────── */
 
+.cc-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 0.25rem 0.5rem;
+    font-size: 0.65rem;
+    color: var(--gray-300);
+    letter-spacing: 0.02em;
+}
+
 .cc-footer {
     margin-top: 1rem;
     padding: 0.5rem 0.25rem;
