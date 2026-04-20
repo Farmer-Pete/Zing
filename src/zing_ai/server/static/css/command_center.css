@@ -467,13 +467,6 @@ a.ci-failing-name:hover {
     color: var(--gray-700);
 }
 
-/* Inline icon inside launch buttons */
-.btn-icon {
-    width: 10px;
-    height: 10px;
-    flex-shrink: 0;
-}
-
 /* Flex row container for multiple launch buttons */
 .launch-btn-group {
     display: flex;

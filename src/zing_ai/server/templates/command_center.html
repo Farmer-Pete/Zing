@@ -24,8 +24,8 @@
         var cmd = btn.getAttribute('data-launch-cmd');
         var label = btn.getAttribute('data-launch-label');
         navigator.clipboard.writeText(cmd).then(function() {
-            btn.textContent = 'Copied!';
-            setTimeout(function() { btn.textContent = label; }, 1500);
+            btn.innerHTML = '&#10003; Copied!';
+            setTimeout(function() { btn.innerHTML = label; }, 1500);
         });
     });
     document.addEventListener('keydown', function(e) {
