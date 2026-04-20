@@ -523,12 +523,17 @@ a.ci-failing-name:hover {
     cursor: pointer;
     z-index: 100;
     box-shadow: 0 4px 14px rgba(15,27,45,0.3);
-    transition: background 0.15s ease, transform 0.15s ease;
+    transition: background 0.15s ease, transform 0.25s ease, opacity 0.25s ease;
     border: none;
 }
 .mgmt-fab:hover {
     background: var(--navy-mid);
     transform: scale(1.05);
+}
+.mgmt-fab.hidden {
+    transform: translateY(80px);
+    opacity: 0;
+    pointer-events: none;
 }
 
 /* Count badge */
