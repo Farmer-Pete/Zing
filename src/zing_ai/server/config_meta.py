@@ -230,8 +230,8 @@ FIELD_META: dict[str, dict] = {
         "label": "Code directory",
         "field_type": "text",
         "description": {
-            "short": "Absolute path to the directory containing your git repositories.",
-            "long": "Absolute path to the directory containing your git repositories.",
+            "short": "Path to the directory containing your git repositories (e.g. ~/Code).",
+            "long": "Path to the directory containing your git repositories (e.g. ~/Code).",
         },
     },
     # category: agents
