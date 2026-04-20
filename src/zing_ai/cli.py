@@ -248,8 +248,15 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
                     claude_flags=cfg.command_center.claude_flags,
                 )
                 tmux_name = build_tmux_session_name(ticket_id) if detach else None
-                exec_or_detach(args, Path.cwd(), tmux_name)
-                return  # unreachable in foreground mode, but satisfies type checkers
+                # Try resume; if Claude can't find the conversation, fall
+                # through to the new-session flow instead of failing.
+                result = subprocess.run(args, cwd=Path.cwd())
+                if result.returncode == 0:
+                    return
+                click.echo(
+                    f"Resume failed (exit {result.returncode}); starting a new session instead.",
+                    err=True,
+                )
 
             # New ticket flow — read Linear API key (only needed for tickets)
             lr_config_path = Path.home() / ".config" / "lr" / "config.json"
