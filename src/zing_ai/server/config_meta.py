@@ -228,7 +228,7 @@ FIELD_META: dict[str, dict] = {
     },
     "git.code_dir": {
         "label": "Code directory",
-        "field_type": "directory",
+        "field_type": "text",
         "description": {
             "short": "Absolute path to the directory containing your git repositories.",
             "long": "Absolute path to the directory containing your git repositories.",

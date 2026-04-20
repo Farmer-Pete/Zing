@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -166,13 +165,3 @@ def post_toggle_github_repo_group(request: Request, payload: dict[str, Any]) -> 
     except Timeout:
         return JSONResponse({"error": "config is locked, try again"}, status_code=503)
     return JSONResponse({"status": "ok", "repos": group_repos})
-
-
-@router.get("/config/browse-directory")
-async def browse_directory(path: str = "~") -> JSONResponse:
-    """List subdirectories of a given path for the directory picker."""
-    resolved = Path(path).expanduser().resolve()
-    if not resolved.is_dir():
-        return JSONResponse({"error": f"Not a directory: {resolved}"}, status_code=400)
-    dirs = sorted(d.name for d in resolved.iterdir() if d.is_dir() and not d.name.startswith("."))
-    return JSONResponse({"resolved": str(resolved), "dirs": dirs})

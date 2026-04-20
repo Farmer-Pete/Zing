@@ -1,7 +1,7 @@
 {# Context contract:
    - key: dot-path string, e.g. "thresholds.large_file_lines"
    - label: human-readable field label
-   - field_type: "number" | "text" | "select" | "password" | "directory"
+   - field_type: "number" | "text" | "select"
    - value: current value (int or str)
    - description: short help text
    - options: list of strings (only used when field_type == "select")
@@ -23,25 +23,6 @@
            data-signals='{{ {signal_name: value} | tojson }}'
            data-bind="{{ signal_name }}"
            data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', {payload: { '{{ key.split('.')[1] }}': ${{ signal_name }} }})">
-  {% elif field_type == "directory" %}
-    <div class="directory-picker">
-      <input type="text" id="input-{{ signal_name }}" value="{{ value }}"
-             data-signals='{{ {signal_name: value} | tojson }}'
-             data-bind="{{ signal_name }}"
-             data-on:change__debounce.500ms="@post('/config/save/{{ key.split('.')[0] }}', {payload: { '{{ key.split('.')[1] }}': ${{ signal_name }} }})"
-             placeholder="~/Code">
-      <button type="button" class="browse-btn" onclick="(async function(btn){
-        var input = btn.previousElementSibling;
-        var path = input.value || '~';
-        fetch('/config/browse-directory?path=' + encodeURIComponent(path))
-          .then(function(r){ return r.json(); })
-          .then(function(data){
-            if (data.error) { alert(data.error); return; }
-            var choice = prompt('Current: ' + data.resolved + '\n\nSubdirectories:\n' + data.dirs.join('\n') + '\n\nEnter full path or press Cancel:');
-            if (choice) { input.value = choice; input.dispatchEvent(new Event('change', {bubbles:true})); }
-          });
-      })(this)">Browse</button>
-    </div>
   {% elif field_type == "number" %}
     <input type="number" id="input-{{ signal_name }}" value="{{ value }}"
            data-signals='{{ {signal_name: value} | tojson }}'
