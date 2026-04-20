@@ -10,10 +10,12 @@
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
        toggles via SSE. #}
-    <div class="cc-error"
+    <div class="cc-error" id="cc-error"
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
+    {# Secondary error banner for JS-driven errors (not controlled by Datastar signals) #}
+    <div class="cc-error" id="cc-js-error" style="display: none"></div>
 
 {% include "fragments/kanban_board.html" %}
 
@@ -36,7 +38,7 @@
         if (!btn || btn.disabled) return;
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
-        var errorBanner = document.querySelector('.cc-error');
+        var errorBanner = document.getElementById('cc-js-error');
 
         btn.disabled = true;
         btn.innerHTML = '&#9203; Launching\u2026';
