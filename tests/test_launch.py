@@ -17,10 +17,12 @@ from zing_ai.launch import (
     create_worktree,
     derive_branch_name,
     detect_action,
+    exec_or_detach,
     extract_ticket_id,
     fetch_pr_data,
     move_ticket_in_progress,
     parse_pr_url,
+    require_tmux,
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
@@ -722,3 +724,118 @@ class TestExtractTicketId(TestCase):
         """Single-letter prefixes like 'A-1' are not matched (need 2+ letter prefix)."""
         result = extract_ticket_id("A-1", "B-42 fix", "X-99")
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# require_tmux
+# ---------------------------------------------------------------------------
+
+
+class TestRequireTmux(TestCase):
+    """Tests for require_tmux."""
+
+    def test_require_tmux_missing(self) -> None:
+        """When tmux is not on PATH, LaunchError is raised."""
+        with (
+            patch("zing_ai.launch.shutil.which", return_value=None),
+            self.assertRaises(LaunchError) as ctx,
+        ):
+            require_tmux()
+        self.assertIn("tmux", str(ctx.exception))
+
+    def test_require_tmux_found(self) -> None:
+        """When tmux is found on PATH, no error is raised."""
+        with patch("zing_ai.launch.shutil.which", return_value="/usr/bin/tmux"):
+            require_tmux()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# exec_or_detach
+# ---------------------------------------------------------------------------
+
+
+class TestExecOrDetach(TestCase):
+    """Tests for exec_or_detach."""
+
+    def test_exec_or_detach_foreground(self) -> None:
+        """When tmux_session is None, os.execvp is called with the given args."""
+        args = ["claude", "/zing:new BAK-1", "--session-id", "sess-1", "--name", "BAK-1"]
+        with patch("zing_ai.launch.os.execvp") as mock_execvp:
+            exec_or_detach(args, Path("/tmp/work"), tmux_session=None)
+        mock_execvp.assert_called_once_with("claude", args)
+
+    def test_exec_or_detach_detach(self) -> None:
+        """When tmux_session is set, tmux new-session is called with shlex.join(args)."""
+        import shlex
+
+        args = ["claude", "/zing:new BAK-2", "--session-id", "sess-2", "--name", "BAK-2"]
+        has_session_result = MagicMock()
+        has_session_result.returncode = 1  # session does not exist
+
+        new_session_result = MagicMock()
+        new_session_result.returncode = 0
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "has-session":
+                return has_session_result
+            return new_session_result
+
+        with patch("zing_ai.launch.subprocess.run", side_effect=fake_run) as mock_run:
+            exec_or_detach(args, Path("/tmp/work"), tmux_session="zing-test")
+
+        # Find the new-session call
+        calls = mock_run.call_args_list
+        new_sess_call = next(c for c in calls if c[0][0][1] == "new-session")
+        cmd = new_sess_call[0][0]
+        self.assertIn(shlex.join(args), cmd)
+        self.assertIn("zing-test", cmd)
+        self.assertIn("/tmp/work", cmd)
+
+    def test_exec_or_detach_name_collision(self) -> None:
+        """When has-session returns 0, LaunchError is raised with 'already exists'."""
+        has_session_result = MagicMock()
+        has_session_result.returncode = 0  # session already exists
+
+        with (
+            patch("zing_ai.launch.subprocess.run", return_value=has_session_result),
+            self.assertRaises(LaunchError) as ctx,
+        ):
+            exec_or_detach(
+                ["claude", "--resume", "sess-x"],
+                Path("/tmp/work"),
+                tmux_session="zing-bak-1",
+            )
+        self.assertIn("already exists", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# create_session_on_server with tmux_session
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSessionOnServerWithTmux(TestCase):
+    """Tests for create_session_on_server tmux_session parameter."""
+
+    def test_create_session_on_server_with_tmux(self) -> None:
+        """When tmux_session is provided, it is included in the POST body."""
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = json.dumps(
+            {"status": "created", "session_id": "sess-tmux"}
+        ).encode()
+        resp_mock.__enter__ = lambda s: s
+        resp_mock.__exit__ = MagicMock(return_value=False)
+
+        with patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock) as mock_open:
+            create_session_on_server(
+                server_url="http://localhost:9876",
+                session_id="sess-tmux",
+                title="FRO-123",
+                ticket_id="FRO-123",
+                worktree_path="/tmp/wt",
+                skill="new",
+                tmux_session="zing-fro-123",
+            )
+
+        req = mock_open.call_args[0][0]
+        body = json.loads(req.data.decode())
+        self.assertEqual(body["tmux_session"], "zing-fro-123")

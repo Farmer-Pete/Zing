@@ -18,6 +18,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.error
@@ -546,6 +547,7 @@ def create_session_on_server(
     skill: str | None,
     pr_number: int | None = None,
     pr_repo: str | None = None,
+    tmux_session: str | None = None,
 ) -> None:
     """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
@@ -561,6 +563,7 @@ def create_session_on_server(
         skill: Skill/command name, or ``None``.
         pr_number: GitHub PR number, or ``None``.
         pr_repo: GitHub repo as ``"owner/repo"``, or ``None``.
+        tmux_session: tmux session name for detached launches, or ``None``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -573,6 +576,7 @@ def create_session_on_server(
         "skill": skill,
         "pr_number": pr_number,
         "pr_repo": pr_repo,
+        "tmux_session": tmux_session,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -668,3 +672,84 @@ def build_claude_args(
 
     slash_cmd = f"/zing:{skill} {target}" if target else f"/zing:{skill}"
     return ["claude", slash_cmd, "--session-id", session_id, "--name", name]
+
+
+# ---------------------------------------------------------------------------
+# tmux helpers
+# ---------------------------------------------------------------------------
+
+_TMUX_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+
+
+def _sanitize_tmux_name(name: str) -> str:
+    """Replace characters unsafe for tmux session names with underscores."""
+    return _TMUX_UNSAFE_RE.sub("_", name)
+
+
+def build_tmux_session_name(target: str, pr_number: int | None = None) -> str:
+    """Build a tmux session name for a launch target.
+
+    Args:
+        target: Ticket ID, branch name, or other identifier for the session.
+        pr_number: If provided, overrides ``target`` and produces a PR-based name.
+
+    Returns:
+        A tmux-safe session name string.
+    """
+    if pr_number is not None:
+        return f"zing-pr-{pr_number}"
+    if re.fullmatch(TICKET_ID_PATTERN, target):
+        return f"zing-{target.lower()}"
+    return f"zing-{_sanitize_tmux_name(target)}"
+
+
+def require_tmux() -> None:
+    """Check that tmux is available on PATH.
+
+    Raises:
+        LaunchError: If tmux is not found.
+    """
+    if shutil.which("tmux") is None:
+        raise LaunchError("tmux is required for --detach mode but was not found on PATH")
+
+
+def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = None) -> None:
+    """Execute a command in the foreground or in a detached tmux session.
+
+    When ``tmux_session`` is ``None``, the current process is replaced via
+    ``os.execvp`` (foreground mode).  When set, a new detached tmux session
+    is created.
+
+    Args:
+        args: Command and arguments, e.g. ``["claude", "/zing:new BAK-1", ...]``.
+        work_dir: Working directory for the process.
+        tmux_session: tmux session name.  ``None`` means foreground (exec).
+
+    Raises:
+        LaunchError: If the tmux session name already exists.
+    """
+    if tmux_session is None:
+        os.execvp(args[0], args)
+        return  # unreachable — satisfies type checkers
+
+    # Check for name collision
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", tmux_session],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        raise LaunchError(f"tmux session '{tmux_session}' already exists")
+
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            tmux_session,
+            "-c",
+            str(work_dir),
+            shlex.join(args),
+        ],
+        check=True,
+    )
