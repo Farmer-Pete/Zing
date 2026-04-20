@@ -1260,6 +1260,23 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_post_create_claude_code_session_with_tmux_session(self) -> None:
+        """POST /api/sessions/claude-code with tmux_session persists it."""
+        resp = self.client.post(
+            "/api/sessions/claude-code",
+            json={
+                "session_id": "cc-tmux-1",
+                "title": "Background Session",
+                "ticket_id": "FRO-123",
+                "tmux_session": "zing-fro-123",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("cc-tmux-1")
+        self.assertIsNotNone(session)
+        assert session is not None  # narrow for pyright
+        self.assertEqual(session.tmux_session, "zing-fro-123")  # type: ignore[union-attr]
+
     def test_get_sessions_returns_all(self) -> None:
         """GET /api/sessions returns all sessions."""
         self._create_session("zing-1", "Zing Session")

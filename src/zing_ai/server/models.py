@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
 
 
 class Location(BaseModel):
@@ -158,6 +158,7 @@ class SessionState(StrEnum):
     STARTED = "started"
     READY = "ready"
     COMPLETED = "completed"
+    STOPPED = "stopped"
 
 
 _STATE_PRIORITY: dict[str, int] = {
@@ -356,10 +357,18 @@ class ClaudeCodeSession(SessionBase):
     skill: str | None = None
     pr_number: int | None = None
     pr_repo: str | None = None
+    tmux_session: str | None = None
+    _tmux_alive: bool = PrivateAttr(default=False)
 
     @property
     def state(self) -> SessionState:
-        """Return the session state. ClaudeCodeSessions are always STARTED."""
+        """Return the session state.
+
+        If *tmux_session* is set and the session is not alive, return STOPPED.
+        Otherwise return STARTED.
+        """
+        if self.tmux_session is not None and not self._tmux_alive:
+            return SessionState.STOPPED
         return SessionState.STARTED
 
 
