@@ -273,6 +273,20 @@ async def command_center_events(request: Request):  # noqa: ANN201
     return _generate()
 
 
+@router.post("/command-center/refresh")
+async def refresh_command_center(request: Request) -> JSONResponse:
+    """Trigger an immediate poll of Linear/GitHub and refresh the board."""
+    poller = getattr(request.app.state, "poller", None)
+    if poller is None:
+        return JSONResponse({"error": "Poller not available"}, status_code=503)
+    try:
+        await poller._poll_once()  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Manual refresh failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"status": "refreshed"})
+
+
 # ---------------------------------------------------------------------------
 # Background session launch
 # ---------------------------------------------------------------------------

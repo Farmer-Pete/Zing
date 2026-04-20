@@ -99,6 +99,13 @@
 
     <footer class="cc-footer">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
+        <button class="cc-refresh-btn" id="cc-refresh-btn" onclick="(function(btn){
+            btn.disabled = true; btn.textContent = 'Refreshing\u2026';
+            fetch('/command-center/refresh', {method:'POST'}).then(function(r){
+                btn.textContent = r.ok ? '\u2713 Refreshed' : 'Failed';
+                setTimeout(function(){ btn.textContent = '\u21BB Refresh'; btn.disabled = false; }, 1500);
+            }).catch(function(){ btn.textContent = 'Failed'; setTimeout(function(){ btn.textContent = '\u21BB Refresh'; btn.disabled = false; }, 1500); });
+        })(this)">&#x21BB; Refresh</button>
     </footer>
 </div>
 {% endblock %}

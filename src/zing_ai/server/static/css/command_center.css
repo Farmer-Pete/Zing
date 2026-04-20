@@ -457,6 +457,26 @@ a.ci-failing-name:hover {
     color: var(--gray-300);
     text-align: right;
     letter-spacing: 0.02em;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.cc-refresh-btn {
+    background: none;
+    border: 1px solid var(--gray-200);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.cc-refresh-btn:hover {
+    color: var(--gray-700);
+    border-color: var(--gray-300);
 }
 
 /* ──────────────────────────────────────────────

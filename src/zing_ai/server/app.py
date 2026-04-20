@@ -208,6 +208,7 @@ def create_app(
             queues=fastapi_app.state.cc_queues,
             config=load_config().command_center,
         )
+        fastapi_app.state.poller = poller
         poller_task = asyncio.create_task(poller.run())
 
         def _sync_tmux_alive(live: set[str]) -> None:
