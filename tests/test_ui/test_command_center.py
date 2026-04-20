@@ -140,16 +140,16 @@ def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page)
 
 
 def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
-    """Footer starts with 'Waiting for first poll'; after a poll_status SSE event it updates."""
+    """Toolbar starts with 'Waiting for first poll'; after a poll_status SSE event it updates."""
     with page.expect_response(lambda r: "/command-center/events" in r.url, timeout=5000):
         page.goto(f"{server.base_url}/command-center")
 
     page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-    footer_span = page.locator(".cc-footer span")
-    expect(footer_span).to_be_visible(timeout=5000)
+    toolbar_span = page.locator(".cc-toolbar span")
+    expect(toolbar_span).to_be_visible(timeout=5000)
 
-    initial_text = footer_span.text_content(timeout=3000) or ""
+    initial_text = toolbar_span.text_content(timeout=3000) or ""
     assert "Waiting for first poll" in initial_text, (
         f"Expected 'Waiting for first poll' in footer, got: {initial_text!r}"
     )
@@ -163,10 +163,10 @@ def test_last_synced_footer_updates(server: _ServerInfo, page: Page) -> None:
     for queue in list(server.cc_queues):
         queue.put_nowait("poll_status")
 
-    expect(footer_span).to_contain_text("Last synced", timeout=5000)
-    updated_text = footer_span.text_content(timeout=3000) or ""
+    expect(toolbar_span).to_contain_text("Last synced", timeout=5000)
+    updated_text = toolbar_span.text_content(timeout=3000) or ""
     assert "Waiting for first poll" not in updated_text, (
-        f"Footer should no longer say 'Waiting for first poll', got: {updated_text!r}"
+        f"Toolbar should no longer say 'Waiting for first poll', got: {updated_text!r}"
     )
 
 
