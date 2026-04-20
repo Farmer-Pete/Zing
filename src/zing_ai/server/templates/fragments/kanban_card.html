@@ -97,7 +97,7 @@
   {# ── Zing session indicators (existing rendering) ── #}
   {% for session in card.sessions if session.session_type == 'zing' %}
     {% set state_val = session.state.value %}
-    <a href="/{{ session.session_id }}" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
+    <a href="/{{ session.session_id }}" target="_blank" rel="noopener" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
       {% if state_val == 'started' %}
         <span class="status-dot dot-amber"></span>
       {% elif state_val == 'pending' %}
