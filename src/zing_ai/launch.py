@@ -258,6 +258,12 @@ def create_worktree(
         stderr = exc.stderr.strip()
         # Branch already exists — create worktree without -b (reuse branch).
         if "already exists" in stderr:
+            # If the branch is checked out in an existing worktree, reuse it.
+            existing_match = re.search(r"already used by worktree at '([^']+)'", stderr)
+            if existing_match:
+                existing = Path(existing_match.group(1))
+                if existing.is_dir():
+                    return existing
             # Prune stale worktree records before retrying.
             subprocess.run(
                 ["git", "worktree", "prune"],
@@ -342,9 +348,15 @@ def checkout_pr_branch(
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.strip()
-        # Branch is locked to a stale worktree that no longer exists on disk.
-        # Prune the stale record and retry.
+        # Branch is already checked out in another worktree.
+        # Reuse it if it exists on disk, otherwise prune the stale record and retry.
         if "is already used by worktree" in stderr:
+            existing_match = re.search(r"already used by worktree at '([^']+)'", stderr)
+            if existing_match:
+                existing = Path(existing_match.group(1))
+                if existing.is_dir():
+                    return existing
+            # Stale record — prune and retry.
             subprocess.run(
                 ["git", "worktree", "prune"],
                 capture_output=True,
