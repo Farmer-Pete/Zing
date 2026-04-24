@@ -48,6 +48,9 @@ class GitHubPR(BaseModel):
     repo: str = ""
     requested_reviewers: list[str]
     reviewers: list[str] = Field(default_factory=list)  # users who submitted reviews
+    reviewer_states: dict[str, str] = Field(
+        default_factory=dict
+    )  # login -> APPROVED/CHANGES_REQUESTED/COMMENTED/etc.
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] | None
     mergeable_state: str
     ci_status: str | None

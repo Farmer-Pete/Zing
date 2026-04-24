@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import respx
@@ -360,7 +360,7 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_recent_prs_basic(self) -> None:
         """fetch_recent_prs returns merged PRs authored by the username within the window."""
         # Use a mergedAt 3 days ago (well within a 7-day window).
-        merged_at = "2026-04-14T10:00:00Z"
+        merged_at = (datetime.now(UTC) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         node = _make_pr_node(
             number=10,
             title="Merged feature",
@@ -389,8 +389,8 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
     @respx.mock
     async def test_fetch_recent_prs_filters_by_date(self) -> None:
         """fetch_recent_prs excludes PRs whose mergedAt is older than since_days."""
-        old_merged_at = "2026-04-01T10:00:00Z"  # 16 days ago — outside 7-day window
-        recent_merged_at = "2026-04-14T10:00:00Z"  # 3 days ago — inside window
+        old_merged_at = (datetime.now(UTC) - timedelta(days=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_merged_at = (datetime.now(UTC) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         old_node = _make_pr_node(
             number=1,
@@ -427,7 +427,7 @@ class TestGitHubClient(unittest.IsolatedAsyncioTestCase):
     @respx.mock
     async def test_fetch_recent_prs_filters_by_author_or_reviewer(self) -> None:
         """fetch_recent_prs keeps PRs where user is author OR reviewer; excludes others."""
-        merged_at = "2026-04-14T10:00:00Z"
+        merged_at = (datetime.now(UTC) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # PR authored by alice — should be included for username "alice"
         author_node = _make_pr_node(

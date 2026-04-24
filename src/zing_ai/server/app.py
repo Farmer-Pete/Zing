@@ -241,6 +241,13 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await tmux_task
             await poller.aclose()
+            # Terminate any ttyd processes spawned by attach-session.
+            ttyd_procs: dict = getattr(fastapi_app.state, "ttyd_procs", {})
+            for name, (proc, _port) in list(ttyd_procs.items()):
+                if proc.poll() is None:
+                    proc.terminate()
+                    logger.info("Terminated ttyd process for session %s", name)
+            ttyd_procs.clear()
 
     mcp_starlette = mcp_server.streamable_http_app()
 

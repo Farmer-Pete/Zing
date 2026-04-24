@@ -171,11 +171,17 @@ class TestCreateWorktree(TestCase):
         self.assertEqual(call_args[5], str(expected_path))
 
     def test_raises_on_git_failure(self) -> None:
+        error = subprocess.CalledProcessError(1, "git", stderr="already exists")
+
+        def _side_effect(*args: object, **kwargs: object) -> MagicMock:
+            cmd = args[0] if args else kwargs.get("args", [])
+            # Let `git worktree prune` succeed; everything else raises.
+            if isinstance(cmd, list) and "prune" in cmd:
+                return MagicMock()
+            raise error
+
         with (
-            patch(
-                "zing_ai.launch.subprocess.run",
-                side_effect=subprocess.CalledProcessError(1, "git", stderr="already exists"),
-            ),
+            patch("zing_ai.launch.subprocess.run", side_effect=_side_effect),
             self.assertRaises(LaunchError),
         ):
             create_worktree(Path("/repo"), "feat", "../{repo}-{branch}", "zing/")
@@ -207,13 +213,17 @@ class TestCheckoutPrBranch(TestCase):
             mock_run.return_value = MagicMock()
             result = checkout_pr_branch(repo_root, branch, template)
 
-        expected_path = (repo_root / f"../main-{branch}").resolve()
+        # The prefix before the first slash is stripped for the worktree path
+        # (e.g. "origin/pr-branch" -> "pr-branch").
+        path_branch = branch.split("/", 1)[-1]
+        expected_path = (repo_root / f"../main-{path_branch}").resolve()
         self.assertEqual(result, expected_path)
 
         call_args = mock_run.call_args[0][0]
         # Should NOT have '-b' flag
         self.assertNotIn("-b", call_args)
         self.assertIn("add", call_args)
+        # The git command uses the original branch name (with slashes).
         self.assertIn(branch, call_args)
 
     def test_raises_on_git_failure(self) -> None:
@@ -768,11 +778,19 @@ class TestExecOrDetach(TestCase):
     """Tests for exec_or_detach."""
 
     def test_exec_or_detach_foreground(self) -> None:
-        """When tmux_session is None, os.execvp is called with the given args."""
+        """When tmux_session is None, os.chdir + os.execvp is called."""
+        import os
+        import tempfile
+
         args = ["claude", "/zing:new BAK-1", "--session-id", "sess-1", "--name", "BAK-1"]
-        with patch("zing_ai.launch.os.execvp") as mock_execvp:
-            exec_or_detach(args, Path("/tmp/work"), tmux_session=None)
-        mock_execvp.assert_called_once_with("claude", args)
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir).resolve()
+            with patch("zing_ai.launch.os.execvp") as mock_execvp:
+                exec_or_detach(args, work_dir, tmux_session=None)
+            mock_execvp.assert_called_once_with("claude", args)
+            self.assertEqual(Path.cwd().resolve(), work_dir)
+        os.chdir(original_cwd)
 
     def test_exec_or_detach_detach(self) -> None:
         """When tmux_session is set, tmux new-session is called with shlex.join(args)."""

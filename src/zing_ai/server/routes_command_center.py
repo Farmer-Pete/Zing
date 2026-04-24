@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,10 +33,10 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,
 )
-from zing_ai.server.command_center import aggregate
+from zing_ai.server.command_center import aggregate, generate_standup, infer_repo_for_ticket
 from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.models_external import KanbanView
-from zing_ai.server.templates import render
+from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -184,11 +185,17 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
+    config = load_config()
+    # Sweep dead ttyd processes so entries don't accumulate indefinitely.
+    ttyd_procs: dict = getattr(app.state, "ttyd_procs", {})
+    for name in [k for k, (p, _) in ttyd_procs.items() if p.poll() is not None]:
+        del ttyd_procs[name]
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
+        tmux_attach_mode=config.command_center.tmux_attach_mode,
     )
 
 
@@ -204,6 +211,7 @@ def _render_tray_fragment(app: FastAPI) -> str:
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
+    config = load_config()
     view = _build_view(request.app)
     cache = request.app.state.external_cache
     live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
@@ -220,6 +228,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_tmux_sessions=live_tmux_sessions,
+            tmux_attach_mode=config.command_center.tmux_attach_mode,
             **tray_data,
         )
     )
@@ -287,6 +296,144 @@ async def refresh_command_center(request: Request) -> JSONResponse:
     return JSONResponse({"status": "refreshed"})
 
 
+@router.get("/command-center/standup")
+async def get_standup(request: Request) -> JSONResponse:
+    """Generate a standup message from the current board state."""
+    view = _build_view(request.app)
+    cache = request.app.state.external_cache
+    username = cache.github_username or ""
+    markdown = generate_standup(view, username)
+    html = str(render_markdown(markdown))
+    return JSONResponse({"markdown": markdown, "html": html})
+
+
+# ---------------------------------------------------------------------------
+# Tmux session attach (iTerm2 / browser via ttyd)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/command-center/attach-session")
+async def attach_session(request: Request) -> JSONResponse:
+    """Attach to a tmux session via iTerm2 or browser (ttyd)."""
+    import shutil
+    import socket
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    tmux_session = body.get("tmux_session")
+    mode = body.get("mode", "iterm2")
+    if not tmux_session:
+        return JSONResponse({"error": "tmux_session is required"}, status_code=400)
+
+    tmux_path = shutil.which("tmux")
+    if not tmux_path:
+        return JSONResponse({"error": "tmux not found on PATH"}, status_code=500)
+
+    if mode == "iterm2":
+        if sys.platform != "darwin":
+            return JSONResponse({"error": "iTerm2 is only available on macOS"}, status_code=422)
+        # Escape for AppleScript string context (backslash, then double-quote).
+        as_safe = tmux_session.replace("\\", "\\\\").replace('"', '\\"')
+        applescript = (
+            'tell application "iTerm2"\n'
+            "  create window with default profile "
+            f'command "{tmux_path} -CC attach -t {as_safe}"\n'
+            "end tell"
+        )
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", applescript],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return JSONResponse({"error": "osascript not found"}, status_code=500)
+        return JSONResponse({"status": "attached", "tmux_session": tmux_session})
+
+    if mode == "browser":
+        ttyd_path = shutil.which("ttyd")
+        if not ttyd_path:
+            return JSONResponse(
+                {"error": "ttyd not found. Install with: brew install ttyd"},
+                status_code=500,
+            )
+
+        # Ensure ttyd tracking structures exist on app.state.
+        if not hasattr(request.app.state, "ttyd_procs"):
+            request.app.state.ttyd_procs = {}
+        if not hasattr(request.app.state, "ttyd_lock"):
+            request.app.state.ttyd_lock = asyncio.Lock()
+
+        ttyd_procs: dict[str, tuple[subprocess.Popen, int]] = request.app.state.ttyd_procs
+
+        async with request.app.state.ttyd_lock:
+            if tmux_session in ttyd_procs:
+                proc, port = ttyd_procs[tmux_session]
+                if proc.poll() is None:
+                    # Still running — return existing URL.
+                    return JSONResponse({"url": f"http://127.0.0.1:{port}"})
+                # Process exited — clean up and spawn a new one.
+                del ttyd_procs[tmux_session]
+
+            # Find a free port.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+
+            proc = subprocess.Popen(
+                [
+                    ttyd_path,
+                    "--once",
+                    "--writable",
+                    "--port",
+                    str(port),
+                    tmux_path,
+                    "attach",
+                    "-t",
+                    tmux_session,
+                ],
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            ttyd_procs[tmux_session] = (proc, port)
+
+        # Wait for ttyd to start listening (up to 3 seconds).
+        for _ in range(30):
+            if proc.poll() is not None:
+                stdout = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+                stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                logger.error(
+                    "ttyd exited with code %s for session %s. stdout: %s stderr: %s",
+                    proc.returncode,
+                    tmux_session,
+                    stdout[:1000],
+                    stderr[:1000],
+                )
+                ttyd_procs.pop(tmux_session, None)
+                return JSONResponse(
+                    {"error": f"ttyd exited unexpectedly (code {proc.returncode}): {stderr[:200]}"},
+                    status_code=500,
+                )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as check:
+                check.settimeout(0.1)
+                if check.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            await asyncio.sleep(0.1)
+        else:
+            proc.kill()
+            ttyd_procs.pop(tmux_session, None)
+            return JSONResponse({"error": "ttyd failed to start"}, status_code=500)
+
+        return JSONResponse({"url": f"http://127.0.0.1:{port}"})
+
+    return JSONResponse({"error": f"Unknown mode: {mode}"}, status_code=400)
+
+
 # ---------------------------------------------------------------------------
 # Background session launch
 # ---------------------------------------------------------------------------
@@ -305,6 +452,8 @@ async def launch_background(request: Request) -> JSONResponse:
     # Datastar sends payload under a "payload" key in the signal store.
     payload = body.get("payload", body)
     card_key = payload.get("card_key")
+    repo_override = payload.get("repo")  # set when user picks from the chooser
+    skill_override = payload.get("skill")  # e.g. "pr-respond" for respond buttons
     if not card_key:
         logger.error("launch-background: missing card_key in body: %s", body)
         return JSONResponse({"error": "card_key is required"}, status_code=400)
@@ -361,33 +510,46 @@ async def launch_background(request: Request) -> JSONResponse:
     if card is not None:
         if card.prs:
             pr = card.prs[0]
-            repo_name = pr.repo  # "owner/repo"
+            if not repo_override:
+                repo_name = pr.repo  # "owner/repo"
             branch_name = pr.head_ref
             pr_number = pr.number
             pr_repo = pr.repo
             is_pr_card = True
         if card.ticket is not None:
             ticket_id = card.ticket.identifier
-            if repo_name is None and card.ticket.team:
-                # Fallback: try derive branch from Linear — repo still unknown
-                pass
 
+    if repo_override:
+        repo_name = repo_override
+
+    # For ticket-only cards (no PRs), infer repo from same-team cards.
     if repo_name is None:
-        launching_set.discard(card_key)
-        logger.error(
-            "launch-background: cannot determine repo for card %s "
-            "(has_ticket=%s, has_prs=%s, card_found=%s)",
-            card_key,
-            card is not None and card.ticket is not None,
-            card is not None and bool(card.prs),
-            card is not None,
-        )
-        return JSONResponse(
-            {"error": f"Cannot determine repository for card {card_key}"},
-            status_code=422,
-        )
+        kanban_view: KanbanView = _build_view(request.app)
+        team = card.ticket.team if (card is not None and card.ticket) else None
+        candidates = infer_repo_for_ticket(kanban_view, team)
+        if len(candidates) == 1:
+            repo_name = candidates[0]
+        elif candidates:
+            launching_set.discard(card_key)
+            return JSONResponse(
+                {"status": "choose_repo", "repos": candidates, "card_key": card_key}
+            )
+        else:
+            launching_set.discard(card_key)
+            logger.error(
+                "launch-background: cannot determine repo for card %s (no PRs, no same-team cards)",
+                card_key,
+            )
+            return JSONResponse(
+                {
+                    "error": f"Cannot determine repository for card {card_key}. "
+                    "Ticket has no linked PR and no same-team cards have PRs."
+                },
+                status_code=422,
+            )
 
     # Resolve local repo path.
+    assert repo_name is not None  # guarded above
     repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
     if repo_root is None:
         launching_set.discard(card_key)
@@ -421,7 +583,7 @@ async def launch_background(request: Request) -> JSONResponse:
         )
 
     title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
-    skill = "pr-audit" if is_pr_card else "new"
+    skill = skill_override or ("pr-audit" if is_pr_card else "new")
     target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
     tmux_name = build_tmux_session_name(
         target=ticket_id or branch_name,
@@ -516,6 +678,45 @@ def _push_board_changed(app: FastAPI) -> None:
     """Push a board_changed event to all SSE queues."""
     for q in app.state.cc_queues:
         q.put_nowait("board_changed")
+
+
+@router.post("/command-center/start-ticket")
+async def start_ticket(request: Request) -> JSONResponse:
+    """Move a Linear ticket to 'In Progress'."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    payload = body.get("payload", body)
+    ticket_id = payload.get("ticket_id")
+    if not ticket_id:
+        return JSONResponse({"error": "ticket_id is required"}, status_code=400)
+
+    config = load_config()
+    api_key = config.command_center.linear_api_key
+    if not api_key:
+        return JSONResponse({"error": "Linear API key not configured"}, status_code=422)
+
+    try:
+        await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
+    except LaunchError as exc:
+        logger.error("start-ticket failed for %s: %s", ticket_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # Trigger a poll in the background to pick up the state change.
+    poller = getattr(request.app.state, "poller", None)
+    if poller is not None:
+
+        async def _bg_poll() -> None:
+            with contextlib.suppress(Exception):
+                await poller._poll_once()  # noqa: SLF001
+            _push_board_changed(request.app)
+
+        asyncio.create_task(_bg_poll())
+    else:
+        _push_board_changed(request.app)
+
+    return JSONResponse({"status": "started", "ticket_id": ticket_id})
 
 
 @router.post("/command-center/kill-session")

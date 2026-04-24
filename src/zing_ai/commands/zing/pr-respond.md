@@ -194,24 +194,13 @@ Mark the "Address review comments", "Commit & push", and "Reply & resolve on Git
 </step>
 
 <step name="present_comments">
-Present all comments to the user, grouped by type, as a single numbered list with continuous numbering:
+Present a **brief count-only summary** — do NOT list out all comments upfront. The user will see each comment in full during the `address_comments` step.
 
 ```
-Found {total_count} unresolved comment(s) on PR #{number}:
-
-Review threads ({thread_count}):
-1. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
-2. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
-
-Review summaries ({summary_count}):
-3. [Review: {state}] @{reviewer}: "{comment_body_truncated}"
-
-General comments ({issue_comment_count}):
-4. [Comment] @{author}: "{comment_body_truncated}"
-...
+Found {total_count} unresolved comment(s) on PR #{number}: {thread_count} review thread(s), {summary_count} review summary/summaries, {issue_comment_count} general comment(s). Will walk through each one at a time.
 ```
 
-Omit any group header if that group has zero items. Truncate long comment bodies to ~{{ thresholds.comment_truncation_chars }} characters with "..." for the summary view.
+Omit zero-count groups from the summary (e.g., if no review summaries, just say "3 review thread(s), 1 general comment(s)").
 
 ### Create comment-level tasks
 
@@ -224,12 +213,12 @@ TaskCreate: "[Comment] @{author}: '{comment_body_truncated}'"                   
 ```
 
 All comment tasks start as pending.
-
-Then say: "Will address each comment one at a time."
 </step>
 
 <step name="address_comments">
 Mark the "Address review comments" phase task as `in_progress` using TaskUpdate.
+
+Process comments **one at a time**. Present one comment, wait for the user's response, then move to the next. Do NOT present multiple comments at once.
 
 For each comment, in order — marking the corresponding comment task as `in_progress` when starting it:
 
@@ -268,31 +257,25 @@ For each comment, in order — marking the corresponding comment task as `in_pro
    - A **misunderstanding** that should be clarified
    - **Not actionable** (e.g., an observation, praise, or already addressed)
 
-4. **If the comment is not actionable** (already addressed, praise, informational), tell the user:
-   ```
-   This comment appears to be {reason}. Skipping — will reply acknowledging it.
-   ```
-   Record that a reply should be posted but no code change is needed. Move to the next comment.
+4. **For every comment**, present it to the user in "fix with chat" mode. Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="PR comment needs your input.")` where `session_id` is the session ID from the zing file frontmatter.
 
-5. **If there is exactly one clear fix**, propose it to the user:
-   ```
-   Proposed fix: {brief description of the change}
-   ```
-   Then make the code change.
+   Present the analysis and options using AskUserQuestion:
+   - Show what the reviewer is asking for and the relevant code context
+   - If the comment is **not actionable** (already addressed, praise, informational), explain why and propose skipping — but still let the user decide
+   - If there is **one clear fix**, describe the proposed change
+   - If there are **multiple valid approaches**, list each with a short label and description
+   - If the comment is a **question or misunderstanding**, draft a reply
 
-6. **If there are multiple valid approaches**:
-   Before asking the user, send a browser notification so they know input is needed:
-   Call `notification_send(session_id, title="Input needed", body="A PR comment needs your decision on how to address it.")` where `session_id` is the session ID from the zing file frontmatter.
-   Present them as a menu using AskUserQuestion:
-   - Question: "How should this be addressed?"
-   - Options: List each approach with a short label and description
-   - Include an "Other" option so the user can describe their own approach
+   Always include these options:
+   - The proposed fix(es) or "Skip — acknowledge only"
+   - An "Other" option so the user can describe their own approach
 
-   Wait for the user's selection, then implement the chosen approach.
+   **Stop and wait for the user's response before doing anything else.** Only after the user responds, implement the chosen approach.
 
-7. **If the comment is a question or misunderstanding**, draft a reply and show it to the user for approval before recording it.
+After addressing each comment, mark its comment task as `completed` using TaskUpdate. If more comments remain, mention how many are left (e.g., "Done. 3 more to go.") before presenting the next one.
 
-After addressing each comment, mark its comment task as `completed` using TaskUpdate, and record:
+Record for each addressed comment:
 - The comment ID
 - The comment type: `review_thread`, `review_body`, or `issue_comment`
 - What was done (code change, reply only, skipped)

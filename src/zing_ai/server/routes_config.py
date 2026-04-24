@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import OrderedDict
 from typing import Any
 
@@ -13,6 +14,12 @@ from pydantic import ValidationError
 from zing_ai.config import ConfigError, default_config, load_config, save_config
 from zing_ai.server.config_meta import FIELD_META
 from zing_ai.server.templates import render
+
+_PLATFORM_FIELD_META: dict[str, dict[str, Any]] = {
+    key: meta
+    for key, meta in FIELD_META.items()
+    if "platform" not in meta or meta["platform"] == sys.platform
+}
 
 
 def _group_repos(
@@ -64,7 +71,7 @@ def get_config_page(request: Request) -> HTMLResponse:
         render(
             "config.html",
             config=cfg,
-            field_meta=FIELD_META,
+            field_meta=_PLATFORM_FIELD_META,
             current_path="/config",
             config_error=config_error,
             github_repo_groups=github_repo_groups,

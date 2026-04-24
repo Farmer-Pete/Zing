@@ -19,6 +19,13 @@
 
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
+        <button class="cc-refresh-btn" id="cc-standup-btn" onclick="(function(btn){
+            btn.disabled = true; btn.textContent = 'Loading\u2026';
+            fetch('/command-center/standup').then(function(r){ return r.json(); }).then(function(data){
+                window.openStandup(data);
+                btn.textContent = '\u270D Standup'; btn.disabled = false;
+            }).catch(function(){ btn.textContent = 'Failed'; setTimeout(function(){ btn.textContent = '\u270D Standup'; btn.disabled = false; }, 1500); });
+        })(this)">&#x270D; Standup</button>
         <button class="cc-refresh-btn" id="cc-refresh-btn" onclick="(function(btn){
             btn.disabled = true; btn.textContent = 'Refreshing\u2026';
             fetch('/command-center/refresh', {method:'POST'}).then(function(r){
@@ -34,7 +41,179 @@
     {% include "fragments/management_tray.html" %}
     </div>
 
+    {# ── Terminal modal (ttyd iframe) ── #}
+    <div id="terminal-modal" class="terminal-modal" style="display:none;">
+      <div class="terminal-modal-bar">
+        <span class="terminal-modal-title" id="terminal-modal-title"></span>
+        <button class="terminal-modal-close" id="terminal-modal-close">&times;</button>
+      </div>
+      <iframe id="terminal-modal-iframe" class="terminal-modal-iframe"></iframe>
+    </div>
+    <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
+    {# ── Repo chooser modal ── #}
+    <div id="repo-chooser-modal" class="dialog-modal" style="display:none;">
+      <div class="dialog-modal-bar">
+        <span class="dialog-modal-title">Choose Repository</span>
+        <div class="dialog-modal-actions">
+          <button class="terminal-modal-close" id="repo-chooser-close">&times;</button>
+        </div>
+      </div>
+      <div class="repo-chooser-body">
+        <p class="repo-chooser-hint">This ticket has no linked PR. Which repo does it belong to?</p>
+        <div id="repo-chooser-list" class="repo-chooser-list"></div>
+      </div>
+    </div>
+    <div id="repo-chooser-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
+    {# ── Standup modal ── #}
+    <div id="standup-modal" class="dialog-modal" style="display:none;">
+      <div class="dialog-modal-bar">
+        <span class="dialog-modal-title">Standup</span>
+        <div class="dialog-modal-actions">
+          <div class="standup-tabs">
+            <button class="standup-tab active" data-standup-tab="rendered">Rich Text</button>
+            <button class="standup-tab" data-standup-tab="markdown">Markdown</button>
+          </div>
+          <button class="standup-copy-btn" id="standup-copy-btn">Copy</button>
+          <button class="terminal-modal-close" id="standup-modal-close">&times;</button>
+        </div>
+      </div>
+      <div class="standup-content standup-rendered" id="standup-rendered"></div>
+      <pre class="standup-content standup-markdown" id="standup-markdown" style="display:none;"></pre>
+    </div>
+    <div id="standup-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
     <script>
+    // Repo chooser modal close
+    (function() {
+        var modal = document.getElementById('repo-chooser-modal');
+        var backdrop = document.getElementById('repo-chooser-backdrop');
+        var closeBtn = document.getElementById('repo-chooser-close');
+        function close() { modal.style.display = 'none'; backdrop.style.display = 'none'; }
+        closeBtn.addEventListener('click', close);
+        backdrop.addEventListener('click', close);
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') close();
+        });
+    })();
+
+    // Standup modal
+    (function() {
+        var modal = document.getElementById('standup-modal');
+        var backdrop = document.getElementById('standup-modal-backdrop');
+        var closeBtn = document.getElementById('standup-modal-close');
+        var copyBtn = document.getElementById('standup-copy-btn');
+        var renderedEl = document.getElementById('standup-rendered');
+        var markdownEl = document.getElementById('standup-markdown');
+        var tabs = modal.querySelectorAll('[data-standup-tab]');
+        var activeTab = 'rendered';
+        var standupData = {};
+
+        function switchTab(tab) {
+            activeTab = tab;
+            tabs.forEach(function(t) {
+                t.classList.toggle('active', t.getAttribute('data-standup-tab') === tab);
+            });
+            renderedEl.style.display = tab === 'rendered' ? '' : 'none';
+            markdownEl.style.display = tab === 'markdown' ? '' : 'none';
+        }
+
+        tabs.forEach(function(t) {
+            t.addEventListener('click', function() {
+                switchTab(t.getAttribute('data-standup-tab'));
+            });
+        });
+
+        function closeStandup() {
+            modal.style.display = 'none';
+            backdrop.style.display = 'none';
+        }
+
+        closeBtn.addEventListener('click', closeStandup);
+        backdrop.addEventListener('click', closeStandup);
+
+        copyBtn.addEventListener('click', function() {
+            var text;
+            if (activeTab === 'markdown') {
+                text = standupData.markdown || '';
+                navigator.clipboard.writeText(text).then(function() {
+                    copyBtn.textContent = '\u2713 Copied!';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                });
+            } else {
+                // Copy rich text (HTML) so it pastes formatted in Slack/etc.
+                var blob = new Blob([standupData.html || ''], {type: 'text/html'});
+                var textBlob = new Blob([standupData.markdown || ''], {type: 'text/plain'});
+                var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
+                navigator.clipboard.write([item]).then(function() {
+                    copyBtn.textContent = '\u2713 Copied!';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                });
+            }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeStandup();
+            }
+        });
+
+        // Expose loader for the toolbar button
+        window.openStandup = function(data) {
+            standupData = data;
+            renderedEl.innerHTML = data.html || '';
+            markdownEl.textContent = data.markdown || '';
+            switchTab('rendered');
+            modal.style.display = '';
+            backdrop.style.display = '';
+        };
+    })();
+
+    // Terminal modal
+    (function() {
+        var modal = document.getElementById('terminal-modal');
+        var backdrop = document.getElementById('terminal-modal-backdrop');
+        var iframe = document.getElementById('terminal-modal-iframe');
+        var title = document.getElementById('terminal-modal-title');
+        var closeBtn = document.getElementById('terminal-modal-close');
+
+        function closeModal() {
+            // ttyd is cross-origin, so we cannot clear its beforeunload handler.
+            // Remove the iframe from the DOM entirely to avoid triggering the
+            // "Leave site?" dialog when navigating it to about:blank.
+            modal.style.display = 'none';
+            backdrop.style.display = 'none';
+            if (iframe && iframe.parentNode) {
+                iframe.parentNode.removeChild(iframe);
+            }
+            iframe = null;
+        }
+
+        window.openTerminal = function(url, sessionName) {
+            title.textContent = sessionName || 'Terminal';
+            // Create a fresh iframe each time (the previous one was removed on close).
+            if (!iframe) {
+                iframe = document.createElement('iframe');
+                iframe.id = 'terminal-modal-iframe';
+                iframe.className = 'terminal-modal-iframe';
+                modal.appendChild(iframe);
+            }
+            iframe.src = url;
+            modal.style.display = '';
+            backdrop.style.display = '';
+        };
+
+        closeBtn.addEventListener('click', closeModal);
+        backdrop.addEventListener('click', closeModal);
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeModal();
+            }
+        });
+    })();
+
     // Toast notification helper
     function showToast(message, type) {
         var container = document.getElementById('cc-toast-container');
@@ -63,34 +242,134 @@
         });
     });
 
+    // Repo chooser: shows a popup when the server can't determine which repo to use.
+    // After the user picks, retries the original request with the chosen repo.
+    function handleRepoChoice(data, retryFn) {
+        var modal = document.getElementById('repo-chooser-modal');
+        var backdrop = document.getElementById('repo-chooser-backdrop');
+        var list = document.getElementById('repo-chooser-list');
+        list.innerHTML = '';
+        data.repos.forEach(function(repo) {
+            var btn = document.createElement('button');
+            btn.className = 'repo-chooser-option';
+            btn.textContent = repo;
+            btn.addEventListener('click', function() {
+                modal.style.display = 'none';
+                backdrop.style.display = 'none';
+                retryFn(repo);
+            });
+            list.appendChild(btn);
+        });
+        modal.style.display = '';
+        backdrop.style.display = '';
+    }
+
     // Background launch for data-launch-bg buttons
     document.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-launch-bg]');
         if (!btn || btn.disabled) return;
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
+        var skill = btn.getAttribute('data-launch-bg-skill');
+
+        function doLaunch(repo) {
+            btn.disabled = true;
+            btn.innerHTML = '&#9203; Launching\u2026';
+            var payload = {card_key: cardKey};
+            if (repo) payload.repo = repo;
+            if (skill) payload.skill = skill;
+
+            fetch('/command-center/launch-background', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (data.status === 'choose_repo') {
+                        btn.innerHTML = label; btn.disabled = false;
+                        handleRepoChoice(data, doLaunch);
+                    } else if (!resp.ok) {
+                        showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
+                        btn.innerHTML = '&#10007; Failed';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                    } else {
+                        showToast('Session launched for ' + cardKey, 'success');
+                        btn.innerHTML = '&#10003; Launched!';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
+                    }
+                });
+            }).catch(function(err) {
+                showToast('Launch failed: ' + err.message, 'error');
+                btn.innerHTML = '&#10007; Failed';
+                setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+            });
+        }
+        doLaunch(null);
+    });
+
+    // Attach session (iTerm2 or browser via ttyd)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-attach-session]');
+        if (!btn || btn.disabled) return;
+        var tmuxSession = btn.getAttribute('data-attach-session');
+        var mode = btn.getAttribute('data-attach-mode');
 
         btn.disabled = true;
-        btn.innerHTML = '&#9203; Launching\u2026';
+        btn.innerHTML = '&#9203; Attaching\u2026';
 
-        fetch('/command-center/launch-background', {
+        fetch('/command-center/attach-session', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({card_key: cardKey})
+            body: JSON.stringify({tmux_session: tmuxSession, mode: mode})
         }).then(function(resp) {
             return resp.json().then(function(data) {
                 if (!resp.ok) {
-                    showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
+                    showToast(data.error || ('Attach failed (HTTP ' + resp.status + ')'), 'error');
                     btn.innerHTML = '&#10007; Failed';
-                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
+                } else if (data.url) {
+                    openTerminal(data.url, tmuxSession);
+                    btn.innerHTML = '&#10003; Opened!';
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
                 } else {
-                    showToast('Session launched for ' + cardKey, 'success');
-                    btn.innerHTML = '&#10003; Launched!';
-                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
+                    btn.innerHTML = '&#10003; Attached!';
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
                 }
             });
         }).catch(function(err) {
-            showToast('Launch failed: ' + err.message, 'error');
+            showToast('Attach failed: ' + err.message, 'error');
+            btn.innerHTML = '&#10007; Failed';
+            setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
+        });
+    });
+
+    // Start ticket (move to in-progress)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-start-ticket]');
+        if (!btn || btn.disabled) return;
+        var ticketId = btn.getAttribute('data-start-ticket');
+        var label = btn.getAttribute('data-start-ticket-label');
+
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Starting\u2026';
+
+        fetch('/command-center/start-ticket', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ticket_id: ticketId})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) {
+                    showToast(data.error || ('Start failed (HTTP ' + resp.status + ')'), 'error');
+                    btn.innerHTML = '&#10007; Failed';
+                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                } else {
+                    showToast(ticketId + ' moved to In Progress', 'success');
+                    btn.innerHTML = '&#10003; Started!';
+                }
+            });
+        }).catch(function(err) {
+            showToast('Start failed: ' + err.message, 'error');
             btn.innerHTML = '&#10007; Failed';
             setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
         });

@@ -390,12 +390,13 @@ When `review_wait` returns, iterate over the returned items. Each item contains 
 
 - **Accepted findings** (user selected an option): Apply the corresponding edit to the zing file using the Edit tool. The option's `description` field contains the concrete edit to make.
 - **Skipped findings**: Exclude entirely.
-- **Discuss findings**: Walk through each one conversationally with the user before applying:
+- **Discuss findings**: Walk through **one at a time** — present one, wait for the user's response, then move to the next:
   - Lead with what the agent found, referencing the relevant code naturally
   - Show a short code snippet so the user can see exactly what's being discussed
   - Explain the trade-offs or concerns in plain language
-  - Ask the user what they'd like to do and apply their decision
+  - Ask the user what they'd like to do. **Stop and wait for their response before presenting the next discuss item.**
   - Vary how you introduce each finding — don't start every one the same way
+  - If more discuss items remain, mention how many are left before moving on
 
 After all improvements have been applied, summarize what was changed.
 </step>

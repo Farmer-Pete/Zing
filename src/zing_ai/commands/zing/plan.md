@@ -179,12 +179,13 @@ Otherwise, collect and deduplicate findings from all subagents:
 
 6. **Incorporate answers:** Iterate over the returned review items. Most items will have a direct answer — incorporate those into your understanding.
 
-   For any items the user marked **"Discuss"**, walk through each one conversationally before continuing:
+   For any items the user marked **"Discuss"**, walk through them **one at a time** — present one, wait for the user's response, then move to the next:
    - Lead with what the subagent found, referencing the relevant code naturally: "In `auth.py` around line 15, ..."
    - Show a short code snippet so the user can see exactly what's being discussed
    - Explain the trade-offs or concerns in plain language
-   - Ask the user what they'd like to do and record their decision
+   - Ask the user what they'd like to do. **Stop and wait for their response before presenting the next discuss item.**
    - Vary how you introduce each finding — don't start every one the same way
+   - If more discuss items remain, mention how many are left before moving on
 
    Use all answers (both direct and discussed) alongside the merged findings when fleshing out the plan in the next step.
 </step>

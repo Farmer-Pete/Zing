@@ -21,7 +21,7 @@ Once you have the PR number, run:
 gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 ```
 
-Store the PR number, head branch, base branch, title, and URL for later use.
+Store the PR number, head branch, base branch, title, body/description, and URL for later use. Read the PR body carefully — it contains the author's intent, context, and any testing notes that inform the review.
 
 ### Session setup
 
@@ -56,6 +56,24 @@ Get the full diff and context:
 From the diff output, note which lines in each file appear in diff hunks — you can only place line-level comments on lines that appear in the diff (`+` lines or unchanged context lines). Lines that are only in the old version (`-` lines) cannot receive comments.
 </step>
 
+<step name="fetch_pr_context">
+Fetch all existing comments and review history for full context:
+
+1. **PR comments and review threads:**
+```
+gh api repos/{owner}/{repo}/pulls/{number}/comments --paginate
+gh api repos/{owner}/{repo}/issues/{number}/comments --paginate
+gh api repos/{owner}/{repo}/pulls/{number}/reviews --paginate
+```
+
+2. **Check for prior reviews by the current user.** From the reviews list, check if the current user (`gh api /user --jq '.login'`) has previously submitted a review. If so:
+   - Note the date of the last review.
+   - Get the diff since the last review: `git log --since="{last_review_date}" --oneline {base}...HEAD` to identify which commits are new.
+   - The review should **primarily focus on changes since the last review**, while still noting any unresolved issues from prior reviews. Mention this scope at the start of the review: "This is a re-review focusing on changes since my last review on {date}."
+
+3. **Read all comment threads** to understand ongoing discussions, resolved issues, and any context the author or other reviewers have provided. Do not re-raise issues that have already been resolved.
+</step>
+
 <step name="read_changed_files">
 Follow the `read_changed_files` step from the shared review reference.
 </step>
@@ -71,6 +89,31 @@ Follow the `diff_preparation` step from the shared review reference.
 Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`). In addition to the shared agent context, each agent also receives:
 - A note of which lines in each assigned file appear in the diff (so agents know which lines can receive line-level comments)
 - PR-specific context: PR number `{number}`, head branch `{headRefName}`, base branch `{baseRefName}`
+- If this is a re-review: which commits are new since the last review
+
+### Pre-existing issues
+
+If you notice issues in the code that are **outside the scope of this PR** or **predate the changes** (i.e., the code was already broken/problematic before this PR touched it), raise them as findings with type `"pre_existing"` and severity `low`. These findings:
+
+- **Cannot trigger `REQUEST_CHANGES`** — they are informational only
+- Should include an option to **create a Linear ticket** to track the issue separately. Add an option with label "File a ticket" and description "Create a Linear ticket to track this separately — no fix needed in this PR."
+- If the user selects "File a ticket" during triage, create the ticket using the Linear GraphQL API. Before creating any tickets, ensure a "zing" label exists: query `issueLabels(filter: { name: { eq: "zing" } })` — if no results, create it with `issueLabelCreate(input: { name: "zing", teamId: "<team_id>" })`. Then create the ticket:
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d '{"query": "mutation { issueCreate(input: { teamId: \"<team_id>\", title: \"...\", description: \"...\", labelIds: [\"<zing_label_id>\"], priority: <1-4>, estimate: <story_points> }) { success issue { identifier url } } }"}'
+```
+   Use the team ID that matches the repository (see the team IDs in CLAUDE.md). Read the Linear API key from `~/.config/lr/config.json`.
+
+   **Priority**: Set based on the pre-existing issue's impact — `1` (urgent), `2` (high), `3` (medium), `4` (low). Most pre-existing issues will be `3` or `4`.
+
+   **Estimate (story points)**: Estimate the effort to fix the issue — use the team's point scale (typically 1, 2, 3, 5, 8). Consider complexity, scope of changes needed, and testing effort.
+- When included in the PR review, place the comment on the relevant diff line if possible. Prefix with "**Pre-existing:** " and include the Linear ticket link if one was created (e.g., "**Pre-existing:** {description}. Tracked in {TICKET-ID} — no fix needed in this PR.").
+
+### Stylistic preferences
+
+Mark findings that are purely stylistic preferences (naming conventions, formatting choices, code organization preferences that don't affect correctness or readability) as **nits**. Prefix the comment body with "**Nit:** " and use severity `low`. Do not request changes for nit-only reviews.
 </step>
 
 <step name="present_summary">
@@ -259,98 +302,6 @@ If the API call fails (e.g., a line comment targets a line the API rejects), ret
 
 End your review summary with: "Zing! Review complete."
 
-### Determine the recommended option
-
-After submitting the review, examine the complexity of all accepted/downgraded findings from the `review_wait()` response. For each finding, use `response.complexity or finding.complexity` (user override first, then agent classification).
-
-Count the findings by complexity and determine the default:
-- If **all** accepted/downgraded findings have `complexity == "simple"`: recommend **"Auto-apply all fixes"**
-- If accepted/downgraded findings are a mix of simple and standard (but **no** complex): recommend **"Fix with chat"**
-- If **any** accepted/downgraded finding has `complexity == "complex"`: recommend **"Build a plan to fix"**
-
-### Present the "What next?" question
-
-Before asking the user, send a browser notification so they know input is needed:
-Call `notification_send(session_id, title="PR audit complete", body="Choose how to proceed with the PR.")` where `session_id` is the session ID from the zing file frontmatter.
-
-Use AskUserQuestion to ask: "What next?" with these options. Append a recommendation note to the description of the recommended option explaining why (e.g., "Recommended — all 5 findings are simple fixes" or "Recommended — 3 findings are complex and need a detailed plan").
-
-- "Auto-apply all fixes" (description: "Fastest — applies fixes without asking. Less control.")
-- "Fix with chat" (description: "Walk through each finding interactively. More control, still fast.")
-- "Build a plan to fix" (description: "Full plan → audit → build pipeline. Most rigorous, slowest.")
-- "I'm done" (description: "Stop here")
-
-### Handling each choice
-
-If "Auto-apply all fixes": proceed to the `auto_apply` step.
-
-If "Fix with chat": proceed to the `discuss_findings` step.
-
-If "Build a plan to fix": invoke the `Skill` tool with skill name `zing` and args set to the report file path (e.g. `.zing/pr-review-123-2025-06-15-1423.md`). Do NOT embed the current session token in the new zing file — it gets its own session when `/zing:plan` picks it up.
-
-If "I'm done": exit normally.
-
-</step>
-
-<step name="auto_apply">
-Automatically apply fixes for all accepted/downgraded findings without interactive prompts. This step is self-contained — no separate skill or server-side code is needed.
-
-### Process
-
-1. **Iterate through each accepted/downgraded finding** in the order they appear in the report.
-
-2. **For each finding:**
-   a. Read the finding's body (the detailed explanation from the report) and the selected approach option (from `response.selected` / `response.other_text`).
-   b. Read the relevant source file(s) referenced in the finding.
-   c. Apply the fix directly using Edit/Write tools. For simple findings the fix should be obvious from the finding description and selected approach. For standard findings, use the approach option to guide the implementation.
-   d. After applying the fix, check if there are test files related to the changed code (look for `test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.ts`, etc. in the same directory or a `tests/` directory). If test files exist, run the relevant tests via Bash to verify the fix didn't break anything.
-   e. If a fix **fails** (tests break, the change is ambiguous, or the code context makes the fix unclear), **fall back to interactive "fix with chat" mode for that finding only**: show the finding to the user, explain what was attempted and why it failed, and ask for guidance. After resolving interactively, continue auto-applying the remaining findings.
-
-3. **After all findings are processed**, show a summary:
-   ```
-   Auto-apply complete:
-   - {applied_count} fixes applied successfully
-   - {fallback_count} required interactive resolution
-   - {skipped_count} skipped
-   ```
-
-4. **Stage and commit all changes** with a descriptive commit message listing the findings addressed:
-   ```
-   Fix PR review findings: {brief list of finding titles}
-
-   Applied {applied_count} fixes from PR review ({report_file}).
-   Findings addressed:
-   - #{n}: {finding title}
-   - #{n}: {finding title}
-   ...
-   ```
-
-5. After committing, return to the `submit_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Auto-apply" or "Fix with chat" options again).
-</step>
-
-<step name="discuss_findings">
-Read the report markdown file written in the `write_report` step. Parse each numbered finding from the "Details" section.
-
-Before presenting findings, send a browser notification so they know input is needed:
-Call `notification_send(session_id, title="Chat fix mode", body="Ready for interactive fix discussion.")` where `session_id` is the session ID from the zing file frontmatter.
-
-Present the first finding — show its number, description, file/line, severity, and the explanation from the report. Include the code snippet. Then say something like:
-
-"What would you like to do with this one? You can ask me to fix it, suggest a different approach, or just say **next** to move on."
-
-Then enter a conversational loop. The user drives the interaction using natural language — there are no menus or structured prompts. Respond naturally to whatever they say:
-
-- **"fix this" / "fix it"** — Write a fix for the current finding. Show what you're changing and why, then apply it with the Edit tool. After applying, confirm what changed and present the next finding.
-- **"try X instead" / "what about X?" / "I'd rather do Y"** — The user is steering toward a different solution. Discuss the approach, and if it makes sense, apply it. If it has trade-offs worth knowing, explain them before applying.
-- **"next" / "skip"** — Move to the next finding without changes.
-- **"done" / "that's enough"** — End the walkthrough early.
-- **"why?" / "explain" / "tell me more"** — Go deeper into why this matters — failure modes, examples, what could go wrong in production. Then wait for the user's next input on the same finding.
-- **"show me more context"** — Read more of the surrounding code and show it. Then wait for the user's next input.
-- **Any other input** — The user might ask a question, disagree, suggest something, or want to explore a tangent. Engage naturally, then continue with the current finding until they say next/fix/done.
-
-After each finding is resolved (fixed, skipped, or discussed), present the next one. Continue until all findings have been addressed or the user says done.
-
-After the walkthrough is complete, return to the `submit_review` step's AskUserQuestion — offer "Build a plan to fix" and "I'm done" (without the "Fix with chat" option again).
 </step>
 
 </process>
@@ -359,6 +310,9 @@ After the walkthrough is complete, return to the `submit_review` step's AskUserQ
 Follow the anti-patterns from the shared review reference, plus:
 - Do NOT place comments on lines that don't appear in the diff — the GitHub API will reject them
 - Do NOT submit a review without the user triaging findings in the batch review UI first
+- Do NOT request changes for pre-existing issues — they are informational and tracked via Linear tickets
+- Do NOT re-raise issues that have already been resolved in comment threads
+- Do NOT request changes for nit-only reviews
 </anti_patterns>
 
 <success_criteria>
@@ -366,12 +320,17 @@ Review is complete when:
 
 - [ ] Shared review reference was loaded
 - [ ] PR was identified (from argument, URL, or current branch)
+- [ ] PR body/description was read for context
 - [ ] PR branch was checked out locally
+- [ ] All existing PR comments and review threads were fetched
+- [ ] Prior review by current user detected (if any) and review scoped accordingly
 - [ ] Full diff was obtained and all changed files were read
 - [ ] Lines eligible for line-level comments were identified from the diff
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
+- [ ] Pre-existing issues raised as informational findings with option to file Linear tickets
+- [ ] Stylistic preferences marked as nits with low severity
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied

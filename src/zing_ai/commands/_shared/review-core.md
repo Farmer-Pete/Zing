@@ -466,7 +466,7 @@ If the tool returns an error:
 - **Accepted findings**: Include in the output (the calling skill defines how — e.g., report file, PR line comments).
 - **Dropped findings**: Exclude entirely.
 - **Downgraded findings**: Include in the output with their adjusted severity.
-- **Discuss findings**: Walk through each one conversationally with the user (following the `walk_through_findings` guidelines), then include in the output with a note that they were flagged for discussion.
+- **Discuss findings**: Walk through **one at a time** conversationally with the user (following the `walk_through_findings` guidelines) — present one finding, wait for the user's response, then move to the next. After all discuss findings are resolved, include them in the output with a note that they were flagged for discussion.
 
 **7. No findings after triage:** If no findings remain after triage (all dropped), the calling skill provides the no-findings behavior and message.
 </step>
@@ -474,7 +474,9 @@ If the tool returns an error:
 <walk_through_findings>
 This step is handled by the browser-based review UI. The `check_and_review` step calls `review_wait(session_id, step_id)` which returns a `review_url` — display this URL to the user so they can open the dashboard. The call blocks until the user reviews findings and submits decisions (accept, drop, or discuss).
 
-For findings marked "discuss", walk through each one conversationally with the user:
+For findings marked "discuss", present them **one at a time**. Do NOT show all discuss items at once — show one, wait for the user's response, then move to the next.
+
+For each finding:
 
 - Lead with what you noticed, referencing the file and line conversationally: "In `auth.py` around line 15, ..."
 - Show a short code snippet from the diff so the user can see exactly what you're talking about
@@ -487,8 +489,9 @@ For findings marked "discuss", walk through each one conversationally with the u
   - "This looks like it could bite you..."
   - "Small thing —"
   - "So in the new `handleSubmit` function..."
+- End with a question to the user about this specific finding (e.g., "What do you think — should we fix this?", "Want to keep this in the report or drop it?"). **Stop here and wait for the user's response before presenting the next finding.**
 
-After explaining, ask the user what they'd like to do with the finding and record their decision.
+Only after the user responds, move on to the next discuss finding. If there are more discuss items remaining, mention how many are left (e.g., "Got it. 2 more to go.") before presenting the next one.
 </walk_through_findings>
 
 <anti_patterns>

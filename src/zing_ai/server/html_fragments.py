@@ -41,7 +41,9 @@ def ready_button_html(session_id: str) -> str:
         '<div id="submit-section">'
         f'<button class="submit-btn" '
         f"data-on:click=\"@post('/{html.escape(session_id)}/submit')\">"
-        "Submit Review</button></div>"
+        "Submit Review</button>"
+        '<span class="submit-hint">Findings without a selection will default to discuss</span>'
+        "</div>"
     )
 
 

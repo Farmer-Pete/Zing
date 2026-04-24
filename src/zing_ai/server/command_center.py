@@ -9,6 +9,7 @@ are pure (no I/O) and can be unit tested with synthetic data.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from zing_ai.launch import TICKET_ID_PATTERN
@@ -127,6 +128,18 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
 # -- Signal helpers ----------------------------------------------------------
 
 
+def _is_owned_by_user(card: KanbanCard, current_username: str) -> bool:
+    """The card belongs to the user: ticket is assigned to them or they authored a PR.
+
+    All tickets fetched from Linear are already filtered by the current viewer,
+    so a non-None ticket implies ownership.  For orphan-PR cards the user must
+    be the author of at least one linked PR.
+    """
+    if card.ticket is not None:
+        return True
+    return any(pr.author == current_username for pr in card.prs)
+
+
 def _has_active_session(card: KanbanCard) -> bool:
     """Any ZingSession has a step in STARTED state.
 
@@ -151,9 +164,39 @@ def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
     return any(
         pr.state == "open"
         and not pr.requested_reviewers
+        and pr.review_decision != "APPROVED"
         and (card.ticket is not None or pr.author == current_username)
         for pr in card.prs
     )
+
+
+def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
+    """User authored a PR that has reviewer feedback they haven't addressed yet.
+
+    A reviewer's feedback is unaddressed when they submitted a review
+    (appear in ``reviewers``) but have NOT been re-requested (not in
+    ``requested_reviewers``), and they are a human (not a bot).
+
+    Human vs bot detection uses ``reviewer_states``: reviewers who submitted
+    ``CHANGES_REQUESTED`` or ``APPROVED`` are definitely human.  Reviewers
+    who only ``COMMENTED`` are human if they appear in ``requested_reviewers``
+    on any PR on the card; otherwise they are assumed to be bots.
+    """
+    for pr in card.prs:
+        if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
+            continue
+
+        not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
+        for reviewer in not_rerequested:
+            state = pr.reviewer_states.get(reviewer, "COMMENTED")
+            if state in ("CHANGES_REQUESTED", "APPROVED"):
+                # Definitely a human reviewer — their feedback is unaddressed.
+                return True
+            if state == "COMMENTED" and reviewer in set(pr.requested_reviewers):
+                # Comment-only review from a reviewer who was requested on this PR.
+                return True
+
+    return False
 
 
 def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
@@ -251,6 +294,64 @@ def _assign_review_group(card: KanbanCard, current_username: str) -> str:
 # -- Classification ----------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CardSignals:
+    """Independent boolean signals computed from a card's state.
+
+    Each signal answers one question about the card. The classification
+    decision is a simple truth table over these signals, making it easy
+    to see why a card lands in a particular column and to adjust
+    priorities without accidentally breaking other cases.
+    """
+
+    owned: bool
+    """Card is assigned to (or authored by) the current user."""
+
+    has_active_session: bool
+    """A ZingSession has a workflow step in STARTED state."""
+
+    has_open_pr_no_reviewers: bool
+    """An open PR exists with no requested reviewers and not yet approved."""
+
+    has_unaddressed_feedback: bool
+    """User authored a PR with reviewer feedback they haven't re-requested on."""
+
+    has_pr_awaiting_review: bool
+    """An open PR has requested reviewers and the user is involved."""
+
+    has_approved_open_pr: bool
+    """User authored an open PR with review_decision APPROVED."""
+
+    is_recently_done: bool
+    """Ticket completed, PR merged, or user submitted a review within the done window."""
+
+    ticket_started: bool
+    """The linked Linear ticket has state_type 'started'."""
+
+
+def _compute_signals(
+    card: KanbanCard,
+    current_username: str,
+    cutoff: datetime,
+) -> CardSignals:
+    """Compute all classification signals for *card* independently."""
+    return CardSignals(
+        owned=_is_owned_by_user(card, current_username),
+        has_active_session=_has_active_session(card),
+        has_open_pr_no_reviewers=_has_open_pr_in_progress(card, current_username),
+        has_unaddressed_feedback=_has_unaddressed_feedback(card, current_username),
+        has_pr_awaiting_review=_has_pr_needing_review(card, current_username),
+        has_approved_open_pr=any(
+            pr.state == "open"
+            and pr.review_decision == "APPROVED"
+            and pr.author == current_username
+            for pr in card.prs
+        ),
+        is_recently_done=_is_recently_done(card, cutoff, current_username),
+        ticket_started=(card.ticket is not None and card.ticket.state_type == "started"),
+    )
+
+
 def _classify_card(
     card: KanbanCard,
     current_username: str,
@@ -260,24 +361,49 @@ def _classify_card(
 
     Returns ``None`` when the card should be excluded from the board.
 
-    Priority: in_progress > needs_review > done > ticket-started > todo
+    Decision table (first match wins):
+
+    =============================================  ================
+    Condition                                      Column
+    =============================================  ================
+    Card excluded by filter                        ``None``
+    User has unaddressed reviewer feedback          in_progress
+    PR is awaiting review from someone              needs_review
+    User's open PR is approved (ready to merge)     done
+    Owned + active session or open PR (no reviews)  in_progress
+    Recently done (merged / completed / reviewed)   done
+    Owned + ticket state is "started"               in_progress
+    Everything else                                 todo
+    =============================================  ================
     """
     cutoff = now - _DONE_WINDOW
 
     if not _should_include_card(card, current_username, cutoff):
         return None
 
-    if _has_active_session(card) or _has_open_pr_in_progress(card, current_username):
+    s = _compute_signals(card, current_username, cutoff)
+
+    # User has feedback to address — they need to act.
+    if s.has_unaddressed_feedback:
         return "in_progress"
 
-    if _has_pr_needing_review(card, current_username):
+    # PR is out for review — user is blocked on reviewers.
+    if s.has_pr_awaiting_review:
         return "needs_review"
 
-    if _is_recently_done(card, cutoff, current_username):
+    # PR approved and ready to merge — takes priority over active sessions.
+    if s.has_approved_open_pr:
         return "done"
 
-    # Ticket is actively being worked on but no PR signal drove it elsewhere.
-    if card.ticket is not None and card.ticket.state_type == "started":
+    # Actively working: session running or PR not yet sent for review.
+    if s.owned and (s.has_active_session or s.has_open_pr_no_reviewers):
+        return "in_progress"
+
+    if s.is_recently_done:
+        return "done"
+
+    # Ticket is being worked on but no PR signal drove it elsewhere.
+    if s.owned and s.ticket_started:
         return "in_progress"
 
     return "todo"
@@ -297,14 +423,19 @@ def _user_involved_in_done_card(card: KanbanCard, current_username: str) -> bool
     return any(pr.author == current_username or current_username in pr.reviewers for pr in card.prs)
 
 
-def _assign_done_group(card: KanbanCard) -> str:
+def _assign_done_group(card: KanbanCard, current_username: str) -> str:
     """Return the done sub-group for a done card.
 
-    - ``ready_to_merge``: has an open PR that is approved but not yet merged
+    - ``ready_to_merge``: has an open PR authored by the user that is approved
+      but not yet merged
     - ``completed``: merged PRs or completed tickets
     """
     for pr in card.prs:
-        if pr.state == "open" and pr.review_decision == "APPROVED":
+        if (
+            pr.state == "open"
+            and pr.review_decision == "APPROVED"
+            and pr.author == current_username
+        ):
             return "ready_to_merge"
     return "completed"
 
@@ -408,6 +539,12 @@ def aggregate(
     # Sessions that have a pr_number but no ticket_id will be attached to
     # orphan PR cards (keyed as "pr-{number}") in step 5 below.
     pr_sessions: list[Session] = []
+    # Index ticket cards by PR number for fallback matching.
+    _card_by_pr: dict[tuple[str, int], KanbanCard] = {}
+    for card in cards.values():
+        for pr in card.prs:
+            _card_by_pr[(pr.repo, pr.number)] = card
+
     for session in _sessions:
         if session.ticket_id and session.ticket_id in cards:
             cards[session.ticket_id].sessions.append(session)
@@ -417,7 +554,24 @@ def aggregate(
                     if step.step_name in AUDIT_STEP_NAMES:
                         cards[session.ticket_id].audit_steps.append(step)
         elif _session_pr_number(session) is not None:
-            pr_sessions.append(session)
+            # Try matching to a ticket card by PR number before deferring to orphan.
+            pr_num = _session_pr_number(session)
+            pr_repo = getattr(session, "pr_repo", None) or ""
+            matched_card = _card_by_pr.get((pr_repo, pr_num))  # type: ignore[arg-type]
+            # Fallback: when pr_repo is empty (e.g. ZingSession), match by number only.
+            if matched_card is None and not pr_repo:
+                for (_repo, _num), card_candidate in _card_by_pr.items():
+                    if _num == pr_num:
+                        matched_card = card_candidate
+                        break
+            if matched_card is not None:
+                matched_card.sessions.append(session)
+                if isinstance(session, ZingSession):
+                    for step in session.steps:
+                        if step.step_name in AUDIT_STEP_NAMES:
+                            matched_card.audit_steps.append(step)
+            else:
+                pr_sessions.append(session)
 
     # -----------------------------------------------------------------------
     # 5. Orphan PR cards (no matching ticket)
@@ -509,12 +663,177 @@ def aggregate(
     # 10. Assign done groups and sort: ready_to_merge first, then completed
     # -----------------------------------------------------------------------
     for card in view.done:
-        card.done_group = _assign_done_group(card)
+        card.done_group = _assign_done_group(card, _username)
 
     _DONE_GROUP_ORDER = {"ready_to_merge": 0, "completed": 1}
     view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))
 
     return view
+
+
+def infer_repo_for_ticket(view: KanbanView, team: str | None) -> list[str]:
+    """Infer candidate repos for a ticket-only card by looking at same-team cards.
+
+    Scans all cards across the board for ones whose ticket belongs to the same
+    team and that have linked PRs. Returns the deduplicated list of repo names
+    found, preserving order of first appearance.
+
+    Args:
+        view: The current KanbanView with all columns populated.
+        team: The Linear team name of the ticket, or ``None``.
+
+    Returns:
+        Ordered list of unique repo name strings (e.g. ``["owner/repo"]``).
+        Empty if no same-team cards with PRs are found, or if *team* is ``None``.
+    """
+    if not team:
+        return []
+
+    seen: set[str] = set()
+    repos: list[str] = []
+    for col in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in col:
+            if card.ticket is not None and card.ticket.team == team:
+                for pr in card.prs:
+                    if pr.repo and pr.repo not in seen:
+                        seen.add(pr.repo)
+                        repos.append(pr.repo)
+    return repos
+
+
+def _card_display_title(card: KanbanCard) -> str:
+    """Return a human-readable title for a card (ticket title or PR title)."""
+    if card.ticket is not None:
+        return card.ticket.title
+    if card.prs:
+        return card.prs[0].title
+    return card.key
+
+
+def _card_url(card: KanbanCard) -> str | None:
+    """Return the most relevant URL for a card (ticket URL or PR URL)."""
+    if card.ticket is not None:
+        return card.ticket.url
+    if card.prs:
+        return card.prs[0].url
+    return None
+
+
+def generate_standup(view: KanbanView, current_username: str) -> str:
+    """Generate a standup message from the current Kanban board state.
+
+    The message lists:
+    - What got done yesterday (merged PRs, completed tickets)
+    - What's on the plate today (in-progress work)
+    - Blockers (PRs waiting on others for review)
+
+    Args:
+        view: The current KanbanView with all columns populated.
+        current_username: The GitHub username of the current user.
+
+    Returns:
+        A formatted standup message string in markdown.
+    """
+    now = datetime.now(UTC)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+
+    # -- Done items: split into yesterday vs today --
+    done_yesterday: list[str] = []
+    done_today: list[str] = []
+
+    for card in view.done:
+        # Only include cards the user owns (assigned ticket or authored PR).
+        # Skip cards where the user only reviewed someone else's PR.
+        is_own_ticket = card.ticket is not None
+        is_own_pr = any(pr.author == current_username for pr in card.prs)
+        if not is_own_ticket and not is_own_pr:
+            continue
+
+        title = _card_display_title(card)
+        url = _card_url(card)
+        activity_time = _card_most_recent_activity(card)
+
+        # Determine what "done" means for this card
+        has_merged_pr = any(pr.state == "merged" for pr in card.prs)
+        ticket_completed = card.ticket is not None and card.ticket.state_type == "completed"
+
+        if has_merged_pr:
+            label = f"Merged [{title}]({url})" if url else f"Merged {title}"
+        elif ticket_completed:
+            label = f"Completed [{title}]({url})" if url else f"Completed {title}"
+        elif card.done_group == "ready_to_merge":
+            label = f"Ready to merge [{title}]({url})" if url else f"Ready to merge {title}"
+        else:
+            label = f"Completed [{title}]({url})" if url else f"Completed {title}"
+
+        if activity_time >= today_start:
+            done_today.append(f"- {label}")
+        elif activity_time >= yesterday_start:
+            done_yesterday.append(f"- {label}")
+
+    # -- In progress items --
+    in_progress_items: list[str] = []
+
+    for card in view.in_progress:
+        title = _card_display_title(card)
+        url = _card_url(card)
+
+        # Check if the card has unaddressed feedback (returning to address comments)
+        has_feedback = _has_unaddressed_feedback(card, current_username)
+
+        if has_feedback:
+            label = (
+                f"Resolve comments on [{title}]({url})" if url else (f"Resolve comments on {title}")
+            )
+        else:
+            label = f"Work on [{title}]({url})" if url else f"Work on {title}"
+
+        in_progress_items.append(f"- {label}")
+
+    # -- Needs review: user's own PRs waiting on others --
+    # These contribute to both "done" (the work itself) and "blockers" (the review wait).
+    blocker_items: list[str] = []
+
+    for card in view.needs_review:
+        if card.review_group != "others":
+            continue
+
+        # The ticket/work goes into "what got done" as "Worked on ..."
+        title = _card_display_title(card)
+        url = _card_url(card)
+        label = f"Worked on [{title}]({url})" if url else f"Worked on {title}"
+        activity_time = _card_most_recent_activity(card)
+        if activity_time >= today_start:
+            done_today.append(f"- {label}")
+        elif activity_time >= yesterday_start:
+            done_yesterday.append(f"- {label}")
+
+        # The PR itself is a blocker — use the PR URL
+        pr_url = card.prs[0].url if card.prs else _card_url(card)
+        label = f"Need a review on [{title}]({pr_url})" if pr_url else (f"Need a review on {title}")
+        blocker_items.append(f"- {label}")
+
+    # -- Build message --
+    sections: list[str] = []
+
+    done_lines = done_yesterday + done_today
+    if done_lines:
+        sections.append("**What got done yesterday:**\n" + "\n".join(done_lines))
+    else:
+        sections.append("**What got done yesterday:**\n- (nothing to report)")
+
+    if in_progress_items:
+        sections.append("**What's on my plate today:**\n" + "\n".join(in_progress_items))
+    else:
+        sections.append("**What's on my plate today:**\n- (nothing planned)")
+
+    if blocker_items:
+        sections.append("**Blockers:**\n" + "\n".join(blocker_items))
+    else:
+        sections.append("**Blockers:**\n- None")
+
+    return "\n\n".join(sections)
 
 
 def get_live_tmux_sessions() -> set[str]:
