@@ -213,13 +213,17 @@ class TestCheckoutPrBranch(TestCase):
             mock_run.return_value = MagicMock()
             result = checkout_pr_branch(repo_root, branch, template)
 
-        expected_path = (repo_root / f"../main-{branch}").resolve()
+        # The prefix before the first slash is stripped for the worktree path
+        # (e.g. "origin/pr-branch" -> "pr-branch").
+        path_branch = branch.split("/", 1)[-1]
+        expected_path = (repo_root / f"../main-{path_branch}").resolve()
         self.assertEqual(result, expected_path)
 
         call_args = mock_run.call_args[0][0]
         # Should NOT have '-b' flag
         self.assertNotIn("-b", call_args)
         self.assertIn("add", call_args)
+        # The git command uses the original branch name (with slashes).
         self.assertIn(branch, call_args)
 
     def test_raises_on_git_failure(self) -> None:
