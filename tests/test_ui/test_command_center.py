@@ -91,10 +91,10 @@ def test_card_with_audit_findings_shows_badge(server: _ServerInfo, page: Page) -
     card = page.locator("#card-bak-1003")
     expect(card).to_be_visible(timeout=5000)
 
-    # Audit badge in footer should be visible
-    badge = card.locator(".audit-badge")
-    expect(badge).to_be_visible(timeout=3000)
-    expect(badge).to_contain_text("finding", timeout=3000)
+    # Findings count in the strip should be visible
+    findings = card.locator(".strip-findings")
+    expect(findings).to_be_visible(timeout=3000)
+    expect(findings).to_contain_text("finding", timeout=3000)
 
 
 def test_sse_event_updates_board_without_reload(server: _ServerInfo, page: Page) -> None:
