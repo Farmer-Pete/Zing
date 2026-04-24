@@ -185,7 +185,15 @@ def mcp_cmd(port: int) -> None:
     "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
 )
 @click.option("--detach", is_flag=True, default=False, help="Run in a detached tmux session.")
-def launch(target: str, resume: str, port: int, skill: str | None, detach: bool) -> None:
+@click.option(
+    "--setup-only",
+    is_flag=True,
+    default=False,
+    help="Set up the worktree/branch and register the session, but don't start Claude.",
+)
+def launch(
+    target: str, resume: str, port: int, skill: str | None, detach: bool, setup_only: bool
+) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
@@ -352,6 +360,12 @@ def launch(target: str, resume: str, port: int, skill: str | None, detach: bool)
                 if not succeeded and worktree_path is not None:
                     rollback_worktree(worktree_path)
 
+            if setup_only:
+                click.echo(f"Environment ready: {work_dir}")
+                click.echo(f"Session ID: {session_id}")
+                click.echo(f"To start: cd {work_dir} && claude /zing:{ticket_skill} {ticket_id}")
+                return
+
             args = build_claude_args(
                 skill=ticket_skill,
                 session_id=session_id,
@@ -434,6 +448,12 @@ def launch(target: str, resume: str, port: int, skill: str | None, detach: bool)
             finally:
                 if not succeeded and worktree_path is not None:
                     rollback_worktree(worktree_path)
+
+            if setup_only:
+                click.echo(f"Environment ready: {work_dir}")
+                click.echo(f"Session ID: {session_id}")
+                click.echo(f"To start: cd {work_dir} && claude /zing:{pr_skill} {target}")
+                return
 
             args = build_claude_args(
                 skill=pr_skill,

@@ -51,6 +51,21 @@
     </div>
     <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
+    {# ── Repo chooser modal ── #}
+    <div id="repo-chooser-modal" class="standup-modal" style="display:none;">
+      <div class="standup-modal-bar">
+        <span class="standup-modal-title">Choose Repository</span>
+        <div class="standup-modal-actions">
+          <button class="terminal-modal-close" id="repo-chooser-close">&times;</button>
+        </div>
+      </div>
+      <div class="repo-chooser-body">
+        <p class="repo-chooser-hint">This ticket has no linked PR. Which repo does it belong to?</p>
+        <div id="repo-chooser-list" class="repo-chooser-list"></div>
+      </div>
+    </div>
+    <div id="repo-chooser-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
     {# ── Standup modal ── #}
     <div id="standup-modal" class="standup-modal" style="display:none;">
       <div class="standup-modal-bar">
@@ -70,6 +85,19 @@
     <div id="standup-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
     <script>
+    // Repo chooser modal close
+    (function() {
+        var modal = document.getElementById('repo-chooser-modal');
+        var backdrop = document.getElementById('repo-chooser-backdrop');
+        var closeBtn = document.getElementById('repo-chooser-close');
+        function close() { modal.style.display = 'none'; backdrop.style.display = 'none'; }
+        closeBtn.addEventListener('click', close);
+        backdrop.addEventListener('click', close);
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') close();
+        });
+    })();
+
     // Standup modal
     (function() {
         var modal = document.getElementById('standup-modal');
@@ -205,6 +233,28 @@
         });
     });
 
+    // Repo chooser: shows a popup when the server can't determine which repo to use.
+    // After the user picks, retries the original request with the chosen repo.
+    function handleRepoChoice(data, retryFn) {
+        var modal = document.getElementById('repo-chooser-modal');
+        var backdrop = document.getElementById('repo-chooser-backdrop');
+        var list = document.getElementById('repo-chooser-list');
+        list.innerHTML = '';
+        data.repos.forEach(function(repo) {
+            var btn = document.createElement('button');
+            btn.className = 'repo-chooser-option';
+            btn.textContent = repo;
+            btn.addEventListener('click', function() {
+                modal.style.display = 'none';
+                backdrop.style.display = 'none';
+                retryFn(repo);
+            });
+            list.appendChild(btn);
+        });
+        modal.style.display = '';
+        backdrop.style.display = '';
+    }
+
     // Background launch for data-launch-bg buttons
     document.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-launch-bg]');
@@ -212,30 +262,38 @@
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
 
-        btn.disabled = true;
-        btn.innerHTML = '&#9203; Launching\u2026';
+        function doLaunch(repo) {
+            btn.disabled = true;
+            btn.innerHTML = '&#9203; Launching\u2026';
+            var payload = {card_key: cardKey};
+            if (repo) payload.repo = repo;
 
-        fetch('/command-center/launch-background', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({card_key: cardKey})
-        }).then(function(resp) {
-            return resp.json().then(function(data) {
-                if (!resp.ok) {
-                    showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
-                    btn.innerHTML = '&#10007; Failed';
-                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-                } else {
-                    showToast('Session launched for ' + cardKey, 'success');
-                    btn.innerHTML = '&#10003; Launched!';
-                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
-                }
+            fetch('/command-center/launch-background', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (data.status === 'choose_repo') {
+                        btn.innerHTML = label; btn.disabled = false;
+                        handleRepoChoice(data, doLaunch);
+                    } else if (!resp.ok) {
+                        showToast(data.error || ('Launch failed (HTTP ' + resp.status + ')'), 'error');
+                        btn.innerHTML = '&#10007; Failed';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                    } else {
+                        showToast('Session launched for ' + cardKey, 'success');
+                        btn.innerHTML = '&#10003; Launched!';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 2000);
+                    }
+                });
+            }).catch(function(err) {
+                showToast('Launch failed: ' + err.message, 'error');
+                btn.innerHTML = '&#10007; Failed';
+                setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
             });
-        }).catch(function(err) {
-            showToast('Launch failed: ' + err.message, 'error');
-            btn.innerHTML = '&#10007; Failed';
-            setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-        });
+        }
+        doLaunch(null);
     });
 
     // Attach session (iTerm2 or browser via ttyd)
@@ -272,6 +330,79 @@
             btn.innerHTML = '&#10007; Failed';
             setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
         });
+    });
+
+    // Start ticket (move to in-progress)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-start-ticket]');
+        if (!btn || btn.disabled) return;
+        var ticketId = btn.getAttribute('data-start-ticket');
+        var label = btn.getAttribute('data-start-ticket-label');
+
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Starting\u2026';
+
+        fetch('/command-center/start-ticket', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ticket_id: ticketId})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) {
+                    showToast(data.error || ('Start failed (HTTP ' + resp.status + ')'), 'error');
+                    btn.innerHTML = '&#10007; Failed';
+                    setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                } else {
+                    showToast(ticketId + ' moved to In Progress', 'success');
+                    btn.innerHTML = '&#10003; Started!';
+                }
+            });
+        }).catch(function(err) {
+            showToast('Start failed: ' + err.message, 'error');
+            btn.innerHTML = '&#10007; Failed';
+            setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+        });
+    });
+
+    // Setup environment (worktree/branch without starting Claude)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-setup-env]');
+        if (!btn || btn.disabled) return;
+        var cardKey = btn.getAttribute('data-setup-env');
+        var label = btn.getAttribute('data-setup-env-label');
+
+        function doSetup(repo) {
+            btn.disabled = true;
+            btn.innerHTML = '&#9203; Setting up\u2026';
+            var payload = {card_key: cardKey};
+            if (repo) payload.repo = repo;
+
+            fetch('/command-center/setup-environment', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (data.status === 'choose_repo') {
+                        btn.innerHTML = label; btn.disabled = false;
+                        handleRepoChoice(data, doSetup);
+                    } else if (!resp.ok) {
+                        showToast(data.error || ('Setup failed (HTTP ' + resp.status + ')'), 'error');
+                        btn.innerHTML = '&#10007; Failed';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                    } else {
+                        showToast('Environment ready: ' + data.worktree_path, 'success');
+                        btn.innerHTML = '&#10003; Ready!';
+                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+                    }
+                });
+            }).catch(function(err) {
+                showToast('Setup failed: ' + err.message, 'error');
+                btn.innerHTML = '&#10007; Failed';
+                setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
+            });
+        }
+        doSetup(null);
     });
 
     // ESC to close management tray

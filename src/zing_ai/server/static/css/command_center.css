@@ -731,6 +731,46 @@ a.strip-ci-dot[href] { cursor: pointer; }
 .standup-rendered a:hover { text-decoration: underline; }
 
 /* ──────────────────────────────────────────────
+   REPO CHOOSER
+────────────────────────────────────────────── */
+
+.repo-chooser-body {
+    padding: 1rem 1.25rem;
+}
+
+.repo-chooser-hint {
+    font-size: 0.8rem;
+    color: var(--gray-700);
+    margin: 0 0 0.75rem;
+}
+
+.repo-chooser-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.repo-chooser-option {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    background: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.repo-chooser-option:hover {
+    border-color: var(--orange);
+    background: var(--gray-50);
+}
+
+/* ──────────────────────────────────────────────
    MANAGEMENT TRAY
 ────────────────────────────────────────────── */
 

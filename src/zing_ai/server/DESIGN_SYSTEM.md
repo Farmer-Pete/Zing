@@ -148,6 +148,14 @@ Living reference for all UI design standards. The Zing brand is **bold**, **fast
 - Shadow: `0 4px 14px rgba(245,124,32,0.3)`
 - Hover: `--orange-hover` bg, shadow intensifies, `translateY(-1px)`
 
+### Command Center Card Buttons
+- Two visual tiers based on what the button does:
+  - **Orange (primary)**: Executes a server-side action (launch session, start ticket, setup environment). Uses `card-btn card-btn-primary`.
+  - **White (default)**: Copies a command to the clipboard for the user to run manually. Uses `card-btn` only.
+- Small size: `0.55rem`, `padding: 0.2rem 0.45rem`, `border-radius: 4px`
+- Hidden at rest (`opacity: 0.15`), revealed on card hover (`opacity: 1`)
+- Transition: `background 0.1s, opacity 0.15s`
+
 ### Delete / Destructive Buttons
 - Transparent background, `--gray-500` text, `1px solid --gray-300` border
 - Hover: `--red-orange` text, `--red-orange` border, `rgba(232,68,48,0.05)` background

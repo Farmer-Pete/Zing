@@ -656,6 +656,36 @@ def aggregate(
     return view
 
 
+def infer_repo_for_ticket(view: KanbanView, team: str | None) -> list[str]:
+    """Infer candidate repos for a ticket-only card by looking at same-team cards.
+
+    Scans all cards across the board for ones whose ticket belongs to the same
+    team and that have linked PRs. Returns the deduplicated list of repo names
+    found, preserving order of first appearance.
+
+    Args:
+        view: The current KanbanView with all columns populated.
+        team: The Linear team name of the ticket, or ``None``.
+
+    Returns:
+        Ordered list of unique repo name strings (e.g. ``["owner/repo"]``).
+        Empty if no same-team cards with PRs are found, or if *team* is ``None``.
+    """
+    if not team:
+        return []
+
+    seen: set[str] = set()
+    repos: list[str] = []
+    for col in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in col:
+            if card.ticket is not None and card.ticket.team == team:
+                for pr in card.prs:
+                    if pr.repo and pr.repo not in seen:
+                        seen.add(pr.repo)
+                        repos.append(pr.repo)
+    return repos
+
+
 def _card_display_title(card: KanbanCard) -> str:
     """Return a human-readable title for a card (ticket title or PR title)."""
     if card.ticket is not None:
