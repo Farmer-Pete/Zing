@@ -4,6 +4,9 @@
   Expected context variables:
     card        — KanbanCard instance
     column_cls  — CSS column class string, e.g. "col-todo" (from parent column template)
+    current_username — GitHub username of the current user
+    live_tmux_sessions — set of live tmux session names
+    iterm2_integration — bool, whether iTerm2 control mode is enabled
 #}
 {% set total_findings = namespace(count=0) %}
 {% for step in card.audit_steps %}
@@ -12,102 +15,105 @@
 
 <div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}">
 
-  {# ── Ticket identifier + title ── #}
-  {% if card.ticket %}
-    <a href="{{ card.ticket.url }}" target="_blank" rel="noopener" class="card-ticket">{{ card.ticket.identifier }}</a>
-    <div class="card-title">{{ card.ticket.title }}</div>
-  {% elif card.prs %}
-    <div class="card-title">{{ card.prs[0].title }}</div>
-  {% else %}
-    <div class="card-title">{{ card.key }}</div>
-  {% endif %}
-
-  {# ── PR badges ── #}
-  {% for pr in card.prs %}
-    <a href="{{ pr.url }}" target="_blank" rel="noopener" class="pr-badge{% if pr.merged_at %} pr-merged{% elif pr.draft %} pr-draft{% else %} pr-open{% endif %}">
-      {% if pr.merged_at %}
-        {# Merge icon #}
-        <svg viewBox="0 0 16 16" fill="currentColor">
-          <path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218zM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5zm8-9a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5z"/>
-        </svg>
+  {# ── Header: ticket ID + title + assignee ── #}
+  <div class="card-header">
+    <div class="card-header-top">
+      {% if card.ticket %}
+        <a href="{{ card.ticket.url }}" target="_blank" rel="noopener" class="card-ticket-id">{{ card.ticket.identifier }}</a>
+      {% endif %}
+      {% if card.ticket and card.ticket.assignee %}
+        {% set initials = (card.ticket.assignee[:1] + (card.ticket.assignee.split(' ')[1][:1] if ' ' in card.ticket.assignee else '')).upper() %}
+        <div class="card-assignee" title="{{ card.ticket.assignee }}">{{ initials }}</div>
+      {% endif %}
+    </div>
+    <div class="card-title">
+      {% if card.ticket %}
+        {{ card.ticket.title }}
+      {% elif card.prs %}
+        {{ card.prs[0].title }}
       {% else %}
-        {# Open/draft PR icon #}
-        <svg viewBox="0 0 16 16" fill="currentColor">
-          <path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/>
-        </svg>
+        {{ card.key }}
       {% endif %}
-      {% if pr.repo %}{{ pr.repo.split('/')[1] }}{% endif %}#{{ pr.number }}
-      {% if pr.author %}<span class="pr-author">{{ pr.author }}</span>{% endif %}
-      {% if pr.merged_at %}<span class="pr-status-pill pr-status-merged">merged</span>
-      {% elif pr.draft %}<span class="pr-status-pill pr-status-draft">draft</span>
-      {% elif pr.review_decision == "APPROVED" %}<span class="pr-status-pill pr-status-approved">approved</span>
-      {% elif pr.review_decision == "CHANGES_REQUESTED" and column_cls != "col-review" %}<span class="pr-status-pill pr-status-changes-requested">changes requested</span>
-      {% elif pr.state == "open" and pr.author == current_username and column_cls != "col-review" and pr.reviewers | reject("in", pr.requested_reviewers) | list %}<span class="pr-status-pill pr-status-reviewed">reviewed</span>
+    </div>
+  </div>
+
+  {# ── PR strips: one per PR, with inline action buttons ── #}
+  {% for pr in card.prs %}
+    <div class="status-strip">
+      <a href="{{ pr.url }}" target="_blank" rel="noopener" class="strip-pr{% if pr.draft %} strip-pr-draft{% endif %}" title="{{ pr.repo }}#{{ pr.number }} by {{ pr.author }}">
+        {% if pr.merged_at %}
+          <svg viewBox="0 0 16 16" fill="#7c3aed"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218zM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5zm8-9a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5z"/></svg>
+        {% else %}
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+        {% endif %}
+        {% if pr.repo %}{{ pr.repo.split('/')[1] }}{% endif %}#{{ pr.number }}
+      </a>
+      {% if pr.author %}<span class="strip-author">{{ pr.author }}</span>{% endif %}
+      {% if pr.merged_at %}<span class="strip-pill strip-pill-merged">merged</span>
+      {% elif pr.draft %}<span class="strip-pill strip-pill-draft">draft</span>
+      {% elif pr.review_decision == "APPROVED" %}<span class="strip-pill strip-pill-approved">approved</span>
+      {% elif pr.review_decision == "CHANGES_REQUESTED" and column_cls != "col-review" %}<span class="strip-pill strip-pill-changes">changes requested</span>
+      {% elif pr.state == "open" and pr.author == current_username and column_cls != "col-review" and pr.reviewers | reject("in", pr.requested_reviewers) | list %}<span class="strip-pill strip-pill-reviewed">reviewed</span>
       {% endif %}
-    </a>
-    {% if pr.ci_checks %}
-      {% set failing = pr.ci_checks | selectattr("conclusion", "equalto", "failure") | list %}
-      <div class="ci-checks">
-        {% for check in pr.ci_checks %}
-          {% if check.conclusion == "success" %}
-            {% set dot_cls = "ci-dot-green" %}
-          {% elif check.conclusion == "failure" %}
-            {% set dot_cls = "ci-dot-red" %}
-          {% elif check.conclusion == "skipped" or check.conclusion == "neutral" or check.conclusion == "cancelled" %}
-            {% set dot_cls = "ci-dot-gray" %}
-          {% else %}
-            {% set dot_cls = "ci-dot-amber" %}
-          {% endif %}
-          <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %}
-             class="ci-dot {{ dot_cls }}"
-             title="{{ check.name }}"></a>
-        {% endfor %}
-      </div>
-      {% if failing %}
-        <div class="ci-failing-list">
-          {% for check in failing %}
-            <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %}
-               class="ci-failing-name">&#10005; {{ check.name }}</a>
+      {% if pr.ci_checks %}
+        <div class="strip-ci-dots" title="{{ pr.ci_checks | selectattr('conclusion', 'equalto', 'success') | list | length }} passing{% if pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list %}, {{ pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list | length }} failing{% endif %}">
+          {% for check in pr.ci_checks %}
+            {% if check.conclusion == "success" %}
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-green" title="{{ check.name }}"></a>
+            {% elif check.conclusion == "failure" %}
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-red" title="{{ check.name }}"></a>
+            {% elif check.conclusion == "skipped" or check.conclusion == "neutral" or check.conclusion == "cancelled" %}
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-gray" title="{{ check.name }}"></a>
+            {% else %}
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-amber" title="{{ check.name }}"></a>
+            {% endif %}
           {% endfor %}
         </div>
       {% endif %}
+      {# PR action buttons — inline #}
+      {% if loop.first %}
+        <span class="strip-spacer"></span>
+        {% set is_author = pr.author == current_username %}
+        <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Review">Review</button>
+        <button class="card-btn" data-launch-cmd="zing-ai launch {{ pr.url | e }}" data-launch-label="Start">Start</button>
+        {% if is_author %}
+          <button class="card-btn" data-launch-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}" data-launch-label="Respond">Respond</button>
+        {% endif %}
+      {% endif %}
+    </div>
+    {# CI failure callout #}
+    {% set failing = pr.ci_checks | selectattr("conclusion", "equalto", "failure") | list %}
+    {% if failing %}
+      <div class="ci-fail-bar">
+        {% for check in failing %}
+          <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="ci-fail-link">&#10005; {{ check.name }}</a>
+        {% endfor %}
+      </div>
     {% endif %}
   {% endfor %}
 
-  {# ── Claude Code sessions ── #}
+  {# ── Claude Code sessions with inline attach/resume buttons ── #}
   {% for session in card.sessions if session.session_type == 'claude_code' %}
     {% set is_alive = session.tmux_session and session.tmux_session in live_tmux_sessions %}
-    <div class="session-indicator claude-code">
-      <span class="status-dot dot-blue{% if is_alive %} alive{% endif %}"></span>
+    <div class="status-strip">
+      <span class="strip-session-dot {% if is_alive %}strip-session-alive{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% else %}Stopped{% endif %}"></span>
       {% if is_alive %}
-        <span>Running: {{ session.title }}</span>
+        <span class="strip-session-label">Running: {{ session.title }}</span>
       {% elif session.tmux_session %}
-        <span style="color: var(--gray-400)">Stopped: {{ session.title }}</span>
+        <span class="strip-session-label strip-session-label-dead">Stopped: {{ session.title }}</span>
       {% else %}
-        <span>Claude Code: {{ session.title }}</span>
+        <span class="strip-session-label">{{ session.title }}</span>
       {% endif %}
-    </div>
-    <div class="launch-btn-group">
+      <span class="strip-spacer"></span>
       {% if session.tmux_session and is_alive %}
         {% if iterm2_integration %}
-          <button class="launch-btn launch-btn-secondary"
-                  data-attach-iterm="{{ session.tmux_session | e }}">
-            Attach
-          </button>
+          <button class="card-btn" data-attach-iterm="{{ session.tmux_session | e }}">Attach</button>
         {% else %}
-          <button class="launch-btn launch-btn-secondary"
-                  data-launch-cmd="tmux attach -t {{ session.tmux_session | e }}"
-                  data-launch-label="Attach">
-            Attach
-          </button>
+          <button class="card-btn" data-launch-cmd="tmux attach -t {{ session.tmux_session | e }}" data-launch-label="Attach">Attach</button>
         {% endif %}
       {% endif %}
       {% if session.ticket_id %}
-        <button class="launch-btn launch-btn-secondary"
-                data-launch-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}"
-                data-launch-label="&#x2398; Resume">
-          &#x2398; Resume
-        </button>
+        <button class="card-btn" data-launch-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}" data-launch-label="Resume">Resume</button>
       {% endif %}
     </div>
   {% endfor %}
@@ -115,80 +121,40 @@
   {# ── Zing sessions ── #}
   {% for session in card.sessions if session.session_type == 'zing' %}
     {% set state_val = session.state.value %}
-    <a href="/{{ session.session_id }}" target="_blank" rel="noopener" class="session-indicator{% if state_val == 'started' %} active{% elif state_val == 'pending' %} waiting{% elif state_val == 'completed' %} done{% endif %}">
-      {% if state_val == 'started' %}
-        <span class="status-dot dot-amber"></span>
-      {% elif state_val == 'pending' %}
-        <span class="status-dot dot-red"></span>
-      {% elif state_val == 'completed' %}
-        <span class="status-dot dot-green"></span>
-      {% else %}
-        <span class="status-dot dot-cyan"></span>
-      {% endif %}
-      <span>
+    <div class="status-strip">
+      <a href="/{{ session.session_id }}" target="_blank" rel="noopener" class="strip-zing-session">
+        <span class="strip-zing-dot {% if state_val == 'started' %}strip-zing-amber{% elif state_val == 'pending' %}strip-zing-red{% elif state_val == 'completed' %}strip-zing-green{% else %}strip-zing-cyan{% endif %}"></span>
         {% if state_val == 'started' %}Claude session running
         {% elif state_val == 'pending' %}Waiting to start
         {% elif state_val == 'ready' %}Ready for review
         {% elif state_val == 'completed' %}Session completed
         {% else %}{{ state_val }}
         {% endif %}
-      </span>
-    </a>
+      </a>
+    </div>
   {% endfor %}
 
-  {# ── Launch button ── #}
-  {% if card.prs %}
-    {% set is_author = card.prs[0].author == current_username %}
-    <div class="launch-btn-group">
-      <button class="launch-btn"
-              data-launch-bg="{{ card.key | e }}"
-              data-launch-bg-label="&#9654; Review PR">
-        &#9654; Review PR
-      </button>
-      <button class="launch-btn launch-btn-secondary"
-              data-launch-cmd="zing-ai launch {{ card.prs[0].url | e }}"
-              data-launch-label="&#x2398; Start Review">
-        &#x2398; Start Review
-      </button>
-      {% if is_author %}
-        <button class="launch-btn launch-btn-secondary"
-                data-launch-cmd="zing-ai launch --skill pr-respond {{ card.prs[0].url | e }}"
-                data-launch-label="&#x2398; Respond">
-          &#x2398; Respond
-        </button>
+  {# ── Findings + waiting note ── #}
+  {% if total_findings.count > 0 or (column_cls == "col-review" and card.review_group == "others") %}
+    <div class="status-strip">
+      {% if total_findings.count > 0 %}
+        <span class="strip-findings">{{ total_findings.count }} finding{{ 's' if total_findings.count != 1 else '' }}</span>
       {% endif %}
-    </div>
-  {% elif card.ticket %}
-    {% set has_cc_session = card.sessions | selectattr("session_type", "equalto", "claude_code") | list %}
-    {% set launch_label = "Session Running" if has_cc_session else "Plan Ticket" %}
-    <div class="launch-btn-group">
-      <button class="launch-btn"
-              data-launch-bg="{{ card.key | e }}"
-              data-launch-bg-label="&#9654; {{ launch_label }}">
-        &#9654; {{ launch_label }}
-      </button>
-      <button class="launch-btn launch-btn-secondary"
-              data-launch-cmd="zing-ai launch {{ card.key | e }}"
-              data-launch-label="&#x2398; Copy Command">
-        &#x2398; Copy Command
-      </button>
+      {% if column_cls == "col-review" and card.review_group == "others" %}
+        <span class="strip-spacer"></span>
+        <span class="strip-note">Waiting on others</span>
+      {% endif %}
     </div>
   {% endif %}
 
-  {# ── Divider before footer ── #}
-  <hr class="card-divider">
-
-  {# ── Footer: audit badge + assignee avatar ── #}
-  <div class="card-footer">
-    {% if total_findings.count > 0 %}
-      <span class="audit-badge">&#9888; {{ total_findings.count }} finding{{ 's' if total_findings.count != 1 else '' }}</span>
-    {% else %}
-      <span></span>
-    {% endif %}
-    {% if card.ticket and card.ticket.assignee %}
-      {% set initials = (card.ticket.assignee[:1] + (card.ticket.assignee.split(' ')[1][:1] if ' ' in card.ticket.assignee else '')).upper() %}
-      <div class="assignee" title="{{ card.ticket.assignee }}">{{ initials }}</div>
-    {% endif %}
-  </div>
+  {# ── Footer actions (ticket-only cards, no PRs) ── #}
+  {% if not card.prs and card.ticket %}
+    <div class="card-actions">
+      {% set has_cc_session = card.sessions | selectattr("session_type", "equalto", "claude_code") | list %}
+      {% set launch_label = "Session Running" if has_cc_session else "Plan Ticket" %}
+      <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="{{ launch_label }}">{{ launch_label }}</button>
+      <button class="card-btn" data-launch-cmd="zing-ai launch {{ card.key | e }}" data-launch-label="Copy Cmd">Copy Cmd</button>
+    </div>
+  {% endif %}
 
 </div>
