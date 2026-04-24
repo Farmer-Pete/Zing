@@ -268,29 +268,21 @@ For each comment, in order — marking the corresponding comment task as `in_pro
    - A **misunderstanding** that should be clarified
    - **Not actionable** (e.g., an observation, praise, or already addressed)
 
-4. **If the comment is not actionable** (already addressed, praise, informational), tell the user:
-   ```
-   This comment appears to be {reason}. Skipping — will reply acknowledging it.
-   ```
-   Record that a reply should be posted but no code change is needed. Move to the next comment.
+4. **For every comment**, present it to the user in "fix with chat" mode. Before asking the user, send a browser notification so they know input is needed:
+   Call `notification_send(session_id, title="Input needed", body="PR comment needs your input.")` where `session_id` is the session ID from the zing file frontmatter.
 
-5. **If there is exactly one clear fix**, propose it to the user:
-   ```
-   Proposed fix: {brief description of the change}
-   ```
-   Then make the code change.
+   Present the analysis and options using AskUserQuestion:
+   - Show what the reviewer is asking for and the relevant code context
+   - If the comment is **not actionable** (already addressed, praise, informational), explain why and propose skipping — but still let the user decide
+   - If there is **one clear fix**, describe the proposed change
+   - If there are **multiple valid approaches**, list each with a short label and description
+   - If the comment is a **question or misunderstanding**, draft a reply
 
-6. **If there are multiple valid approaches**:
-   Before asking the user, send a browser notification so they know input is needed:
-   Call `notification_send(session_id, title="Input needed", body="A PR comment needs your decision on how to address it.")` where `session_id` is the session ID from the zing file frontmatter.
-   Present them as a menu using AskUserQuestion:
-   - Question: "How should this be addressed?"
-   - Options: List each approach with a short label and description
-   - Include an "Other" option so the user can describe their own approach
+   Always include these options:
+   - The proposed fix(es) or "Skip — acknowledge only"
+   - An "Other" option so the user can describe their own approach
 
    Wait for the user's selection, then implement the chosen approach.
-
-7. **If the comment is a question or misunderstanding**, draft a reply and show it to the user for approval before recording it.
 
 After addressing each comment, mark its comment task as `completed` using TaskUpdate, and record:
 - The comment ID

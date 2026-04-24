@@ -191,6 +191,10 @@ details.review-group[open] > .review-group-header::before {
     color: #2e7d32;
 }
 
+.card.card-ready-to-merge {
+    background: #e8f5e9;
+}
+
 /* ──────────────────────────────────────────────
    CARDS
 ────────────────────────────────────────────── */
@@ -321,7 +325,40 @@ a.pr-badge:hover {
 .pr-author {
     color: var(--gray-400);
     font-weight: 400;
-    margin-left: 0.15rem;
+}
+
+.pr-status-pill {
+    font-size: 0.55rem;
+    font-weight: 600;
+    padding: 0.05rem 0.35rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.pr-status-approved {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.pr-status-merged {
+    background: #ede7f6;
+    color: #7c3aed;
+}
+
+.pr-status-draft {
+    background: var(--gray-100);
+    color: var(--gray-500);
+}
+
+.pr-status-changes-requested {
+    background: #fff3e0;
+    color: #e65100;
+}
+
+.pr-status-reviewed {
+    background: #fff3e0;
+    color: #e65100;
 }
 
 .pr-badge svg {
@@ -346,19 +383,13 @@ a.pr-badge:hover {
 }
 
 .ci-dot {
-    width: 16px;
-    height: 16px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.5rem;
-    font-weight: 700;
-    color: #fff;
+    display: block;
     text-decoration: none;
     cursor: default;
     flex-shrink: 0;
-    line-height: 1;
 }
 
 a.ci-dot[href] {

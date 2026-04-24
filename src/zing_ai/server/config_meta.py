@@ -316,4 +316,20 @@ FIELD_META: dict[str, dict] = {
         },
         "group": "Command Center",
     },
+    "command_center.iterm2_integration": {
+        "label": "iTerm2 integration",
+        "field_type": "checkbox",
+        "description": {
+            "short": "Attach to tmux sessions via iTerm2 control mode.",
+            "long": (
+                "When enabled, the 'Attach to Session' button opens the tmux session "
+                "in a native iTerm2 window using control mode (tmux -CC). macOS only.\n\n"
+                "**Setup:** In iTerm2, go to Settings > General > tmux and enable "
+                '"Automatically hide the tmux client session after connecting" '
+                "to prevent a second control window from appearing."
+            ),
+        },
+        "group": "Command Center",
+        "platform": "darwin",
+    },
 }

@@ -127,6 +127,18 @@ def _card_most_recent_activity(card: KanbanCard) -> datetime:
 # -- Signal helpers ----------------------------------------------------------
 
 
+def _is_owned_by_user(card: KanbanCard, current_username: str) -> bool:
+    """The card belongs to the user: ticket is assigned to them or they authored a PR.
+
+    All tickets fetched from Linear are already filtered by the current viewer,
+    so a non-None ticket implies ownership.  For orphan-PR cards the user must
+    be the author of at least one linked PR.
+    """
+    if card.ticket is not None:
+        return True
+    return any(pr.author == current_username for pr in card.prs)
+
+
 def _has_active_session(card: KanbanCard) -> bool:
     """Any ZingSession has a step in STARTED state.
 
@@ -151,9 +163,39 @@ def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
     return any(
         pr.state == "open"
         and not pr.requested_reviewers
+        and pr.review_decision != "APPROVED"
         and (card.ticket is not None or pr.author == current_username)
         for pr in card.prs
     )
+
+
+def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
+    """User authored a PR that has reviewer feedback they haven't addressed yet.
+
+    True when a *requested* reviewer has submitted a review (is in
+    ``reviewers``) but has not been re-requested (is not in
+    ``requested_reviewers``), and the PR is not yet approved.
+
+    Reviewers who were never in ``requested_reviewers`` (e.g. automated bots
+    like Sentry) are ignored — only explicitly requested human reviewers count.
+    The set of "ever-requested" reviewers is approximated as the union of
+    current ``requested_reviewers`` and ``reviewers`` who overlap with
+    ``requested_reviewers`` on any PR in the card.
+    """
+    # Build set of all logins that appear in requested_reviewers across the card.
+    ever_requested: set[str] = set()
+    for pr in card.prs:
+        ever_requested.update(pr.requested_reviewers)
+
+    for pr in card.prs:
+        if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
+            continue
+        # Only consider reviewers who were explicitly requested at some point.
+        solicited_reviewers = set(pr.reviewers) & ever_requested
+        unaddressed = solicited_reviewers - set(pr.requested_reviewers)
+        if unaddressed:
+            return True
+    return False
 
 
 def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
@@ -267,7 +309,12 @@ def _classify_card(
     if not _should_include_card(card, current_username, cutoff):
         return None
 
-    if _has_active_session(card) or _has_open_pr_in_progress(card, current_username):
+    owned = _is_owned_by_user(card, current_username)
+
+    if owned and (_has_active_session(card) or _has_open_pr_in_progress(card, current_username)):
+        return "in_progress"
+
+    if _has_unaddressed_feedback(card, current_username):
         return "in_progress"
 
     if _has_pr_needing_review(card, current_username):
@@ -277,7 +324,7 @@ def _classify_card(
         return "done"
 
     # Ticket is actively being worked on but no PR signal drove it elsewhere.
-    if card.ticket is not None and card.ticket.state_type == "started":
+    if owned and card.ticket is not None and card.ticket.state_type == "started":
         return "in_progress"
 
     return "todo"
@@ -297,14 +344,19 @@ def _user_involved_in_done_card(card: KanbanCard, current_username: str) -> bool
     return any(pr.author == current_username or current_username in pr.reviewers for pr in card.prs)
 
 
-def _assign_done_group(card: KanbanCard) -> str:
+def _assign_done_group(card: KanbanCard, current_username: str) -> str:
     """Return the done sub-group for a done card.
 
-    - ``ready_to_merge``: has an open PR that is approved but not yet merged
+    - ``ready_to_merge``: has an open PR authored by the user that is approved
+      but not yet merged
     - ``completed``: merged PRs or completed tickets
     """
     for pr in card.prs:
-        if pr.state == "open" and pr.review_decision == "APPROVED":
+        if (
+            pr.state == "open"
+            and pr.review_decision == "APPROVED"
+            and pr.author == current_username
+        ):
             return "ready_to_merge"
     return "completed"
 
@@ -509,7 +561,7 @@ def aggregate(
     # 10. Assign done groups and sort: ready_to_merge first, then completed
     # -----------------------------------------------------------------------
     for card in view.done:
-        card.done_group = _assign_done_group(card)
+        card.done_group = _assign_done_group(card, _username)
 
     _DONE_GROUP_ORDER = {"ready_to_merge": 0, "completed": 1}
     view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))

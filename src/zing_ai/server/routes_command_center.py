@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import shlex
 import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -184,11 +186,13 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
+    config = load_config()
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
+        iterm2_integration=config.command_center.iterm2_integration,
     )
 
 
@@ -204,6 +208,7 @@ def _render_tray_fragment(app: FastAPI) -> str:
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
+    config = load_config()
     view = _build_view(request.app)
     cache = request.app.state.external_cache
     live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
@@ -220,6 +225,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_tmux_sessions=live_tmux_sessions,
+            iterm2_integration=config.command_center.iterm2_integration,
             **tray_data,
         )
     )
@@ -285,6 +291,57 @@ async def refresh_command_center(request: Request) -> JSONResponse:
         logger.error("Manual refresh failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse({"status": "refreshed"})
+
+
+# ---------------------------------------------------------------------------
+# iTerm2 tmux attach
+# ---------------------------------------------------------------------------
+
+
+@router.post("/command-center/attach-session")
+async def attach_session(request: Request) -> JSONResponse:
+    """Open a tmux session in iTerm2 using control mode (tmux -CC)."""
+    if sys.platform != "darwin":
+        return JSONResponse(
+            {"error": "iTerm2 integration is only available on macOS"}, status_code=422
+        )
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    tmux_session = body.get("tmux_session")
+    if not tmux_session:
+        return JSONResponse({"error": "tmux_session is required"}, status_code=400)
+
+    import shutil
+
+    tmux_path = shutil.which("tmux")
+    if not tmux_path:
+        return JSONResponse({"error": "tmux not found on PATH"}, status_code=500)
+
+    # Validate tmux session name to prevent injection
+    safe_name = shlex.quote(tmux_session)
+
+    applescript = (
+        'tell application "iTerm2"\n'
+        "  create window with default profile "
+        f'command "{tmux_path} -CC attach -t {safe_name}"\n'
+        "end tell"
+    )
+
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", applescript],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return JSONResponse({"error": "osascript not found"}, status_code=500)
+
+    return JSONResponse({"status": "attached", "tmux_session": tmux_session})
 
 
 # ---------------------------------------------------------------------------

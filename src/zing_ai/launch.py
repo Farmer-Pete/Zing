@@ -754,6 +754,7 @@ def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = N
         LaunchError: If the tmux session name already exists.
     """
     if tmux_session is None:
+        os.chdir(work_dir)
         os.execvp(args[0], args)
         return  # unreachable — satisfies type checkers
 

@@ -602,11 +602,27 @@ class TestSessionPrNumberLinking(unittest.TestCase):
 class TestDoneGrouping(unittest.TestCase):
     """Done column should group cards into ready_to_merge and completed."""
 
-    def test_approved_open_pr_is_ready_to_merge(self) -> None:
-        """Open PR approved by user gets ready_to_merge group in Done."""
+    def test_approved_open_pr_authored_by_user_is_ready_to_merge(self) -> None:
+        """Open PR authored by the user and approved → ready_to_merge."""
         pr = _make_pr(
             number=60,
             head_ref="feat/approved",
+            state="open",
+            author="octocat",
+            reviewers=["other-dev"],
+            review_decision="APPROVED",
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
+        done_cards = view.done
+        ready = [c for c in done_cards if c.done_group == "ready_to_merge"]
+        self.assertEqual(len(ready), 1)
+
+    def test_approved_open_pr_by_other_is_completed(self) -> None:
+        """Open PR authored by someone else and approved → completed, not ready_to_merge."""
+        pr = _make_pr(
+            number=65,
+            head_ref="feat/other-approved",
             state="open",
             author="other-dev",
             reviewers=["octocat"],
@@ -616,7 +632,9 @@ class TestDoneGrouping(unittest.TestCase):
         view = _agg(prs=[pr], current_username="octocat")
         done_cards = view.done
         ready = [c for c in done_cards if c.done_group == "ready_to_merge"]
-        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(ready), 0)
+        completed = [c for c in done_cards if c.done_group == "completed"]
+        self.assertEqual(len(completed), 1)
 
     def test_merged_pr_is_completed(self) -> None:
         """Merged PR gets completed group."""

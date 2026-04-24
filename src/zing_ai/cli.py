@@ -171,13 +171,21 @@ def mcp_cmd(port: int) -> None:
 
 @cli.command()
 @click.argument("target")  # ticket ID or PR URL
-@click.option("--resume/--no-resume", default=True, help="Auto-resume existing session if found")
+@click.option(
+    "--resume",
+    is_flag=False,
+    flag_value="auto",
+    default="auto",
+    help="Resume a session. Pass a session UUID to resume a specific session, "
+    "or omit the value for auto-detect. Use --no-resume to skip.",
+)
+@click.option("--no-resume", "resume", flag_value="", help="Skip session resume.")
 @click.option("--port", default=9876, type=int, help="Port the Zing server is listening on.")
 @click.option(
     "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
 )
 @click.option("--detach", is_flag=True, default=False, help="Run in a detached tmux session.")
-def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool) -> None:
+def launch(target: str, resume: str, port: int, skill: str | None, detach: bool) -> None:
     """Launch a Claude Code session for a ticket or PR."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
@@ -235,10 +243,13 @@ def launch(target: str, resume: bool, port: int, skill: str | None, detach: bool
             ticket_id = target
 
             # Check for existing session
-            if resume:
+            if resume == "auto":
                 action, existing_session_id, existing_worktree = detect_action(
                     ticket_id, server_url
                 )
+            elif resume:
+                # Explicit session UUID provided
+                action, existing_session_id, existing_worktree = "resume", resume, None
             else:
                 action, existing_session_id, existing_worktree = "new", None, None
 

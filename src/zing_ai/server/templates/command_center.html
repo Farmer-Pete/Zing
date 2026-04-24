@@ -96,6 +96,37 @@
         });
     });
 
+    // iTerm2 attach for data-attach-iterm buttons
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-attach-iterm]');
+        if (!btn || btn.disabled) return;
+        var tmuxSession = btn.getAttribute('data-attach-iterm');
+
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Attaching\u2026';
+
+        fetch('/command-center/attach-session', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tmux_session: tmuxSession})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) {
+                    showToast(data.error || ('Attach failed (HTTP ' + resp.status + ')'), 'error');
+                    btn.innerHTML = '&#10007; Failed';
+                    setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 3000);
+                } else {
+                    btn.innerHTML = '&#10003; Attached!';
+                    setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 2000);
+                }
+            });
+        }).catch(function(err) {
+            showToast('Attach failed: ' + err.message, 'error');
+            btn.innerHTML = '&#10007; Failed';
+            setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 3000);
+        });
+    });
+
     // ESC to close management tray
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
