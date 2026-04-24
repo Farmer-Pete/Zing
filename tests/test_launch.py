@@ -171,11 +171,17 @@ class TestCreateWorktree(TestCase):
         self.assertEqual(call_args[5], str(expected_path))
 
     def test_raises_on_git_failure(self) -> None:
+        error = subprocess.CalledProcessError(1, "git", stderr="already exists")
+
+        def _side_effect(*args: object, **kwargs: object) -> MagicMock:
+            cmd = args[0] if args else kwargs.get("args", [])
+            # Let `git worktree prune` succeed; everything else raises.
+            if isinstance(cmd, list) and "prune" in cmd:
+                return MagicMock()
+            raise error
+
         with (
-            patch(
-                "zing_ai.launch.subprocess.run",
-                side_effect=subprocess.CalledProcessError(1, "git", stderr="already exists"),
-            ),
+            patch("zing_ai.launch.subprocess.run", side_effect=_side_effect),
             self.assertRaises(LaunchError),
         ):
             create_worktree(Path("/repo"), "feat", "../{repo}-{branch}", "zing/")
