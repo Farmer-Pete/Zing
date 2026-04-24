@@ -47,7 +47,7 @@ def test_card_renders_with_ticket_and_title(server: _ServerInfo, page: Page) -> 
     expect(card).to_be_visible(timeout=5000)
 
     # Ticket identifier should be a clickable link
-    ticket_link = card.locator(".card-ticket")
+    ticket_link = card.locator(".card-ticket-id")
     expect(ticket_link).to_be_visible(timeout=3000)
     expect(ticket_link).to_contain_text("BAK-1001", timeout=3000)
 

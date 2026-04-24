@@ -59,13 +59,13 @@
         <div class="strip-ci-dots" title="{{ pr.ci_checks | selectattr('conclusion', 'equalto', 'success') | list | length }} passing{% if pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list %}, {{ pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list | length }} failing{% endif %}">
           {% for check in pr.ci_checks %}
             {% if check.conclusion == "success" %}
-              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-green" title="{{ check.name }}"></a>
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-green" title="{{ check.name }}" aria-label="{{ check.name }}: success"></a>
             {% elif check.conclusion == "failure" %}
-              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-red" title="{{ check.name }}"></a>
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-red" title="{{ check.name }}" aria-label="{{ check.name }}: failure"></a>
             {% elif check.conclusion == "skipped" or check.conclusion == "neutral" or check.conclusion == "cancelled" %}
-              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-gray" title="{{ check.name }}"></a>
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-gray" title="{{ check.name }}" aria-label="{{ check.name }}: {{ check.conclusion }}"></a>
             {% else %}
-              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-amber" title="{{ check.name }}"></a>
+              <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-amber" title="{{ check.name }}" aria-label="{{ check.name }}: pending"></a>
             {% endif %}
           {% endfor %}
         </div>
@@ -77,7 +77,8 @@
         <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Review">Review</button>
         <button class="card-btn" data-launch-cmd="zing-ai launch {{ pr.url | e }}" data-launch-label="Start">Start</button>
         {% if is_author %}
-          <button class="card-btn" data-launch-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}" data-launch-label="Respond">Respond</button>
+          <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Respond" data-launch-bg-skill="pr-respond">Respond</button>
+          <button class="card-btn" data-launch-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}" data-launch-label="Respond Cmd">Respond Cmd</button>
         {% endif %}
       {% endif %}
     </div>

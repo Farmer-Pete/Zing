@@ -52,10 +52,10 @@
     <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
     {# ── Repo chooser modal ── #}
-    <div id="repo-chooser-modal" class="standup-modal" style="display:none;">
-      <div class="standup-modal-bar">
-        <span class="standup-modal-title">Choose Repository</span>
-        <div class="standup-modal-actions">
+    <div id="repo-chooser-modal" class="dialog-modal" style="display:none;">
+      <div class="dialog-modal-bar">
+        <span class="dialog-modal-title">Choose Repository</span>
+        <div class="dialog-modal-actions">
           <button class="terminal-modal-close" id="repo-chooser-close">&times;</button>
         </div>
       </div>
@@ -67,10 +67,10 @@
     <div id="repo-chooser-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
     {# ── Standup modal ── #}
-    <div id="standup-modal" class="standup-modal" style="display:none;">
-      <div class="standup-modal-bar">
-        <span class="standup-modal-title">Standup</span>
-        <div class="standup-modal-actions">
+    <div id="standup-modal" class="dialog-modal" style="display:none;">
+      <div class="dialog-modal-bar">
+        <span class="dialog-modal-title">Standup</span>
+        <div class="dialog-modal-actions">
           <div class="standup-tabs">
             <button class="standup-tab active" data-standup-tab="rendered">Rich Text</button>
             <button class="standup-tab" data-standup-tab="markdown">Markdown</button>
@@ -270,12 +270,14 @@
         if (!btn || btn.disabled) return;
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
+        var skill = btn.getAttribute('data-launch-bg-skill');
 
         function doLaunch(repo) {
             btn.disabled = true;
             btn.innerHTML = '&#9203; Launching\u2026';
             var payload = {card_key: cardKey};
             if (repo) payload.repo = repo;
+            if (skill) payload.skill = skill;
 
             fetch('/command-center/launch-background', {
                 method: 'POST',

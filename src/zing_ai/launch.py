@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -26,6 +27,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 
 class LaunchError(Exception):
@@ -255,6 +258,13 @@ def create_worktree(
         stderr = exc.stderr.strip()
         # Branch already exists — create worktree without -b (reuse branch).
         if "already exists" in stderr:
+            # Prune stale worktree records before retrying.
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
             try:
                 subprocess.run(
                     ["git", "worktree", "add", str(worktree_path), full_branch],
@@ -293,7 +303,10 @@ def checkout_pr_branch(
         LaunchError: If ``git worktree add`` fails.
     """
     repo_name = repo_root.name
-    relative = worktree_root_template.format(repo=repo_name, branch=branch_name)
+    # Strip any prefix (e.g. "zing/") so the worktree path matches what
+    # create_worktree would produce for the same ticket.
+    path_branch = branch_name.split("/", 1)[-1] if "/" in branch_name else branch_name
+    relative = worktree_root_template.format(repo=repo_name, branch=path_branch)
     worktree_path = (repo_root / relative).resolve()
 
     # Best-effort fetch so the branch exists locally for worktree add
@@ -328,7 +341,28 @@ def checkout_pr_branch(
             cwd=repo_root,
         )
     except subprocess.CalledProcessError as exc:
-        raise LaunchError(f"git worktree add failed: {exc.stderr.strip()}") from exc
+        stderr = exc.stderr.strip()
+        # Branch is locked to a stale worktree that no longer exists on disk.
+        # Prune the stale record and retry.
+        if "is already used by worktree" in stderr:
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", str(worktree_path), branch_name],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_root,
+                )
+            except subprocess.CalledProcessError as exc2:
+                raise LaunchError(f"git worktree add failed: {exc2.stderr.strip()}") from exc2
+        else:
+            raise LaunchError(f"git worktree add failed: {stderr}") from exc
 
     return worktree_path
 
@@ -635,6 +669,7 @@ def fetch_session(
         with urllib.request.urlopen(req) as resp:
             sessions: list[dict] = json.loads(resp.read().decode())
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError):
+        logger.debug("fetch_session failed for %s at %s", session_id, url, exc_info=True)
         return None
     for session in sessions:
         if session.get("session_id") == session_id:

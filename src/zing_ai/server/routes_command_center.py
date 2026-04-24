@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import shlex
 import subprocess
 import sys
 import uuid
@@ -187,6 +186,10 @@ def render_board_fragment(app: FastAPI) -> str:
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
     config = load_config()
+    # Sweep dead ttyd processes so entries don't accumulate indefinitely.
+    ttyd_procs: dict = getattr(app.state, "ttyd_procs", {})
+    for name in [k for k, (p, _) in ttyd_procs.items() if p.poll() is not None]:
+        del ttyd_procs[name]
     return render(
         "fragments/kanban_board.html",
         view=view,
@@ -329,15 +332,15 @@ async def attach_session(request: Request) -> JSONResponse:
     if not tmux_path:
         return JSONResponse({"error": "tmux not found on PATH"}, status_code=500)
 
-    safe_name = shlex.quote(tmux_session)
-
     if mode == "iterm2":
         if sys.platform != "darwin":
             return JSONResponse({"error": "iTerm2 is only available on macOS"}, status_code=422)
+        # Escape for AppleScript string context (backslash, then double-quote).
+        as_safe = tmux_session.replace("\\", "\\\\").replace('"', '\\"')
         applescript = (
             'tell application "iTerm2"\n'
             "  create window with default profile "
-            f'command "{tmux_path} -CC attach -t {safe_name}"\n'
+            f'command "{tmux_path} -CC attach -t {as_safe}"\n'
             "end tell"
         )
         try:
@@ -359,43 +362,45 @@ async def attach_session(request: Request) -> JSONResponse:
                 status_code=500,
             )
 
-        # Check if we already have a ttyd process for this session.
-        ttyd_procs: dict[str, tuple[subprocess.Popen, int]] = getattr(
-            request.app.state, "ttyd_procs", {}
-        )
+        # Ensure ttyd tracking structures exist on app.state.
         if not hasattr(request.app.state, "ttyd_procs"):
-            request.app.state.ttyd_procs = ttyd_procs
+            request.app.state.ttyd_procs = {}
+        if not hasattr(request.app.state, "ttyd_lock"):
+            request.app.state.ttyd_lock = asyncio.Lock()
 
-        if tmux_session in ttyd_procs:
-            proc, port = ttyd_procs[tmux_session]
-            if proc.poll() is None:
-                # Still running — return existing URL.
-                return JSONResponse({"url": f"http://127.0.0.1:{port}"})
-            # Process exited — clean up and spawn a new one.
-            del ttyd_procs[tmux_session]
+        ttyd_procs: dict[str, tuple[subprocess.Popen, int]] = request.app.state.ttyd_procs
 
-        # Find a free port.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
+        async with request.app.state.ttyd_lock:
+            if tmux_session in ttyd_procs:
+                proc, port = ttyd_procs[tmux_session]
+                if proc.poll() is None:
+                    # Still running — return existing URL.
+                    return JSONResponse({"url": f"http://127.0.0.1:{port}"})
+                # Process exited — clean up and spawn a new one.
+                del ttyd_procs[tmux_session]
 
-        proc = subprocess.Popen(
-            [
-                ttyd_path,
-                "--once",
-                "--writable",
-                "--port",
-                str(port),
-                tmux_path,
-                "attach",
-                "-t",
-                tmux_session,
-            ],
-            start_new_session=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        ttyd_procs[tmux_session] = (proc, port)
+            # Find a free port.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+
+            proc = subprocess.Popen(
+                [
+                    ttyd_path,
+                    "--once",
+                    "--writable",
+                    "--port",
+                    str(port),
+                    tmux_path,
+                    "attach",
+                    "-t",
+                    tmux_session,
+                ],
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            ttyd_procs[tmux_session] = (proc, port)
 
         # Wait for ttyd to start listening (up to 3 seconds).
         for _ in range(30):
@@ -409,7 +414,7 @@ async def attach_session(request: Request) -> JSONResponse:
                     stdout[:1000],
                     stderr[:1000],
                 )
-                del ttyd_procs[tmux_session]
+                ttyd_procs.pop(tmux_session, None)
                 return JSONResponse(
                     {"error": f"ttyd exited unexpectedly (code {proc.returncode}): {stderr[:200]}"},
                     status_code=500,
@@ -420,6 +425,8 @@ async def attach_session(request: Request) -> JSONResponse:
                     break
             await asyncio.sleep(0.1)
         else:
+            proc.kill()
+            ttyd_procs.pop(tmux_session, None)
             return JSONResponse({"error": "ttyd failed to start"}, status_code=500)
 
         return JSONResponse({"url": f"http://127.0.0.1:{port}"})
@@ -446,6 +453,7 @@ async def launch_background(request: Request) -> JSONResponse:
     payload = body.get("payload", body)
     card_key = payload.get("card_key")
     repo_override = payload.get("repo")  # set when user picks from the chooser
+    skill_override = payload.get("skill")  # e.g. "pr-respond" for respond buttons
     if not card_key:
         logger.error("launch-background: missing card_key in body: %s", body)
         return JSONResponse({"error": "card_key is required"}, status_code=400)
@@ -575,7 +583,7 @@ async def launch_background(request: Request) -> JSONResponse:
         )
 
     title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
-    skill = "pr-audit" if is_pr_card else "new"
+    skill = skill_override or ("pr-audit" if is_pr_card else "new")
     target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
     tmux_name = build_tmux_session_name(
         target=ticket_id or branch_name,
@@ -695,13 +703,19 @@ async def start_ticket(request: Request) -> JSONResponse:
         logger.error("start-ticket failed for %s: %s", ticket_id, exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
-    # Trigger a poll to pick up the state change.
+    # Trigger a poll in the background to pick up the state change.
     poller = getattr(request.app.state, "poller", None)
     if poller is not None:
-        with contextlib.suppress(Exception):
-            await poller._poll_once()  # noqa: SLF001
 
-    _push_board_changed(request.app)
+        async def _bg_poll() -> None:
+            with contextlib.suppress(Exception):
+                await poller._poll_once()  # noqa: SLF001
+            _push_board_changed(request.app)
+
+        asyncio.create_task(_bg_poll())
+    else:
+        _push_board_changed(request.app)
+
     return JSONResponse({"status": "started", "ticket_id": ticket_id})
 
 

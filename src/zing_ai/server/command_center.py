@@ -182,11 +182,6 @@ def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
     who only ``COMMENTED`` are human if they appear in ``requested_reviewers``
     on any PR on the card; otherwise they are assumed to be bots.
     """
-    # Build set of all logins that appear in requested_reviewers across the card.
-    ever_requested: set[str] = set()
-    for pr in card.prs:
-        ever_requested.update(pr.requested_reviewers)
-
     for pr in card.prs:
         if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
             continue
@@ -195,10 +190,10 @@ def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
         for reviewer in not_rerequested:
             state = pr.reviewer_states.get(reviewer, "COMMENTED")
             if state in ("CHANGES_REQUESTED", "APPROVED"):
-                # Definitely a human reviewer with unaddressed feedback.
+                # Definitely a human reviewer — their feedback is unaddressed.
                 return True
-            if state == "COMMENTED" and reviewer in ever_requested:
-                # Comment-only review from a known requested reviewer.
+            if state == "COMMENTED" and reviewer in set(pr.requested_reviewers):
+                # Comment-only review from a reviewer who was requested on this PR.
                 return True
 
     return False
@@ -563,6 +558,12 @@ def aggregate(
             pr_num = _session_pr_number(session)
             pr_repo = getattr(session, "pr_repo", None) or ""
             matched_card = _card_by_pr.get((pr_repo, pr_num))  # type: ignore[arg-type]
+            # Fallback: when pr_repo is empty (e.g. ZingSession), match by number only.
+            if matched_card is None and not pr_repo:
+                for (_repo, _num), card_candidate in _card_by_pr.items():
+                    if _num == pr_num:
+                        matched_card = card_candidate
+                        break
             if matched_card is not None:
                 matched_card.sessions.append(session)
                 if isinstance(session, ZingSession):
