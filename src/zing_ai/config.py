@@ -84,7 +84,7 @@ class CommandCenterConfig(BaseModel):
     github_excluded_repos: list[str] = Field(default_factory=list)
     poll_seconds: PollSeconds = 60
     claude_flags: str = ""
-    iterm2_integration: bool = False
+    tmux_attach_mode: Literal["copy", "iterm2", "browser"] = "copy"
 
 
 class Config(BaseModel):

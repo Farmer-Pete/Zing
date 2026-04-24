@@ -34,7 +34,52 @@
     {% include "fragments/management_tray.html" %}
     </div>
 
+    {# ── Terminal modal (ttyd iframe) ── #}
+    <div id="terminal-modal" class="terminal-modal" style="display:none;">
+      <div class="terminal-modal-bar">
+        <span class="terminal-modal-title" id="terminal-modal-title"></span>
+        <button class="terminal-modal-close" id="terminal-modal-close">&times;</button>
+      </div>
+      <iframe id="terminal-modal-iframe" class="terminal-modal-iframe"></iframe>
+    </div>
+    <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
     <script>
+    // Terminal modal
+    (function() {
+        var modal = document.getElementById('terminal-modal');
+        var backdrop = document.getElementById('terminal-modal-backdrop');
+        var iframe = document.getElementById('terminal-modal-iframe');
+        var title = document.getElementById('terminal-modal-title');
+        var closeBtn = document.getElementById('terminal-modal-close');
+
+        function closeModal() {
+            // Detach the beforeunload handler inside the iframe before navigating away.
+            try {
+                iframe.contentWindow.onbeforeunload = null;
+            } catch(e) { /* cross-origin — ignore */ }
+            modal.style.display = 'none';
+            backdrop.style.display = 'none';
+            iframe.src = 'about:blank';
+        }
+
+        window.openTerminal = function(url, sessionName) {
+            title.textContent = sessionName || 'Terminal';
+            iframe.src = url;
+            modal.style.display = '';
+            backdrop.style.display = '';
+        };
+
+        closeBtn.addEventListener('click', closeModal);
+        backdrop.addEventListener('click', closeModal);
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeModal();
+            }
+        });
+    })();
+
     // Toast notification helper
     function showToast(message, type) {
         var container = document.getElementById('cc-toast-container');
@@ -96,11 +141,12 @@
         });
     });
 
-    // iTerm2 attach for data-attach-iterm buttons
+    // Attach session (iTerm2 or browser via ttyd)
     document.addEventListener('click', function(e) {
-        var btn = e.target.closest('[data-attach-iterm]');
+        var btn = e.target.closest('[data-attach-session]');
         if (!btn || btn.disabled) return;
-        var tmuxSession = btn.getAttribute('data-attach-iterm');
+        var tmuxSession = btn.getAttribute('data-attach-session');
+        var mode = btn.getAttribute('data-attach-mode');
 
         btn.disabled = true;
         btn.innerHTML = '&#9203; Attaching\u2026';
@@ -108,22 +154,26 @@
         fetch('/command-center/attach-session', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tmux_session: tmuxSession})
+            body: JSON.stringify({tmux_session: tmuxSession, mode: mode})
         }).then(function(resp) {
             return resp.json().then(function(data) {
                 if (!resp.ok) {
                     showToast(data.error || ('Attach failed (HTTP ' + resp.status + ')'), 'error');
                     btn.innerHTML = '&#10007; Failed';
-                    setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 3000);
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
+                } else if (data.url) {
+                    openTerminal(data.url, tmuxSession);
+                    btn.innerHTML = '&#10003; Opened!';
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
                 } else {
                     btn.innerHTML = '&#10003; Attached!';
-                    setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 2000);
+                    setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
                 }
             });
         }).catch(function(err) {
             showToast('Attach failed: ' + err.message, 'error');
             btn.innerHTML = '&#10007; Failed';
-            setTimeout(function() { btn.innerHTML = 'Attach to Session'; btn.disabled = false; }, 3000);
+            setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
         });
     });
 

@@ -106,8 +106,10 @@
       {% endif %}
       <span class="strip-spacer"></span>
       {% if session.tmux_session and is_alive %}
-        {% if iterm2_integration %}
-          <button class="card-btn" data-attach-iterm="{{ session.tmux_session | e }}">Attach</button>
+        {% if tmux_attach_mode == "iterm2" %}
+          <button class="card-btn card-btn-primary" data-attach-session="{{ session.tmux_session | e }}" data-attach-mode="iterm2">Attach</button>
+        {% elif tmux_attach_mode == "browser" %}
+          <button class="card-btn card-btn-primary" data-attach-session="{{ session.tmux_session | e }}" data-attach-mode="browser">Attach</button>
         {% else %}
           <button class="card-btn" data-launch-cmd="tmux attach -t {{ session.tmux_session | e }}" data-launch-label="Attach">Attach</button>
         {% endif %}

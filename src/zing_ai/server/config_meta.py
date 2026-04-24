@@ -316,20 +316,22 @@ FIELD_META: dict[str, dict] = {
         },
         "group": "Command Center",
     },
-    "command_center.iterm2_integration": {
-        "label": "iTerm2 integration",
-        "field_type": "checkbox",
+    "command_center.tmux_attach_mode": {
+        "label": "Attach mode",
+        "field_type": "select",
+        "options": ["copy", "iterm2", "browser"],
         "description": {
-            "short": "Attach to tmux sessions via iTerm2 control mode.",
+            "short": "How the Attach button connects to tmux sessions.",
             "long": (
-                "When enabled, the 'Attach to Session' button opens the tmux session "
-                "in a native iTerm2 window using control mode (tmux -CC). macOS only.\n\n"
-                "**Setup:** In iTerm2, go to Settings > General > tmux and enable "
-                '"Automatically hide the tmux client session after connecting" '
-                "to prevent a second control window from appearing."
+                "**copy** — copies `tmux attach` command to clipboard.\n\n"
+                "**iterm2** — opens the session in a native iTerm2 window via "
+                "control mode (tmux -CC). macOS only. In iTerm2, enable "
+                'Settings > General > tmux > "Automatically hide the tmux client '
+                'session after connecting".\n\n'
+                "**browser** — opens the session in a new browser tab via ttyd. "
+                "Requires `ttyd` (`brew install ttyd`)."
             ),
         },
         "group": "Command Center",
-        "platform": "darwin",
     },
 }

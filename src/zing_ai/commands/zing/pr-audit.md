@@ -21,7 +21,7 @@ Once you have the PR number, run:
 gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 ```
 
-Store the PR number, head branch, base branch, title, and URL for later use.
+Store the PR number, head branch, base branch, title, body/description, and URL for later use. Read the PR body carefully — it contains the author's intent, context, and any testing notes that inform the review.
 
 ### Session setup
 
@@ -56,6 +56,24 @@ Get the full diff and context:
 From the diff output, note which lines in each file appear in diff hunks — you can only place line-level comments on lines that appear in the diff (`+` lines or unchanged context lines). Lines that are only in the old version (`-` lines) cannot receive comments.
 </step>
 
+<step name="fetch_pr_context">
+Fetch all existing comments and review history for full context:
+
+1. **PR comments and review threads:**
+```
+gh api repos/{owner}/{repo}/pulls/{number}/comments --paginate
+gh api repos/{owner}/{repo}/issues/{number}/comments --paginate
+gh api repos/{owner}/{repo}/pulls/{number}/reviews --paginate
+```
+
+2. **Check for prior reviews by the current user.** From the reviews list, check if the current user (`gh api /user --jq '.login'`) has previously submitted a review. If so:
+   - Note the date of the last review.
+   - Get the diff since the last review: `git log --since="{last_review_date}" --oneline {base}...HEAD` to identify which commits are new.
+   - The review should **primarily focus on changes since the last review**, while still noting any unresolved issues from prior reviews. Mention this scope at the start of the review: "This is a re-review focusing on changes since my last review on {date}."
+
+3. **Read all comment threads** to understand ongoing discussions, resolved issues, and any context the author or other reviewers have provided. Do not re-raise issues that have already been resolved.
+</step>
+
 <step name="read_changed_files">
 Follow the `read_changed_files` step from the shared review reference.
 </step>
@@ -71,6 +89,27 @@ Follow the `diff_preparation` step from the shared review reference.
 Follow the `agent_dispatch` step from the shared review reference. The diff stat summary comes from `gh pr diff --stat`. Pass the **session ID** and **step ID** to each agent for agent lifecycle calls (`agent_start`/`agent_stop` only — agents must NOT call `finding_submit`). In addition to the shared agent context, each agent also receives:
 - A note of which lines in each assigned file appear in the diff (so agents know which lines can receive line-level comments)
 - PR-specific context: PR number `{number}`, head branch `{headRefName}`, base branch `{baseRefName}`
+- If this is a re-review: which commits are new since the last review
+
+### Pre-existing issues
+
+If you notice issues in the code that are **outside the scope of this PR** or **predate the changes** (i.e., the code was already broken/problematic before this PR touched it), raise them as findings with type `"pre_existing"` and severity `low`. These findings:
+
+- **Cannot trigger `REQUEST_CHANGES`** — they are informational only
+- Should include an option to **create a Linear ticket** to track the issue separately. Add an option with label "File a ticket" and description "Create a Linear ticket to track this separately — no fix needed in this PR."
+- If the user selects "File a ticket" during triage, create the ticket using the Linear GraphQL API:
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d '{"query": "mutation { issueCreate(input: { teamId: \"<team_id>\", title: \"...\", description: \"...\" }) { success issue { identifier url } } }"}'
+```
+   Use the team ID that matches the repository (see the team IDs in CLAUDE.md). Read the Linear API key from `~/.config/lr/config.json`.
+- When included in the PR review, place the comment on the relevant diff line if possible. Prefix with "**Pre-existing:** " and include the Linear ticket link if one was created (e.g., "**Pre-existing:** {description}. Tracked in {TICKET-ID} — no fix needed in this PR.").
+
+### Stylistic preferences
+
+Mark findings that are purely stylistic preferences (naming conventions, formatting choices, code organization preferences that don't affect correctness or readability) as **nits**. Prefix the comment body with "**Nit:** " and use severity `low`. Do not request changes for nit-only reviews.
 </step>
 
 <step name="present_summary">
@@ -267,6 +306,9 @@ End your review summary with: "Zing! Review complete."
 Follow the anti-patterns from the shared review reference, plus:
 - Do NOT place comments on lines that don't appear in the diff — the GitHub API will reject them
 - Do NOT submit a review without the user triaging findings in the batch review UI first
+- Do NOT request changes for pre-existing issues — they are informational and tracked via Linear tickets
+- Do NOT re-raise issues that have already been resolved in comment threads
+- Do NOT request changes for nit-only reviews
 </anti_patterns>
 
 <success_criteria>
@@ -274,12 +316,17 @@ Review is complete when:
 
 - [ ] Shared review reference was loaded
 - [ ] PR was identified (from argument, URL, or current branch)
+- [ ] PR body/description was read for context
 - [ ] PR branch was checked out locally
+- [ ] All existing PR comments and review threads were fetched
+- [ ] Prior review by current user detected (if any) and review scoped accordingly
 - [ ] Full diff was obtained and all changed files were read
 - [ ] Lines eligible for line-level comments were identified from the diff
 - [ ] Big-picture assessment shared (sizing, context, relevance)
 - [ ] Changes were analyzed against the full review checklist (implementation, logic/bugs, error handling, naming, dependencies, security, performance, usability, testing, production readiness, readability, language-specific, experts)
 - [ ] Each finding has a severity and confidence rating
+- [ ] Pre-existing issues raised as informational findings with option to file Linear tickets
+- [ ] Stylistic preferences marked as nits with low severity
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied

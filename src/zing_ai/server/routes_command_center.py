@@ -192,7 +192,7 @@ def render_board_fragment(app: FastAPI) -> str:
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
-        iterm2_integration=config.command_center.iterm2_integration,
+        tmux_attach_mode=config.command_center.tmux_attach_mode,
     )
 
 
@@ -225,7 +225,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_tmux_sessions=live_tmux_sessions,
-            iterm2_integration=config.command_center.iterm2_integration,
+            tmux_attach_mode=config.command_center.tmux_attach_mode,
             **tray_data,
         )
     )
@@ -294,17 +294,15 @@ async def refresh_command_center(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# iTerm2 tmux attach
+# Tmux session attach (iTerm2 / browser via ttyd)
 # ---------------------------------------------------------------------------
 
 
 @router.post("/command-center/attach-session")
 async def attach_session(request: Request) -> JSONResponse:
-    """Open a tmux session in iTerm2 using control mode (tmux -CC)."""
-    if sys.platform != "darwin":
-        return JSONResponse(
-            {"error": "iTerm2 integration is only available on macOS"}, status_code=422
-        )
+    """Attach to a tmux session via iTerm2 or browser (ttyd)."""
+    import shutil
+    import socket
 
     try:
         body = await request.json()
@@ -312,36 +310,110 @@ async def attach_session(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
     tmux_session = body.get("tmux_session")
+    mode = body.get("mode", "iterm2")
     if not tmux_session:
         return JSONResponse({"error": "tmux_session is required"}, status_code=400)
-
-    import shutil
 
     tmux_path = shutil.which("tmux")
     if not tmux_path:
         return JSONResponse({"error": "tmux not found on PATH"}, status_code=500)
 
-    # Validate tmux session name to prevent injection
     safe_name = shlex.quote(tmux_session)
 
-    applescript = (
-        'tell application "iTerm2"\n'
-        "  create window with default profile "
-        f'command "{tmux_path} -CC attach -t {safe_name}"\n'
-        "end tell"
-    )
-
-    try:
-        subprocess.Popen(
-            ["osascript", "-e", applescript],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    if mode == "iterm2":
+        if sys.platform != "darwin":
+            return JSONResponse({"error": "iTerm2 is only available on macOS"}, status_code=422)
+        applescript = (
+            'tell application "iTerm2"\n'
+            "  create window with default profile "
+            f'command "{tmux_path} -CC attach -t {safe_name}"\n'
+            "end tell"
         )
-    except FileNotFoundError:
-        return JSONResponse({"error": "osascript not found"}, status_code=500)
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", applescript],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return JSONResponse({"error": "osascript not found"}, status_code=500)
+        return JSONResponse({"status": "attached", "tmux_session": tmux_session})
 
-    return JSONResponse({"status": "attached", "tmux_session": tmux_session})
+    if mode == "browser":
+        ttyd_path = shutil.which("ttyd")
+        if not ttyd_path:
+            return JSONResponse(
+                {"error": "ttyd not found. Install with: brew install ttyd"},
+                status_code=500,
+            )
+
+        # Check if we already have a ttyd process for this session.
+        ttyd_procs: dict[str, tuple[subprocess.Popen, int]] = getattr(
+            request.app.state, "ttyd_procs", {}
+        )
+        if not hasattr(request.app.state, "ttyd_procs"):
+            request.app.state.ttyd_procs = ttyd_procs
+
+        if tmux_session in ttyd_procs:
+            proc, port = ttyd_procs[tmux_session]
+            if proc.poll() is None:
+                # Still running — return existing URL.
+                return JSONResponse({"url": f"http://127.0.0.1:{port}"})
+            # Process exited — clean up and spawn a new one.
+            del ttyd_procs[tmux_session]
+
+        # Find a free port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        proc = subprocess.Popen(
+            [
+                ttyd_path,
+                "--once",
+                "--writable",
+                "--port",
+                str(port),
+                tmux_path,
+                "attach",
+                "-t",
+                tmux_session,
+            ],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        ttyd_procs[tmux_session] = (proc, port)
+
+        # Wait for ttyd to start listening (up to 3 seconds).
+        for _ in range(30):
+            if proc.poll() is not None:
+                stdout = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+                stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                logger.error(
+                    "ttyd exited with code %s for session %s. stdout: %s stderr: %s",
+                    proc.returncode,
+                    tmux_session,
+                    stdout[:1000],
+                    stderr[:1000],
+                )
+                del ttyd_procs[tmux_session]
+                return JSONResponse(
+                    {"error": f"ttyd exited unexpectedly (code {proc.returncode}): {stderr[:200]}"},
+                    status_code=500,
+                )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as check:
+                check.settimeout(0.1)
+                if check.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            await asyncio.sleep(0.1)
+        else:
+            return JSONResponse({"error": "ttyd failed to start"}, status_code=500)
+
+        return JSONResponse({"url": f"http://127.0.0.1:{port}"})
+
+    return JSONResponse({"error": f"Unknown mode: {mode}"}, status_code=400)
 
 
 # ---------------------------------------------------------------------------

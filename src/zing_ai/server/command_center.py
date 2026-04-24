@@ -172,15 +172,14 @@ def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
 def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
     """User authored a PR that has reviewer feedback they haven't addressed yet.
 
-    True when a *requested* reviewer has submitted a review (is in
-    ``reviewers``) but has not been re-requested (is not in
-    ``requested_reviewers``), and the PR is not yet approved.
+    A reviewer's feedback is unaddressed when they submitted a review
+    (appear in ``reviewers``) but have NOT been re-requested (not in
+    ``requested_reviewers``), and they are a human (not a bot).
 
-    Reviewers who were never in ``requested_reviewers`` (e.g. automated bots
-    like Sentry) are ignored — only explicitly requested human reviewers count.
-    The set of "ever-requested" reviewers is approximated as the union of
-    current ``requested_reviewers`` and ``reviewers`` who overlap with
-    ``requested_reviewers`` on any PR in the card.
+    Human vs bot detection uses ``reviewer_states``: reviewers who submitted
+    ``CHANGES_REQUESTED`` or ``APPROVED`` are definitely human.  Reviewers
+    who only ``COMMENTED`` are human if they appear in ``requested_reviewers``
+    on any PR on the card; otherwise they are assumed to be bots.
     """
     # Build set of all logins that appear in requested_reviewers across the card.
     ever_requested: set[str] = set()
@@ -190,11 +189,17 @@ def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
     for pr in card.prs:
         if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
             continue
-        # Only consider reviewers who were explicitly requested at some point.
-        solicited_reviewers = set(pr.reviewers) & ever_requested
-        unaddressed = solicited_reviewers - set(pr.requested_reviewers)
-        if unaddressed:
-            return True
+
+        not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
+        for reviewer in not_rerequested:
+            state = pr.reviewer_states.get(reviewer, "COMMENTED")
+            if state in ("CHANGES_REQUESTED", "APPROVED"):
+                # Definitely a human reviewer with unaddressed feedback.
+                return True
+            if state == "COMMENTED" and reviewer in ever_requested:
+                # Comment-only review from a known requested reviewer.
+                return True
+
     return False
 
 
@@ -460,6 +465,12 @@ def aggregate(
     # Sessions that have a pr_number but no ticket_id will be attached to
     # orphan PR cards (keyed as "pr-{number}") in step 5 below.
     pr_sessions: list[Session] = []
+    # Index ticket cards by PR number for fallback matching.
+    _card_by_pr: dict[tuple[str, int], KanbanCard] = {}
+    for card in cards.values():
+        for pr in card.prs:
+            _card_by_pr[(pr.repo, pr.number)] = card
+
     for session in _sessions:
         if session.ticket_id and session.ticket_id in cards:
             cards[session.ticket_id].sessions.append(session)
@@ -469,7 +480,18 @@ def aggregate(
                     if step.step_name in AUDIT_STEP_NAMES:
                         cards[session.ticket_id].audit_steps.append(step)
         elif _session_pr_number(session) is not None:
-            pr_sessions.append(session)
+            # Try matching to a ticket card by PR number before deferring to orphan.
+            pr_num = _session_pr_number(session)
+            pr_repo = getattr(session, "pr_repo", None) or ""
+            matched_card = _card_by_pr.get((pr_repo, pr_num))  # type: ignore[arg-type]
+            if matched_card is not None:
+                matched_card.sessions.append(session)
+                if isinstance(session, ZingSession):
+                    for step in session.steps:
+                        if step.step_name in AUDIT_STEP_NAMES:
+                            matched_card.audit_steps.append(step)
+            else:
+                pr_sessions.append(session)
 
     # -----------------------------------------------------------------------
     # 5. Orphan PR cards (no matching ticket)

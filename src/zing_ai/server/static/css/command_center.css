@@ -299,7 +299,8 @@ a.card-ticket-id:hover { text-decoration: underline; }
 .status-strip {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.5rem;
     padding: 0.4rem 0.6rem;
     min-height: 28px;
 }
@@ -567,6 +568,62 @@ a.strip-ci-dot[href] { cursor: pointer; }
 @keyframes cc-pulse {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.4; }
+}
+
+/* ──────────────────────────────────────────────
+   TERMINAL MODAL (ttyd iframe)
+────────────────────────────────────────────── */
+
+.terminal-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 27, 45, 0.5);
+    z-index: 200;
+}
+
+.terminal-modal {
+    position: fixed;
+    top: 5vh;
+    left: 10vw;
+    width: 80vw;
+    height: 85vh;
+    z-index: 201;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(15, 27, 45, 0.4);
+    display: flex;
+    flex-direction: column;
+}
+
+.terminal-modal-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--navy);
+    color: #fff;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.terminal-modal-close {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 1.25rem;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 0.25rem;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+.terminal-modal-close:hover { opacity: 1; }
+
+.terminal-modal-iframe {
+    flex: 1;
+    border: none;
+    background: #000;
+    width: 100%;
 }
 
 /* ──────────────────────────────────────────────
