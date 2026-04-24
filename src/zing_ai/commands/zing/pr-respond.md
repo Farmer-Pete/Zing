@@ -194,24 +194,13 @@ Mark the "Address review comments", "Commit & push", and "Reply & resolve on Git
 </step>
 
 <step name="present_comments">
-Present all comments to the user, grouped by type, as a single numbered list with continuous numbering:
+Present a **brief count-only summary** — do NOT list out all comments upfront. The user will see each comment in full during the `address_comments` step.
 
 ```
-Found {total_count} unresolved comment(s) on PR #{number}:
-
-Review threads ({thread_count}):
-1. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
-2. [{file_path}:{line}] @{reviewer}: "{comment_body_truncated}"
-
-Review summaries ({summary_count}):
-3. [Review: {state}] @{reviewer}: "{comment_body_truncated}"
-
-General comments ({issue_comment_count}):
-4. [Comment] @{author}: "{comment_body_truncated}"
-...
+Found {total_count} unresolved comment(s) on PR #{number}: {thread_count} review thread(s), {summary_count} review summary/summaries, {issue_comment_count} general comment(s). Will walk through each one at a time.
 ```
 
-Omit any group header if that group has zero items. Truncate long comment bodies to ~{{ thresholds.comment_truncation_chars }} characters with "..." for the summary view.
+Omit zero-count groups from the summary (e.g., if no review summaries, just say "3 review thread(s), 1 general comment(s)").
 
 ### Create comment-level tasks
 
@@ -224,12 +213,12 @@ TaskCreate: "[Comment] @{author}: '{comment_body_truncated}'"                   
 ```
 
 All comment tasks start as pending.
-
-Then say: "Will address each comment one at a time."
 </step>
 
 <step name="address_comments">
 Mark the "Address review comments" phase task as `in_progress` using TaskUpdate.
+
+Process comments **one at a time**. Present one comment, wait for the user's response, then move to the next. Do NOT present multiple comments at once.
 
 For each comment, in order — marking the corresponding comment task as `in_progress` when starting it:
 
@@ -282,9 +271,11 @@ For each comment, in order — marking the corresponding comment task as `in_pro
    - The proposed fix(es) or "Skip — acknowledge only"
    - An "Other" option so the user can describe their own approach
 
-   Wait for the user's selection, then implement the chosen approach.
+   **Stop and wait for the user's response before doing anything else.** Only after the user responds, implement the chosen approach.
 
-After addressing each comment, mark its comment task as `completed` using TaskUpdate, and record:
+After addressing each comment, mark its comment task as `completed` using TaskUpdate. If more comments remain, mention how many are left (e.g., "Done. 3 more to go.") before presenting the next one.
+
+Record for each addressed comment:
 - The comment ID
 - The comment type: `review_thread`, `review_body`, or `issue_comment`
 - What was done (code change, reply only, skipped)

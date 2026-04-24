@@ -155,18 +155,18 @@
       {% if column_cls == "col-todo" %}
         <button class="card-btn card-btn-primary" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
       {% endif %}
-      {% if column_cls == "col-progress" %}
-        <button class="card-btn card-btn-primary" data-setup-env="{{ card.key | e }}" data-setup-env-label="Setup Env">Setup Env</button>
-      {% endif %}
       {% set has_cc_session = card.sessions | selectattr("session_type", "equalto", "claude_code") | list %}
       {% set launch_label = "Session Running" if has_cc_session else "Plan Ticket" %}
       <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="{{ launch_label }}">{{ launch_label }}</button>
       <button class="card-btn" data-launch-cmd="zing-ai launch {{ card.key | e }}" data-launch-label="Copy Cmd">Copy Cmd</button>
+      {% if column_cls == "col-progress" %}
+        <button class="card-btn" data-launch-cmd="zing-ai launch --setup-only {{ card.key | e }}" data-launch-label="Setup Env">Setup Env</button>
+      {% endif %}
     </div>
   {% elif card.prs and column_cls == "col-progress" %}
     {# PR cards in progress: show setup button #}
     <div class="card-actions">
-      <button class="card-btn card-btn-primary" data-setup-env="{{ card.key | e }}" data-setup-env-label="Setup Env">Setup Env</button>
+      <button class="card-btn" data-launch-cmd="zing-ai launch --setup-only {% if card.prs %}{{ card.prs[0].url | e }}{% else %}{{ card.key | e }}{% endif %}" data-launch-label="Setup Env">Setup Env</button>
     </div>
   {% endif %}
 

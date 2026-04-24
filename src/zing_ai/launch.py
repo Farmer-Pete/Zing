@@ -614,6 +614,34 @@ def create_session_on_server(
         ) from exc
 
 
+def fetch_session(
+    server_url: str,
+    session_id: str,
+) -> dict | None:
+    """Fetch a session from the Zing server by its ID.
+
+    Queries ``GET /api/sessions`` and filters by *session_id*.
+
+    Args:
+        server_url: Base URL of the Zing server.
+        session_id: Session UUID to look up.
+
+    Returns:
+        Session dict if found, or ``None``.
+    """
+    url = f"{server_url.rstrip('/')}/api/sessions"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sessions: list[dict] = json.loads(resp.read().decode())
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError):
+        return None
+    for session in sessions:
+        if session.get("session_id") == session_id:
+            return session
+    return None
+
+
 def detect_action(
     ticket_id: str,
     server_url: str,

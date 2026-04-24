@@ -324,6 +324,9 @@ class CardSignals:
     has_pr_awaiting_review: bool
     """An open PR has requested reviewers and the user is involved."""
 
+    has_approved_open_pr: bool
+    """User authored an open PR with review_decision APPROVED."""
+
     is_recently_done: bool
     """Ticket completed, PR merged, or user submitted a review within the done window."""
 
@@ -343,6 +346,12 @@ def _compute_signals(
         has_open_pr_no_reviewers=_has_open_pr_in_progress(card, current_username),
         has_unaddressed_feedback=_has_unaddressed_feedback(card, current_username),
         has_pr_awaiting_review=_has_pr_needing_review(card, current_username),
+        has_approved_open_pr=any(
+            pr.state == "open"
+            and pr.review_decision == "APPROVED"
+            and pr.author == current_username
+            for pr in card.prs
+        ),
         is_recently_done=_is_recently_done(card, cutoff, current_username),
         ticket_started=(card.ticket is not None and card.ticket.state_type == "started"),
     )
@@ -365,6 +374,7 @@ def _classify_card(
     Card excluded by filter                        ``None``
     User has unaddressed reviewer feedback          in_progress
     PR is awaiting review from someone              needs_review
+    User's open PR is approved (ready to merge)     done
     Owned + active session or open PR (no reviews)  in_progress
     Recently done (merged / completed / reviewed)   done
     Owned + ticket state is "started"               in_progress
@@ -385,6 +395,10 @@ def _classify_card(
     # PR is out for review — user is blocked on reviewers.
     if s.has_pr_awaiting_review:
         return "needs_review"
+
+    # PR approved and ready to merge — takes priority over active sessions.
+    if s.has_approved_open_pr:
+        return "done"
 
     # Actively working: session running or PR not yet sent for review.
     if s.owned and (s.has_active_session or s.has_open_pr_no_reviewers):

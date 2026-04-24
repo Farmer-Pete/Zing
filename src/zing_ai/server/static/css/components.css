@@ -261,6 +261,14 @@
     transform: none;
 }
 
+.submit-hint {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-top: 0.5rem;
+    text-align: center;
+}
+
 /* === Delete / Cleanup Buttons === */
 .cleanup-btn {
     padding: 0.25rem 0.625rem;

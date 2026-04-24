@@ -179,17 +179,26 @@
         var closeBtn = document.getElementById('terminal-modal-close');
 
         function closeModal() {
-            // Detach the beforeunload handler inside the iframe before navigating away.
-            try {
-                iframe.contentWindow.onbeforeunload = null;
-            } catch(e) { /* cross-origin — ignore */ }
+            // ttyd is cross-origin, so we cannot clear its beforeunload handler.
+            // Remove the iframe from the DOM entirely to avoid triggering the
+            // "Leave site?" dialog when navigating it to about:blank.
             modal.style.display = 'none';
             backdrop.style.display = 'none';
-            iframe.src = 'about:blank';
+            if (iframe && iframe.parentNode) {
+                iframe.parentNode.removeChild(iframe);
+            }
+            iframe = null;
         }
 
         window.openTerminal = function(url, sessionName) {
             title.textContent = sessionName || 'Terminal';
+            // Create a fresh iframe each time (the previous one was removed on close).
+            if (!iframe) {
+                iframe = document.createElement('iframe');
+                iframe.id = 'terminal-modal-iframe';
+                iframe.className = 'terminal-modal-iframe';
+                modal.appendChild(iframe);
+            }
             iframe.src = url;
             modal.style.display = '';
             backdrop.style.display = '';
@@ -362,47 +371,6 @@
             btn.innerHTML = '&#10007; Failed';
             setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
         });
-    });
-
-    // Setup environment (worktree/branch without starting Claude)
-    document.addEventListener('click', function(e) {
-        var btn = e.target.closest('[data-setup-env]');
-        if (!btn || btn.disabled) return;
-        var cardKey = btn.getAttribute('data-setup-env');
-        var label = btn.getAttribute('data-setup-env-label');
-
-        function doSetup(repo) {
-            btn.disabled = true;
-            btn.innerHTML = '&#9203; Setting up\u2026';
-            var payload = {card_key: cardKey};
-            if (repo) payload.repo = repo;
-
-            fetch('/command-center/setup-environment', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
-            }).then(function(resp) {
-                return resp.json().then(function(data) {
-                    if (data.status === 'choose_repo') {
-                        btn.innerHTML = label; btn.disabled = false;
-                        handleRepoChoice(data, doSetup);
-                    } else if (!resp.ok) {
-                        showToast(data.error || ('Setup failed (HTTP ' + resp.status + ')'), 'error');
-                        btn.innerHTML = '&#10007; Failed';
-                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-                    } else {
-                        showToast('Environment ready: ' + data.worktree_path, 'success');
-                        btn.innerHTML = '&#10003; Ready!';
-                        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-                    }
-                });
-            }).catch(function(err) {
-                showToast('Setup failed: ' + err.message, 'error');
-                btn.innerHTML = '&#10007; Failed';
-                setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-            });
-        }
-        doSetup(null);
     });
 
     // ESC to close management tray

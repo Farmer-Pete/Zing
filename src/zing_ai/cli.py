@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -209,6 +210,7 @@ def launch(
         exec_or_detach,
         extract_ticket_id,
         fetch_pr_data,
+        fetch_session,
         move_ticket_in_progress,
         parse_pr_url,
         require_tmux,
@@ -250,14 +252,19 @@ def launch(
         if is_ticket:
             ticket_id = target
 
-            # Check for existing session
-            if resume == "auto":
+            # Check for existing session (skip when --setup-only)
+            if setup_only:
+                action, existing_session_id, existing_worktree = "new", None, None
+            elif resume == "auto":
                 action, existing_session_id, existing_worktree = detect_action(
                     ticket_id, server_url
                 )
             elif resume:
-                # Explicit session UUID provided
-                action, existing_session_id, existing_worktree = "resume", resume, None
+                # Explicit session UUID provided — look up worktree from
+                # the Zing server so we resume in the correct directory.
+                session_data = fetch_session(server_url, resume)
+                existing_worktree = session_data.get("worktree_path") if session_data else None
+                action, existing_session_id = "resume", resume
             else:
                 action, existing_session_id, existing_worktree = "new", None, None
 
@@ -271,14 +278,52 @@ def launch(
                 resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
                 tmux_name = build_tmux_session_name(ticket_id) if detach else None
                 explicit_resume = resume not in ("auto", "")
-                result = subprocess.run(args, cwd=resume_cwd)
+                if explicit_resume:
+                    click.echo(f"cwd: {resume_cwd}", err=True)
+                    click.echo(f"cmd: {shlex.join(args)}", err=True)
+                result = subprocess.run(
+                    args, cwd=resume_cwd, capture_output=explicit_resume, text=True
+                )
                 if result.returncode == 0:
                     return
                 if explicit_resume:
-                    raise LaunchError(
-                        f"Resume failed for session {existing_session_id}"
-                        f" (exit {result.returncode})"
+                    detail = result.stderr.strip() if result.stderr else ""
+                    click.echo(
+                        f"Claude resume failed (exit {result.returncode})"
+                        + (f": {detail}" if detail else ""),
+                        err=True,
                     )
+                    # The Claude conversation doesn't exist yet, but the
+                    # session may have been created by setup-environment.
+                    # Check the Zing server and offer to launch a new session.
+                    click.echo(
+                        f"Checking Zing server at {server_url} for session "
+                        f"{existing_session_id}...",
+                        err=True,
+                    )
+                    session_data = fetch_session(server_url, existing_session_id)
+                    if session_data is not None:
+                        wt = session_data.get("worktree_path") or str(Path.cwd())
+                        session_skill = session_data.get("skill") or "new"
+                        session_title = session_data.get("title") or ticket_id
+                        click.echo("No Claude conversation for this session yet.")
+                        click.echo(f"Working directory: {wt}")
+                        if click.confirm("Launch Claude with this session ID?", default=True):
+                            args = build_claude_args(
+                                skill=session_skill,
+                                session_id=existing_session_id,
+                                name=session_title,
+                                target=ticket_id,
+                                claude_flags=cfg.command_center.claude_flags,
+                            )
+                            click.echo(f"cwd: {wt}", err=True)
+                            click.echo(f"cmd: {shlex.join(args)}", err=True)
+                            sys.stderr.flush()
+                            exec_or_detach(args, Path(wt), tmux_name)
+                            return
+                        raise LaunchError("Aborted by user.")
+                    click.echo("Session not found on Zing server either.", err=True)
+                    raise LaunchError(f"Session {existing_session_id} not found")
                 click.echo(
                     f"Resume failed (exit {result.returncode}); starting a new session instead.",
                     err=True,
