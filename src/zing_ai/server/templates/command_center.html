@@ -19,6 +19,13 @@
 
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
+        <button class="cc-refresh-btn" id="cc-standup-btn" onclick="(function(btn){
+            btn.disabled = true; btn.textContent = 'Loading\u2026';
+            fetch('/command-center/standup').then(function(r){ return r.json(); }).then(function(data){
+                window.openStandup(data);
+                btn.textContent = '\u270D Standup'; btn.disabled = false;
+            }).catch(function(){ btn.textContent = 'Failed'; setTimeout(function(){ btn.textContent = '\u270D Standup'; btn.disabled = false; }, 1500); });
+        })(this)">&#x270D; Standup</button>
         <button class="cc-refresh-btn" id="cc-refresh-btn" onclick="(function(btn){
             btn.disabled = true; btn.textContent = 'Refreshing\u2026';
             fetch('/command-center/refresh', {method:'POST'}).then(function(r){
@@ -44,7 +51,97 @@
     </div>
     <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
+    {# ── Standup modal ── #}
+    <div id="standup-modal" class="standup-modal" style="display:none;">
+      <div class="standup-modal-bar">
+        <span class="standup-modal-title">Standup</span>
+        <div class="standup-modal-actions">
+          <div class="standup-tabs">
+            <button class="standup-tab active" data-standup-tab="rendered">Rich Text</button>
+            <button class="standup-tab" data-standup-tab="markdown">Markdown</button>
+          </div>
+          <button class="standup-copy-btn" id="standup-copy-btn">Copy</button>
+          <button class="terminal-modal-close" id="standup-modal-close">&times;</button>
+        </div>
+      </div>
+      <div class="standup-content standup-rendered" id="standup-rendered"></div>
+      <pre class="standup-content standup-markdown" id="standup-markdown" style="display:none;"></pre>
+    </div>
+    <div id="standup-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+
     <script>
+    // Standup modal
+    (function() {
+        var modal = document.getElementById('standup-modal');
+        var backdrop = document.getElementById('standup-modal-backdrop');
+        var closeBtn = document.getElementById('standup-modal-close');
+        var copyBtn = document.getElementById('standup-copy-btn');
+        var renderedEl = document.getElementById('standup-rendered');
+        var markdownEl = document.getElementById('standup-markdown');
+        var tabs = modal.querySelectorAll('[data-standup-tab]');
+        var activeTab = 'rendered';
+        var standupData = {};
+
+        function switchTab(tab) {
+            activeTab = tab;
+            tabs.forEach(function(t) {
+                t.classList.toggle('active', t.getAttribute('data-standup-tab') === tab);
+            });
+            renderedEl.style.display = tab === 'rendered' ? '' : 'none';
+            markdownEl.style.display = tab === 'markdown' ? '' : 'none';
+        }
+
+        tabs.forEach(function(t) {
+            t.addEventListener('click', function() {
+                switchTab(t.getAttribute('data-standup-tab'));
+            });
+        });
+
+        function closeStandup() {
+            modal.style.display = 'none';
+            backdrop.style.display = 'none';
+        }
+
+        closeBtn.addEventListener('click', closeStandup);
+        backdrop.addEventListener('click', closeStandup);
+
+        copyBtn.addEventListener('click', function() {
+            var text;
+            if (activeTab === 'markdown') {
+                text = standupData.markdown || '';
+                navigator.clipboard.writeText(text).then(function() {
+                    copyBtn.textContent = '\u2713 Copied!';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                });
+            } else {
+                // Copy rich text (HTML) so it pastes formatted in Slack/etc.
+                var blob = new Blob([standupData.html || ''], {type: 'text/html'});
+                var textBlob = new Blob([standupData.markdown || ''], {type: 'text/plain'});
+                var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
+                navigator.clipboard.write([item]).then(function() {
+                    copyBtn.textContent = '\u2713 Copied!';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                });
+            }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && modal.style.display !== 'none') {
+                closeStandup();
+            }
+        });
+
+        // Expose loader for the toolbar button
+        window.openStandup = function(data) {
+            standupData = data;
+            renderedEl.innerHTML = data.html || '';
+            markdownEl.textContent = data.markdown || '';
+            switchTab('rendered');
+            modal.style.display = '';
+            backdrop.style.display = '';
+        };
+    })();
+
     // Terminal modal
     (function() {
         var modal = document.getElementById('terminal-modal');

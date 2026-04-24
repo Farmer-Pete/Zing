@@ -34,10 +34,10 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,
 )
-from zing_ai.server.command_center import aggregate
+from zing_ai.server.command_center import aggregate, generate_standup
 from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.models_external import KanbanView
-from zing_ai.server.templates import render
+from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -291,6 +291,17 @@ async def refresh_command_center(request: Request) -> JSONResponse:
         logger.error("Manual refresh failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse({"status": "refreshed"})
+
+
+@router.get("/command-center/standup")
+async def get_standup(request: Request) -> JSONResponse:
+    """Generate a standup message from the current board state."""
+    view = _build_view(request.app)
+    cache = request.app.state.external_cache
+    username = cache.github_username or ""
+    markdown = generate_standup(view, username)
+    html = str(render_markdown(markdown))
+    return JSONResponse({"markdown": markdown, "html": html})
 
 
 # ---------------------------------------------------------------------------

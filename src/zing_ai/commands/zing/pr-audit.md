@@ -97,14 +97,18 @@ If you notice issues in the code that are **outside the scope of this PR** or **
 
 - **Cannot trigger `REQUEST_CHANGES`** — they are informational only
 - Should include an option to **create a Linear ticket** to track the issue separately. Add an option with label "File a ticket" and description "Create a Linear ticket to track this separately — no fix needed in this PR."
-- If the user selects "File a ticket" during triage, create the ticket using the Linear GraphQL API:
+- If the user selects "File a ticket" during triage, create the ticket using the Linear GraphQL API. Before creating any tickets, ensure a "zing" label exists: query `issueLabels(filter: { name: { eq: "zing" } })` — if no results, create it with `issueLabelCreate(input: { name: "zing", teamId: "<team_id>" })`. Then create the ticket:
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: $API_KEY" \
-  -d '{"query": "mutation { issueCreate(input: { teamId: \"<team_id>\", title: \"...\", description: \"...\" }) { success issue { identifier url } } }"}'
+  -d '{"query": "mutation { issueCreate(input: { teamId: \"<team_id>\", title: \"...\", description: \"...\", labelIds: [\"<zing_label_id>\"], priority: <1-4>, estimate: <story_points> }) { success issue { identifier url } } }"}'
 ```
    Use the team ID that matches the repository (see the team IDs in CLAUDE.md). Read the Linear API key from `~/.config/lr/config.json`.
+
+   **Priority**: Set based on the pre-existing issue's impact — `1` (urgent), `2` (high), `3` (medium), `4` (low). Most pre-existing issues will be `3` or `4`.
+
+   **Estimate (story points)**: Estimate the effort to fix the issue — use the team's point scale (typically 1, 2, 3, 5, 8). Consider complexity, scope of changes needed, and testing effort.
 - When included in the PR review, place the comment on the relevant diff line if possible. Prefix with "**Pre-existing:** " and include the Linear ticket link if one was created (e.g., "**Pre-existing:** {description}. Tracked in {TICKET-ID} — no fix needed in this PR.").
 
 ### Stylistic preferences

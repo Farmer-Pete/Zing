@@ -627,6 +627,110 @@ a.strip-ci-dot[href] { cursor: pointer; }
 }
 
 /* ──────────────────────────────────────────────
+   STANDUP MODAL
+────────────────────────────────────────────── */
+
+.standup-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 560px;
+    max-width: 90vw;
+    max-height: 80vh;
+    z-index: 201;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(15, 27, 45, 0.4);
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+}
+
+.standup-modal-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--navy);
+    color: #fff;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.standup-modal-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.standup-tabs {
+    display: flex;
+    gap: 2px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    padding: 2px;
+}
+
+.standup-tab {
+    background: none;
+    color: rgba(255,255,255,0.6);
+    border: none;
+    border-radius: 3px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.6rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+}
+.standup-tab:hover { color: #fff; }
+.standup-tab.active {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+}
+
+.standup-copy-btn {
+    background: var(--navy-mid);
+    color: #fff;
+    border: 1px solid var(--navy-light);
+    border-radius: 4px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    font-family: inherit;
+}
+.standup-copy-btn:hover { background: var(--navy-light); }
+
+.standup-content {
+    padding: 1rem 1.25rem;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+    overflow-y: auto;
+    margin: 0;
+}
+
+.standup-markdown {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    background: var(--gray-50);
+}
+
+.standup-rendered {
+    font-family: inherit;
+}
+.standup-rendered ul { margin: 0.25rem 0; padding-left: 1.25rem; }
+.standup-rendered li { margin-bottom: 0.15rem; }
+.standup-rendered p { margin: 0.5rem 0; }
+.standup-rendered a { color: var(--cyan-dim); text-decoration: none; }
+.standup-rendered a:hover { text-decoration: underline; }
+
+/* ──────────────────────────────────────────────
    MANAGEMENT TRAY
 ────────────────────────────────────────────── */
 

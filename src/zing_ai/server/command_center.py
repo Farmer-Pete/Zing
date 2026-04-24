@@ -9,6 +9,7 @@ are pure (no I/O) and can be unit tested with synthetic data.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from zing_ai.launch import TICKET_ID_PATTERN
@@ -298,6 +299,55 @@ def _assign_review_group(card: KanbanCard, current_username: str) -> str:
 # -- Classification ----------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CardSignals:
+    """Independent boolean signals computed from a card's state.
+
+    Each signal answers one question about the card. The classification
+    decision is a simple truth table over these signals, making it easy
+    to see why a card lands in a particular column and to adjust
+    priorities without accidentally breaking other cases.
+    """
+
+    owned: bool
+    """Card is assigned to (or authored by) the current user."""
+
+    has_active_session: bool
+    """A ZingSession has a workflow step in STARTED state."""
+
+    has_open_pr_no_reviewers: bool
+    """An open PR exists with no requested reviewers and not yet approved."""
+
+    has_unaddressed_feedback: bool
+    """User authored a PR with reviewer feedback they haven't re-requested on."""
+
+    has_pr_awaiting_review: bool
+    """An open PR has requested reviewers and the user is involved."""
+
+    is_recently_done: bool
+    """Ticket completed, PR merged, or user submitted a review within the done window."""
+
+    ticket_started: bool
+    """The linked Linear ticket has state_type 'started'."""
+
+
+def _compute_signals(
+    card: KanbanCard,
+    current_username: str,
+    cutoff: datetime,
+) -> CardSignals:
+    """Compute all classification signals for *card* independently."""
+    return CardSignals(
+        owned=_is_owned_by_user(card, current_username),
+        has_active_session=_has_active_session(card),
+        has_open_pr_no_reviewers=_has_open_pr_in_progress(card, current_username),
+        has_unaddressed_feedback=_has_unaddressed_feedback(card, current_username),
+        has_pr_awaiting_review=_has_pr_needing_review(card, current_username),
+        is_recently_done=_is_recently_done(card, cutoff, current_username),
+        ticket_started=(card.ticket is not None and card.ticket.state_type == "started"),
+    )
+
+
 def _classify_card(
     card: KanbanCard,
     current_username: str,
@@ -307,29 +357,44 @@ def _classify_card(
 
     Returns ``None`` when the card should be excluded from the board.
 
-    Priority: in_progress > needs_review > done > ticket-started > todo
+    Decision table (first match wins):
+
+    =============================================  ================
+    Condition                                      Column
+    =============================================  ================
+    Card excluded by filter                        ``None``
+    User has unaddressed reviewer feedback          in_progress
+    PR is awaiting review from someone              needs_review
+    Owned + active session or open PR (no reviews)  in_progress
+    Recently done (merged / completed / reviewed)   done
+    Owned + ticket state is "started"               in_progress
+    Everything else                                 todo
+    =============================================  ================
     """
     cutoff = now - _DONE_WINDOW
 
     if not _should_include_card(card, current_username, cutoff):
         return None
 
-    owned = _is_owned_by_user(card, current_username)
+    s = _compute_signals(card, current_username, cutoff)
 
-    if owned and (_has_active_session(card) or _has_open_pr_in_progress(card, current_username)):
+    # User has feedback to address — they need to act.
+    if s.has_unaddressed_feedback:
         return "in_progress"
 
-    if _has_unaddressed_feedback(card, current_username):
-        return "in_progress"
-
-    if _has_pr_needing_review(card, current_username):
+    # PR is out for review — user is blocked on reviewers.
+    if s.has_pr_awaiting_review:
         return "needs_review"
 
-    if _is_recently_done(card, cutoff, current_username):
+    # Actively working: session running or PR not yet sent for review.
+    if s.owned and (s.has_active_session or s.has_open_pr_no_reviewers):
+        return "in_progress"
+
+    if s.is_recently_done:
         return "done"
 
-    # Ticket is actively being worked on but no PR signal drove it elsewhere.
-    if owned and card.ticket is not None and card.ticket.state_type == "started":
+    # Ticket is being worked on but no PR signal drove it elsewhere.
+    if s.owned and s.ticket_started:
         return "in_progress"
 
     return "todo"
@@ -589,6 +654,141 @@ def aggregate(
     view.done.sort(key=lambda c: _DONE_GROUP_ORDER.get(c.done_group or "", 2))
 
     return view
+
+
+def _card_display_title(card: KanbanCard) -> str:
+    """Return a human-readable title for a card (ticket title or PR title)."""
+    if card.ticket is not None:
+        return card.ticket.title
+    if card.prs:
+        return card.prs[0].title
+    return card.key
+
+
+def _card_url(card: KanbanCard) -> str | None:
+    """Return the most relevant URL for a card (ticket URL or PR URL)."""
+    if card.ticket is not None:
+        return card.ticket.url
+    if card.prs:
+        return card.prs[0].url
+    return None
+
+
+def generate_standup(view: KanbanView, current_username: str) -> str:
+    """Generate a standup message from the current Kanban board state.
+
+    The message lists:
+    - What got done yesterday (merged PRs, completed tickets)
+    - What's on the plate today (in-progress work)
+    - Blockers (PRs waiting on others for review)
+
+    Args:
+        view: The current KanbanView with all columns populated.
+        current_username: The GitHub username of the current user.
+
+    Returns:
+        A formatted standup message string in markdown.
+    """
+    now = datetime.now(UTC)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+
+    # -- Done items: split into yesterday vs today --
+    done_yesterday: list[str] = []
+    done_today: list[str] = []
+
+    for card in view.done:
+        # Only include cards the user owns (assigned ticket or authored PR).
+        # Skip cards where the user only reviewed someone else's PR.
+        is_own_ticket = card.ticket is not None
+        is_own_pr = any(pr.author == current_username for pr in card.prs)
+        if not is_own_ticket and not is_own_pr:
+            continue
+
+        title = _card_display_title(card)
+        url = _card_url(card)
+        activity_time = _card_most_recent_activity(card)
+
+        # Determine what "done" means for this card
+        has_merged_pr = any(pr.state == "merged" for pr in card.prs)
+        ticket_completed = card.ticket is not None and card.ticket.state_type == "completed"
+
+        if has_merged_pr:
+            label = f"Merged [{title}]({url})" if url else f"Merged {title}"
+        elif ticket_completed:
+            label = f"Completed [{title}]({url})" if url else f"Completed {title}"
+        elif card.done_group == "ready_to_merge":
+            label = f"Ready to merge [{title}]({url})" if url else f"Ready to merge {title}"
+        else:
+            label = f"Completed [{title}]({url})" if url else f"Completed {title}"
+
+        if activity_time >= today_start:
+            done_today.append(f"- {label}")
+        elif activity_time >= yesterday_start:
+            done_yesterday.append(f"- {label}")
+
+    # -- In progress items --
+    in_progress_items: list[str] = []
+
+    for card in view.in_progress:
+        title = _card_display_title(card)
+        url = _card_url(card)
+
+        # Check if the card has unaddressed feedback (returning to address comments)
+        has_feedback = _has_unaddressed_feedback(card, current_username)
+
+        if has_feedback:
+            label = (
+                f"Resolve comments on [{title}]({url})" if url else (f"Resolve comments on {title}")
+            )
+        else:
+            label = f"Work on [{title}]({url})" if url else f"Work on {title}"
+
+        in_progress_items.append(f"- {label}")
+
+    # -- Needs review: user's own PRs waiting on others --
+    # These contribute to both "done" (the work itself) and "blockers" (the review wait).
+    blocker_items: list[str] = []
+
+    for card in view.needs_review:
+        if card.review_group != "others":
+            continue
+
+        # The ticket/work goes into "what got done" as "Worked on ..."
+        title = _card_display_title(card)
+        url = _card_url(card)
+        label = f"Worked on [{title}]({url})" if url else f"Worked on {title}"
+        activity_time = _card_most_recent_activity(card)
+        if activity_time >= today_start:
+            done_today.append(f"- {label}")
+        elif activity_time >= yesterday_start:
+            done_yesterday.append(f"- {label}")
+
+        # The PR itself is a blocker — use the PR URL
+        pr_url = card.prs[0].url if card.prs else _card_url(card)
+        label = f"Need a review on [{title}]({pr_url})" if pr_url else (f"Need a review on {title}")
+        blocker_items.append(f"- {label}")
+
+    # -- Build message --
+    sections: list[str] = []
+
+    done_lines = done_yesterday + done_today
+    if done_lines:
+        sections.append("**What got done yesterday:**\n" + "\n".join(done_lines))
+    else:
+        sections.append("**What got done yesterday:**\n- (nothing to report)")
+
+    if in_progress_items:
+        sections.append("**What's on my plate today:**\n" + "\n".join(in_progress_items))
+    else:
+        sections.append("**What's on my plate today:**\n- (nothing planned)")
+
+    if blocker_items:
+        sections.append("**Blockers:**\n" + "\n".join(blocker_items))
+    else:
+        sections.append("**Blockers:**\n- None")
+
+    return "\n\n".join(sections)
 
 
 def get_live_tmux_sessions() -> set[str]:

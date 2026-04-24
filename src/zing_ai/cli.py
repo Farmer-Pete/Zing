@@ -262,11 +262,15 @@ def launch(target: str, resume: str, port: int, skill: str | None, detach: bool)
                 )
                 resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
                 tmux_name = build_tmux_session_name(ticket_id) if detach else None
-                # Try resume; if Claude can't find the conversation, fall
-                # through to the new-session flow instead of failing.
+                explicit_resume = resume not in ("auto", "")
                 result = subprocess.run(args, cwd=resume_cwd)
                 if result.returncode == 0:
                     return
+                if explicit_resume:
+                    raise LaunchError(
+                        f"Resume failed for session {existing_session_id}"
+                        f" (exit {result.returncode})"
+                    )
                 click.echo(
                     f"Resume failed (exit {result.returncode}); starting a new session instead.",
                     err=True,
