@@ -512,7 +512,7 @@ def launch(
             wf_mode = _prompt_workflow_mode()
             work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
             tmux_name = build_tmux_session_name(md_name) if detach else None
-            md_skill = skill or "build"
+            md_skill = skill or "new"
 
             _init_create_and_launch(
                 repo_root=repo_root,
