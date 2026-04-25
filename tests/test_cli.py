@@ -344,4 +344,4 @@ def test_launch_markdown_setup_only(tmp_path):
     # Verify session was created with correct args
     mock_create.assert_called_once()
     assert mock_create.call_args.kwargs["ticket_id"] is None
-    assert mock_create.call_args.kwargs["skill"] == "build"
+    assert mock_create.call_args.kwargs["skill"] == "new"
