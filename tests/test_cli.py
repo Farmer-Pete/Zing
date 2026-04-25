@@ -345,3 +345,63 @@ def test_launch_markdown_setup_only(tmp_path):
     mock_create.assert_called_once()
     assert mock_create.call_args.kwargs["ticket_id"] is None
     assert mock_create.call_args.kwargs["skill"] == "new"
+
+
+def test_launch_markdown_copies_file_to_worktree(tmp_path):
+    """Markdown file is copied into the worktree so it's available at the same relative path."""
+    zing_dir = tmp_path / ".zing"
+    zing_dir.mkdir()
+    md_file = zing_dir / "my-plan.md"
+    md_file.write_text("# Plan\n")
+
+    worktree_dir = tmp_path / "worktree"
+
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),
+        patch("zing_ai.launch.detect_action_by_title", return_value=("new", None, None)),
+        patch("zing_ai.launch.resolve_repo_root", return_value=tmp_path),
+        patch("zing_ai.launch.create_worktree", return_value=worktree_dir),
+        patch("zing_ai.launch.run_init_script"),
+        patch("zing_ai.launch.create_session_on_server"),
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.git.worktree_root = "../{repo}-{branch}"
+        mock_cfg.return_value.git.branch_prefix = "zing/"
+        mock_cfg.return_value.git.zing_init_script = ""
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", str(md_file), "--setup-only"])
+
+    assert result.exit_code == 0, result.output
+    copied = worktree_dir / ".zing" / "my-plan.md"
+    assert copied.exists(), "markdown file should be copied into the worktree"
+    assert copied.read_text() == "# Plan\n"
+
+
+def test_launch_markdown_no_copy_without_worktree(tmp_path):
+    """No copy happens when workflow mode is not 'worktree'."""
+    zing_dir = tmp_path / ".zing"
+    zing_dir.mkdir()
+    md_file = zing_dir / "my-plan.md"
+    md_file.write_text("# Plan\n")
+
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),
+        patch("zing_ai.launch.detect_action_by_title", return_value=("new", None, None)),
+        patch("zing_ai.launch.resolve_repo_root", return_value=tmp_path),
+        patch("zing_ai.launch.run_init_script"),
+        patch("zing_ai.launch.create_session_on_server"),
+    ):
+        mock_cfg.return_value.git.workflow_mode = "none"
+        mock_cfg.return_value.git.worktree_root = "../{repo}-{branch}"
+        mock_cfg.return_value.git.branch_prefix = "zing/"
+        mock_cfg.return_value.git.zing_init_script = ""
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", str(md_file), "--setup-only"])
+
+    assert result.exit_code == 0, result.output
+    # The target_arg in the output should still point to the original file
+    assert str(md_file) in result.output

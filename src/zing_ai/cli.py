@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -511,6 +512,20 @@ def launch(
             repo_root = resolve_repo_root(Path.cwd())
             wf_mode = _prompt_workflow_mode()
             work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
+
+            # .zing/ is gitignored so it won't exist in a new worktree.
+            # Copy the target file so it's available at the same relative path.
+            if worktree_path is not None:
+                try:
+                    rel = md_path.relative_to(repo_root)
+                except ValueError:
+                    pass
+                else:
+                    dest = worktree_path / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(md_path, dest)
+                    md_path = dest
+
             tmux_name = build_tmux_session_name(md_name) if detach else None
             md_skill = skill or "new"
 
