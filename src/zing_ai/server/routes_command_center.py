@@ -185,7 +185,6 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
-    config = load_config()
     # Sweep dead ttyd processes so entries don't accumulate indefinitely.
     ttyd_procs: dict = getattr(app.state, "ttyd_procs", {})
     for name in [k for k, (p, _) in ttyd_procs.items() if p.poll() is not None]:
@@ -195,7 +194,6 @@ def render_board_fragment(app: FastAPI) -> str:
         view=view,
         current_username=cache.github_username or "",
         live_tmux_sessions=live_tmux_sessions,
-        tmux_attach_mode=config.command_center.tmux_attach_mode,
     )
 
 
@@ -211,7 +209,6 @@ def _render_tray_fragment(app: FastAPI) -> str:
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
-    config = load_config()
     view = _build_view(request.app)
     cache = request.app.state.external_cache
     live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
@@ -228,7 +225,6 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_tmux_sessions=live_tmux_sessions,
-            tmux_attach_mode=config.command_center.tmux_attach_mode,
             **tray_data,
         )
     )
