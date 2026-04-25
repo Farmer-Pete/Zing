@@ -102,7 +102,7 @@
         {% endif %}
       {% endif %}
       {# Kebab menu — always present #}
-      <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+      <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
       <div class="strip-menu">
         {% if pr.merged_at %}
           {# Merged: links only #}
@@ -115,7 +115,7 @@
         {% else %}
           {# Non-merged PR: full menu with search for complex menus #}
           {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
-            <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+            <input class="menu-search" type="text" placeholder="Search actions..." data-kebab-search>
           {% endif %}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -201,7 +201,7 @@
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
         <button class="strip-primary-btn strip-primary-btn-blue" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -221,7 +221,7 @@
       {% endif %}
       {% if session.ticket_id and not is_alive %}
         <button class="strip-primary-btn" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}">Resume</button>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -287,7 +287,7 @@
         <button class="strip-primary-btn" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -316,7 +316,7 @@
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build">Build</button>
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
