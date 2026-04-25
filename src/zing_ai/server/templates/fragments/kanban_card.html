@@ -5,8 +5,7 @@
     card        — KanbanCard instance
     column_cls  — CSS column class string, e.g. "col-todo" (from parent column template)
     current_username — GitHub username of the current user
-    live_tmux_sessions — set of live tmux session names
-    iterm2_integration — bool, whether iTerm2 control mode is enabled
+    live_sessions — set of live zellij session names
 #}
 {% set total_findings = namespace(count=0) %}
 {% for step in card.audit_steps %}
@@ -95,25 +94,19 @@
 
   {# ── Claude Code sessions with inline attach/resume buttons ── #}
   {% for session in card.sessions if session.session_type == 'claude_code' %}
-    {% set is_alive = session.tmux_session and session.tmux_session in live_tmux_sessions %}
+    {% set is_alive = session.terminal_session and session.terminal_session in live_sessions %}
     <div class="status-strip">
       <span class="strip-session-dot {% if is_alive %}strip-session-alive{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% else %}Stopped{% endif %}"></span>
       {% if is_alive %}
         <span class="strip-session-label">Running: {{ session.title }}</span>
-      {% elif session.tmux_session %}
+      {% elif session.terminal_session %}
         <span class="strip-session-label strip-session-label-dead">Stopped: {{ session.title }}</span>
       {% else %}
         <span class="strip-session-label">{{ session.title }}</span>
       {% endif %}
       <span class="strip-spacer"></span>
-      {% if session.tmux_session and is_alive %}
-        {% if tmux_attach_mode == "iterm2" %}
-          <button class="card-btn card-btn-primary" data-attach-session="{{ session.tmux_session | e }}" data-attach-mode="iterm2">Attach</button>
-        {% elif tmux_attach_mode == "browser" %}
-          <button class="card-btn card-btn-primary" data-attach-session="{{ session.tmux_session | e }}" data-attach-mode="browser">Attach</button>
-        {% else %}
-          <button class="card-btn" data-launch-cmd="tmux attach -t {{ session.tmux_session | e }}" data-launch-label="Attach">Attach</button>
-        {% endif %}
+      {% if session.terminal_session and is_alive %}
+        <button class="card-btn card-btn-primary" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
       {% endif %}
       {% if session.ticket_id %}
         <button class="card-btn" data-launch-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}" data-launch-label="Resume">Resume</button>

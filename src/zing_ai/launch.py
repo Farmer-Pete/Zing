@@ -704,7 +704,7 @@ def create_session_on_server(
     skill: str | None,
     pr_number: int | None = None,
     pr_repo: str | None = None,
-    tmux_session: str | None = None,
+    terminal_session: str | None = None,
 ) -> None:
     """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
@@ -720,7 +720,7 @@ def create_session_on_server(
         skill: Skill/command name, or ``None``.
         pr_number: GitHub PR number, or ``None``.
         pr_repo: GitHub repo as ``"owner/repo"``, or ``None``.
-        tmux_session: tmux session name for detached launches, or ``None``.
+        terminal_session: Terminal session name for detached launches, or ``None``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -733,7 +733,7 @@ def create_session_on_server(
         "skill": skill,
         "pr_number": pr_number,
         "pr_repo": pr_repo,
-        "tmux_session": tmux_session,
+        "terminal_session": terminal_session,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -868,89 +868,103 @@ def build_claude_args(
 
 
 # ---------------------------------------------------------------------------
-# tmux helpers
+# Session name helpers
 # ---------------------------------------------------------------------------
 
-_TMUX_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+_SESSION_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]")
 
 
-def _sanitize_tmux_name(name: str) -> str:
-    """Replace characters unsafe for tmux session names with underscores."""
-    return _TMUX_UNSAFE_RE.sub("_", name)
+def _sanitize_session_name(name: str) -> str:
+    """Replace characters unsafe for session names with underscores."""
+    return _SESSION_NAME_RE.sub("_", name)
 
 
-def build_tmux_session_name(target: str, pr_number: int | None = None) -> str:
-    """Build a tmux session name for a launch target.
+def build_session_name(target: str, pr_number: int | None = None) -> str:
+    """Build a Zellij session name for a launch target.
 
     Args:
         target: Ticket ID, branch name, or other identifier for the session.
         pr_number: If provided, overrides ``target`` and produces a PR-based name.
 
     Returns:
-        A tmux-safe session name string.
+        A session-safe name string.
     """
     if pr_number is not None:
-        return f"zing-pr-{pr_number}"
+        return f"zing--pr-{pr_number}"
     if re.fullmatch(TICKET_ID_PATTERN, target):
-        return f"zing-{target.lower()}"
-    return f"zing-{_sanitize_tmux_name(target)}"
+        return f"zing--{target.lower()}"
+    return f"zing--{_sanitize_session_name(target)}"
 
 
-def require_tmux() -> None:
-    """Check that tmux is available on PATH.
+def require_session_backend() -> None:
+    """Check that Zellij is available on PATH.
 
     Raises:
-        LaunchError: If tmux is not found.
+        LaunchError: If Zellij is not found.
     """
-    if shutil.which("tmux") is None:
-        raise LaunchError("tmux is required for --detach mode but was not found on PATH")
+    if shutil.which("zellij") is None:
+        raise LaunchError(
+            "Zellij is required for --detach mode but was not found on PATH."
+            " Install it from https://zellij.dev/"
+        )
 
 
-def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = None) -> None:
-    """Execute a command in the foreground or in a detached tmux session.
+def exec_or_detach(args: list[str], work_dir: Path, terminal_session: str | None = None) -> None:
+    """Execute a command in the foreground or in a detached Zellij session.
 
-    When ``tmux_session`` is ``None``, the current process is replaced via
-    ``os.execvp`` (foreground mode).  When set, a new detached tmux session
+    When ``terminal_session`` is ``None``, the current process is replaced via
+    ``os.execvp`` (foreground mode).  When set, a new detached Zellij session
     is created.
 
     Args:
         args: Command and arguments, e.g. ``["claude", "/zing:new BAK-1", ...]``.
         work_dir: Working directory for the process.
-        tmux_session: tmux session name.  ``None`` means foreground (exec).
+        terminal_session: Zellij session name.  ``None`` means foreground (exec).
 
     Raises:
-        LaunchError: If the tmux session name already exists.
+        LaunchError: If the session name already exists.
     """
-    if tmux_session is None:
+    if terminal_session is None:
         os.chdir(work_dir)
         os.execvp(args[0], args)
         return  # unreachable — satisfies type checkers
 
-    # Check for name collision
+    # Check if session already exists
     result = subprocess.run(
-        ["tmux", "has-session", "-t", tmux_session],
+        ["zellij", "list-sessions", "-sn"],
         capture_output=True,
+        text=True,
     )
-    if result.returncode == 0:
-        raise LaunchError(f"tmux session '{tmux_session}' already exists")
+    existing = {s.strip() for s in result.stdout.splitlines() if s.strip()}
+    if terminal_session in existing:
+        raise LaunchError(f"Session '{terminal_session}' already exists")
 
+    # Write a layout file for this command
+    from zing_ai.server.zellij_config import ensure_zellij_config, write_command_layout
+
+    config_path, config_dir = ensure_zellij_config()
+    layout_path = write_command_layout(args[0], args[1:])
     subprocess.run(
         [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            tmux_session,
+            "zellij",
+            "--config",
+            str(config_path),
+            "--config-dir",
+            str(config_dir),
+            "-l",
+            str(layout_path),
+            "attach",
+            terminal_session,
+            "-b",
             "-c",
-            str(work_dir),
-            shlex.join(args),
         ],
+        cwd=str(work_dir),
         check=True,
     )
-
-    import click  # lazy — launch.py avoids top-level Click dependency
-
-    click.echo(f"Session started. Attach with: tmux attach -t {tmux_session}")
+    print(f"Session '{terminal_session}' started (detached)")
+    print(
+        f"View in browser at the Command Center, or attach with: zellij attach {terminal_session}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1013,10 @@ def find_repo_path(
     # Use a local dict to accumulate results; merge into caller's cache at the end.
     local: dict[str, Path] = {}
 
+    # Strip GIT_DIR/GIT_WORK_TREE so git -C targets the scanned child,
+    # not the caller's repo (matters when invoked from a git hook).
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+
     # Scan immediate children only (depth 1).
     for child in sorted(code_path.iterdir()):
         if not child.is_dir():
@@ -1008,6 +1026,7 @@ def find_repo_path(
         is_git = subprocess.run(
             ["git", "-C", str(child), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
+            env=clean_env,
         )
         if is_git.returncode != 0:
             continue
@@ -1017,6 +1036,7 @@ def find_repo_path(
             ["git", "-C", str(child), "worktree", "list", "--porcelain"],
             capture_output=True,
             text=True,
+            env=clean_env,
         )
         if wt_result.returncode != 0:
             continue
@@ -1037,6 +1057,7 @@ def find_repo_path(
             ["git", "-C", str(child), "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
+            env=clean_env,
         )
         if remote_result.returncode != 0:
             continue

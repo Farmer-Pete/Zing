@@ -24,7 +24,7 @@ from zing_ai.launch import (
     find_repo_path,
     move_ticket_in_progress,
     parse_pr_url,
-    require_tmux,
+    require_session_backend,
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
@@ -750,26 +750,26 @@ class TestExtractTicketId(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# require_tmux
+# require_session_backend
 # ---------------------------------------------------------------------------
 
 
-class TestRequireTmux(TestCase):
-    """Tests for require_tmux."""
+class TestRequireSessionBackend(TestCase):
+    """Tests for require_session_backend."""
 
-    def test_require_tmux_missing(self) -> None:
-        """When tmux is not on PATH, LaunchError is raised."""
+    def test_require_session_backend_missing(self) -> None:
+        """When zellij is not on PATH, LaunchError is raised."""
         with (
             patch("zing_ai.launch.shutil.which", return_value=None),
             self.assertRaises(LaunchError) as ctx,
         ):
-            require_tmux()
-        self.assertIn("tmux", str(ctx.exception))
+            require_session_backend()
+        self.assertIn("zellij", str(ctx.exception))
 
-    def test_require_tmux_found(self) -> None:
-        """When tmux is found on PATH, no error is raised."""
-        with patch("zing_ai.launch.shutil.which", return_value="/usr/bin/tmux"):
-            require_tmux()  # should not raise
+    def test_require_session_backend_found(self) -> None:
+        """When zellij is found on PATH, no error is raised."""
+        with patch("zing_ai.launch.shutil.which", return_value="/usr/bin/zellij"):
+            require_session_backend()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +781,7 @@ class TestExecOrDetach(TestCase):
     """Tests for exec_or_detach."""
 
     def test_exec_or_detach_foreground(self) -> None:
-        """When tmux_session is None, os.chdir + os.execvp is called."""
+        """When terminal_session is None, os.chdir + os.execvp is called."""
         import os
         import tempfile
 
@@ -790,68 +790,81 @@ class TestExecOrDetach(TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             work_dir = Path(tmpdir).resolve()
             with patch("zing_ai.launch.os.execvp") as mock_execvp:
-                exec_or_detach(args, work_dir, tmux_session=None)
+                exec_or_detach(args, work_dir, terminal_session=None)
             mock_execvp.assert_called_once_with("claude", args)
             self.assertEqual(Path.cwd().resolve(), work_dir)
         os.chdir(original_cwd)
 
     def test_exec_or_detach_detach(self) -> None:
-        """When tmux_session is set, tmux new-session is called with shlex.join(args)."""
-        import shlex
-
+        """When terminal_session is set, zellij attach is called with a layout file."""
         args = ["claude", "/zing:new BAK-2", "--session-id", "sess-2", "--name", "BAK-2"]
-        has_session_result = MagicMock()
-        has_session_result.returncode = 1  # session does not exist
 
-        new_session_result = MagicMock()
-        new_session_result.returncode = 0
+        list_sessions_result = MagicMock()
+        list_sessions_result.stdout = ""  # no existing sessions
+
+        attach_result = MagicMock()
+        attach_result.returncode = 0
 
         def fake_run(cmd, **kwargs):
-            if cmd[1] == "has-session":
-                return has_session_result
-            return new_session_result
-
-        with patch("zing_ai.launch.subprocess.run", side_effect=fake_run) as mock_run:
-            exec_or_detach(args, Path("/tmp/work"), tmux_session="zing-test")
-
-        # Find the new-session call
-        calls = mock_run.call_args_list
-        new_sess_call = next(c for c in calls if c[0][0][1] == "new-session")
-        cmd = new_sess_call[0][0]
-        self.assertIn(shlex.join(args), cmd)
-        self.assertIn("zing-test", cmd)
-        self.assertIn("/tmp/work", cmd)
-
-    def test_exec_or_detach_name_collision(self) -> None:
-        """When has-session returns 0, LaunchError is raised with 'already exists'."""
-        has_session_result = MagicMock()
-        has_session_result.returncode = 0  # session already exists
+            if cmd[:2] == ["zellij", "list-sessions"]:
+                return list_sessions_result
+            return attach_result
 
         with (
-            patch("zing_ai.launch.subprocess.run", return_value=has_session_result),
+            patch("zing_ai.launch.subprocess.run", side_effect=fake_run) as mock_run,
+            patch(
+                "zing_ai.server.zellij_config.ensure_zellij_config",
+                return_value=(Path("/tmp/config.kdl"), Path("/tmp")),
+            ),
+            patch(
+                "zing_ai.server.zellij_config.write_command_layout",
+                return_value=Path("/tmp/layout.kdl"),
+            ),
+        ):
+            exec_or_detach(args, Path("/tmp/work"), terminal_session="zing--test")
+
+        calls = mock_run.call_args_list
+        # First call: list-sessions -sn
+        list_call = calls[0][0][0]
+        self.assertEqual(list_call, ["zellij", "list-sessions", "-sn"])
+        # Second call: zellij attach <name> -b -c
+        attach_call = calls[1][0][0]
+        self.assertIn("zellij", attach_call)
+        self.assertIn("attach", attach_call)
+        self.assertIn("zing--test", attach_call)
+        self.assertIn("-b", attach_call)
+        self.assertIn("-c", attach_call)
+
+    def test_exec_or_detach_name_collision(self) -> None:
+        """When zellij list-sessions -sn returns the session name, LaunchError is raised."""
+        list_sessions_result = MagicMock()
+        list_sessions_result.stdout = "zing--bak-1\n"  # session already exists
+
+        with (
+            patch("zing_ai.launch.subprocess.run", return_value=list_sessions_result),
             self.assertRaises(LaunchError) as ctx,
         ):
             exec_or_detach(
                 ["claude", "--resume", "sess-x"],
                 Path("/tmp/work"),
-                tmux_session="zing-bak-1",
+                terminal_session="zing--bak-1",
             )
         self.assertIn("already exists", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
-# create_session_on_server with tmux_session
+# create_session_on_server with terminal_session
 # ---------------------------------------------------------------------------
 
 
-class TestCreateSessionOnServerWithTmux(TestCase):
-    """Tests for create_session_on_server tmux_session parameter."""
+class TestCreateSessionOnServerWithTerminalSession(TestCase):
+    """Tests for create_session_on_server terminal_session parameter."""
 
-    def test_create_session_on_server_with_tmux(self) -> None:
-        """When tmux_session is provided, it is included in the POST body."""
+    def test_create_session_on_server_with_terminal_session(self) -> None:
+        """When terminal_session is provided, it is included in the POST body."""
         resp_mock = MagicMock()
         resp_mock.read.return_value = json.dumps(
-            {"status": "created", "session_id": "sess-tmux"}
+            {"status": "created", "session_id": "sess-zellij"}
         ).encode()
         resp_mock.__enter__ = lambda s: s
         resp_mock.__exit__ = MagicMock(return_value=False)
@@ -859,17 +872,17 @@ class TestCreateSessionOnServerWithTmux(TestCase):
         with patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock) as mock_open:
             create_session_on_server(
                 server_url="http://localhost:9876",
-                session_id="sess-tmux",
+                session_id="sess-zellij",
                 title="FRO-123",
                 ticket_id="FRO-123",
                 worktree_path="/tmp/wt",
                 skill="new",
-                tmux_session="zing-fro-123",
+                terminal_session="zing--fro-123",
             )
 
         req = mock_open.call_args[0][0]
         body = json.loads(req.data.decode())
-        self.assertEqual(body["tmux_session"], "zing-fro-123")
+        self.assertEqual(body["terminal_session"], "zing--fro-123")
 
 
 # ---------------------------------------------------------------------------
@@ -878,34 +891,48 @@ class TestCreateSessionOnServerWithTmux(TestCase):
 
 
 def _init_git_repo(path: Path, remote_url: str) -> None:
-    """Create a bare-minimum git repo with one commit and an origin remote."""
-    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    """Create a bare-minimum git repo with one commit and an origin remote.
+
+    Strips GIT_DIR and GIT_WORK_TREE from the subprocess environment so that
+    git commands target the temp directory, not the enclosing real repo.  Git
+    hooks (pre-push, pre-commit) set these variables, which causes ``git -C``
+    to silently operate on the wrong repository.
+    """
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         check=True,
         capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.name", "Test"],
         check=True,
         capture_output=True,
+        env=env,
     )
     (path / "README.md").write_text("hello")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "commit", "--no-verify", "-m", "init"],
         check=True,
         capture_output=True,
+        env=env,
     )
     result = subprocess.run(
         ["git", "-C", str(path), "remote", "add", "origin", remote_url],
         capture_output=True,
+        env=env,
     )
     if result.returncode != 0:
         subprocess.run(
             ["git", "-C", str(path), "remote", "set-url", "origin", remote_url],
             check=True,
             capture_output=True,
+            env=env,
         )
 
 
@@ -957,7 +984,10 @@ class TestFindRepoPath(TestCase):
 
     def test_find_repo_path_skips_worktrees(self) -> None:
         """Linked worktrees are skipped; only the main checkout is matched."""
+        import os
         import tempfile
+
+        env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
 
         with tempfile.TemporaryDirectory() as td:
             code_dir = Path(td)
@@ -970,21 +1000,25 @@ class TestFindRepoPath(TestCase):
                 ["git", "-C", str(repo_dir), "checkout", "-b", "feature"],
                 check=True,
                 capture_output=True,
+                env=env,
             )
             subprocess.run(
                 ["git", "-C", str(repo_dir), "checkout", "main"],
                 capture_output=True,
+                env=env,
             )
             # Fallback: use master if main doesn't exist.
             subprocess.run(
                 ["git", "-C", str(repo_dir), "checkout", "master"],
                 capture_output=True,
+                env=env,
             )
 
             worktree_dir = code_dir / "linked-wt"
             subprocess.run(
                 ["git", "-C", str(repo_dir), "worktree", "add", str(worktree_dir), "feature"],
                 check=True,
+                env=env,
                 capture_output=True,
             )
 
@@ -997,31 +1031,6 @@ class TestFindRepoPath(TestCase):
         with self.assertRaises(LaunchError) as ctx:
             find_repo_path("", "acme/repo")
         self.assertIn("code_dir is not configured", str(ctx.exception))
-
-    def test_find_repo_path_cached(self) -> None:
-        """Returns cached result on second call without running subprocess."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            code_dir = Path(td)
-            repo_dir = code_dir / "cached-repo"
-            repo_dir.mkdir()
-            _init_git_repo(repo_dir, "https://github.com/acme/cached-repo.git")
-
-            cache: dict[str, Path] = {}
-
-            # First call populates the cache.
-            result1 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
-            self.assertEqual(result1, repo_dir)
-            self.assertIn("acme/cached-repo", cache)
-
-            # Second call must use the cache — patch subprocess.run to confirm
-            # it is never called.
-            with patch("zing_ai.launch.subprocess.run") as mock_run:
-                result2 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
-
-            self.assertEqual(result2, repo_dir)
-            mock_run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

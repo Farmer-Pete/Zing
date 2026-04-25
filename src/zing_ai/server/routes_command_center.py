@@ -6,8 +6,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import subprocess
-import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +23,7 @@ from zing_ai.config import load_config
 from zing_ai.launch import (
     LaunchError,
     build_claude_args,
-    build_tmux_session_name,
+    build_session_name,
     checkout_pr_branch,
     create_session_on_server,
     create_worktree,
@@ -126,14 +126,14 @@ class _WorktreeEntry:
 def _build_tray_data(
     view: KanbanView,
     sessions: list,
-    live_tmux_sessions: set[str],
+    live_sessions: set[str],
 ) -> dict:
     """Build running_sessions, worktree_entries, running_count, orphan_count for the tray.
 
     Args:
         view: The current KanbanView (all columns).
         sessions: All sessions from the session manager.
-        live_tmux_sessions: Set of currently alive tmux session names.
+        live_sessions: Set of currently alive zellij session names.
 
     Returns:
         A dict with keys: running_sessions, worktree_entries, running_count, orphan_count.
@@ -154,8 +154,8 @@ def _build_tray_data(
         if not isinstance(session, ClaudeCodeSession):
             continue
 
-        # Track running sessions (alive in tmux).
-        if session.tmux_session and session.tmux_session in live_tmux_sessions:
+        # Track running sessions (alive in zellij).
+        if session.terminal_session and session.terminal_session in live_sessions:
             running_sessions.append(session)
 
         # Build worktree entries for sessions with a worktree_path.
@@ -184,39 +184,32 @@ def render_board_fragment(app: FastAPI) -> str:
     """Render the full kanban board. Used by SSE board_changed events."""
     view = _build_view(app)
     cache = app.state.external_cache
-    live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
-    config = load_config()
-    # Sweep dead ttyd processes so entries don't accumulate indefinitely.
-    ttyd_procs: dict = getattr(app.state, "ttyd_procs", {})
-    for name in [k for k, (p, _) in ttyd_procs.items() if p.poll() is not None]:
-        del ttyd_procs[name]
+    live_sessions: set[str] = getattr(app.state, "live_sessions", set())
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
-        live_tmux_sessions=live_tmux_sessions,
-        tmux_attach_mode=config.command_center.tmux_attach_mode,
+        live_sessions=live_sessions,
     )
 
 
 def _render_tray_fragment(app: FastAPI) -> str:
     """Render the management tray. Used by SSE board_changed events."""
     view = _build_view(app)
-    live_tmux_sessions: set[str] = getattr(app.state, "live_tmux_sessions", set())
+    live_sessions: set[str] = getattr(app.state, "live_sessions", set())
     sessions = app.state.session_manager.list_sessions()
-    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
+    tray_data = _build_tray_data(view, sessions, live_sessions)
     return render("fragments/management_tray.html", **tray_data)
 
 
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
-    config = load_config()
     view = _build_view(request.app)
     cache = request.app.state.external_cache
-    live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
+    live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
     sessions = request.app.state.session_manager.list_sessions()
-    tray_data = _build_tray_data(view, sessions, live_tmux_sessions)
+    tray_data = _build_tray_data(view, sessions, live_sessions)
     return HTMLResponse(
         render(
             "command_center.html",
@@ -227,8 +220,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             last_error=cache.last_error,
             body_class="command-center",
             current_username=cache.github_username or "",
-            live_tmux_sessions=live_tmux_sessions,
-            tmux_attach_mode=config.command_center.tmux_attach_mode,
+            live_sessions=live_sessions,
             **tray_data,
         )
     )
@@ -308,130 +300,25 @@ async def get_standup(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Tmux session attach (iTerm2 / browser via ttyd)
+# Zellij session attach (browser proxy)
 # ---------------------------------------------------------------------------
 
 
 @router.post("/command-center/attach-session")
 async def attach_session(request: Request) -> JSONResponse:
-    """Attach to a tmux session via iTerm2 or browser (ttyd)."""
-    import shutil
-    import socket
-
+    """Attach to a zellij session via the browser proxy."""
+    if not getattr(request.app.state, "zellij_available", False):
+        return JSONResponse({"error": "Zellij is not available"}, status_code=503)
     try:
-        body = await request.json()
+        data = await request.json()
     except json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    tmux_session = body.get("tmux_session")
-    mode = body.get("mode", "iterm2")
-    if not tmux_session:
-        return JSONResponse({"error": "tmux_session is required"}, status_code=400)
-
-    tmux_path = shutil.which("tmux")
-    if not tmux_path:
-        return JSONResponse({"error": "tmux not found on PATH"}, status_code=500)
-
-    if mode == "iterm2":
-        if sys.platform != "darwin":
-            return JSONResponse({"error": "iTerm2 is only available on macOS"}, status_code=422)
-        # Escape for AppleScript string context (backslash, then double-quote).
-        as_safe = tmux_session.replace("\\", "\\\\").replace('"', '\\"')
-        applescript = (
-            'tell application "iTerm2"\n'
-            "  create window with default profile "
-            f'command "{tmux_path} -CC attach -t {as_safe}"\n'
-            "end tell"
-        )
-        try:
-            subprocess.Popen(
-                ["osascript", "-e", applescript],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            return JSONResponse({"error": "osascript not found"}, status_code=500)
-        return JSONResponse({"status": "attached", "tmux_session": tmux_session})
-
-    if mode == "browser":
-        ttyd_path = shutil.which("ttyd")
-        if not ttyd_path:
-            return JSONResponse(
-                {"error": "ttyd not found. Install with: brew install ttyd"},
-                status_code=500,
-            )
-
-        # Ensure ttyd tracking structures exist on app.state.
-        if not hasattr(request.app.state, "ttyd_procs"):
-            request.app.state.ttyd_procs = {}
-        if not hasattr(request.app.state, "ttyd_lock"):
-            request.app.state.ttyd_lock = asyncio.Lock()
-
-        ttyd_procs: dict[str, tuple[subprocess.Popen, int]] = request.app.state.ttyd_procs
-
-        async with request.app.state.ttyd_lock:
-            if tmux_session in ttyd_procs:
-                proc, port = ttyd_procs[tmux_session]
-                if proc.poll() is None:
-                    # Still running — return existing URL.
-                    return JSONResponse({"url": f"http://127.0.0.1:{port}"})
-                # Process exited — clean up and spawn a new one.
-                del ttyd_procs[tmux_session]
-
-            # Find a free port.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
-
-            proc = subprocess.Popen(
-                [
-                    ttyd_path,
-                    "--once",
-                    "--writable",
-                    "--port",
-                    str(port),
-                    tmux_path,
-                    "attach",
-                    "-t",
-                    tmux_session,
-                ],
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            ttyd_procs[tmux_session] = (proc, port)
-
-        # Wait for ttyd to start listening (up to 3 seconds).
-        for _ in range(30):
-            if proc.poll() is not None:
-                stdout = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-                stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-                logger.error(
-                    "ttyd exited with code %s for session %s. stdout: %s stderr: %s",
-                    proc.returncode,
-                    tmux_session,
-                    stdout[:1000],
-                    stderr[:1000],
-                )
-                ttyd_procs.pop(tmux_session, None)
-                return JSONResponse(
-                    {"error": f"ttyd exited unexpectedly (code {proc.returncode}): {stderr[:200]}"},
-                    status_code=500,
-                )
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as check:
-                check.settimeout(0.1)
-                if check.connect_ex(("127.0.0.1", port)) == 0:
-                    break
-            await asyncio.sleep(0.1)
-        else:
-            proc.kill()
-            ttyd_procs.pop(tmux_session, None)
-            return JSONResponse({"error": "ttyd failed to start"}, status_code=500)
-
-        return JSONResponse({"url": f"http://127.0.0.1:{port}"})
-
-    return JSONResponse({"error": f"Unknown mode: {mode}"}, status_code=400)
+    terminal_session = data.get("terminal_session")
+    if not terminal_session:
+        return JSONResponse({"error": "terminal_session is required"}, status_code=400)
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+        return JSONResponse({"error": "invalid session name"}, status_code=400)
+    return JSONResponse({"url": f"/zellij/{terminal_session}"})
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +472,7 @@ async def launch_background(request: Request) -> JSONResponse:
     title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
     skill = skill_override or ("pr-audit" if is_pr_card else "new")
     target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
-    tmux_name = build_tmux_session_name(
+    session_name = build_session_name(
         target=ticket_id or branch_name,
         pr_number=pr_number,
     )
@@ -629,7 +516,7 @@ async def launch_background(request: Request) -> JSONResponse:
                     skill,
                     pr_number=pr_number,
                     pr_repo=pr_repo,
-                    tmux_session=tmux_name,
+                    terminal_session=session_name,
                 )
 
                 args = build_claude_args(
@@ -639,20 +526,20 @@ async def launch_background(request: Request) -> JSONResponse:
                     target,
                     claude_flags=config.command_center.claude_flags,
                 )
-                exec_or_detach(args, wt, tmux_session=tmux_name)
+                exec_or_detach(args, wt, terminal_session=session_name)
 
                 return session_id, wt
 
             session_id, wt = await asyncio.to_thread(_blocking)
 
-            logger.info("Background session launched: %s (tmux: %s)", session_id, tmux_name)
+            logger.info("Background session launched: %s (session: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
             for q in request.app.state.cc_queues:
                 q.put_nowait("board_changed")
 
             return JSONResponse(
-                {"status": "launched", "session_id": session_id, "tmux_session": tmux_name}
+                {"status": "launched", "session_id": session_id, "terminal_session": session_name}
             )
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
@@ -721,7 +608,7 @@ async def start_ticket(request: Request) -> JSONResponse:
 
 @router.post("/command-center/kill-session")
 async def kill_session(request: Request) -> JSONResponse:
-    """Kill a running tmux session and remove the session record."""
+    """Kill a running zellij session and remove the session record."""
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -733,11 +620,15 @@ async def kill_session(request: Request) -> JSONResponse:
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
 
-    if session is None or not isinstance(session, ClaudeCodeSession) or not session.tmux_session:
+    if (
+        session is None
+        or not isinstance(session, ClaudeCodeSession)
+        or not session.terminal_session
+    ):
         return JSONResponse({"error": "session not found"}, status_code=404)
 
     subprocess.run(
-        ["tmux", "kill-session", "-t", session.tmux_session],
+        ["zellij", "kill-session", session.terminal_session],
         capture_output=True,
     )
 
@@ -763,8 +654,8 @@ async def cleanup_worktree(request: Request) -> JSONResponse:
     if session is None or not isinstance(session, ClaudeCodeSession) or not session.worktree_path:
         return JSONResponse({"error": "session not found"}, status_code=404)
 
-    live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
-    if session.tmux_session and session.tmux_session in live_tmux_sessions:
+    live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
+    if session.terminal_session and session.terminal_session in live_sessions:
         return JSONResponse(
             {"error": "Cannot clean up worktree while session is running"},
             status_code=409,

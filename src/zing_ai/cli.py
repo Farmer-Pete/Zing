@@ -186,7 +186,7 @@ def mcp_cmd(port: int) -> None:
 @click.option(
     "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
 )
-@click.option("--detach", is_flag=True, default=False, help="Run in a detached tmux session.")
+@click.option("--detach", is_flag=True, default=False, help="Run in a detached session.")
 @click.option(
     "--setup-only",
     is_flag=True,
@@ -202,7 +202,7 @@ def launch(
         TICKET_ID_PATTERN,
         LaunchError,
         build_claude_args,
-        build_tmux_session_name,
+        build_session_name,
         checkout_pr_branch,
         create_session_on_server,
         create_worktree,
@@ -215,7 +215,7 @@ def launch(
         fetch_session,
         move_ticket_in_progress,
         parse_pr_url,
-        require_tmux,
+        require_session_backend,
         resolve_repo_root,
         rollback_worktree,
         run_init_script,
@@ -248,7 +248,7 @@ def launch(
             ) from e
 
         if detach:
-            require_tmux()
+            require_session_backend()
 
         # -- shared helpers (capture enclosing scope) ----------------------
 
@@ -267,7 +267,7 @@ def launch(
                 claude_flags=cfg.command_center.claude_flags,
             )
             resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
-            tmux_name = build_tmux_session_name(name) if detach else None
+            session_name = build_session_name(name) if detach else None
             explicit = resume not in ("auto", "")
             if explicit:
                 click.echo(f"cwd: {resume_cwd}", err=True)
@@ -304,7 +304,7 @@ def launch(
                         click.echo(f"cwd: {wt}", err=True)
                         click.echo(f"cmd: {shlex.join(relaunch_args)}", err=True)
                         sys.stderr.flush()
-                        exec_or_detach(relaunch_args, Path(wt), tmux_name)
+                        exec_or_detach(relaunch_args, Path(wt), session_name)
                         return True
                     raise LaunchError("Aborted by user.")
                 click.echo("Session not found on Zing server either.", err=True)
@@ -379,7 +379,7 @@ def launch(
             resolved_skill: str,
             title: str,
             ticket_id: str | None,
-            tmux_name: str | None,
+            session_name: str | None,
             pre_create_hook: Callable[[], None] | None = None,
             pr_number: int | None = None,
             pr_repo: str | None = None,
@@ -405,7 +405,7 @@ def launch(
                     skill=resolved_skill,
                     pr_number=pr_number,
                     pr_repo=pr_repo,
-                    tmux_session=tmux_name,
+                    terminal_session=session_name,
                 )
                 succeeded = True
             finally:
@@ -428,7 +428,7 @@ def launch(
                 target=target_arg,
                 claude_flags=cfg.command_center.claude_flags,
             )
-            exec_or_detach(args, work_dir, tmux_name)
+            exec_or_detach(args, work_dir, session_name)
 
         def _prompt_workflow_mode() -> str:
             """Prompt for workflow mode if configured as 'ask'."""
@@ -474,7 +474,7 @@ def launch(
             branch_name = derive_branch_name(ticket_id, api_key)
             wf_mode = _prompt_workflow_mode()
             work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
-            tmux_name = build_tmux_session_name(ticket_id) if detach else None
+            session_name = build_session_name(ticket_id) if detach else None
             ticket_skill = skill or "new"
 
             _init_create_and_launch(
@@ -487,7 +487,7 @@ def launch(
                 resolved_skill=ticket_skill,
                 title=ticket_id,
                 ticket_id=ticket_id,
-                tmux_name=tmux_name,
+                session_name=session_name,
                 pre_create_hook=lambda: move_ticket_in_progress(ticket_id, api_key),
             )
 
@@ -526,7 +526,7 @@ def launch(
                     shutil.copy2(md_path, dest)
                     md_path = dest
 
-            tmux_name = build_tmux_session_name(md_name) if detach else None
+            session_name = build_session_name(md_name) if detach else None
             md_skill = skill or "new"
 
             _init_create_and_launch(
@@ -539,7 +539,7 @@ def launch(
                 resolved_skill=md_skill,
                 title=md_name,
                 ticket_id=None,
-                tmux_name=tmux_name,
+                session_name=session_name,
             )
 
         else:
@@ -589,7 +589,7 @@ def launch(
             else:
                 work_dir = Path.cwd()
 
-            tmux_name = build_tmux_session_name(target, pr_number=pr_number) if detach else None
+            session_name = build_session_name(target, pr_number=pr_number) if detach else None
 
             _init_create_and_launch(
                 repo_root=repo_root,
@@ -601,7 +601,7 @@ def launch(
                 resolved_skill=pr_skill,
                 title=pr_name,
                 ticket_id=ticket_id,
-                tmux_name=tmux_name,
+                session_name=session_name,
                 pr_number=pr_number,
                 pr_repo=f"{owner}/{repo}",
             )
