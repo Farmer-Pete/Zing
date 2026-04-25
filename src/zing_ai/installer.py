@@ -115,6 +115,93 @@ def install_claude(target_dir: Path | None = None, config: Config | None = None)
     )
 
     register_mcp_server("claude")
+    install_claude_hooks()
+
+
+def install_claude_hooks(hooks_dir: Path | None = None, settings_path: Path | None = None) -> None:
+    """Install the notify-zing.sh hook and register it in Claude Code settings.
+
+    Creates ``~/.claude/hooks/`` if it doesn't exist, copies the bundled
+    ``notify-zing.sh`` script into it (making it executable), and merges the
+    ``PreToolUse`` hook entry for ``AskUserQuestion`` into
+    ``~/.claude/settings.json``.
+
+    The operation is idempotent — running it again will not duplicate the hook
+    entry in settings.json.
+
+    Parameters
+    ----------
+    hooks_dir:
+        Override for ``~/.claude/hooks/``.  Useful for testing.
+    settings_path:
+        Override for ``~/.claude/settings.json``.  Useful for testing.
+    """
+    if hooks_dir is None:
+        hooks_dir = Path.home() / ".claude" / "hooks"
+    if settings_path is None:
+        settings_path = Path.home() / ".claude" / "settings.json"
+
+    logger.info("Installing Claude hooks to %s", hooks_dir)
+
+    # -- 1. Ensure hooks directory exists -------------------------------------
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    # -- 2. Copy notify-zing.sh -----------------------------------------------
+    src_hook = importlib.resources.files("zing_ai").joinpath("hooks").joinpath("notify-zing.sh")
+    dst_hook = hooks_dir / "notify-zing.sh"
+    dst_hook.write_bytes(src_hook.read_bytes())
+    # Make it executable (owner, group, others)
+    current_mode = dst_hook.stat().st_mode
+    dst_hook.chmod(current_mode | 0o111)
+    logger.debug("Installed hook script: %s", dst_hook)
+
+    # -- 3. Merge PreToolUse entry into settings.json -------------------------
+    _merge_pretooluse_hook(settings_path)
+
+
+def _merge_pretooluse_hook(settings_path: Path) -> None:
+    """Merge the AskUserQuestion PreToolUse hook entry into settings.json.
+
+    Reads the existing settings file (or starts with an empty dict), checks
+    whether a ``PreToolUse`` entry with ``matcher: "AskUserQuestion"`` already
+    exists, and only appends it if missing.  Existing hooks are always
+    preserved.
+    """
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing settings.json: %s", exc)
+            settings = {}
+
+    hooks_section = settings.setdefault("hooks", {})
+    pretooluse_list = hooks_section.setdefault("PreToolUse", [])
+
+    # Check for an existing entry with matcher "AskUserQuestion".
+    matcher = "AskUserQuestion"
+    for entry in pretooluse_list:
+        if isinstance(entry, dict) and entry.get("matcher") == matcher:
+            logger.debug("PreToolUse hook for %r already registered — skipping", matcher)
+            return
+
+    # Append the new entry.
+    pretooluse_list.append(
+        {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "~/.claude/hooks/notify-zing.sh",
+                    "timeout": 5,
+                }
+            ],
+        }
+    )
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    logger.debug("Registered PreToolUse hook for %r in %s", matcher, settings_path)
 
 
 def install_opencode(target_dir: Path | None = None, config: Config | None = None) -> None:

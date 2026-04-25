@@ -33,8 +33,14 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,
 )
-from zing_ai.server.command_center import aggregate, generate_standup, infer_repo_for_ticket
-from zing_ai.server.models import ClaudeCodeSession
+from zing_ai.server.attention import AttentionItem, build_attention_queue
+from zing_ai.server.command_center import (
+    aggregate,
+    build_session_phases,
+    generate_standup,
+    infer_repo_for_ticket,
+)
+from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.templates import render, render_markdown
 
@@ -185,11 +191,29 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_sessions: set[str] = getattr(app.state, "live_sessions", set())
+    sessions = app.state.session_manager.list_sessions()
+    session_phases = {}
+    for s in sessions:
+        if hasattr(s, "steps"):
+            session_phases[s.session_id] = build_session_phases(s)
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_sessions=live_sessions,
+        session_phases=session_phases,
+    )
+
+
+def render_attention_bar_fragment(app: FastAPI, sessions: list[Session] | None = None) -> str:
+    """Render the attention bar fragment. Used by SSE board_changed events."""
+    resolved: list[Session] = (
+        sessions if sessions is not None else app.state.session_manager.list_sessions()
+    )
+    attention_items = build_attention_queue(resolved, datetime.now(UTC))
+    return render(
+        "fragments/attention_bar.html",
+        attention_items=attention_items,
     )
 
 
@@ -210,6 +234,11 @@ async def get_command_center(request: Request) -> HTMLResponse:
     live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
     sessions = request.app.state.session_manager.list_sessions()
     tray_data = _build_tray_data(view, sessions, live_sessions)
+    attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    session_phases = {}
+    for s in sessions:
+        if hasattr(s, "steps"):
+            session_phases[s.session_id] = build_session_phases(s)
     return HTMLResponse(
         render(
             "command_center.html",
@@ -221,6 +250,8 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_sessions=live_sessions,
+            attention_items=attention_items,
+            session_phases=session_phases,
             **tray_data,
         )
     )
@@ -244,10 +275,17 @@ async def command_center_events(request: Request):  # noqa: ANN201
                     continue
                 kind, _, _target = event.partition(":")
                 if kind == "board_changed":
+                    sessions = request.app.state.session_manager.list_sessions()
                     html = render_board_fragment(request.app)
                     yield SSE.patch_elements(
                         html,
                         selector="#kanban-board",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                    attn_html = render_attention_bar_fragment(request.app, sessions=sessions)
+                    yield SSE.patch_elements(
+                        attn_html,
+                        selector="#attention-bar",
                         mode=ElementPatchMode.OUTER,
                     )
                     tray_html = _render_tray_fragment(request.app)
@@ -683,3 +721,186 @@ async def cleanup_worktree(request: Request) -> JSONResponse:
     manager.cleanup_session(session_id)
     _push_board_changed(request.app)
     return JSONResponse({"status": "cleaned_up"})
+
+
+@router.post("/command-center/session-question")
+async def session_question(request: Request) -> JSONResponse:
+    """Receive a question from a Claude Code hook and add it as a notification."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    session_id = body.get("session_id")
+    question = body.get("question")
+    if not session_id or not question:
+        return JSONResponse({"status": "ignored"})
+    manager = request.app.state.session_manager
+    # Direct lookup first.
+    session = manager.get_session(session_id)
+    if session is not None and not isinstance(session, ClaudeCodeSession):
+        session = None  # Only accept ClaudeCodeSession for hook questions
+    if session is None:
+        # Fallback: scan for a ClaudeCodeSession whose terminal_session matches.
+        for s in manager.list_sessions():
+            if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_id:
+                session = s
+                session_id = s.session_id
+                break
+    if session is None:
+        logger.debug("session_question ignored: session_id=%s not found", session_id)
+        return JSONResponse({"status": "ignored"})
+    manager.add_notification(session_id, title="Input needed", body=question)
+    return JSONResponse({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Review drawer
+# ---------------------------------------------------------------------------
+
+
+def _format_wait_label(seconds: int) -> str:
+    """Return a compact wait-time string: '42s', '5m', '2h'."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def build_drawer_context(
+    session_id: str,
+    manager: object,
+    attention_queue: list[AttentionItem],
+) -> dict:
+    """Build template context for the review drawer.
+
+    Args:
+        session_id: The session to open in the drawer.
+        manager: The session manager (app.state.session_manager).
+        attention_queue: Current attention queue from build_attention_queue().
+
+    Returns:
+        A dict with keys: session, steps, current_step, mode, queue_position,
+        queue_total, queue_items, next_session_id, prev_session_id,
+        waiting_label, notification_body, notification.
+    """
+    session = manager.get_session(session_id)  # type: ignore[union-attr]
+    if session is None:
+        return {}
+
+    # Find this session in the attention queue to determine position.
+    queue_index = next(
+        (i for i, item in enumerate(attention_queue) if item.session_id == session_id),
+        None,
+    )
+
+    queue_total = len(attention_queue)
+    queue_position = (queue_index + 1) if queue_index is not None else 1
+
+    # Items after this one in the queue.
+    queue_items = attention_queue[queue_index + 1 :] if queue_index is not None else []
+
+    next_session_id: str | None = queue_items[0].session_id if queue_items else None
+    prev_session_id: str | None = (
+        attention_queue[queue_index - 1].session_id
+        if (queue_index is not None and queue_index > 0)
+        else None
+    )
+
+    # Determine mode.
+    current_attention = attention_queue[queue_index] if queue_index is not None else None
+    mode = current_attention.action_type if current_attention else "findings"
+
+    # Normalise: "questions" maps to "findings" for template mode.
+    if mode == "questions":
+        mode = "findings"
+
+    # Wait label.
+    waiting_label = ""
+    if current_attention:
+        waiting_label = _format_wait_label(current_attention.wait_seconds)
+
+    # Steps and current step for ZingSession.
+    steps: list = []
+    current_step = None
+    notification = None
+    notification_body = ""
+
+    if isinstance(session, ZingSession):
+        steps = list(session.steps)
+        # Current step = last READY step.
+        current_step = next((s for s in reversed(steps) if s.state.value == "ready"), None)
+    elif isinstance(session, ClaudeCodeSession):
+        notification = session.pending_question
+        notification_body = notification.body if notification else ""
+
+    return {
+        "session": session,
+        "steps": steps,
+        "current_step": current_step,
+        "mode": mode,
+        "queue_position": queue_position,
+        "queue_total": max(queue_total, 1),
+        "queue_items": queue_items,
+        "next_session_id": next_session_id,
+        "prev_session_id": prev_session_id,
+        "waiting_label": waiting_label,
+        "notification": notification,
+        "notification_body": notification_body,
+    }
+
+
+@router.get("/command-center/drawer/{session_id}", response_class=HTMLResponse)
+async def get_drawer(session_id: str, request: Request) -> HTMLResponse:
+    """Return the drawer HTML fragment for a session.
+
+    The fragment includes backdrop + panel.  The JS injects it into
+    #review-drawer-container and sets display:block.
+    """
+    manager = request.app.state.session_manager
+    sessions = manager.list_sessions()
+    attention_queue = build_attention_queue(sessions, datetime.now(UTC))
+
+    ctx = build_drawer_context(session_id, manager, attention_queue)
+    if not ctx:
+        logger.warning("Drawer requested for unknown session: %s", session_id)
+        return HTMLResponse("<div>Session not found</div>", status_code=404)
+
+    session = ctx["session"]
+
+    if isinstance(session, ClaudeCodeSession):
+        # Attach mode — use the simpler attach template.
+        html = render("fragments/drawer_attach.html", **ctx)
+    else:
+        # Findings/questions mode.
+        html = render("fragments/review_drawer.html", **ctx)
+
+    return HTMLResponse(html)
+
+
+@router.get(
+    "/command-center/drawer/{session_id}/step/{step_id}",
+    response_class=HTMLResponse,
+)
+async def get_drawer_step(
+    session_id: str,
+    step_id: str,
+    request: Request,
+) -> HTMLResponse:
+    """Return a single step-history fragment for the drawer.
+
+    The JS can inject individual step sections when expanding collapsed history.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(session_id)
+    if session is None or not isinstance(session, ZingSession):
+        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+        return HTMLResponse("<div>Session not found</div>", status_code=404)
+
+    step = next((s for s in session.steps if s.step_id == step_id), None)
+    if step is None:
+        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+        return HTMLResponse("<div>Step not found</div>", status_code=404)
+
+    html = render("fragments/drawer_step_history.html", step=step, session=session)
+    return HTMLResponse(html)

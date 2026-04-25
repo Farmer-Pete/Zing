@@ -1344,6 +1344,35 @@ class TestClaudeCodeSession(unittest.TestCase):
         ids = [s.session_id for s in sessions]
         assert "cc-list" in ids
 
+    def test_add_notification_on_claude_code_session(self) -> None:
+        """add_notification() works on a ClaudeCodeSession."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-notif", title="Notif Test")
+        notif = self.manager.add_notification("cc-notif", "Alert", body="Details", url="/cc-notif")
+        session = self.manager.get_session("cc-notif")
+        assert session is not None
+        assert isinstance(session, ClaudeCodeSession)
+        assert len(session.notifications) == 1
+        assert session.notifications[0].id == notif.id
+        assert session.notifications[0].title == "Alert"
+        assert session.notifications[0].body == "Details"
+        assert session.notifications[0].url == "/cc-notif"
+
+    def test_add_notification_on_claude_code_session_fires_event(self) -> None:
+        """add_notification() on ClaudeCodeSession fires a listener event."""
+        self.manager.create_claude_code_session(session_id="cc-evt", title="Event Test")
+        events: list[tuple[str, str]] = []
+        self.manager.add_listener(lambda et, sid: events.append((et, sid)))
+
+        notif = self.manager.add_notification("cc-evt", "Event Alert")
+        matching = [
+            (et, sid)
+            for et, sid in events
+            if et == f"notification_added:{notif.id}" and sid == "cc-evt"
+        ]
+        assert len(matching) == 1
+
 
 if __name__ == "__main__":
     unittest.main()

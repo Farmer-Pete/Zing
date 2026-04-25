@@ -1,0 +1,308 @@
+{#
+  review_drawer.html — full drawer shell injected into #review-drawer-container.
+
+  Expected context variables:
+    session       — ZingSession or ClaudeCodeSession
+    steps         — list of WorkflowStep objects (completed + current)
+    current_step  — the WorkflowStep that is current (READY or STARTED)
+    current_step_index — 0-based index of current step (for timeline)
+    mode          — "findings" | "attach"
+    queue_position — "N of M" position in attention queue
+    queue_total   — total items in attention queue
+    queue_items   — remaining attention items after this one
+    next_session_id — session_id of next item (or None)
+    prev_session_id — session_id of previous item (or None)
+
+  The outer drawer-backdrop and .drawer are rendered inline.
+  The step history is included via a separate fragment call.
+#}
+
+{# ── Backdrop ── #}
+<div class="drawer-backdrop" onclick="window.closeReviewDrawer()"></div>
+
+{# ── Drawer panel ── #}
+<div class="drawer" id="review-drawer">
+
+  {# ── Header ── #}
+  <div class="dh">
+    <div class="dh-top">
+      <button class="dh-close" onclick="window.closeReviewDrawer()">&times;</button>
+      {% if session.ticket_id %}
+        <span class="dh-ticket">{{ session.ticket_id }}</span>
+      {% endif %}
+      <div class="dh-nav">
+        <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
+        <button class="dh-nav-btn" onclick="window.drawerNavPrev()" title="Previous"
+          {% if not prev_session_id %}disabled{% endif %}>&larr;</button>
+        <button class="dh-nav-btn" onclick="window.drawerNavNext()" title="Next"
+          {% if not next_session_id %}disabled{% endif %}>&rarr;</button>
+      </div>
+    </div>
+    <div class="dh-title">{{ session.title }}</div>
+    <div class="dh-meta">
+      {% if current_step %}
+        <span class="dh-badge badge-cyan">{{ current_step.step_name }}</span>
+        {% if mode == "findings" %}
+          <span>{{ current_step.findings | length }} finding{% if current_step.findings | length != 1 %}s{% endif %}</span>
+        {% endif %}
+      {% endif %}
+      {% if waiting_label %}
+        <span>waiting {{ waiting_label }}</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Timeline bar ── #}
+  {% if steps %}
+    <div class="d-tl">
+      {% for step in steps %}
+        {% if step.state.value == "completed" %}
+          {% if step.step_name == "plan" %}
+            <div class="ds ds-p" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
+          {% elif step.step_name in ("plan-audit", "build-audit") %}
+            <div class="ds ds-a" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
+          {% elif step.step_name == "build" %}
+            <div class="ds ds-b" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
+          {% elif step.step_name == "code-review" %}
+            <div class="ds ds-r" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
+          {% else %}
+            <div class="ds ds-u" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
+          {% endif %}
+        {% elif step.state.value == "ready" %}
+          <div class="ds ds-wn" style="flex:{{ loop.index }}" title="{{ step.step_name }}">now</div>
+        {% else %}
+          <div class="ds ds-w" style="flex:{{ loop.index }}" title="{{ step.step_name }}"></div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <div class="d-tl-info">
+      <span style="font-weight:600">{{ steps | length }} step{% if steps | length != 1 %}s{% endif %}</span>
+    </div>
+  {% endif %}
+
+  {# ── Scrollable body ── #}
+  <div class="d-body" id="drawer-body">
+    {# Past steps — collapsible history #}
+    {% for step in steps %}
+      {% if step != current_step %}
+        <div class="step-section" id="step-section-{{ step.step_id }}">
+          <div class="step-hdr" onclick="this.parentElement.classList.toggle('open')">
+            <span class="step-chv">&#9654;</span>
+            {% if step.step_name == "plan" %}
+              <span class="step-ico">&#128269;</span>
+            {% elif step.step_name in ("plan-audit", "build-audit") %}
+              <span class="step-ico">&#128203;</span>
+            {% elif step.step_name == "build" %}
+              <span class="step-ico">&#128736;</span>
+            {% elif step.step_name == "code-review" %}
+              <span class="step-ico">&#128270;</span>
+            {% else %}
+              <span class="step-ico">&#9654;</span>
+            {% endif %}
+            <span class="step-name">{{ step.step_name }}</span>
+            {% if step.state.value == "completed" %}
+              <span class="step-badge sbg-completed">completed</span>
+            {% elif step.state.value == "ready" %}
+              <span class="step-badge sbg-ready">ready</span>
+            {% else %}
+              <span class="step-badge sbg-started">{{ step.state.value }}</span>
+            {% endif %}
+            {% if step.agents %}
+              <span class="step-time">{{ step.agents | length }} agent{% if step.agents | length != 1 %}s{% endif %}</span>
+            {% endif %}
+          </div>
+          <div class="step-content">
+            {# Agent rows #}
+            {% for agent in step.agents %}
+              <div class="agent-row">
+                <div class="ag-dot" style="background:{% if agent.state.value == 'completed' %}var(--green){% else %}var(--orange){% endif %}"></div>
+                <span class="ag-name">{{ agent.name }}</span>
+                {% if agent.description %}<span class="ag-desc">— {{ agent.description }}</span>{% endif %}
+              </div>
+            {% endfor %}
+
+            {# Per-finding response rows #}
+            {% if step.findings %}
+              <div class="hist-findings">
+                {% for finding in step.findings %}
+                  {% set response = step.responses[loop.index0] if step.responses and loop.index0 < step.responses | length else None %}
+                  <div class="hist-finding">
+                    {% if response and response.action %}
+                      <span class="hf-action hfa-{{ response.action.value | lower }}">{{ response.action.value }}</span>
+                    {% else %}
+                      <span class="hf-action" style="background:var(--gray-100);color:var(--gray-500)">—</span>
+                    {% endif %}
+                    <div class="hf-body">
+                      <div class="hf-title {% if response and response.action and response.action.value == 'drop' %}hf-dropped{% endif %}">{{ finding.title }}</div>
+                      {% if response and response.answer %}
+                        <div class="hf-response">{{ response.answer }}</div>
+                      {% endif %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+    {% endfor %}
+
+    {# Current step findings or attach mode #}
+    {% if current_step %}
+      {% if mode == "attach" %}
+        {# ── Attach hero ── #}
+        <div class="attach-hero">
+          <div class="attach-hero-icon">&#9654;</div>
+          <h3>Claude needs your input</h3>
+          {% if notification_body %}
+            <p>{{ notification_body }}</p>
+          {% endif %}
+          <button class="attach-hero-btn" onclick="window.openTerminalFromDrawer('{{ session.terminal_session }}')">Attach to Session</button>
+        </div>
+
+        {% if notification_body %}
+          <div class="attach-ctx">
+            <div class="attach-ctx-title">Question</div>
+            <div class="attach-msg">{{ notification_body }}</div>
+          </div>
+        {% endif %}
+
+      {% elif mode == "findings" and current_step.findings %}
+        {# ── Current step header ── #}
+        <div class="step-section open" id="step-section-{{ current_step.step_id }}">
+          <div class="step-hdr" style="background:rgba(62,207,224,0.06)" onclick="this.parentElement.classList.toggle('open')">
+            <span class="step-chv">&#9654;</span>
+            {% if current_step.step_name == "plan" %}
+              <span class="step-ico">&#128269;</span>
+            {% elif current_step.step_name in ("plan-audit", "build-audit") %}
+              <span class="step-ico">&#128203;</span>
+            {% elif current_step.step_name == "build" %}
+              <span class="step-ico">&#128736;</span>
+            {% elif current_step.step_name == "code-review" %}
+              <span class="step-ico">&#128270;</span>
+            {% else %}
+              <span class="step-ico">&#9654;</span>
+            {% endif %}
+            <span class="step-name">{{ current_step.step_name }}</span>
+            <span class="step-badge sbg-ready">ready for review</span>
+          </div>
+          <div class="step-content">
+            {% for agent in current_step.agents %}
+              <div class="agent-row">
+                <div class="ag-dot"></div>
+                <span class="ag-name">{{ agent.name }}</span>
+                {% if agent.description %}<span class="ag-desc">— {{ agent.description }}</span>{% endif %}
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        {# ── Findings area ── #}
+        <div class="findings-area">
+          <div class="d-ft">Findings to review ({{ current_step.findings | length }})</div>
+
+          {% for finding in current_step.findings %}
+            <div class="df" id="df-{{ finding.id }}">
+              <div class="df-h">
+                {% if finding.type == "triage" and finding.severity %}
+                  {% if finding.severity.value in ("critical", "high") %}
+                    <span class="df-s df-hi">{{ finding.severity.value }}</span>
+                  {% elif finding.severity.value == "medium" %}
+                    <span class="df-s df-me">med</span>
+                  {% else %}
+                    <span class="df-s df-in">{{ finding.severity.value }}</span>
+                  {% endif %}
+                {% elif finding.type == "evaluation" %}
+                  <span class="df-s df-in">eval</span>
+                {% elif finding.type == "text" %}
+                  <span class="df-s" style="background:rgba(245,124,32,0.15);color:var(--orange)">q</span>
+                {% endif %}
+                <span class="df-t">{{ finding.title }}</span>
+              </div>
+              {% if finding.body %}
+                <div class="df-b">{{ finding.body }}</div>
+              {% endif %}
+              {% if finding.type == "triage" and finding.location %}
+                <div class="df-l">{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</div>
+              {% endif %}
+              {% if finding.type == "triage" %}
+                <div class="df-tr">
+                  <button class="df-tb" data-action="accept" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Accept</button>
+                  <button class="df-tb" data-action="drop" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Drop</button>
+                  <button class="df-tb" data-action="discuss" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Discuss</button>
+                </div>
+              {% elif finding.type == "text" %}
+                <div class="df-tr">
+                  <textarea class="df-answer" id="answer-{{ finding.id }}" placeholder="Your answer…" rows="2"
+                    data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}"></textarea>
+                </div>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  {# ── Footer ── #}
+  <div class="d-footer">
+    <div class="d-fprog">
+      {% if mode == "findings" and current_step %}
+        <strong id="drawer-triage-count">0</strong> / {{ current_step.findings | length }} triaged
+      {% elif mode == "attach" %}
+        Waiting for response
+      {% endif %}
+    </div>
+    <button class="d-fskip" onclick="window.skipToNext()">Skip &rarr;</button>
+    {% if mode == "findings" and current_step %}
+      <button class="d-fsub"
+        id="drawer-submit-btn"
+        data-session-id="{{ session.session_id }}"
+        data-step-id="{{ current_step.step_id }}"
+        data-next-session-id="{{ next_session_id or '' }}"
+        onclick="window.submitAndNext()">Submit &amp; Next</button>
+    {% endif %}
+  </div>
+
+  {# ── Up next queue ── #}
+  {% if queue_items %}
+    <div class="d-queue"
+      data-next-session-id="{{ next_session_id or '' }}"
+      data-prev-session-id="{{ prev_session_id or '' }}">
+      <div class="d-qt">Up next <span class="d-qc">{{ queue_items | length }}</span></div>
+      {% for item in queue_items[:3] %}
+        {% if item.action_type == "findings" %}
+          {% set qi_cls = "qi-findings" %}
+          {% set qi_ico = "&#9998;" %}
+          {% set qa_cls = "qa-review" %}
+          {% set qa_lbl = "review" %}
+        {% elif item.action_type == "attach" %}
+          {% set qi_cls = "qi-attach" %}
+          {% set qi_ico = "&#9654;" %}
+          {% set qa_cls = "qa-attach" %}
+          {% set qa_lbl = "attach" %}
+        {% else %}
+          {% set qi_cls = "qi-question" %}
+          {% set qi_ico = "?" %}
+          {% set qa_cls = "qa-answer" %}
+          {% set qa_lbl = "answer" %}
+        {% endif %}
+        <div class="d-qi" onclick="window.openReviewDrawer('{{ item.session_id }}', '{{ item.action_type }}')"
+             data-session-id="{{ item.session_id }}">
+          <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
+          {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}
+          <span class="d-qtl">{{ item.title }}</span>
+          <span class="d-qa {{ qa_cls }}">{{ qa_lbl }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="d-queue">
+      <div class="d-qt">Queue empty</div>
+      <div style="font-size:0.68rem;color:var(--gray-500);padding:0.25rem 0.25rem 0.1rem">
+        All caught up &#10003;
+      </div>
+    </div>
+  {% endif %}
+
+</div>
