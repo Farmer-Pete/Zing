@@ -28,6 +28,7 @@ from zing_ai.launch import (
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
+    sanitize_branch_name,
     validate_markdown_target,
 )
 
@@ -1028,6 +1029,30 @@ class TestFindRepoPath(TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestSanitizeBranchName(TestCase):
+    """Tests for sanitize_branch_name."""
+
+    def test_passes_clean_name(self) -> None:
+        self.assertEqual(
+            sanitize_branch_name("replace-tmux-with-zellij"), "replace-tmux-with-zellij"
+        )
+
+    def test_replaces_spaces_with_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("my cool plan"), "my-cool-plan")
+
+    def test_replaces_special_chars(self) -> None:
+        self.assertEqual(sanitize_branch_name("design~v2"), "design-v2")
+
+    def test_strips_leading_trailing_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("..foo"), "foo")
+
+    def test_collapses_consecutive_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("a   b"), "a-b")
+
+    def test_returns_unnamed_for_empty(self) -> None:
+        self.assertEqual(sanitize_branch_name("..."), "unnamed")
+
+
 class TestValidateMarkdownTarget(TestCase):
     """Tests for validate_markdown_target."""
 
@@ -1135,6 +1160,28 @@ class TestDetectActionByTitle(TestCase):
         self.assertEqual(action, "new")
         self.assertIsNone(sid)
         self.assertIsNone(wt)
+
+    def test_returns_most_recent_match(self) -> None:
+        """When multiple sessions match the title, returns the last (most recent) one."""
+        sessions = [
+            {
+                "session_type": "claude_code",
+                "title": "my-plan",
+                "session_id": "sess-old",
+                "worktree_path": "/tmp/wt-old",
+            },
+            {
+                "session_type": "claude_code",
+                "title": "my-plan",
+                "session_id": "sess-new",
+                "worktree_path": "/tmp/wt-new",
+            },
+        ]
+        with self._mock_urlopen(sessions):
+            action, sid, wt = detect_action_by_title("my-plan", "http://localhost:9876")
+        self.assertEqual(action, "resume")
+        self.assertEqual(sid, "sess-new")
+        self.assertEqual(wt, "/tmp/wt-new")
 
     def test_ignores_non_claude_code_sessions(self) -> None:
         sessions = [
