@@ -371,23 +371,28 @@
       {% set _status_label = "done" if _state_val == "completed" else ("stopped" if _state_val == "stopped" else _state_val) %}
       <div class="card-session-strip" data-open-drawer="{{ _sess.session_id }}" data-drawer-mode="history">
         <div class="card-session-phases">
-          {# Phase segments rendered inline — build_session_phases() not callable from template,
-             so we render simple phase segments from step names directly ── #}
-          {% for step in _sess.steps %}
-            {% if step.step_name == 'plan' %}
-              <div class="css-seg css-p" style="flex:1"></div>
-            {% elif step.step_name in ('plan-audit', 'build-audit', 'pr-audit', 'custom-audit') %}
-              <div class="css-seg css-a" style="flex:1"></div>
-            {% elif step.step_name == 'build' %}
-              <div class="css-seg css-b" style="flex:1"></div>
-            {% elif step.step_name == 'ready' %}
-              <div class="css-seg css-r" style="flex:1"></div>
-            {% else %}
-              <div class="css-seg css-b" style="flex:1"></div>
+          {% if session_phases and _sess.session_id in session_phases %}
+            {% for seg in session_phases[_sess.session_id] %}
+              <div class="css-seg css-{{ seg.phase[0] }}" style="flex:{{ seg.flex }}"></div>
+            {% endfor %}
+          {% else %}
+            {# Phase segments rendered inline — equal-width fallback ── #}
+            {% for step in _sess.steps %}
+              {% if step.step_name == 'plan' %}
+                <div class="css-seg css-p" style="flex:1"></div>
+              {% elif step.step_name in ('plan-audit', 'build-audit', 'pr-audit', 'custom-audit') %}
+                <div class="css-seg css-a" style="flex:1"></div>
+              {% elif step.step_name == 'build' %}
+                <div class="css-seg css-b" style="flex:1"></div>
+              {% elif step.step_name == 'ready' %}
+                <div class="css-seg css-r" style="flex:1"></div>
+              {% else %}
+                <div class="css-seg css-b" style="flex:1"></div>
+              {% endif %}
+            {% endfor %}
+            {% if not _sess.steps %}
+              <div class="css-seg css-w" style="flex:1"></div>
             {% endif %}
-          {% endfor %}
-          {% if not _sess.steps %}
-            <div class="css-seg css-w" style="flex:1"></div>
           {% endif %}
         </div>
         <span class="card-session-label">{{ _status_label }}</span>

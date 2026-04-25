@@ -34,8 +34,13 @@ from zing_ai.launch import (
     rollback_worktree,
 )
 from zing_ai.server.attention import AttentionItem, build_attention_queue
-from zing_ai.server.command_center import aggregate, generate_standup, infer_repo_for_ticket
-from zing_ai.server.models import ClaudeCodeSession, ZingSession
+from zing_ai.server.command_center import (
+    aggregate,
+    build_session_phases,
+    generate_standup,
+    infer_repo_for_ticket,
+)
+from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.templates import render, render_markdown
 
@@ -186,18 +191,26 @@ def render_board_fragment(app: FastAPI) -> str:
     view = _build_view(app)
     cache = app.state.external_cache
     live_sessions: set[str] = getattr(app.state, "live_sessions", set())
+    sessions = app.state.session_manager.list_sessions()
+    session_phases = {}
+    for s in sessions:
+        if hasattr(s, "steps"):
+            session_phases[s.session_id] = build_session_phases(s)
     return render(
         "fragments/kanban_board.html",
         view=view,
         current_username=cache.github_username or "",
         live_sessions=live_sessions,
+        session_phases=session_phases,
     )
 
 
-def render_attention_bar_fragment(app: FastAPI) -> str:
+def render_attention_bar_fragment(app: FastAPI, sessions: list[Session] | None = None) -> str:
     """Render the attention bar fragment. Used by SSE board_changed events."""
-    sessions = app.state.session_manager.list_sessions()
-    attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    resolved: list[Session] = (
+        sessions if sessions is not None else app.state.session_manager.list_sessions()
+    )
+    attention_items = build_attention_queue(resolved, datetime.now(UTC))
     return render(
         "fragments/attention_bar.html",
         attention_items=attention_items,
@@ -222,6 +235,10 @@ async def get_command_center(request: Request) -> HTMLResponse:
     sessions = request.app.state.session_manager.list_sessions()
     tray_data = _build_tray_data(view, sessions, live_sessions)
     attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    session_phases = {}
+    for s in sessions:
+        if hasattr(s, "steps"):
+            session_phases[s.session_id] = build_session_phases(s)
     return HTMLResponse(
         render(
             "command_center.html",
@@ -234,6 +251,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             current_username=cache.github_username or "",
             live_sessions=live_sessions,
             attention_items=attention_items,
+            session_phases=session_phases,
             **tray_data,
         )
     )
@@ -257,13 +275,14 @@ async def command_center_events(request: Request):  # noqa: ANN201
                     continue
                 kind, _, _target = event.partition(":")
                 if kind == "board_changed":
+                    sessions = request.app.state.session_manager.list_sessions()
                     html = render_board_fragment(request.app)
                     yield SSE.patch_elements(
                         html,
                         selector="#kanban-board",
                         mode=ElementPatchMode.OUTER,
                     )
-                    attn_html = render_attention_bar_fragment(request.app)
+                    attn_html = render_attention_bar_fragment(request.app, sessions=sessions)
                     yield SSE.patch_elements(
                         attn_html,
                         selector="#attention-bar",
@@ -718,14 +737,17 @@ async def session_question(request: Request) -> JSONResponse:
     manager = request.app.state.session_manager
     # Direct lookup first.
     session = manager.get_session(session_id)
+    if session is not None and not isinstance(session, ClaudeCodeSession):
+        session = None  # Only accept ClaudeCodeSession for hook questions
     if session is None:
-        # Fallback: scan for a ClaudeCodeSession whose tmux_session matches.
+        # Fallback: scan for a ClaudeCodeSession whose terminal_session matches.
         for s in manager.list_sessions():
-            if isinstance(s, ClaudeCodeSession) and s.tmux_session == session_id:
+            if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_id:
                 session = s
                 session_id = s.session_id
                 break
     if session is None:
+        logger.debug("session_question ignored: session_id=%s not found", session_id)
         return JSONResponse({"status": "ignored"})
     manager.add_notification(session_id, title="Input needed", body=question)
     return JSONResponse({"status": "ok"})
@@ -841,6 +863,7 @@ async def get_drawer(session_id: str, request: Request) -> HTMLResponse:
 
     ctx = build_drawer_context(session_id, manager, attention_queue)
     if not ctx:
+        logger.warning("Drawer requested for unknown session: %s", session_id)
         return HTMLResponse("<div>Session not found</div>", status_code=404)
 
     session = ctx["session"]
@@ -871,10 +894,12 @@ async def get_drawer_step(
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
     if session is None or not isinstance(session, ZingSession):
+        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
         return HTMLResponse("<div>Session not found</div>", status_code=404)
 
     step = next((s for s in session.steps if s.step_id == step_id), None)
     if step is None:
+        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
         return HTMLResponse("<div>Step not found</div>", status_code=404)
 
     html = render("fragments/drawer_step_history.html", step=step, session=session)

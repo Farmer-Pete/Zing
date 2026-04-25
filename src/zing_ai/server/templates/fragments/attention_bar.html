@@ -5,21 +5,22 @@
     attention_items  — list[AttentionItem] from build_attention_queue()
 
   Hidden entirely when attention_items is empty.
-  Collapsible via <details>/<summary> — preserves open/closed state across SSE patches.
+  Collapse state is tracked in the Datastar signal $attnBarOpen so it
+  survives SSE patches that replace this element in-place.
 
   The outer <div id="attention-bar"> is included here so that OUTER-mode SSE
   patches can replace this element in-place (same pattern as kanban_board.html).
 #}
 <div id="attention-bar">
 {% if attention_items %}
-<details class="attn-bar" open>
-  <summary class="attn-hdr">
+<div class="attn-bar">
+  <div class="attn-hdr" data-on-click="$attnBarOpen = !$attnBarOpen" style="cursor:pointer">
     <div class="attn-ico">!</div>
     <span class="attn-ttl">Needs your attention</span>
     <span class="attn-cnt">{{ attention_items | length }}</span>
     <span class="attn-chv">&#9660;</span>
-  </summary>
-  <div class="attn-items">
+  </div>
+  <div class="attn-items" data-show="$attnBarOpen">
     {% for item in attention_items %}
       {% if item.action_type == "findings" %}
         {% set type_cls = "type-findings" %}
@@ -79,6 +80,6 @@
       </div>
     {% endfor %}
   </div>
-</details>
+</div>
 {% endif %}
 </div>

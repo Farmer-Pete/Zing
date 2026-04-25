@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from zing_ai.server.command_center import _ensure_utc
 from zing_ai.server.models import ClaudeCodeSession, Session, SessionState, ZingSession
 
 
@@ -37,12 +38,13 @@ def build_attention_queue(sessions: list[Session], now: datetime) -> list[Attent
     Returns items sorted by wait_seconds descending (longest wait first).
     """
     items: list[AttentionItem] = []
+    now = _ensure_utc(now)
 
     for session in sessions:
         if isinstance(session, ZingSession):
             for step in session.steps:
                 if step.state == SessionState.READY:
-                    wait_seconds = int((now - step.created_at).total_seconds())
+                    wait_seconds = int((now - _ensure_utc(step.created_at)).total_seconds())
                     action_type: Literal["findings", "attach", "questions"] = (
                         "questions" if step.step_name == "plan" else "findings"
                     )
@@ -64,7 +66,7 @@ def build_attention_queue(sessions: list[Session], now: datetime) -> list[Attent
         elif isinstance(session, ClaudeCodeSession):
             notification = session.pending_question
             if notification is not None:
-                wait_seconds = int((now - notification.created_at).total_seconds())
+                wait_seconds = int((now - _ensure_utc(notification.created_at)).total_seconds())
                 items.append(
                     AttentionItem(
                         action_type="attach",

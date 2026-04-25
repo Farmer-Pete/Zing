@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": []} | tojson }}'
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true} | tojson }}'
      data-init="@get('/command-center/events')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
@@ -538,6 +538,8 @@
             btn.innerHTML = '&#10007; Failed';
             setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 3000);
         });
+    });
+
     // ── Review Drawer ────────────────────────────────────────────────────────
 
     // Current drawer state.
