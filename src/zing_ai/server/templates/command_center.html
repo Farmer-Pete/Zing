@@ -242,9 +242,11 @@
         });
         menu.classList.toggle('open');
         var card = menu.closest('.card');
-        card.classList.toggle('menu-open', menu.classList.contains('open'));
+        var isOpen = menu.classList.contains('open');
+        card.classList.toggle('menu-open', isOpen);
+        kebab.setAttribute('aria-expanded', isOpen);
         // Auto-focus search if present
-        if (menu.classList.contains('open')) {
+        if (isOpen) {
             var search = menu.querySelector('.menu-search');
             if (search) { search.value = ''; search.focus(); filterMenu(search); }
         }
@@ -254,6 +256,10 @@
         document.querySelectorAll('.strip-menu.open').forEach(function(m) {
             m.classList.remove('open');
             m.closest('.card').classList.remove('menu-open');
+            var kebab = m.previousElementSibling;
+            if (kebab && kebab.classList.contains('strip-kebab')) {
+                kebab.setAttribute('aria-expanded', 'false');
+            }
         });
     }
 
@@ -261,6 +267,14 @@
         if (!e.target.closest('.strip-kebab') && !e.target.closest('.strip-menu')) {
             closeAllMenus();
         }
+    });
+
+    // Open external URLs from data-open-url attributes (replaces inline onclick)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-open-url]');
+        if (!btn) return;
+        window.open(btn.getAttribute('data-open-url'), '_blank');
+        closeAllMenus();
     });
 
     // Copy-to-clipboard for kebab menu copy buttons

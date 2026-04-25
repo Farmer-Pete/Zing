@@ -487,7 +487,8 @@ a.strip-ci-dot[href] { cursor: pointer; }
     background: var(--orange); color: #fff; cursor: pointer; font-weight: 600;
     font-family: inherit; white-space: nowrap; opacity: 0; transition: opacity 0.15s;
 }
-.card:hover .strip-primary-btn { opacity: 1; }
+.card:hover .strip-primary-btn,
+.card:focus-within .strip-primary-btn { opacity: 1; }
 .strip-primary-btn:hover { background: var(--orange-hover); }
 .strip-primary-btn-blue { background: #3b82f6; }
 .strip-primary-btn-blue:hover { background: #2563eb; }
@@ -498,7 +499,8 @@ a.strip-ci-dot[href] { cursor: pointer; }
     justify-content: center; border-radius: 4px; opacity: 0; flex-shrink: 0;
     transition: opacity 0.15s, color 0.15s, background 0.15s;
 }
-.card:hover .strip-kebab { opacity: 1; }
+.card:hover .strip-kebab,
+.card:focus-within .strip-kebab { opacity: 1; }
 .strip-kebab:hover { color: var(--gray-700); background: var(--gray-100); }
 
 /* ──────────────────────────────────────────────

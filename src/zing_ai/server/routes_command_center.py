@@ -404,6 +404,7 @@ async def launch_background(request: Request) -> JSONResponse:
                         card.prs[0],
                     )
                 except ValueError:
+                    launching_set.discard(card_key)
                     return JSONResponse(
                         {"error": f"Invalid pr_number: {pr_number_override}"}, status_code=400
                     )
