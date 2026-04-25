@@ -183,10 +183,44 @@
       {% endif %}
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
-        <button class="card-btn card-btn-primary" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
+        <button class="strip-primary-btn strip-primary-btn-blue" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <div class="strip-menu">
+          <div class="menu-col-header">
+            <span class="menu-col-header-label">Action</span>
+            <span class="menu-col-header-copy">&#128203;</span>
+          </div>
+          <div class="menu-items">
+            <div class="menu-row">
+              <button class="menu-row-main" data-attach-session="{{ session.terminal_session | e }}"><span class="menu-icon">&#9655;</span> Attach</button>
+              <button class="menu-row-copy" data-copy-cmd="tmux attach -t {{ session.terminal_session | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-kill-session="{{ session.session_id | e }}"><span class="menu-icon">&#128683;</span> Kill session</button>
+              <span style="width:32px;"></span>
+            </div>
+          </div>
+        </div>
       {% endif %}
       {% if session.ticket_id %}
-        <button class="card-btn" data-launch-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}" data-launch-label="Resume">Resume</button>
+        <button class="strip-primary-btn" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}">Resume</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&#8942;</button>
+        <div class="strip-menu">
+          <div class="menu-col-header">
+            <span class="menu-col-header-label">Action</span>
+            <span class="menu-col-header-copy">&#128203;</span>
+          </div>
+          <div class="menu-items">
+            <div class="menu-row">
+              <button class="menu-row-main" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}"><span class="menu-icon">&#128260;</span> Resume session</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-cleanup-session="{{ session.session_id | e }}"><span class="menu-icon">&#128683;</span> Discard session</button>
+              <span style="width:32px;"></span>
+            </div>
+          </div>
+        </div>
       {% endif %}
     </div>
   {% endfor %}
