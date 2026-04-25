@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from zing_ai.installer import InstallError, install_claude, install_opencode
+from zing_ai.installer import InstallError, install_claude, install_claude_hooks, install_opencode
 
 # All markdown files that should be installed, relative to the target dir.
 EXPECTED_FILES = [
@@ -572,3 +572,133 @@ def test_stale_when_stored_mtime_missing_but_current_exists(tmp_path: Path, monk
         package_version=__version__,
     )
     assert is_install_stale(tmp_path, cfg) is True
+
+
+# ---------------------------------------------------------------------------
+# Hook installation tests
+# ---------------------------------------------------------------------------
+
+
+def test_hook_script_is_installed(tmp_path: Path) -> None:
+    """install_claude_hooks() copies notify-zing.sh to the hooks directory."""
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    assert (hooks_dir / "notify-zing.sh").is_file(), "notify-zing.sh not installed"
+
+
+def test_hook_script_is_executable(tmp_path: Path) -> None:
+    """notify-zing.sh must be executable after install."""
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    hook = hooks_dir / "notify-zing.sh"
+    mode = hook.stat().st_mode
+    assert mode & 0o100, "notify-zing.sh is not owner-executable"
+
+
+def test_hook_script_content_matches_source(tmp_path: Path) -> None:
+    """The installed hook script content must match the bundled source."""
+    import importlib.resources
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    src = (
+        importlib.resources.files("zing_ai")
+        .joinpath("hooks")
+        .joinpath("notify-zing.sh")
+        .read_bytes()
+    )
+    dst = (hooks_dir / "notify-zing.sh").read_bytes()
+    assert src == dst, "Installed hook content differs from source"
+
+
+def test_settings_pretooluse_entry_added(tmp_path: Path) -> None:
+    """install_claude_hooks() adds PreToolUse AskUserQuestion hook to settings.json."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    pretooluse = settings.get("hooks", {}).get("PreToolUse", [])
+    matchers = [e.get("matcher") for e in pretooluse if isinstance(e, dict)]
+    assert "AskUserQuestion" in matchers, "PreToolUse AskUserQuestion entry not found"
+
+
+def test_settings_existing_hooks_preserved(tmp_path: Path) -> None:
+    """Existing hooks in settings.json are not overwritten."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+
+    # Write pre-existing settings with a different hook.
+    existing = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "echo hello"}],
+                }
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(existing), encoding="utf-8")
+
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    pretooluse = settings.get("hooks", {}).get("PreToolUse", [])
+    matchers = [e.get("matcher") for e in pretooluse if isinstance(e, dict)]
+    assert "Bash" in matchers, "Existing Bash hook was removed"
+    assert "AskUserQuestion" in matchers, "AskUserQuestion hook was not added"
+
+
+def test_settings_idempotent_no_duplicate(tmp_path: Path) -> None:
+    """Running install_claude_hooks() twice does not duplicate the PreToolUse entry."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    pretooluse = settings.get("hooks", {}).get("PreToolUse", [])
+    ask_entries = [
+        e for e in pretooluse if isinstance(e, dict) and e.get("matcher") == "AskUserQuestion"
+    ]
+    assert len(ask_entries) == 1, f"Expected 1 AskUserQuestion entry, found {len(ask_entries)}"
+
+
+def test_settings_created_from_scratch(tmp_path: Path) -> None:
+    """install_claude_hooks() creates settings.json if it doesn't exist."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "nonexistent" / "settings.json"
+
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    assert settings_path.exists(), "settings.json was not created"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "hooks" in settings
+
+
+def test_install_claude_calls_install_hooks(tmp_path: Path) -> None:
+    """install_claude() calls install_claude_hooks() as part of the install flow."""
+    target = tmp_path / "commands"
+    with (
+        patch("zing_ai.installer.install_claude_hooks") as mock_hooks,
+        patch("zing_ai.installer.register_mcp_server"),
+    ):
+        install_claude(target_dir=target)
+
+    mock_hooks.assert_called_once()
