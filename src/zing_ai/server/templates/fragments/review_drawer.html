@@ -273,12 +273,12 @@
       {% for item in queue_items[:3] %}
         {% if item.action_type == "findings" %}
           {% set qi_cls = "qi-findings" %}
-          {% set qi_ico = "&#9998;" %}
+          {% set qi_ico = "✎" %}
           {% set qa_cls = "qa-review" %}
           {% set qa_lbl = "review" %}
         {% elif item.action_type == "attach" %}
           {% set qi_cls = "qi-attach" %}
-          {% set qi_ico = "&#9654;" %}
+          {% set qi_ico = "▶" %}
           {% set qa_cls = "qa-attach" %}
           {% set qa_lbl = "attach" %}
         {% else %}
