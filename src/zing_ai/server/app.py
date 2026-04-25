@@ -219,8 +219,8 @@ def create_app(
             def _sync_tmux_alive(live: set[str]) -> None:
                 """Set _tmux_alive on each ClaudeCodeSession based on live tmux names."""
                 for session in sm.list_sessions():
-                    if isinstance(session, ClaudeCodeSession) and session.tmux_session:
-                        session._tmux_alive = session.tmux_session in live
+                    if isinstance(session, ClaudeCodeSession) and session.terminal_session:
+                        session._session_alive = session.terminal_session in live
 
             async def _poll_tmux() -> None:
                 """Poll tmux every 5 seconds and store live session names on app state."""

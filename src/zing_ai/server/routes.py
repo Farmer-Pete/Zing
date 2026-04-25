@@ -752,7 +752,7 @@ async def post_create_claude_code_session(
             skill=body.skill,
             pr_number=body.pr_number,
             pr_repo=body.pr_repo,
-            tmux_session=body.tmux_session,
+            terminal_session=body.tmux_session,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

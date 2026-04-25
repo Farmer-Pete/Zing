@@ -155,7 +155,7 @@ def _build_tray_data(
             continue
 
         # Track running sessions (alive in tmux).
-        if session.tmux_session and session.tmux_session in live_tmux_sessions:
+        if session.terminal_session and session.terminal_session in live_tmux_sessions:
             running_sessions.append(session)
 
         # Build worktree entries for sessions with a worktree_path.
@@ -733,11 +733,15 @@ async def kill_session(request: Request) -> JSONResponse:
     manager = request.app.state.session_manager
     session = manager.get_session(session_id)
 
-    if session is None or not isinstance(session, ClaudeCodeSession) or not session.tmux_session:
+    if (
+        session is None
+        or not isinstance(session, ClaudeCodeSession)
+        or not session.terminal_session
+    ):
         return JSONResponse({"error": "session not found"}, status_code=404)
 
     subprocess.run(
-        ["tmux", "kill-session", "-t", session.tmux_session],
+        ["tmux", "kill-session", "-t", session.terminal_session],
         capture_output=True,
     )
 
@@ -764,7 +768,7 @@ async def cleanup_worktree(request: Request) -> JSONResponse:
         return JSONResponse({"error": "session not found"}, status_code=404)
 
     live_tmux_sessions: set[str] = getattr(request.app.state, "live_tmux_sessions", set())
-    if session.tmux_session and session.tmux_session in live_tmux_sessions:
+    if session.terminal_session and session.terminal_session in live_tmux_sessions:
         return JSONResponse(
             {"error": "Cannot clean up worktree while session is running"},
             status_code=409,

@@ -357,17 +357,25 @@ class ClaudeCodeSession(SessionBase):
     skill: str | None = None
     pr_number: int | None = None
     pr_repo: str | None = None
-    tmux_session: str | None = None
-    _tmux_alive: bool = PrivateAttr(default=False)
+    terminal_session: str | None = None
+    _session_alive: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_tmux_session(cls, data: dict) -> dict:
+        """Backward compat: load old JSON files with 'tmux_session' key."""
+        if isinstance(data, dict) and "tmux_session" in data and "terminal_session" not in data:
+            data["terminal_session"] = data.pop("tmux_session")
+        return data
 
     @property
     def state(self) -> SessionState:
         """Return the session state.
 
-        If *tmux_session* is set and the session is not alive, return STOPPED.
+        If *terminal_session* is set and the session is not alive, return STOPPED.
         Otherwise return STARTED.
         """
-        if self.tmux_session is not None and not self._tmux_alive:
+        if self.terminal_session is not None and not self._session_alive:
             return SessionState.STOPPED
         return SessionState.STARTED
 

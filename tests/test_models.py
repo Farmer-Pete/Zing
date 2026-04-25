@@ -439,33 +439,40 @@ class TestSessionDiscriminatedUnion(unittest.TestCase):
 class TestClaudeCodeSessionState(unittest.TestCase):
     """Tests for ClaudeCodeSession.state lifecycle behavior."""
 
-    def test_state_started_when_no_tmux(self) -> None:
-        """State is STARTED when tmux_session is None."""
+    def test_state_started_when_no_terminal_session(self) -> None:
+        """State is STARTED when terminal_session is None."""
         session = ClaudeCodeSession(session_id="s1", title="Test")
         assert session.state == SessionState.STARTED
 
-    def test_state_stopped_when_tmux_not_alive(self) -> None:
-        """State is STOPPED when tmux_session is set but not alive."""
-        session = ClaudeCodeSession(session_id="s2", title="Test", tmux_session="zing-fro-123")
+    def test_state_stopped_when_session_not_alive(self) -> None:
+        """State is STOPPED when terminal_session is set but not alive."""
+        session = ClaudeCodeSession(session_id="s2", title="Test", terminal_session="zing--fro-123")
         assert session.state == SessionState.STOPPED
 
-    def test_state_started_when_tmux_alive(self) -> None:
-        """State is STARTED when tmux_session is set and alive."""
-        session = ClaudeCodeSession(session_id="s3", title="Test", tmux_session="zing-fro-123")
-        session._tmux_alive = True
+    def test_state_started_when_session_alive(self) -> None:
+        """State is STARTED when terminal_session is set and alive."""
+        session = ClaudeCodeSession(session_id="s3", title="Test", terminal_session="zing--fro-123")
+        session._session_alive = True
         assert session.state == SessionState.STARTED
 
-    def test_tmux_alive_not_in_model_dump(self) -> None:
-        """_tmux_alive is a PrivateAttr and does not appear in model_dump."""
+    def test_session_alive_not_in_model_dump(self) -> None:
+        """_session_alive is a PrivateAttr and does not appear in model_dump."""
         session = ClaudeCodeSession(session_id="s4", title="Test")
         dump = session.model_dump()
-        assert "_tmux_alive" not in dump
+        assert "_session_alive" not in dump
 
-    def test_tmux_session_in_model_dump(self) -> None:
-        """tmux_session appears in model_dump."""
-        session = ClaudeCodeSession(session_id="s5", title="Test", tmux_session="zing-x")
+    def test_terminal_session_in_model_dump(self) -> None:
+        """terminal_session appears in model_dump."""
+        session = ClaudeCodeSession(session_id="s5", title="Test", terminal_session="zing--x")
         dump = session.model_dump()
-        assert dump["tmux_session"] == "zing-x"
+        assert dump["terminal_session"] == "zing--x"
+
+    def test_migrate_tmux_session_backward_compat(self) -> None:
+        """Old JSON with tmux_session key loads into terminal_session field."""
+        session = ClaudeCodeSession.model_validate(
+            {"session_id": "s6", "title": "Test", "tmux_session": "zing--x"}
+        )
+        assert session.terminal_session == "zing--x"
 
 
 if __name__ == "__main__":
