@@ -683,3 +683,30 @@ async def cleanup_worktree(request: Request) -> JSONResponse:
     manager.cleanup_session(session_id)
     _push_board_changed(request.app)
     return JSONResponse({"status": "cleaned_up"})
+
+
+@router.post("/command-center/session-question")
+async def session_question(request: Request) -> JSONResponse:
+    """Receive a question from a Claude Code hook and add it as a notification."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    session_id = body.get("session_id")
+    question = body.get("question")
+    if not session_id or not question:
+        return JSONResponse({"status": "ignored"})
+    manager = request.app.state.session_manager
+    # Direct lookup first.
+    session = manager.get_session(session_id)
+    if session is None:
+        # Fallback: scan for a ClaudeCodeSession whose tmux_session matches.
+        for s in manager.list_sessions():
+            if isinstance(s, ClaudeCodeSession) and s.tmux_session == session_id:
+                session = s
+                session_id = s.session_id
+                break
+    if session is None:
+        return JSONResponse({"status": "ignored"})
+    manager.add_notification(session_id, title="Input needed", body=question)
+    return JSONResponse({"status": "ok"})

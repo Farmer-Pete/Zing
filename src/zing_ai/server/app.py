@@ -285,6 +285,7 @@ def create_app(
             notif_id = event_type.split(":", 1)[1]
             _notify_sse_connections(session_id, f"notification:{notif_id}")
             _notify_dashboard_connections(f"notification:{notif_id}", session_id=session_id)
+            _notify_cc_connections("board_changed")
             return
         if event_type in sse_events:
             _notify_sse_connections(session_id, sse_events[event_type])

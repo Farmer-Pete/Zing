@@ -195,6 +195,7 @@ class Notification(BaseModel):
     body: str = ""
     url: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
+    answered_at: datetime | None = None
 
 
 class ResponseAction(StrEnum):
@@ -371,10 +372,8 @@ class ClaudeCodeSession(SessionBase):
 
     @property
     def pending_question(self) -> Notification | None:
-        """Return the last notification with no corresponding response, or None."""
-        if not self.notifications:
-            return None
-        return self.notifications[-1]
+        """Return the last unanswered notification, or None."""
+        return next((n for n in reversed(self.notifications) if n.answered_at is None), None)
 
     @property
     def state(self) -> SessionState:
