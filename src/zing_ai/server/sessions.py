@@ -844,8 +844,6 @@ class SessionManager:
     ) -> Notification:
         """Create a notification, append it to the session, persist, and notify."""
         session = self._get_session_or_raise(session_id)
-        if not isinstance(session, ZingSession):
-            raise KeyError(f"Session {session_id} is not a ZingSession")
         notification = Notification(title=title, body=body, url=url)
         session.notifications.append(notification)
         self._persist(session)

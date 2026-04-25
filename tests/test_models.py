@@ -436,6 +436,65 @@ class TestSessionDiscriminatedUnion(unittest.TestCase):
         assert session.steps[0].step_name == "review"
 
 
+class TestClaudeCodeSessionNotifications(unittest.TestCase):
+    """Tests for ClaudeCodeSession notification field."""
+
+    def test_created_with_notifications(self) -> None:
+        """ClaudeCodeSession can be created with an explicit notifications list."""
+        n = Notification(title="Hello")
+        session = ClaudeCodeSession(session_id="s1", title="T", notifications=[n])
+        assert len(session.notifications) == 1
+        assert session.notifications[0].title == "Hello"
+
+    def test_notifications_default_to_empty(self) -> None:
+        """ClaudeCodeSession notifications defaults to empty list."""
+        session = ClaudeCodeSession(session_id="s1", title="T")
+        assert session.notifications == []
+
+    def test_serialization_roundtrip(self) -> None:
+        """ClaudeCodeSession serializes and deserializes notifications correctly."""
+        from pydantic import TypeAdapter
+
+        adapter = TypeAdapter(Session)
+        n = Notification(title="Alert", body="Details", url="/s1")
+        original = ClaudeCodeSession(session_id="cc-n", title="T", notifications=[n])
+        json_bytes = adapter.dump_json(original)
+        restored = adapter.validate_json(json_bytes)
+        assert isinstance(restored, ClaudeCodeSession)
+        assert len(restored.notifications) == 1
+        assert restored.notifications[0].title == "Alert"
+        assert restored.notifications[0].body == "Details"
+        assert restored.notifications[0].url == "/s1"
+
+    def test_backward_compat_no_notifications_field(self) -> None:
+        """Existing ClaudeCodeSession JSON without notifications loads with empty list."""
+        from pydantic import TypeAdapter
+
+        adapter = TypeAdapter(Session)
+        data = {
+            "session_id": "cc-old",
+            "title": "Old session",
+            "session_type": "claude_code",
+        }
+        session = adapter.validate_python(data)
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.notifications == []
+
+    def test_pending_question_returns_none_when_no_notifications(self) -> None:
+        """pending_question returns None when notifications list is empty."""
+        session = ClaudeCodeSession(session_id="s1", title="T")
+        assert session.pending_question is None
+
+    def test_pending_question_returns_last_notification(self) -> None:
+        """pending_question returns the last notification."""
+        n1 = Notification(title="First")
+        n2 = Notification(title="Last")
+        session = ClaudeCodeSession(session_id="s1", title="T", notifications=[n1, n2])
+        pq = session.pending_question
+        assert pq is not None
+        assert pq.title == "Last"
+
+
 class TestClaudeCodeSessionState(unittest.TestCase):
     """Tests for ClaudeCodeSession.state lifecycle behavior."""
 

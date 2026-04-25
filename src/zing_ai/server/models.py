@@ -358,6 +358,7 @@ class ClaudeCodeSession(SessionBase):
     pr_number: int | None = None
     pr_repo: str | None = None
     terminal_session: str | None = None
+    notifications: list[Notification] = Field(default_factory=list)
     _session_alive: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
@@ -367,6 +368,13 @@ class ClaudeCodeSession(SessionBase):
         if isinstance(data, dict) and "tmux_session" in data and "terminal_session" not in data:
             data["terminal_session"] = data.pop("tmux_session")
         return data
+
+    @property
+    def pending_question(self) -> Notification | None:
+        """Return the last notification with no corresponding response, or None."""
+        if not self.notifications:
+            return None
+        return self.notifications[-1]
 
     @property
     def state(self) -> SessionState:
