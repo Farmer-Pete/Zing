@@ -33,9 +33,9 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,
 )
-from zing_ai.server.attention import build_attention_queue
+from zing_ai.server.attention import AttentionItem, build_attention_queue
 from zing_ai.server.command_center import aggregate, generate_standup, infer_repo_for_ticket
-from zing_ai.server.models import ClaudeCodeSession
+from zing_ai.server.models import ClaudeCodeSession, ZingSession
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.templates import render, render_markdown
 
@@ -729,3 +729,153 @@ async def session_question(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ignored"})
     manager.add_notification(session_id, title="Input needed", body=question)
     return JSONResponse({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Review drawer
+# ---------------------------------------------------------------------------
+
+
+def _format_wait_label(seconds: int) -> str:
+    """Return a compact wait-time string: '42s', '5m', '2h'."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def build_drawer_context(
+    session_id: str,
+    manager: object,
+    attention_queue: list[AttentionItem],
+) -> dict:
+    """Build template context for the review drawer.
+
+    Args:
+        session_id: The session to open in the drawer.
+        manager: The session manager (app.state.session_manager).
+        attention_queue: Current attention queue from build_attention_queue().
+
+    Returns:
+        A dict with keys: session, steps, current_step, mode, queue_position,
+        queue_total, queue_items, next_session_id, prev_session_id,
+        waiting_label, notification_body, notification.
+    """
+    session = manager.get_session(session_id)  # type: ignore[union-attr]
+    if session is None:
+        return {}
+
+    # Find this session in the attention queue to determine position.
+    queue_index = next(
+        (i for i, item in enumerate(attention_queue) if item.session_id == session_id),
+        None,
+    )
+
+    queue_total = len(attention_queue)
+    queue_position = (queue_index + 1) if queue_index is not None else 1
+
+    # Items after this one in the queue.
+    queue_items = attention_queue[queue_index + 1 :] if queue_index is not None else []
+
+    next_session_id: str | None = queue_items[0].session_id if queue_items else None
+    prev_session_id: str | None = (
+        attention_queue[queue_index - 1].session_id
+        if (queue_index is not None and queue_index > 0)
+        else None
+    )
+
+    # Determine mode.
+    current_attention = attention_queue[queue_index] if queue_index is not None else None
+    mode = current_attention.action_type if current_attention else "findings"
+
+    # Normalise: "questions" maps to "findings" for template mode.
+    if mode == "questions":
+        mode = "findings"
+
+    # Wait label.
+    waiting_label = ""
+    if current_attention:
+        waiting_label = _format_wait_label(current_attention.wait_seconds)
+
+    # Steps and current step for ZingSession.
+    steps: list = []
+    current_step = None
+    notification = None
+    notification_body = ""
+
+    if isinstance(session, ZingSession):
+        steps = list(session.steps)
+        # Current step = last READY step.
+        current_step = next((s for s in reversed(steps) if s.state.value == "ready"), None)
+    elif isinstance(session, ClaudeCodeSession):
+        notification = session.pending_question
+        notification_body = notification.body if notification else ""
+
+    return {
+        "session": session,
+        "steps": steps,
+        "current_step": current_step,
+        "mode": mode,
+        "queue_position": queue_position,
+        "queue_total": max(queue_total, 1),
+        "queue_items": queue_items,
+        "next_session_id": next_session_id,
+        "prev_session_id": prev_session_id,
+        "waiting_label": waiting_label,
+        "notification": notification,
+        "notification_body": notification_body,
+    }
+
+
+@router.get("/command-center/drawer/{session_id}", response_class=HTMLResponse)
+async def get_drawer(session_id: str, request: Request) -> HTMLResponse:
+    """Return the drawer HTML fragment for a session.
+
+    The fragment includes backdrop + panel.  The JS injects it into
+    #review-drawer-container and sets display:block.
+    """
+    manager = request.app.state.session_manager
+    sessions = manager.list_sessions()
+    attention_queue = build_attention_queue(sessions, datetime.now(UTC))
+
+    ctx = build_drawer_context(session_id, manager, attention_queue)
+    if not ctx:
+        return HTMLResponse("<div>Session not found</div>", status_code=404)
+
+    session = ctx["session"]
+
+    if isinstance(session, ClaudeCodeSession):
+        # Attach mode — use the simpler attach template.
+        html = render("fragments/drawer_attach.html", **ctx)
+    else:
+        # Findings/questions mode.
+        html = render("fragments/review_drawer.html", **ctx)
+
+    return HTMLResponse(html)
+
+
+@router.get(
+    "/command-center/drawer/{session_id}/step/{step_id}",
+    response_class=HTMLResponse,
+)
+async def get_drawer_step(
+    session_id: str,
+    step_id: str,
+    request: Request,
+) -> HTMLResponse:
+    """Return a single step-history fragment for the drawer.
+
+    The JS can inject individual step sections when expanding collapsed history.
+    """
+    manager = request.app.state.session_manager
+    session = manager.get_session(session_id)
+    if session is None or not isinstance(session, ZingSession):
+        return HTMLResponse("<div>Session not found</div>", status_code=404)
+
+    step = next((s for s in session.steps if s.step_id == step_id), None)
+    if step is None:
+        return HTMLResponse("<div>Step not found</div>", status_code=404)
+
+    html = render("fragments/drawer_step_history.html", step=step, session=session)
+    return HTMLResponse(html)

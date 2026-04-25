@@ -46,7 +46,10 @@
         {% set wait_lbl = (item.wait_seconds // 3600) ~ "h" %}
       {% endif %}
 
-      <div class="attn-item">
+      <div class="attn-item"
+           data-open-drawer="{{ item.session_id }}"
+           data-open-drawer-mode="{{ item.action_type }}"
+           style="cursor:pointer">
         <div class="attn-type-ico {{ type_cls }}">{{ icon }}</div>
         <div class="attn-info">
           <div class="attn-top-row">
@@ -70,7 +73,9 @@
           {% endif %}
           <span>{{ wait_lbl }}</span>
         </div>
-        <button class="attn-btn {{ btn_cls }}">{{ btn_lbl }}</button>
+        <button class="attn-btn {{ btn_cls }}"
+                data-open-drawer="{{ item.session_id }}"
+                data-open-drawer-mode="{{ item.action_type }}">{{ btn_lbl }}</button>
       </div>
     {% endfor %}
   </div>

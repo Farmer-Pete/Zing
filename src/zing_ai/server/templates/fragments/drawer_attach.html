@@ -1,0 +1,121 @@
+{#
+  drawer_attach.html — attach-mode content for ClaudeCodeSession items.
+
+  Expected context variables:
+    session          — ClaudeCodeSession
+    notification     — Notification object (the pending question)
+    queue_position   — current position in queue (int)
+    queue_total      — total items in queue (int)
+    queue_items      — remaining attention items
+    next_session_id  — session_id of next item (or None)
+    prev_session_id  — session_id of previous item (or None)
+    waiting_label    — human-readable wait time (e.g. "5m")
+#}
+
+{# ── Backdrop ── #}
+<div class="drawer-backdrop" onclick="window.closeReviewDrawer()"></div>
+
+{# ── Drawer panel ── #}
+<div class="drawer" id="review-drawer">
+
+  {# ── Header ── #}
+  <div class="dh">
+    <div class="dh-top">
+      <button class="dh-close" onclick="window.closeReviewDrawer()">&times;</button>
+      {% if session.ticket_id %}
+        <span class="dh-ticket">{{ session.ticket_id }}</span>
+      {% endif %}
+      <div class="dh-nav">
+        <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
+        <button class="dh-nav-btn" onclick="window.drawerNavPrev()" title="Previous"
+          {% if not prev_session_id %}disabled{% endif %}>&larr;</button>
+        <button class="dh-nav-btn" onclick="window.drawerNavNext()" title="Next"
+          {% if not next_session_id %}disabled{% endif %}>&rarr;</button>
+      </div>
+    </div>
+    <div class="dh-title">{{ session.title }}</div>
+    <div class="dh-meta">
+      <span class="dh-badge badge-cyan">attach</span>
+      {% if waiting_label %}
+        <span>waiting {{ waiting_label }}</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── No timeline for attach mode ── #}
+
+  {# ── Scrollable body ── #}
+  <div class="d-body" id="drawer-body">
+
+    {# ── Blue hero card ── #}
+    <div class="attach-hero">
+      <div class="attach-hero-icon">&#9654;</div>
+      <h3>Claude needs your input</h3>
+      {% if notification %}
+        <p>{{ notification.body }}</p>
+      {% endif %}
+      <button class="attach-hero-btn"
+        onclick="window.openTerminalFromDrawer('{{ session.session_id }}')">
+        Attach to Session
+      </button>
+    </div>
+
+    {# ── Question text ── #}
+    {% if notification and notification.body %}
+      <div class="attach-ctx">
+        <div class="attach-ctx-title">Question from Claude</div>
+        <div class="attach-msg">{{ notification.body }}</div>
+      </div>
+    {% endif %}
+
+  </div>
+
+  {# ── Footer ── #}
+  <div class="d-footer">
+    <div class="d-fprog">Waiting for your response</div>
+    <button class="d-fskip" onclick="window.skipToNext()">Skip &rarr;</button>
+  </div>
+
+  {# ── Up next queue ── #}
+  {% if queue_items %}
+    <div class="d-queue"
+      data-next-session-id="{{ next_session_id or '' }}"
+      data-prev-session-id="{{ prev_session_id or '' }}">
+      <div class="d-qt">Up next <span class="d-qc">{{ queue_items | length }}</span></div>
+      {% for item in queue_items[:3] %}
+        {% if item.action_type == "findings" %}
+          {% set qi_cls = "qi-findings" %}
+          {% set qi_ico = "&#9998;" %}
+          {% set qa_cls = "qa-review" %}
+          {% set qa_lbl = "review" %}
+        {% elif item.action_type == "attach" %}
+          {% set qi_cls = "qi-attach" %}
+          {% set qi_ico = "&#9654;" %}
+          {% set qa_cls = "qa-attach" %}
+          {% set qa_lbl = "attach" %}
+        {% else %}
+          {% set qi_cls = "qi-question" %}
+          {% set qi_ico = "?" %}
+          {% set qa_cls = "qa-answer" %}
+          {% set qa_lbl = "answer" %}
+        {% endif %}
+        <div class="d-qi"
+             onclick="window.openReviewDrawer('{{ item.session_id }}', '{{ item.action_type }}')"
+             data-session-id="{{ item.session_id }}">
+          <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
+          {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}
+          <span class="d-qtl">{{ item.title }}</span>
+          <span class="d-qa {{ qa_cls }}">{{ qa_lbl }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="d-queue">
+      <div class="d-qt">Queue empty</div>
+      <div style="font-size:0.68rem;color:var(--gray-500);padding:0.25rem 0.25rem 0.1rem">
+        All caught up &#10003;
+      </div>
+    </div>
+  {% endif %}
+
+</div>
