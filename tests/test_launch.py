@@ -24,7 +24,7 @@ from zing_ai.launch import (
     find_repo_path,
     move_ticket_in_progress,
     parse_pr_url,
-    require_tmux,
+    require_session_backend,
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
@@ -750,26 +750,26 @@ class TestExtractTicketId(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# require_tmux
+# require_session_backend
 # ---------------------------------------------------------------------------
 
 
 class TestRequireTmux(TestCase):
-    """Tests for require_tmux."""
+    """Tests for require_session_backend."""
 
-    def test_require_tmux_missing(self) -> None:
+    def test_require_session_backend_missing(self) -> None:
         """When tmux is not on PATH, LaunchError is raised."""
         with (
             patch("zing_ai.launch.shutil.which", return_value=None),
             self.assertRaises(LaunchError) as ctx,
         ):
-            require_tmux()
+            require_session_backend()
         self.assertIn("tmux", str(ctx.exception))
 
-    def test_require_tmux_found(self) -> None:
+    def test_require_session_backend_found(self) -> None:
         """When tmux is found on PATH, no error is raised."""
         with patch("zing_ai.launch.shutil.which", return_value="/usr/bin/tmux"):
-            require_tmux()  # should not raise
+            require_session_backend()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +790,7 @@ class TestExecOrDetach(TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             work_dir = Path(tmpdir).resolve()
             with patch("zing_ai.launch.os.execvp") as mock_execvp:
-                exec_or_detach(args, work_dir, tmux_session=None)
+                exec_or_detach(args, work_dir, terminal_session=None)
             mock_execvp.assert_called_once_with("claude", args)
             self.assertEqual(Path.cwd().resolve(), work_dir)
         os.chdir(original_cwd)
@@ -812,7 +812,7 @@ class TestExecOrDetach(TestCase):
             return new_session_result
 
         with patch("zing_ai.launch.subprocess.run", side_effect=fake_run) as mock_run:
-            exec_or_detach(args, Path("/tmp/work"), tmux_session="zing-test")
+            exec_or_detach(args, Path("/tmp/work"), terminal_session="zing-test")
 
         # Find the new-session call
         calls = mock_run.call_args_list
@@ -834,7 +834,7 @@ class TestExecOrDetach(TestCase):
             exec_or_detach(
                 ["claude", "--resume", "sess-x"],
                 Path("/tmp/work"),
-                tmux_session="zing-bak-1",
+                terminal_session="zing-bak-1",
             )
         self.assertIn("already exists", str(ctx.exception))
 
@@ -864,7 +864,7 @@ class TestCreateSessionOnServerWithTmux(TestCase):
                 ticket_id="FRO-123",
                 worktree_path="/tmp/wt",
                 skill="new",
-                tmux_session="zing-fro-123",
+                terminal_session="zing-fro-123",
             )
 
         req = mock_open.call_args[0][0]

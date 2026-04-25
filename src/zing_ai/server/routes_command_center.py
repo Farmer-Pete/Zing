@@ -23,7 +23,7 @@ from zing_ai.config import load_config
 from zing_ai.launch import (
     LaunchError,
     build_claude_args,
-    build_tmux_session_name,
+    build_session_name,
     checkout_pr_branch,
     create_session_on_server,
     create_worktree,
@@ -581,7 +581,7 @@ async def launch_background(request: Request) -> JSONResponse:
     title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
     skill = skill_override or ("pr-audit" if is_pr_card else "new")
     target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
-    tmux_name = build_tmux_session_name(
+    session_name = build_session_name(
         target=ticket_id or branch_name,
         pr_number=pr_number,
     )
@@ -625,7 +625,7 @@ async def launch_background(request: Request) -> JSONResponse:
                     skill,
                     pr_number=pr_number,
                     pr_repo=pr_repo,
-                    tmux_session=tmux_name,
+                    terminal_session=session_name,
                 )
 
                 args = build_claude_args(
@@ -635,20 +635,20 @@ async def launch_background(request: Request) -> JSONResponse:
                     target,
                     claude_flags=config.command_center.claude_flags,
                 )
-                exec_or_detach(args, wt, tmux_session=tmux_name)
+                exec_or_detach(args, wt, terminal_session=session_name)
 
                 return session_id, wt
 
             session_id, wt = await asyncio.to_thread(_blocking)
 
-            logger.info("Background session launched: %s (tmux: %s)", session_id, tmux_name)
+            logger.info("Background session launched: %s (tmux: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
             for q in request.app.state.cc_queues:
                 q.put_nowait("board_changed")
 
             return JSONResponse(
-                {"status": "launched", "session_id": session_id, "tmux_session": tmux_name}
+                {"status": "launched", "session_id": session_id, "tmux_session": session_name}
             )
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
