@@ -396,7 +396,20 @@ async def launch_background(request: Request) -> JSONResponse:
 
     if card is not None:
         if card.prs:
-            pr = card.prs[0]
+            pr_number_override = payload.get("pr_number")
+            if pr_number_override is not None:
+                try:
+                    pr = next(
+                        (p for p in card.prs if p.number == int(pr_number_override)),
+                        card.prs[0],
+                    )
+                except ValueError:
+                    launching_set.discard(card_key)
+                    return JSONResponse(
+                        {"error": f"Invalid pr_number: {pr_number_override}"}, status_code=400
+                    )
+            else:
+                pr = card.prs[0]
             if not repo_override:
                 repo_name = pr.repo  # "owner/repo"
             branch_name = pr.head_ref

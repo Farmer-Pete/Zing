@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest import TestCase
@@ -934,6 +936,10 @@ def _init_git_repo(path: Path, remote_url: str) -> None:
         )
 
 
+@unittest.skipIf(
+    "GIT_DIR" in os.environ,
+    "Skipped inside git hooks — _init_git_repo corrupts parent repo config via GIT_DIR",
+)
 class TestFindRepoPath(TestCase):
     """Tests for find_repo_path."""
 

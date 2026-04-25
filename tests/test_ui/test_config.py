@@ -13,6 +13,12 @@ from tests.test_ui.conftest import _ServerInfo
 
 pytestmark = pytest.mark.ui
 
+# base.html loads external CDN scripts (Datastar, Mermaid, Google Fonts).
+# Playwright's default goto wait_until="load" blocks until ALL resources
+# finish, which can time out on slow networks or under CI load.  The config
+# page only needs the DOM — use "domcontentloaded" everywhere.
+_GOTO_WAIT = "domcontentloaded"
+
 
 @pytest.fixture
 def tmp_config(monkeypatch):
@@ -35,8 +41,8 @@ def test_autosave_on_change(server: _ServerInfo, page: Page, tmp_config: Path) -
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
 
-    page.goto(f"{server.base_url}/config")
-    page.wait_for_load_state("networkidle", timeout=5000)
+    page.goto(f"{server.base_url}/config", wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     locator = page.locator("#input-thresholds_large_file_lines")
     locator.fill("1500")
@@ -55,8 +61,8 @@ def test_autosave_on_change(server: _ServerInfo, page: Page, tmp_config: Path) -
 
 def test_saved_value_persists_on_reload(server: _ServerInfo, page: Page, tmp_config: Path) -> None:
     """A value saved via autosave is still present after a full page reload."""
-    page.goto(f"{server.base_url}/config")
-    page.wait_for_load_state("networkidle", timeout=5000)
+    page.goto(f"{server.base_url}/config", wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     locator = page.locator("#input-thresholds_large_file_lines")
     locator.fill("1500")
@@ -68,8 +74,8 @@ def test_saved_value_persists_on_reload(server: _ServerInfo, page: Page, tmp_con
         locator.dispatch_event("change")
 
     # Reload the page — the value should come back from saved config
-    page.reload()
-    page.wait_for_load_state("domcontentloaded", timeout=5000)
+    page.reload(wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     reloaded = page.locator("#input-thresholds_large_file_lines")
     expect(reloaded).to_have_value("1500", timeout=3000)
@@ -79,8 +85,8 @@ def test_validation_error_leaves_page_usable(
     server: _ServerInfo, page: Page, tmp_config: Path
 ) -> None:
     """Submitting a negative value either persists or fails gracefully; page stays usable."""
-    page.goto(f"{server.base_url}/config")
-    page.wait_for_load_state("domcontentloaded", timeout=5000)
+    page.goto(f"{server.base_url}/config", wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     locator = page.locator("#input-thresholds_large_file_lines")
 
@@ -103,8 +109,8 @@ def test_select_autosave(server: _ServerInfo, page: Page, tmp_config: Path) -> N
     errors: list[str] = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
 
-    page.goto(f"{server.base_url}/config")
-    page.wait_for_load_state("networkidle", timeout=5000)
+    page.goto(f"{server.base_url}/config", wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     locator = page.locator("#input-git_workflow_mode")
 
@@ -122,8 +128,8 @@ def test_select_autosave(server: _ServerInfo, page: Page, tmp_config: Path) -> N
 
 def test_no_save_button_exists(server: _ServerInfo, page: Page, tmp_config: Path) -> None:
     """The config page has no submit button — saving is fully automatic."""
-    page.goto(f"{server.base_url}/config")
-    page.wait_for_load_state("domcontentloaded", timeout=5000)
+    page.goto(f"{server.base_url}/config", wait_until=_GOTO_WAIT)
+    page.wait_for_timeout(300)
 
     # No <button type="submit"> anywhere on the page
     assert page.locator("button[type=submit]").count() == 0

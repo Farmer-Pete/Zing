@@ -203,7 +203,11 @@ details.review-group[open] > .review-group-header::before {
     box-shadow: 0 1px 2px rgba(0,0,0,0.06);
     transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
     cursor: default;
+    position: relative;
+    z-index: 1;
 }
+
+.card.menu-open { z-index: 50; }
 
 .card:hover {
     border-color: var(--orange);
@@ -303,6 +307,7 @@ a.card-ticket-id:hover { text-decoration: underline; }
     gap: 0.3rem 0.5rem;
     padding: 0.4rem 0.6rem;
     min-height: 28px;
+    position: relative;
 }
 
 .status-strip + .status-strip {
@@ -476,6 +481,96 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-right-color: #4caf50;
     border-bottom-color: #bbf7d0;
 }
+
+.strip-primary-btn {
+    font-size: 0.55rem; padding: 0.15rem 0.4rem; border-radius: 4px; border: none;
+    background: var(--orange); color: #fff; cursor: pointer; font-weight: 600;
+    font-family: inherit; white-space: nowrap; opacity: 0; transition: opacity 0.15s;
+}
+.card:hover .strip-primary-btn,
+.card:focus-within .strip-primary-btn { opacity: 1; }
+.strip-primary-btn:hover { background: var(--orange-hover); }
+.strip-primary-btn-blue { background: #3b82f6; }
+.strip-primary-btn-blue:hover { background: #2563eb; }
+
+.strip-kebab {
+    width: 20px; height: 20px; border: none; background: none; cursor: pointer;
+    font-size: 0.85rem; color: var(--gray-300); display: flex; align-items: center;
+    justify-content: center; border-radius: 4px; opacity: 0; flex-shrink: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.card:hover .strip-kebab,
+.card:focus-within .strip-kebab { opacity: 1; }
+.strip-kebab:hover { color: var(--gray-700); background: var(--gray-100); }
+
+/* ──────────────────────────────────────────────
+   KEBAB DROPDOWN MENUS
+────────────────────────────────────────────── */
+
+/* Dropdown container */
+.strip-menu {
+    display: none; position: absolute; right: 0.4rem; top: 100%; z-index: 10;
+    background: #fff; border: 1px solid var(--gray-200); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.15); min-width: 260px; overflow: hidden;
+}
+.strip-menu.open { display: block; }
+
+/* Column header */
+.menu-col-header {
+    display: flex; align-items: center; padding: 0.2rem 0.6rem;
+    border-bottom: 1px solid var(--gray-200); background: var(--gray-50);
+}
+.menu-col-header-label { flex: 1; font-size: 0.4rem; font-weight: 700; text-transform: uppercase; color: var(--gray-500); letter-spacing: 0.04em; }
+.menu-col-header-copy { width: 32px; font-size: 0.4rem; font-weight: 700; text-transform: uppercase; color: var(--gray-500); text-align: center; letter-spacing: 0.04em; }
+
+/* Scrollable items container */
+.menu-items { max-height: 320px; overflow-y: auto; padding: 0.2rem 0; }
+
+/* Dual-button row */
+.menu-row { display: flex; align-items: stretch; gap: 0; border-bottom: 1px solid var(--gray-100); }
+.menu-row:last-child { border-bottom: none; }
+
+.menu-row-main {
+    flex: 1; display: flex; align-items: center; gap: 0.4rem;
+    padding: 0.3rem 0.6rem; border: none; background: none; cursor: pointer;
+    font-size: 0.6rem; color: var(--gray-700); font-family: inherit; text-align: left;
+}
+.menu-row-main:hover { background: var(--orange); color: #fff; }
+.menu-row-main:hover .menu-desc { color: rgba(255,255,255,0.7); }
+
+.menu-row-copy {
+    display: flex; align-items: center; justify-content: center;
+    width: 32px; border: none; background: none; cursor: pointer;
+    color: var(--gray-300); font-size: 0.65rem; border-left: 1px solid var(--gray-100);
+    transition: background 0.1s, color 0.1s; flex-shrink: 0;
+}
+.menu-row-copy:hover { background: var(--gray-100); color: var(--gray-700); }
+.menu-row-copy.copied { color: #16a34a; background: rgba(22,163,74,0.08); }
+
+/* Full-width link items (no copy column) */
+.menu-row-link {
+    display: flex; align-items: center; gap: 0.4rem; width: 100%;
+    padding: 0.3rem 0.6rem; border: none; background: none; cursor: pointer;
+    font-size: 0.6rem; color: var(--gray-700); font-family: inherit; text-align: left;
+    border-bottom: 1px solid var(--gray-100);
+}
+.menu-row-link:last-child { border-bottom: none; }
+.menu-row-link:hover { background: var(--orange); color: #fff; }
+
+/* Section labels and dividers */
+.menu-section-label { font-size: 0.4rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); padding: 0.3rem 0.6rem 0.1rem; }
+.menu-icon { font-size: 0.6rem; width: 14px; text-align: center; flex-shrink: 0; }
+.menu-desc { font-size: 0.45rem; color: var(--gray-500); display: block; }
+.strip-menu-divider { height: 1px; background: var(--gray-100); margin: 0; }
+
+/* Search input for complex menus */
+.menu-search {
+    width: 100%; padding: 0.35rem 0.6rem; border: none;
+    border-bottom: 1px solid var(--gray-100);
+    font-size: 0.6rem; font-family: inherit; outline: none;
+    background: var(--gray-50); color: var(--text-primary);
+}
+.menu-search::placeholder { color: var(--gray-300); }
 
 /* ──────────────────────────────────────────────
    FOOTER

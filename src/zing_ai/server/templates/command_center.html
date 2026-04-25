@@ -229,17 +229,91 @@
         }, 5000);
     }
 
-    // Clipboard copy for data-launch-cmd buttons
-    document.addEventListener('click', function(e) {
-        var btn = e.target.closest('[data-launch-cmd]');
-        if (!btn) return;
-        var cmd = btn.getAttribute('data-launch-cmd');
-        var label = btn.getAttribute('data-launch-label');
-        navigator.clipboard.writeText(cmd).then(function() {
-            btn.innerHTML = '&#10003; Copied!';
-            setTimeout(function() { btn.innerHTML = label; }, 1500);
+    // Kebab menu toggling
+    function toggleMenu(kebab) {
+        var menu = kebab.nextElementSibling;
+        if (!menu || !menu.classList.contains('strip-menu')) return;
+        // Close all other open menus
+        document.querySelectorAll('.strip-menu.open').forEach(function(m) {
+            if (m !== menu) {
+                m.classList.remove('open');
+                m.closest('.card').classList.remove('menu-open');
+            }
         });
+        menu.classList.toggle('open');
+        var card = menu.closest('.card');
+        var isOpen = menu.classList.contains('open');
+        card.classList.toggle('menu-open', isOpen);
+        kebab.setAttribute('aria-expanded', isOpen);
+        // Auto-focus search if present
+        if (isOpen) {
+            var search = menu.querySelector('.menu-search');
+            if (search) { search.value = ''; search.focus(); filterMenu(search); }
+        }
+    }
+
+    function closeAllMenus() {
+        document.querySelectorAll('.strip-menu.open').forEach(function(m) {
+            m.classList.remove('open');
+            m.closest('.card').classList.remove('menu-open');
+            var kebab = m.previousElementSibling;
+            if (kebab && kebab.classList.contains('strip-kebab')) {
+                kebab.setAttribute('aria-expanded', 'false');
+            }
+        });
+    }
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.strip-kebab') && !e.target.closest('.strip-menu')) {
+            closeAllMenus();
+        }
     });
+
+    // Open external URLs from data-open-url attributes (replaces inline onclick)
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-open-url]');
+        if (!btn) return;
+        window.open(btn.getAttribute('data-open-url'), '_blank');
+        closeAllMenus();
+    });
+
+    // Copy-to-clipboard for kebab menu copy buttons
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-copy-cmd]');
+        if (!btn) return;
+        var cmd = btn.getAttribute('data-copy-cmd');
+        var original = btn.innerHTML;
+        navigator.clipboard.writeText(cmd).then(function() {
+            btn.innerHTML = '&#10003;';
+            btn.classList.add('copied');
+            setTimeout(function() {
+                btn.innerHTML = original;
+                btn.classList.remove('copied');
+            }, 1500);
+        });
+        closeAllMenus();
+    });
+
+    // Search filtering for complex kebab menus
+    function filterMenu(input) {
+        var q = input.value.toLowerCase();
+        var menu = input.closest('.strip-menu');
+        menu.querySelectorAll('.menu-row').forEach(function(row) {
+            var main = row.querySelector('.menu-row-main');
+            var text = (main.getAttribute('data-s') || main.textContent).toLowerCase();
+            row.style.display = text.includes(q) ? '' : 'none';
+        });
+        // Hide empty section labels
+        menu.querySelectorAll('.menu-section-label').forEach(function(label) {
+            var next = label.nextElementSibling;
+            var hasVisible = false;
+            while (next && !next.classList.contains('menu-section-label') && !next.classList.contains('strip-menu-divider')) {
+                if (next.style.display !== 'none') hasVisible = true;
+                next = next.nextElementSibling;
+            }
+            label.style.display = hasVisible ? '' : 'none';
+        });
+    }
 
     // Repo chooser: shows a popup when the server can't determine which repo to use.
     // After the user picks, retries the original request with the chosen repo.
@@ -270,6 +344,7 @@
         var cardKey = btn.getAttribute('data-launch-bg');
         var label = btn.getAttribute('data-launch-bg-label');
         var skill = btn.getAttribute('data-launch-bg-skill');
+        var prNumber = btn.getAttribute('data-launch-bg-pr');
 
         function doLaunch(repo) {
             btn.disabled = true;
@@ -277,6 +352,7 @@
             var payload = {card_key: cardKey};
             if (repo) payload.repo = repo;
             if (skill) payload.skill = skill;
+            if (prNumber) payload.pr_number = parseInt(prNumber, 10);
 
             fetch('/command-center/launch-background', {
                 method: 'POST',
@@ -382,6 +458,81 @@
                 document.getElementById('mgmt-fab').classList.remove('hidden');
             }
         }
+    });
+
+    // Kill running session
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-kill-session]');
+        if (!btn) return;
+        var sessionId = btn.getAttribute('data-kill-session');
+        fetch('/command-center/kill-session', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) showToast(data.error || 'Kill failed', 'error');
+                else showToast('Session killed', 'success');
+            });
+        }).catch(function(err) {
+            showToast('Kill failed: ' + err.message, 'error');
+        });
+        closeAllMenus();
+    });
+
+    // Cleanup/discard stopped session
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-cleanup-session]');
+        if (!btn) return;
+        var sessionId = btn.getAttribute('data-cleanup-session');
+        fetch('/command-center/cleanup-worktree', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId})
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) showToast(data.error || 'Cleanup failed', 'error');
+                else showToast('Session discarded', 'success');
+            });
+        }).catch(function(err) {
+            showToast('Cleanup failed: ' + err.message, 'error');
+        });
+        closeAllMenus();
+    });
+
+    // Resume stopped session
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-resume-session]');
+        if (!btn || btn.disabled) return;
+        var sessionId = btn.getAttribute('data-resume-session');
+        var ticketId = btn.getAttribute('data-resume-ticket');
+
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Resuming\u2026';
+
+        var payload = {card_key: ticketId, skill: 'resume'};
+
+        fetch('/command-center/launch-background', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        }).then(function(resp) {
+            return resp.json().then(function(data) {
+                if (!resp.ok) {
+                    showToast(data.error || 'Resume failed', 'error');
+                    btn.innerHTML = '&#10007; Failed';
+                    setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 3000);
+                } else {
+                    showToast('Session resumed', 'success');
+                    btn.innerHTML = '&#10003; Resumed!';
+                    setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 2000);
+                }
+            });
+        }).catch(function(err) {
+            showToast('Resume failed: ' + err.message, 'error');
+            btn.innerHTML = '&#10007; Failed';
+            setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 3000);
+        });
     });
     </script>
 
