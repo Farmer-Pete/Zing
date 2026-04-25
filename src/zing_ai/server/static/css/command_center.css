@@ -203,7 +203,11 @@ details.review-group[open] > .review-group-header::before {
     box-shadow: 0 1px 2px rgba(0,0,0,0.06);
     transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
     cursor: default;
+    position: relative;
+    z-index: 1;
 }
+
+.card.menu-open { z-index: 50; }
 
 .card:hover {
     border-color: var(--orange);
@@ -303,6 +307,7 @@ a.card-ticket-id:hover { text-decoration: underline; }
     gap: 0.3rem 0.5rem;
     padding: 0.4rem 0.6rem;
     min-height: 28px;
+    position: relative;
 }
 
 .status-strip + .status-strip {
@@ -476,6 +481,25 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-right-color: #4caf50;
     border-bottom-color: #bbf7d0;
 }
+
+.strip-primary-btn {
+    font-size: 0.55rem; padding: 0.15rem 0.4rem; border-radius: 4px; border: none;
+    background: var(--orange); color: #fff; cursor: pointer; font-weight: 600;
+    font-family: inherit; white-space: nowrap; opacity: 0; transition: opacity 0.15s;
+}
+.card:hover .strip-primary-btn { opacity: 1; }
+.strip-primary-btn:hover { background: var(--orange-hover); }
+.strip-primary-btn-blue { background: #3b82f6; }
+.strip-primary-btn-blue:hover { background: #2563eb; }
+
+.strip-kebab {
+    width: 20px; height: 20px; border: none; background: none; cursor: pointer;
+    font-size: 0.85rem; color: var(--gray-300); display: flex; align-items: center;
+    justify-content: center; border-radius: 4px; opacity: 0; flex-shrink: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.card:hover .strip-kebab { opacity: 1; }
+.strip-kebab:hover { color: var(--gray-700); background: var(--gray-100); }
 
 /* ──────────────────────────────────────────────
    FOOTER
