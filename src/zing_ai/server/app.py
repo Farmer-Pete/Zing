@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import pathlib
+import subprocess
 import time
 from collections.abc import AsyncGenerator
 
@@ -32,6 +33,8 @@ from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
 from zing_ai.server.sessions import SessionManager
+from zing_ai.server.zellij_config import ensure_zellij_config
+from zing_ai.server.zellij_proxy import create_zellij_router
 
 logger = logging.getLogger("zing_ai.server")
 
@@ -120,6 +123,7 @@ def create_app(
     external_cache: ExternalCache | None = None,
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
+    disable_zellij: bool = False,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -131,6 +135,7 @@ def create_app(
         port: The port the server will listen on, used for MCP tool URL construction.
         external_cache: Optional ExternalCache instance for testing (injects pre-populated state).
         cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
+        disable_zellij: If True, skip Zellij web server startup (useful in tests).
     """
     sm = session_manager or SessionManager()
 
@@ -207,6 +212,89 @@ def create_app(
         poller_task: asyncio.Task[None] | None = None
         session_poll_task: asyncio.Task[None] | None = None
 
+        # ------------------------------------------------------------------
+        # Zellij web server startup (soft — never crashes the server)
+        # ------------------------------------------------------------------
+        ensure_zellij_config()
+
+        fastapi_app.state.zellij_available = False
+        fastapi_app.state.zellij_http_client = None
+
+        if not disable_zellij:
+            try:
+                # 1. Start Zellij web server (daemonized)
+                result = subprocess.run(
+                    ["zellij", "web", "--start", "--daemonize", "--port", "8082"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    logger.warning("Zellij web server failed to start: %s", result.stderr)
+                else:
+                    # 2. Create auth token
+                    token_result = subprocess.run(
+                        ["zellij", "web", "--create-token"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    auth_token = None
+                    if token_result.returncode == 0:
+                        for line in token_result.stdout.strip().splitlines():
+                            line = line.strip()
+                            if line.startswith("token_") and ":" in line:
+                                auth_token = line.split(":", 1)[1].strip()
+                                break
+
+                    if auth_token:
+                        # 3. Readiness probe — poll port 8082 before login
+                        import socket
+
+                        for _ in range(30):
+                            try:
+                                with socket.create_connection(("127.0.0.1", 8082), timeout=0.1):
+                                    break
+                            except OSError:
+                                await asyncio.sleep(0.1)
+
+                        # 4. Server-side login to get session cookie
+                        import httpx
+
+                        async with httpx.AsyncClient() as login_client:
+                            resp = await login_client.post(
+                                "http://127.0.0.1:8082/command/login",
+                                json={"auth_token": auth_token, "remember_me": True},
+                            )
+                            session_cookie = None
+                            if resp.status_code == 200:
+                                session_cookie = resp.cookies.get("session_token")
+                                if not session_cookie:
+                                    for header_val in resp.headers.get_list("set-cookie"):
+                                        if "session_token=" in header_val:
+                                            session_cookie = header_val.split("session_token=")[
+                                                1
+                                            ].split(";")[0]
+                                            break
+
+                        if session_cookie:
+                            fastapi_app.state.zellij_http_client = httpx.AsyncClient(
+                                timeout=30.0,
+                                cookies={"session_token": session_cookie},
+                            )
+                            fastapi_app.state.zellij_available = True
+                            logger.info("Zellij web server ready")
+                        else:
+                            logger.warning("Zellij login failed — terminal sessions unavailable")
+                    else:
+                        logger.warning(
+                            "Zellij token creation failed — terminal sessions unavailable"
+                        )
+            except FileNotFoundError:
+                logger.warning("zellij binary not found — terminal sessions unavailable")
+            except Exception:
+                logger.exception("Zellij startup failed — terminal sessions unavailable")
+
         if not disable_polling:
             poller = ExternalPoller(
                 cache=fastapi_app.state.external_cache,
@@ -249,6 +337,10 @@ def create_app(
                 session_poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await session_poll_task
+            if fastapi_app.state.zellij_http_client:
+                await fastapi_app.state.zellij_http_client.aclose()
+            with contextlib.suppress(FileNotFoundError, OSError):
+                subprocess.run(["zellij", "web", "--stop"], check=False)
 
     mcp_starlette = mcp_server.streamable_http_app()
 
@@ -277,6 +369,7 @@ def create_app(
     fastapi_app.include_router(config_router)
     fastapi_app.include_router(install_router)
     fastapi_app.include_router(command_center_router)
+    fastapi_app.include_router(create_zellij_router())
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]

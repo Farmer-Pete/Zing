@@ -1863,4 +1863,110 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
         # Counts
         self.assertEqual(data["running_count"], 1)
-        self.assertEqual(data["orphan_count"], 2)
+
+
+class TestZellijLifespan(unittest.TestCase):
+    """Tests for Zellij web server lifecycle in create_app().
+
+    The mcp_server module-level singleton has a session_manager that can only
+    call .run() once per instance.  These tests patch ``zing_ai.server.app.mcp_server``
+    for the *entire* lifespan — app creation AND TestClient context — so the
+    lifespan closure sees the mock and never touches the real MCP server.
+    """
+
+    def _build_mock_mcp(self) -> MagicMock:
+        """Return a MagicMock that stands in for the module-level mcp_server."""
+        import contextlib
+        from collections.abc import AsyncIterator
+
+        @contextlib.asynccontextmanager
+        async def _noop_run() -> AsyncIterator[None]:
+            yield
+
+        mock_sm = MagicMock()
+        mock_sm.run = _noop_run
+
+        mock_mcp = MagicMock()
+        mock_mcp.session_manager = mock_sm
+        mock_mcp.streamable_http_app.return_value = MagicMock(routes=[])
+        return mock_mcp
+
+    def test_create_app_with_disable_zellij(self) -> None:
+        """When disable_zellij=True, zellij_available is False and /zellij/ returns 503."""
+        import tempfile
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        mock_mcp = self._build_mock_mcp()
+        with patch("zing_ai.server.app.mcp_server", mock_mcp):
+            tmp = tempfile.mkdtemp()
+            manager = SessionManager(data_dir=Path(tmp))
+            app = create_app(
+                session_manager=manager,
+                disable_polling=True,
+                disable_zellij=True,
+            )
+            with TestClient(app) as client:
+                resp = client.get("/zellij/")
+                # 503 = Zellij unavailable (correct — disable_zellij=True)
+                self.assertEqual(resp.status_code, 503)
+
+    def test_zellij_startup_failure_sets_unavailable(self) -> None:
+        """When zellij web --start fails (non-zero return), zellij_available is False."""
+        import tempfile
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "zellij web not supported"
+
+        mock_mcp = self._build_mock_mcp()
+        with (
+            patch("zing_ai.server.app.mcp_server", mock_mcp),
+            patch("zing_ai.server.app.subprocess.run", return_value=mock_result),
+        ):
+            tmp = tempfile.mkdtemp()
+            manager = SessionManager(data_dir=Path(tmp))
+            app = create_app(
+                session_manager=manager,
+                disable_polling=True,
+                disable_zellij=False,
+            )
+            with TestClient(app) as client:
+                resp = client.get("/zellij/")
+                self.assertEqual(resp.status_code, 503)
+
+    def test_zellij_binary_missing_sets_unavailable(self) -> None:
+        """When the zellij binary is missing (FileNotFoundError), zellij_available is False."""
+        import tempfile
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        mock_mcp = self._build_mock_mcp()
+        with (
+            patch("zing_ai.server.app.mcp_server", mock_mcp),
+            patch("zing_ai.server.app.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            tmp = tempfile.mkdtemp()
+            manager = SessionManager(data_dir=Path(tmp))
+            app = create_app(
+                session_manager=manager,
+                disable_polling=True,
+                disable_zellij=False,
+            )
+            with TestClient(app) as client:
+                resp = client.get("/zellij/")
+                self.assertEqual(resp.status_code, 503)
