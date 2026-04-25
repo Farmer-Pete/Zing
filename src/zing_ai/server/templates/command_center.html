@@ -41,7 +41,7 @@
     {% include "fragments/management_tray.html" %}
     </div>
 
-    {# ── Terminal modal (ttyd iframe) ── #}
+    {# ── Terminal modal (Zellij iframe) ── #}
     <div id="terminal-modal" class="terminal-modal" style="display:none;">
       <div class="terminal-modal-bar">
         <span class="terminal-modal-title" id="terminal-modal-title"></span>
@@ -179,7 +179,6 @@
         var closeBtn = document.getElementById('terminal-modal-close');
 
         function closeModal() {
-            // ttyd is cross-origin, so we cannot clear its beforeunload handler.
             // Remove the iframe from the DOM entirely to avoid triggering the
             // "Leave site?" dialog when navigating it to about:blank.
             modal.style.display = 'none';
@@ -307,12 +306,11 @@
         doLaunch(null);
     });
 
-    // Attach session (iTerm2 or browser via ttyd)
+    // Attach session (browser via Zellij)
     document.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-attach-session]');
         if (!btn || btn.disabled) return;
-        var tmuxSession = btn.getAttribute('data-attach-session');
-        var mode = btn.getAttribute('data-attach-mode');
+        var terminalSession = btn.getAttribute('data-attach-session');
 
         btn.disabled = true;
         btn.innerHTML = '&#9203; Attaching\u2026';
@@ -320,7 +318,7 @@
         fetch('/command-center/attach-session', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tmux_session: tmuxSession, mode: mode})
+            body: JSON.stringify({terminal_session: terminalSession})
         }).then(function(resp) {
             return resp.json().then(function(data) {
                 if (!resp.ok) {
@@ -328,7 +326,7 @@
                     btn.innerHTML = '&#10007; Failed';
                     setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
                 } else if (data.url) {
-                    openTerminal(data.url, tmuxSession);
+                    openTerminal(data.url, terminalSession);
                     btn.innerHTML = '&#10003; Opened!';
                     setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
                 } else {
