@@ -370,8 +370,8 @@ def _classify_card(
     User has unaddressed reviewer feedback          in_progress
     PR is awaiting review from someone              needs_review
     User's open PR is approved (ready to merge)     done
-    Owned + active session or open PR (no reviews)  in_progress
     Recently done (merged / completed / reviewed)   done
+    Owned + active session or open PR (no reviews)  in_progress
     Owned + ticket state is "started"               in_progress
     Everything else                                 todo
     =============================================  ================
@@ -395,12 +395,14 @@ def _classify_card(
     if s.has_approved_open_pr:
         return "done"
 
+    # Recently done (merged PR, completed ticket, submitted review) — takes
+    # priority over active sessions which may simply be stale.
+    if s.is_recently_done:
+        return "done"
+
     # Actively working: session running or PR not yet sent for review.
     if s.owned and (s.has_active_session or s.has_open_pr_no_reviewers):
         return "in_progress"
-
-    if s.is_recently_done:
-        return "done"
 
     # Ticket is being worked on but no PR signal drove it elsewhere.
     if s.owned and s.ticket_started:
