@@ -397,7 +397,7 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-radius: 50%;
     flex-shrink: 0;
 }
-.strip-session-alive { background: #3b82f6; animation: cc-pulse 2s infinite; }
+.strip-session-alive { background: var(--blue); animation: cc-pulse 2s infinite; }
 .strip-session-dead  { background: var(--gray-300); }
 
 .strip-session-label {
@@ -1166,7 +1166,7 @@ a.strip-ci-dot[href] { cursor: pointer; }
     align-items: center;
     gap: 0.35rem;
     padding: 0.25rem 0.6rem;
-    background: linear-gradient(135deg, #eff6ff, #dbeafe);
+    background: linear-gradient(135deg, var(--blue-subtle), #dbeafe);
     border-top: 1px solid rgba(59, 130, 246, 0.3);
     font-size: 0.48rem;
 }
@@ -1779,7 +1779,7 @@ body.drawer-open .mgmt-fab {
 
 /* Attach hero */
 .attach-hero {
-    background: linear-gradient(135deg, #eff6ff, #dbeafe);
+    background: linear-gradient(135deg, var(--blue-subtle), #dbeafe);
     border: 2px solid #93c5fd;
     border-radius: 10px;
     padding: 1rem 1.25rem;
@@ -1791,7 +1791,7 @@ body.drawer-open .mgmt-fab {
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    background: #3b82f6;
+    background: var(--blue);
     color: var(--white);
     margin: 0 auto 0.6rem;
     display: flex;
@@ -1825,7 +1825,7 @@ body.drawer-open .mgmt-fab {
 .attach-hero-btn {
     padding: 0.5rem 1.25rem;
     border-radius: 8px;
-    background: #3b82f6;
+    background: var(--blue);
     color: var(--white);
     font-weight: 700;
     font-size: 0.85rem;
@@ -1836,7 +1836,7 @@ body.drawer-open .mgmt-fab {
 }
 
 .attach-hero-btn:hover {
-    background: #2563eb;
+    background: var(--blue-dark);
 }
 
 .attach-ctx {
@@ -1980,7 +1980,7 @@ body.drawer-open .mgmt-fab {
 }
 
 .qi-findings { background: rgba(62, 207, 224, 0.15); color: var(--cyan-dim); }
-.qi-attach { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+.qi-attach { background: rgba(59, 130, 246, 0.15); color: var(--blue); }
 .qi-question { background: rgba(245, 124, 32, 0.15); color: var(--orange); }
 
 .d-qid {
@@ -2007,5 +2007,5 @@ body.drawer-open .mgmt-fab {
 }
 
 .qa-review { background: rgba(62, 207, 224, 0.12); color: var(--cyan-dim); }
-.qa-attach { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
+.qa-attach { background: rgba(59, 130, 246, 0.12); color: var(--blue); }
 .qa-answer { background: rgba(245, 124, 32, 0.12); color: var(--orange); }
