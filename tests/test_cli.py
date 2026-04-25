@@ -281,3 +281,67 @@ def test_mcp_custom_port():
     mock_run.assert_called_once()
     _args, kwargs = mock_run.call_args
     assert kwargs["port"] == 8080
+
+
+# -- launch subcommand: markdown target ----------------------------------------
+
+
+def test_launch_unrecognized_target_error():
+    """Unrecognized target prints an error listing all three target types."""
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),  # server check passes
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", "not-a-thing"])
+    assert result.exit_code == 1
+    assert "Unrecognized target" in result.output
+    assert "ticket ID" in result.output
+    assert "PR URL" in result.output
+    assert "markdown" in result.output
+
+
+def test_launch_markdown_nonexistent_file():
+    """Launching a nonexistent .md file prints a clear error."""
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", "/nonexistent/plan.md"])
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_launch_markdown_setup_only(tmp_path):
+    """--setup-only with a valid .md file creates the environment without launching Claude."""
+    md_file = tmp_path / "my-plan.md"
+    md_file.write_text("# Plan\n")
+
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),
+        patch("zing_ai.launch.detect_action_by_title", return_value=("new", None, None)),
+        patch("zing_ai.launch.resolve_repo_root", return_value=tmp_path),
+        patch("zing_ai.launch.create_worktree", return_value=tmp_path / "worktree"),
+        patch("zing_ai.launch.run_init_script"),
+        patch("zing_ai.launch.create_session_on_server") as mock_create,
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.git.worktree_root = "../{repo}-{branch}"
+        mock_cfg.return_value.git.branch_prefix = "zing/"
+        mock_cfg.return_value.git.zing_init_script = ""
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", str(md_file), "--setup-only"])
+    assert result.exit_code == 0, result.output
+    assert "Environment ready" in result.output
+    assert "Session ID" in result.output
+    # Verify session was created with correct args
+    mock_create.assert_called_once()
+    assert mock_create.call_args.kwargs["ticket_id"] is None
+    assert mock_create.call_args.kwargs["skill"] == "build"

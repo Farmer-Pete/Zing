@@ -44,6 +44,99 @@ TICKET_ID_PATTERN = r"[A-Z]{2,}-\d+"
 _TICKET_RE = re.compile(rf"\b{TICKET_ID_PATTERN}\b")
 
 # ---------------------------------------------------------------------------
+# Markdown file helpers
+# ---------------------------------------------------------------------------
+
+
+_BRANCH_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+_BRANCH_COLLAPSE_RE = re.compile(r"-{2,}")
+
+
+def sanitize_branch_name(name: str) -> str:
+    """Sanitize a string for use as a git branch name component.
+
+    Replaces characters unsafe for git refs with dashes, collapses
+    consecutive dashes, and strips leading/trailing dashes.
+
+    Args:
+        name: Raw name (e.g. a filename stem).
+
+    Returns:
+        A git-safe branch name component.
+    """
+    sanitized = _BRANCH_UNSAFE_RE.sub("-", name)
+    sanitized = _BRANCH_COLLAPSE_RE.sub("-", sanitized)
+    return sanitized.strip("-") or "unnamed"
+
+
+def validate_markdown_target(target: str) -> Path:
+    """Resolve and validate a markdown file target path.
+
+    Args:
+        target: Path string to a markdown file (relative or absolute).
+
+    Returns:
+        Resolved absolute Path to the markdown file.
+
+    Raises:
+        LaunchError: If the file does not exist or is not a ``.md`` file.
+    """
+    md_path = Path(target).resolve()
+    if md_path.suffix != ".md":
+        raise LaunchError(f"Target file must be a markdown file (.md): {target}")
+    if not md_path.is_file():
+        raise LaunchError(f"Markdown file not found: {target}")
+    return md_path
+
+
+def detect_action_by_title(
+    title: str,
+    server_url: str,
+) -> tuple[Literal["resume", "new"], str | None, str | None]:
+    """Check whether an existing Claude Code session exists with *title*.
+
+    Calls ``GET /api/sessions`` (unfiltered) and searches for a session with
+    ``session_type == "claude_code"`` whose ``title`` matches.
+
+    Args:
+        title: Session title to search for.
+        server_url: Base URL of the Zing server.
+
+    Returns:
+        ``("resume", session_id, worktree_path)`` if a matching session is
+        found, otherwise ``("new", None, None)``.
+
+    Raises:
+        LaunchError: If the HTTP call fails.
+    """
+    url = f"{server_url.rstrip('/')}/api/sessions"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sessions: list[dict] = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        raise LaunchError(f"Zing server HTTP {exc.code}: {exc.reason}") from exc
+    except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
+        raise LaunchError(
+            f"Could not connect to Zing server at {server_url}. Is 'zing-ai mcp' running?"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise LaunchError(f"Zing server returned non-JSON response: {exc}") from exc
+
+    # Return the most recent match (last in insertion order) to avoid
+    # resuming stale sessions when the same plan file is launched repeatedly.
+    match: dict | None = None
+    for session in sessions:
+        if session.get("session_type") == "claude_code" and session.get("title") == title:
+            match = session
+
+    if match is not None:
+        return ("resume", match["session_id"], match.get("worktree_path"))
+
+    return ("new", None, None)
+
+
+# ---------------------------------------------------------------------------
 # PR URL helpers
 # ---------------------------------------------------------------------------
 

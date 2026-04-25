@@ -119,6 +119,7 @@ def create_app(
     port: int = 9876,
     external_cache: ExternalCache | None = None,
     cc_queues: list[asyncio.Queue[str]] | None = None,
+    disable_polling: bool = False,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -203,44 +204,53 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
         # Note: state is set on fastapi_app.state, NOT starlette_app.state (different objects).
-        poller = ExternalPoller(
-            cache=fastapi_app.state.external_cache,
-            queues=fastapi_app.state.cc_queues,
-            config=load_config().command_center,
-        )
-        fastapi_app.state.poller = poller
-        poller_task = asyncio.create_task(poller.run())
+        poller_task: asyncio.Task[None] | None = None
+        tmux_task: asyncio.Task[None] | None = None
 
-        def _sync_tmux_alive(live: set[str]) -> None:
-            """Set _tmux_alive on each ClaudeCodeSession based on live tmux names."""
-            for session in sm.list_sessions():
-                if isinstance(session, ClaudeCodeSession) and session.tmux_session:
-                    session._tmux_alive = session.tmux_session in live
+        if not disable_polling:
+            poller = ExternalPoller(
+                cache=fastapi_app.state.external_cache,
+                queues=fastapi_app.state.cc_queues,
+                config=load_config().command_center,
+            )
+            fastapi_app.state.poller = poller
+            poller_task = asyncio.create_task(poller.run())
 
-        async def _poll_tmux() -> None:
-            """Poll tmux every 5 seconds and store live session names on app state."""
-            # Initial call before first SSE render
-            live = await asyncio.to_thread(get_live_tmux_sessions)
-            fastapi_app.state.live_tmux_sessions = live
-            _sync_tmux_alive(live)
-            while True:
-                await asyncio.sleep(5)
+            def _sync_tmux_alive(live: set[str]) -> None:
+                """Set _tmux_alive on each ClaudeCodeSession based on live tmux names."""
+                for session in sm.list_sessions():
+                    if isinstance(session, ClaudeCodeSession) and session.tmux_session:
+                        session._tmux_alive = session.tmux_session in live
+
+            async def _poll_tmux() -> None:
+                """Poll tmux every 5 seconds and store live session names on app state."""
+                # Initial call before first SSE render
                 live = await asyncio.to_thread(get_live_tmux_sessions)
                 fastapi_app.state.live_tmux_sessions = live
                 _sync_tmux_alive(live)
+                while True:
+                    await asyncio.sleep(5)
+                    live = await asyncio.to_thread(get_live_tmux_sessions)
+                    fastapi_app.state.live_tmux_sessions = live
+                    _sync_tmux_alive(live)
 
-        tmux_task = asyncio.create_task(_poll_tmux())
+            tmux_task = asyncio.create_task(_poll_tmux())
+        else:
+            fastapi_app.state.live_tmux_sessions = set()
+
         try:
             async with mcp_server.session_manager.run():
                 yield
         finally:
-            poller_task.cancel()
-            tmux_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await poller_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await tmux_task
-            await poller.aclose()
+            if poller_task is not None:
+                poller_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await poller_task
+                await poller.aclose()  # type: ignore[possibly-undefined]
+            if tmux_task is not None:
+                tmux_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tmux_task
             # Terminate any ttyd processes spawned by attach-session.
             ttyd_procs: dict = getattr(fastapi_app.state, "ttyd_procs", {})
             for name, (proc, _port) in list(ttyd_procs.items()):

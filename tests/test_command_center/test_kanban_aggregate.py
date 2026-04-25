@@ -343,16 +343,16 @@ class TestColumnPriorityRule(unittest.TestCase):
         self.assertEqual(len(view.in_progress), 1)
         self.assertEqual(len(view.needs_review), 0)
 
-    def test_in_progress_beats_done(self) -> None:
-        """A card with a STARTED session and a recently merged PR → in_progress."""
+    def test_done_beats_stale_session(self) -> None:
+        """A merged PR moves card to done even if a session step is still STARTED."""
         issue = _make_issue(identifier="BAK-1", state_type="completed", updated_at=RECENT)
         pr = _make_pr(number=5, head_ref="BAK-1/fix", state="merged", updated_at=RECENT)
         pr.merged_at = RECENT
         step = _make_workflow_step(step_name="build", state=SessionState.STARTED)
         session = _make_session(session_id="s1", ticket_id="BAK-1", steps=[step])
         view = _agg(issues=[issue], prs=[pr], sessions=[session])
-        self.assertEqual(len(view.in_progress), 1)
-        self.assertEqual(len(view.done), 0)
+        self.assertEqual(len(view.done), 1)
+        self.assertEqual(len(view.in_progress), 0)
 
     def test_needs_review_beats_done(self) -> None:
         """A card with pending reviews and a recently merged PR → needs_review."""

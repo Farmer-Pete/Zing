@@ -17,6 +17,7 @@ from zing_ai.launch import (
     create_worktree,
     derive_branch_name,
     detect_action,
+    detect_action_by_title,
     exec_or_detach,
     extract_ticket_id,
     fetch_pr_data,
@@ -27,6 +28,8 @@ from zing_ai.launch import (
     resolve_repo_root,
     rollback_worktree,
     run_init_script,
+    sanitize_branch_name,
+    validate_markdown_target,
 )
 
 # ---------------------------------------------------------------------------
@@ -1019,3 +1022,177 @@ class TestFindRepoPath(TestCase):
 
             self.assertEqual(result2, repo_dir)
             mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# validate_markdown_target
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeBranchName(TestCase):
+    """Tests for sanitize_branch_name."""
+
+    def test_passes_clean_name(self) -> None:
+        self.assertEqual(
+            sanitize_branch_name("replace-tmux-with-zellij"), "replace-tmux-with-zellij"
+        )
+
+    def test_replaces_spaces_with_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("my cool plan"), "my-cool-plan")
+
+    def test_replaces_special_chars(self) -> None:
+        self.assertEqual(sanitize_branch_name("design~v2"), "design-v2")
+
+    def test_strips_leading_trailing_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("..foo"), "foo")
+
+    def test_collapses_consecutive_dashes(self) -> None:
+        self.assertEqual(sanitize_branch_name("a   b"), "a-b")
+
+    def test_returns_unnamed_for_empty(self) -> None:
+        self.assertEqual(sanitize_branch_name("..."), "unnamed")
+
+
+class TestValidateMarkdownTarget(TestCase):
+    """Tests for validate_markdown_target."""
+
+    def test_validates_existing_md_file(self) -> None:
+        """Returns the resolved absolute path for an existing .md file."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"# Plan\n")
+            tmp_path = f.name
+        try:
+            result = validate_markdown_target(tmp_path)
+            self.assertEqual(result, Path(tmp_path).resolve())
+            self.assertTrue(result.is_absolute())
+        finally:
+            Path(tmp_path).unlink()
+
+    def test_raises_on_nonexistent_file(self) -> None:
+        """Raises LaunchError when the file does not exist."""
+        with self.assertRaises(LaunchError) as ctx:
+            validate_markdown_target("/nonexistent/plan.md")
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_raises_on_non_md_file(self) -> None:
+        """Raises LaunchError when the file is not a .md file."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            tmp_path = f.name
+        try:
+            with self.assertRaises(LaunchError) as ctx:
+                validate_markdown_target(tmp_path)
+            self.assertIn(".md", str(ctx.exception))
+        finally:
+            Path(tmp_path).unlink()
+
+    def test_resolves_relative_path(self) -> None:
+        """Resolves a relative path to an absolute one."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".md", dir=os.getcwd(), delete=False) as f:
+            f.write(b"# Plan\n")
+            tmp_path = f.name
+        try:
+            relative = os.path.basename(tmp_path)
+            result = validate_markdown_target(relative)
+            self.assertTrue(result.is_absolute())
+            self.assertEqual(result, Path(tmp_path).resolve())
+        finally:
+            Path(tmp_path).unlink()
+
+
+# ---------------------------------------------------------------------------
+# detect_action_by_title
+# ---------------------------------------------------------------------------
+
+
+class TestDetectActionByTitle(TestCase):
+    """Tests for detect_action_by_title."""
+
+    def _mock_urlopen(self, response_data):
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = json.dumps(response_data).encode()
+        resp_mock.__enter__ = lambda s: s
+        resp_mock.__exit__ = MagicMock(return_value=False)
+        return patch("zing_ai.launch.urllib.request.urlopen", return_value=resp_mock)
+
+    def test_returns_resume_when_matching_title_found(self) -> None:
+        sessions = [
+            {
+                "session_type": "claude_code",
+                "title": "replace-tmux-with-zellij",
+                "session_id": "sess-md-1",
+                "worktree_path": "/tmp/wt-md",
+            },
+        ]
+        with self._mock_urlopen(sessions):
+            action, sid, wt = detect_action_by_title(
+                "replace-tmux-with-zellij", "http://localhost:9876"
+            )
+        self.assertEqual(action, "resume")
+        self.assertEqual(sid, "sess-md-1")
+        self.assertEqual(wt, "/tmp/wt-md")
+
+    def test_returns_new_when_no_matching_title(self) -> None:
+        sessions = [
+            {
+                "session_type": "claude_code",
+                "title": "other-plan",
+                "session_id": "sess-other",
+            },
+        ]
+        with self._mock_urlopen(sessions):
+            action, sid, wt = detect_action_by_title(
+                "replace-tmux-with-zellij", "http://localhost:9876"
+            )
+        self.assertEqual(action, "new")
+        self.assertIsNone(sid)
+        self.assertIsNone(wt)
+
+    def test_returns_new_when_empty_sessions(self) -> None:
+        with self._mock_urlopen([]):
+            action, sid, wt = detect_action_by_title("my-plan", "http://localhost:9876")
+        self.assertEqual(action, "new")
+        self.assertIsNone(sid)
+        self.assertIsNone(wt)
+
+    def test_returns_most_recent_match(self) -> None:
+        """When multiple sessions match the title, returns the last (most recent) one."""
+        sessions = [
+            {
+                "session_type": "claude_code",
+                "title": "my-plan",
+                "session_id": "sess-old",
+                "worktree_path": "/tmp/wt-old",
+            },
+            {
+                "session_type": "claude_code",
+                "title": "my-plan",
+                "session_id": "sess-new",
+                "worktree_path": "/tmp/wt-new",
+            },
+        ]
+        with self._mock_urlopen(sessions):
+            action, sid, wt = detect_action_by_title("my-plan", "http://localhost:9876")
+        self.assertEqual(action, "resume")
+        self.assertEqual(sid, "sess-new")
+        self.assertEqual(wt, "/tmp/wt-new")
+
+    def test_ignores_non_claude_code_sessions(self) -> None:
+        sessions = [
+            {
+                "session_type": "zing",
+                "title": "my-plan",
+                "session_id": "sess-zing",
+            },
+        ]
+        with self._mock_urlopen(sessions):
+            action, sid, wt = detect_action_by_title("my-plan", "http://localhost:9876")
+        self.assertEqual(action, "new")
+        self.assertIsNone(sid)
+        self.assertIsNone(wt)

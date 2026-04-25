@@ -43,7 +43,12 @@ def ui_server() -> Generator[_ServerInfo]:
     manager = SessionManager(data_dir=data_dir)
     external_cache = ExternalCache()
     cc_queues: list[asyncio.Queue[str]] = []
-    app = create_app(session_manager=manager, external_cache=external_cache, cc_queues=cc_queues)
+    app = create_app(
+        session_manager=manager,
+        external_cache=external_cache,
+        cc_queues=cc_queues,
+        disable_polling=True,
+    )
 
     # Use port 0 to let the OS assign a free port
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
