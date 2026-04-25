@@ -374,16 +374,18 @@ For each finding, classify the fix complexity as `simple`, `standard`, or `compl
 <step name="agent_dispatch">
 **Before launching agents**, check if `.zing-learned-rules.md` exists in the repository root. If it does:
 1. Read the file using the `Read` tool
-2. Add the following section to every agent's prompt (after the standard checklist items):
+2. Insert the following section verbatim into every agent's prompt (after the standard checklist items):
 
-> ## Repo-Specific Learned Rules
->
-> The following rules were learned from this codebase's history of production issues
-> and missed review findings. Apply them with the same rigor as the standard checklist.
-> Findings from learned rules should use the severity specified in the rule.
-> Only apply rules that are relevant to your assigned review categories.
->
-> {all rules from .zing-learned-rules.md, copied verbatim}
+```
+## Repo-Specific Learned Rules
+
+The following rules were learned from this codebase's history of production issues
+and missed review findings. Apply them with the same rigor as the standard checklist.
+Findings from learned rules should use the severity specified in the rule.
+Only apply rules that are relevant to your assigned review categories.
+
+{all rules from .zing-learned-rules.md, copied verbatim}
+```
 
 If `.zing-learned-rules.md` does not exist, skip this entirely — do not add empty sections to agent prompts.
 
