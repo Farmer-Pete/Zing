@@ -1,0 +1,79 @@
+{#
+  attention_bar.html — renders the attention bar above the kanban board.
+
+  Expected context variables:
+    attention_items  — list[AttentionItem] from build_attention_queue()
+
+  Hidden entirely when attention_items is empty.
+  Collapsible via <details>/<summary> — preserves open/closed state across SSE patches.
+
+  The outer <div id="attention-bar"> is included here so that OUTER-mode SSE
+  patches can replace this element in-place (same pattern as kanban_board.html).
+#}
+<div id="attention-bar">
+{% if attention_items %}
+<details class="attn-bar" open>
+  <summary class="attn-hdr">
+    <div class="attn-ico">!</div>
+    <span class="attn-ttl">Needs your attention</span>
+    <span class="attn-cnt">{{ attention_items | length }}</span>
+    <span class="attn-chv">&#9660;</span>
+  </summary>
+  <div class="attn-items">
+    {% for item in attention_items %}
+      {% if item.action_type == "findings" %}
+        {% set type_cls = "type-findings" %}
+        {% set icon = "&#9998;" %}
+        {% set btn_cls = "btn-rev" %}
+        {% set btn_lbl = "Review" %}
+      {% elif item.action_type == "attach" %}
+        {% set type_cls = "type-attach" %}
+        {% set icon = "&#9654;" %}
+        {% set btn_cls = "btn-att" %}
+        {% set btn_lbl = "Attach" %}
+      {% else %}
+        {% set type_cls = "type-question" %}
+        {% set icon = "?" %}
+        {% set btn_cls = "btn-ans" %}
+        {% set btn_lbl = "Answer" %}
+      {% endif %}
+
+      {% if item.wait_seconds < 60 %}
+        {% set wait_lbl = item.wait_seconds ~ "s" %}
+      {% elif item.wait_seconds < 3600 %}
+        {% set wait_lbl = (item.wait_seconds // 60) ~ "m" %}
+      {% else %}
+        {% set wait_lbl = (item.wait_seconds // 3600) ~ "h" %}
+      {% endif %}
+
+      <div class="attn-item">
+        <div class="attn-type-ico {{ type_cls }}">{{ icon }}</div>
+        <div class="attn-info">
+          <div class="attn-top-row">
+            {% if item.ticket_id %}<span class="attn-tid">{{ item.ticket_id }}</span>{% endif %}
+            <span class="attn-lbl">{{ item.title }}</span>
+          </div>
+          <div class="attn-desc">{{ item.description }}</div>
+        </div>
+        <div class="attn-meta">
+          {% if item.step_name %}
+            {% if item.step_name == "plan" %}
+              {% set step_cls = "stp-pl" %}
+            {% elif item.step_name == "build" %}
+              {% set step_cls = "stp-bu" %}
+            {% elif item.step_name in ("build-audit", "plan-audit") %}
+              {% set step_cls = "stp-ba" %}
+            {% else %}
+              {% set step_cls = "stp-cr" %}
+            {% endif %}
+            <span class="attn-step {{ step_cls }}">{{ item.step_name }}</span>
+          {% endif %}
+          <span>{{ wait_lbl }}</span>
+        </div>
+        <button class="attn-btn {{ btn_cls }}">{{ btn_lbl }}</button>
+      </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+</div>

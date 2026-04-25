@@ -33,6 +33,7 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,
 )
+from zing_ai.server.attention import build_attention_queue
 from zing_ai.server.command_center import aggregate, generate_standup, infer_repo_for_ticket
 from zing_ai.server.models import ClaudeCodeSession
 from zing_ai.server.models_external import KanbanView
@@ -193,6 +194,16 @@ def render_board_fragment(app: FastAPI) -> str:
     )
 
 
+def render_attention_bar_fragment(app: FastAPI) -> str:
+    """Render the attention bar fragment. Used by SSE board_changed events."""
+    sessions = app.state.session_manager.list_sessions()
+    attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    return render(
+        "fragments/attention_bar.html",
+        attention_items=attention_items,
+    )
+
+
 def _render_tray_fragment(app: FastAPI) -> str:
     """Render the management tray. Used by SSE board_changed events."""
     view = _build_view(app)
@@ -210,6 +221,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
     live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
     sessions = request.app.state.session_manager.list_sessions()
     tray_data = _build_tray_data(view, sessions, live_sessions)
+    attention_items = build_attention_queue(sessions, datetime.now(UTC))
     return HTMLResponse(
         render(
             "command_center.html",
@@ -221,6 +233,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             body_class="command-center",
             current_username=cache.github_username or "",
             live_sessions=live_sessions,
+            attention_items=attention_items,
             **tray_data,
         )
     )
@@ -248,6 +261,12 @@ async def command_center_events(request: Request):  # noqa: ANN201
                     yield SSE.patch_elements(
                         html,
                         selector="#kanban-board",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                    attn_html = render_attention_bar_fragment(request.app)
+                    yield SSE.patch_elements(
+                        attn_html,
+                        selector="#attention-bar",
                         mode=ElementPatchMode.OUTER,
                     )
                     tray_html = _render_tray_fragment(request.app)
