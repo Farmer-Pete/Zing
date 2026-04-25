@@ -1013,6 +1013,10 @@ def find_repo_path(
     # Use a local dict to accumulate results; merge into caller's cache at the end.
     local: dict[str, Path] = {}
 
+    # Strip GIT_DIR/GIT_WORK_TREE so git -C targets the scanned child,
+    # not the caller's repo (matters when invoked from a git hook).
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+
     # Scan immediate children only (depth 1).
     for child in sorted(code_path.iterdir()):
         if not child.is_dir():
@@ -1022,6 +1026,7 @@ def find_repo_path(
         is_git = subprocess.run(
             ["git", "-C", str(child), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
+            env=clean_env,
         )
         if is_git.returncode != 0:
             continue
@@ -1031,6 +1036,7 @@ def find_repo_path(
             ["git", "-C", str(child), "worktree", "list", "--porcelain"],
             capture_output=True,
             text=True,
+            env=clean_env,
         )
         if wt_result.returncode != 0:
             continue
@@ -1051,6 +1057,7 @@ def find_repo_path(
             ["git", "-C", str(child), "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
+            env=clean_env,
         )
         if remote_result.returncode != 0:
             continue

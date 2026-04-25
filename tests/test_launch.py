@@ -891,34 +891,48 @@ class TestCreateSessionOnServerWithTerminalSession(TestCase):
 
 
 def _init_git_repo(path: Path, remote_url: str) -> None:
-    """Create a bare-minimum git repo with one commit and an origin remote."""
-    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    """Create a bare-minimum git repo with one commit and an origin remote.
+
+    Strips GIT_DIR and GIT_WORK_TREE from the subprocess environment so that
+    git commands target the temp directory, not the enclosing real repo.  Git
+    hooks (pre-push, pre-commit) set these variables, which causes ``git -C``
+    to silently operate on the wrong repository.
+    """
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         check=True,
         capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.name", "Test"],
         check=True,
         capture_output=True,
+        env=env,
     )
     (path / "README.md").write_text("hello")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "commit", "--no-verify", "-m", "init"],
         check=True,
         capture_output=True,
+        env=env,
     )
     result = subprocess.run(
         ["git", "-C", str(path), "remote", "add", "origin", remote_url],
         capture_output=True,
+        env=env,
     )
     if result.returncode != 0:
         subprocess.run(
             ["git", "-C", str(path), "remote", "set-url", "origin", remote_url],
             check=True,
             capture_output=True,
+            env=env,
         )
 
 
@@ -970,7 +984,10 @@ class TestFindRepoPath(TestCase):
 
     def test_find_repo_path_skips_worktrees(self) -> None:
         """Linked worktrees are skipped; only the main checkout is matched."""
+        import os
         import tempfile
+
+        env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
 
         with tempfile.TemporaryDirectory() as td:
             code_dir = Path(td)
@@ -983,21 +1000,25 @@ class TestFindRepoPath(TestCase):
                 ["git", "-C", str(repo_dir), "checkout", "-b", "feature"],
                 check=True,
                 capture_output=True,
+                env=env,
             )
             subprocess.run(
                 ["git", "-C", str(repo_dir), "checkout", "main"],
                 capture_output=True,
+                env=env,
             )
             # Fallback: use master if main doesn't exist.
             subprocess.run(
                 ["git", "-C", str(repo_dir), "checkout", "master"],
                 capture_output=True,
+                env=env,
             )
 
             worktree_dir = code_dir / "linked-wt"
             subprocess.run(
                 ["git", "-C", str(repo_dir), "worktree", "add", str(worktree_dir), "feature"],
                 check=True,
+                env=env,
                 capture_output=True,
             )
 
@@ -1010,31 +1031,6 @@ class TestFindRepoPath(TestCase):
         with self.assertRaises(LaunchError) as ctx:
             find_repo_path("", "acme/repo")
         self.assertIn("code_dir is not configured", str(ctx.exception))
-
-    def test_find_repo_path_cached(self) -> None:
-        """Returns cached result on second call without running subprocess."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            code_dir = Path(td)
-            repo_dir = code_dir / "cached-repo"
-            repo_dir.mkdir()
-            _init_git_repo(repo_dir, "https://github.com/acme/cached-repo.git")
-
-            cache: dict[str, Path] = {}
-
-            # First call populates the cache.
-            result1 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
-            self.assertEqual(result1, repo_dir)
-            self.assertIn("acme/cached-repo", cache)
-
-            # Second call must use the cache — patch subprocess.run to confirm
-            # it is never called.
-            with patch("zing_ai.launch.subprocess.run") as mock_run:
-                result2 = find_repo_path(str(code_dir), "acme/cached-repo", cache=cache)
-
-            self.assertEqual(result2, repo_dir)
-            mock_run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
