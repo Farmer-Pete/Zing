@@ -258,21 +258,80 @@
   {% if not card.prs and card.ticket %}
     <div class="card-actions">
       {% if column_cls == "col-todo" %}
-        <button class="card-btn card-btn-primary" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
-      {% endif %}
-      {% set has_cc_session = card.sessions | selectattr("session_type", "equalto", "claude_code") | list %}
-      {% set launch_label = "Session Running" if has_cc_session else "Plan Ticket" %}
-      <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="{{ launch_label }}">{{ launch_label }}</button>
-      <button class="card-btn" data-launch-cmd="zing-ai launch {{ card.key | e }}" data-launch-label="Copy Cmd">Copy Cmd</button>
-      {% if column_cls == "col-progress" %}
-        <button class="card-btn" data-launch-cmd="zing-ai launch --setup-only {{ card.key | e }}" data-launch-label="Setup Env">Setup Env</button>
+        <button class="strip-primary-btn" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
+        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&#8942;</button>
+        <div class="strip-menu">
+          <div class="menu-col-header">
+            <span class="menu-col-header-label">Action</span>
+            <span class="menu-col-header-copy">&#128203;</span>
+          </div>
+          <div class="menu-items">
+            <div class="menu-section-label">Zing</div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start"><span class="menu-icon">&#9654;</span> Start Ticket</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-copy-cmd="zing-ai launch {{ card.key | e }}"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            <button class="menu-row-link" onclick="window.open('{{ card.ticket.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      {% elif column_cls == "col-progress" %}
+        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build">Build</button>
+        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&#8942;</button>
+        <div class="strip-menu">
+          <div class="menu-col-header">
+            <span class="menu-col-header-label">Action</span>
+            <span class="menu-col-header-copy">&#128203;</span>
+          </div>
+          <div class="menu-items">
+            <div class="menu-section-label">Zing</div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build"><span class="menu-icon">&#128296;</span> Build</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill build {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan Audit" data-launch-bg-skill="plan-audit"><span class="menu-icon">&#128269;</span> Plan Audit</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan-audit {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan &rarr; Linear" data-launch-bg-skill="plan-linear"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan-linear {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Other</div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Setup Env" data-launch-bg-skill="setup-only"><span class="menu-icon">&#128736;</span> Setup Env</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --setup-only {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-copy-cmd="zing-ai launch {{ card.key | e }}"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            <button class="menu-row-link" onclick="window.open('{{ card.ticket.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
       {% endif %}
     </div>
   {% elif card.prs and column_cls == "col-progress" %}
-    {# PR cards in progress: show setup button #}
-    <div class="card-actions">
-      <button class="card-btn" data-launch-cmd="zing-ai launch --setup-only {% if card.prs %}{{ card.prs[0].url | e }}{% else %}{{ card.key | e }}{% endif %}" data-launch-label="Setup Env">Setup Env</button>
-    </div>
+    {# PR cards in progress: setup env button moved to PR kebab menu, no standalone footer needed #}
   {% endif %}
 
 </div>
