@@ -886,8 +886,6 @@ class TestCreateSessionOnServerWithTerminalSession(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# find_repo_path
-# ---------------------------------------------------------------------------
 
 
 def _init_git_repo(path: Path, remote_url: str) -> None:

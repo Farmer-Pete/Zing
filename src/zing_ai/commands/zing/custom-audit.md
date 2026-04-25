@@ -127,6 +127,23 @@ For each file in scope, prepare a file context block:
 
 Apply the same filtering rules from `diff_preparation` in the shared review reference if any files slipped through (lock files, generated code, minified, vendored, binary). Since scope was already filtered at resolution time, this should be minimal.
 
+**Before launching agents**, check if `.zing-learned-rules.md` exists in the repository root. If it does:
+1. Read the file using the `Read` tool
+2. Insert the following section verbatim into every agent's prompt (after the standard checklist items):
+
+```
+## Repo-Specific Learned Rules
+
+The following rules were learned from this codebase's history of production issues
+and missed review findings. Apply them with the same rigor as the standard checklist.
+Findings from learned rules should use the severity specified in the rule.
+Only apply rules that are relevant to your assigned review categories.
+
+{all rules from .zing-learned-rules.md, copied verbatim}
+```
+
+If `.zing-learned-rules.md` does not exist, skip this entirely — do not add empty sections to agent prompts.
+
 **Agent dispatch:**
 
 Launch 6 parallel Task agents to review the code. Each agent receives:
