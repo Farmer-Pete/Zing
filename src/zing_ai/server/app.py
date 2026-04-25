@@ -16,7 +16,7 @@ from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from zing_ai.config import load_config
-from zing_ai.server.command_center import get_live_tmux_sessions
+from zing_ai.server.command_center import get_live_sessions
 from zing_ai.server.external_cache import ExternalCache
 from zing_ai.server.external_poller import ExternalPoller
 from zing_ai.server.mcp_tools import configure, mcp_server
@@ -225,12 +225,12 @@ def create_app(
             async def _poll_tmux() -> None:
                 """Poll tmux every 5 seconds and store live session names on app state."""
                 # Initial call before first SSE render
-                live = await asyncio.to_thread(get_live_tmux_sessions)
+                live = await asyncio.to_thread(get_live_sessions)
                 fastapi_app.state.live_tmux_sessions = live
                 _sync_tmux_alive(live)
                 while True:
                     await asyncio.sleep(5)
-                    live = await asyncio.to_thread(get_live_tmux_sessions)
+                    live = await asyncio.to_thread(get_live_sessions)
                     fastapi_app.state.live_tmux_sessions = live
                     _sync_tmux_alive(live)
 

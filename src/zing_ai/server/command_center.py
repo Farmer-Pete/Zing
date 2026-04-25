@@ -3,12 +3,13 @@
 Takes typed snapshots from Linear, GitHub, and the in-memory SessionManager
 and produces the Kanban view rendered on ``/command-center``. Most functions
 are pure (no I/O) and can be unit tested with synthetic data.
-``get_live_tmux_sessions`` is the exception — it shells out to ``tmux``.
+``get_live_sessions`` is the exception — it shells out to ``zellij``.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -838,17 +839,11 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
     return "\n\n".join(sections)
 
 
-def get_live_tmux_sessions() -> set[str]:
-    """Return the set of active tmux session names.
-
-    Runs ``tmux list-sessions`` to get the current session list.
-    Returns an empty set if tmux is not installed, not running, or has no sessions.
-    """
-    import subprocess
-
+def get_live_sessions() -> set[str]:
+    """Return the set of live Zellij session names with the zing-- prefix."""
     try:
         result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            ["zellij", "list-sessions", "-sn"],
             capture_output=True,
             text=True,
         )
@@ -856,4 +851,6 @@ def get_live_tmux_sessions() -> set[str]:
         return set()
     if result.returncode != 0:
         return set()
-    return {line for line in result.stdout.splitlines() if line}
+    return {
+        line.strip() for line in result.stdout.splitlines() if line.strip().startswith("zing--")
+    }
