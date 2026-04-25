@@ -839,25 +839,92 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
     return "\n\n".join(sections)
 
 
+_PHASE_TOKEN_MAP: dict[str, str] = {
+    "plan": "p",
+    "plan-audit": "a",
+    "build": "b",
+    "build-audit": "a",
+    "pr-audit": "a",
+    "custom-audit": "a",
+    "code-review": "r",
+    "ready": "r",
+}
+
+_HUMAN_CAP_RATIO = 2.0
+
+
+def _ai_seconds(step: WorkflowStep, now: datetime) -> float:
+    """Wall-clock seconds Claude actively spent on this step.
+
+    Computed as ``max(agent.completed_at)`` - ``min(agent.started_at)`` over
+    the step's agents. An agent without ``completed_at`` is treated as still
+    running (uses ``now`` as its end). Returns 0.0 when the step has no
+    agents — caller falls back to a created-at heuristic.
+    """
+    if not step.agents:
+        return 0.0
+    starts = [_ensure_utc(a.started_at) for a in step.agents]
+    ends = [_ensure_utc(a.completed_at) if a.completed_at else now for a in step.agents]
+    return max((max(ends) - min(starts)).total_seconds(), 0.0)
+
+
+def _human_seconds(
+    step: WorkflowStep,
+    next_start: datetime | None,
+    now: datetime,
+) -> float:
+    """Wall-clock seconds spent waiting for human review after Claude finished.
+
+    Returns 0.0 when:
+    - the step has no agent data
+    - any agent is still running (Claude not yet done)
+    - the step is COMPLETED but has no next step (we don't track when the
+      completion transition happened, so there's no defensible end time)
+    """
+    if not step.agents or any(a.completed_at is None for a in step.agents):
+        return 0.0
+    if step.state.value == "completed" and next_start is None:
+        return 0.0
+    ai_done = max(_ensure_utc(a.completed_at) for a in step.agents)  # type: ignore[arg-type]
+    end = next_start if next_start is not None else now
+    return max((end - ai_done).total_seconds(), 0.0)
+
+
+def _format_duration(seconds: float) -> str:
+    """Compact duration: '42s', '5m', '2h', '3d'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
 def build_session_phases(session: ZingSession) -> list[dict]:
-    """Build a list of phase segments for a session's mini timeline.
+    """Build phase segments for a session's mini timeline.
 
-    Each segment has a ``phase`` key (e.g. ``"plan"``, ``"build"``, ``"wait"``)
-    and a ``flex`` key — a relative weight computed from the duration of the
-    step compared to the total session duration.
+    Each step expands into up to two adjacent sub-segments:
+    - **AI portion** — width proportional to Claude's actual work time on the
+      step (from agent timestamps); rendered in the phase color.
+    - **Human portion** — width proportional to the gap between Claude
+      finishing and the next step starting (or now for the current step);
+      rendered in a lighter shade of the same phase color. Capped at
+      ``_HUMAN_CAP_RATIO`` × the AI width so an overnight gap can't dominate
+      the bar; if the real wait exceeded the cap, ``label`` carries the
+      true duration (e.g. ``"3h"``) so users can still see it.
 
-    The phase name maps to a CSS modifier class on `.css-seg`:
-    - ``"plan"``  → ``.css-p``  (orange)
-    - ``"audit"`` → ``.css-a``  (amber)
-    - ``"build"`` → ``.css-b``  (purple)
-    - ``"ready"`` → ``.css-r``  (cyan)
-    - ``"wait"``  → ``.css-w``  (gray)
-    - ``"done"``  → ``.css-u``  (green)
+    Each segment dict has:
+    - ``token``: CSS class suffix — ``p``/``a``/``b``/``r``/``u`` for AI,
+      same with ``-h`` suffix for the human portion (e.g. ``p-h``)
+    - ``label``: empty for AI; for human, empty unless the cap kicked in
+    - ``flex``: relative width
+    - ``step_name``: original step name (for tooltip)
 
-    Uses adjacent-step timestamp heuristic: each step's duration is estimated
-    as the time between its ``created_at`` and the next step's ``created_at``
-    (or ``now`` for the last step).  Steps with zero or negative duration are
-    assigned a minimum flex of 0.1 so they still appear.
+    Used by both the kanban card mini bar (``.css-seg`` classes) and the
+    review drawer timeline (``.ds`` classes), so both views render
+    identically from the same data.
 
     Returns an empty list when the session has no steps.
     """
@@ -866,53 +933,48 @@ def build_session_phases(session: ZingSession) -> list[dict]:
 
     now = datetime.now(UTC)
 
-    _PHASE_MAP: dict[str, str] = {
-        "plan": "plan",
-        "plan-audit": "audit",
-        "build": "build",
-        "build-audit": "audit",
-        "pr-audit": "audit",
-        "custom-audit": "audit",
-        "ready": "ready",
-    }
-
-    segments: list[dict] = []
-    total_seconds = 0.0
-
+    # Pass 1: per-step AI/human seconds. Falls back to created-at heuristic
+    # for legacy steps that have no agent data.
+    raw: list[tuple[str, float, float, float, str]] = []
     for i, step in enumerate(session.steps):
-        step_start = _ensure_utc(step.created_at)
-        if i + 1 < len(session.steps):
-            step_end = _ensure_utc(session.steps[i + 1].created_at)
-        else:
-            step_end = now
+        next_start = (
+            _ensure_utc(session.steps[i + 1].created_at) if i + 1 < len(session.steps) else None
+        )
+        ai = _ai_seconds(step, now)
+        human = _human_seconds(step, next_start, now)
+        if ai == 0.0 and not step.agents:
+            # Legacy fallback: split the step's wall-clock duration evenly so
+            # there's still something to render. Treat it all as AI time.
+            step_end = next_start if next_start is not None else now
+            ai = max((step_end - _ensure_utc(step.created_at)).total_seconds(), 0.0)
+        token = _PHASE_TOKEN_MAP.get(step.step_name, "u")
+        capped_human = min(human, _HUMAN_CAP_RATIO * ai) if ai > 0 else 0.0
+        raw.append((token, ai, capped_human, human, step.step_name))
 
-        duration = max((step_end - step_start).total_seconds(), 0.0)
-        total_seconds += duration
+    # Pass 2: scale to flex values.
+    total = sum(ai + capped_h for _, ai, capped_h, _, _ in raw)
+    if total <= 0:
+        # Nothing measurable — fall back to equal-width AI segments.
+        return [
+            {"token": t, "label": "", "flex": 1.0, "step_name": name} for t, _, _, _, name in raw
+        ]
 
-        # Determine phase name from step_name
-        phase = _PHASE_MAP.get(step.step_name, "build")
-        segments.append({"phase": phase, "duration": duration})
-
-    # Convert durations to flex values (normalised so max ≈ 10)
-    if total_seconds <= 0:
-        # Fallback: equal weights
-        return [{"phase": s["phase"], "flex": 1.0} for s in segments]
-
-    scale = 10.0 / total_seconds
+    scale = 10.0 / total
     result: list[dict] = []
-    for s in segments:
-        flex = max(round(s["duration"] * scale, 1), 0.1)
-        result.append({"phase": s["phase"], "flex": flex})
-
-    # Add a trailing "wait" segment if the session state is READY or STARTED
-    # (i.e., still running) — this represents the current waiting period.
-    if session.state in (SessionState.READY, SessionState.STARTED):
-        last_step_end = _ensure_utc(session.steps[-1].created_at)
-        waiting_secs = max((now - last_step_end).total_seconds(), 0.0)
-        if waiting_secs > 0:
-            wait_flex = max(round(waiting_secs * scale, 1), 0.2)
-            result.append({"phase": "wait", "flex": wait_flex})
-
+    for token, ai, capped_human, real_human, name in raw:
+        ai_flex = max(round(ai * scale, 1), 0.3) if ai > 0 else 0.3
+        result.append({"token": token, "label": "", "flex": ai_flex, "step_name": name})
+        if capped_human > 0:
+            human_flex = max(round(capped_human * scale, 1), 0.2)
+            human_label = _format_duration(real_human) if real_human > _HUMAN_CAP_RATIO * ai else ""
+            result.append(
+                {
+                    "token": f"{token}-h",
+                    "label": human_label,
+                    "flex": human_flex,
+                    "step_name": name,
+                }
+            )
     return result
 
 

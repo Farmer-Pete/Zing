@@ -16,6 +16,7 @@
   The outer drawer-backdrop and .drawer are rendered inline.
   The step history is included via a separate fragment call.
 #}
+{% from "fragments/_phase_strip.html" import phase_strip %}
 
 {# ── Backdrop ── #}
 <div class="drawer-backdrop" data-drawer-close></div>
@@ -53,27 +54,9 @@
   </div>
 
   {# ── Timeline bar ── #}
-  {% if steps %}
+  {% if phase_segments %}
     <div class="d-tl">
-      {% for step in steps %}
-        {% if step.state.value == "completed" %}
-          {% if step.step_name == "plan" %}
-            <div class="ds ds-p" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name in ("plan-audit", "build-audit") %}
-            <div class="ds ds-a" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name == "build" %}
-            <div class="ds ds-b" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name == "code-review" %}
-            <div class="ds ds-r" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% else %}
-            <div class="ds ds-u" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% endif %}
-        {% elif step.state.value == "ready" %}
-          <div class="ds ds-wn" style="flex:{{ loop.index }}" title="{{ step.step_name }}">now</div>
-        {% else %}
-          <div class="ds ds-w" style="flex:{{ loop.index }}" title="{{ step.step_name }}"></div>
-        {% endif %}
-      {% endfor %}
+      {{ phase_strip(phase_segments, prefix="ds", show_labels=True) }}
     </div>
     <div class="d-tl-info">
       <span style="font-weight:600">{{ steps | length }} step{% if steps | length != 1 %}s{% endif %}</span>

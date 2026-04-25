@@ -1245,13 +1245,20 @@ a.strip-ci-dot[href] { cursor: pointer; }
     height: 100%;
 }
 
-/* Phase segment color variants — mirror prototype .css-p/.css-a/.css-b/.css-r/.css-w/.css-u */
+/* Phase segment color variants — AI portion uses full color, human portion
+   uses a lighter shade of the same color (mirrors .ds-* variants). */
 .css-p { background: var(--orange); }
 .css-a { background: var(--amber); }
 .css-b { background: #7c3aed; }
 .css-r { background: var(--cyan-dim); }
 .css-w { background: #e2e8f0; }
 .css-u { background: #16a34a; }
+
+.css-p-h { background: color-mix(in srgb, var(--orange) 30%, white); }
+.css-a-h { background: color-mix(in srgb, var(--amber) 30%, white); }
+.css-b-h { background: color-mix(in srgb, #7c3aed 30%, white); }
+.css-r-h { background: color-mix(in srgb, var(--cyan-dim) 30%, white); }
+.css-u-h { background: color-mix(in srgb, #16a34a 30%, white); }
 
 .card-session-label {
     font-size: 0.42rem;
@@ -1452,20 +1459,12 @@ body.drawer-open .mgmt-fab {
 .ds-w { background: #e2e8f0; color: var(--gray-500); }
 .ds-u { background: #16a34a; }
 
-.ds-wn {
-    background: repeating-linear-gradient(
-        -45deg,
-        #e2e8f0, #e2e8f0 3px,
-        #d1d5db 3px, #d1d5db 6px
-    );
-    animation: drawer-bp 1s linear infinite;
-    background-size: 12px 12px;
-    color: var(--gray-700);
-}
-
-@keyframes drawer-bp {
-    to { background-position: 12px 0; }
-}
+/* Human-portion (lighter shade); dark text since the background is pale. */
+.ds-p-h { background: color-mix(in srgb, var(--orange) 30%, white); color: var(--gray-700); }
+.ds-a-h { background: color-mix(in srgb, var(--amber) 30%, white); color: var(--gray-700); }
+.ds-b-h { background: color-mix(in srgb, #7c3aed 30%, white); color: var(--gray-700); }
+.ds-r-h { background: color-mix(in srgb, var(--cyan-dim) 30%, white); color: var(--gray-700); }
+.ds-u-h { background: color-mix(in srgb, #16a34a 30%, white); color: var(--gray-700); }
 
 .d-tl-info {
     display: flex;
