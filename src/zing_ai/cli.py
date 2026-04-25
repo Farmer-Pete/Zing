@@ -186,7 +186,7 @@ def mcp_cmd(port: int) -> None:
 @click.option(
     "--skill", default=None, type=str, help="Skill to use for the session (e.g. pr-respond)."
 )
-@click.option("--detach", is_flag=True, default=False, help="Run in a detached tmux session.")
+@click.option("--detach", is_flag=True, default=False, help="Run in a detached session.")
 @click.option(
     "--setup-only",
     is_flag=True,

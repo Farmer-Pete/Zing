@@ -1268,14 +1268,14 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         resp = self.client.post(
             "/api/sessions/claude-code",
             json={
-                "session_id": "cc-tmux-1",
+                "session_id": "cc-zellij-1",
                 "title": "Background Session",
                 "ticket_id": "FRO-123",
                 "terminal_session": "zing--fro-123",
             },
         )
         self.assertEqual(resp.status_code, 200)
-        session = self.manager.get_session("cc-tmux-1")
+        session = self.manager.get_session("cc-zellij-1")
         self.assertIsNotNone(session)
         assert session is not None  # narrow for pyright
         self.assertEqual(session.terminal_session, "zing--fro-123")  # type: ignore[union-attr]
@@ -1325,7 +1325,11 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         """POST /api/sessions/claude-code returns expected shape."""
         resp = self.client.post(
             "/api/sessions/claude-code",
-            json={"session_id": "cc-tmux-shape", "title": "Shape", "terminal_session": "zing-test"},
+            json={
+                "session_id": "cc-zellij-shape",
+                "title": "Shape",
+                "terminal_session": "zing-test",
+            },
         )
         self.assertEqual(resp.status_code, 200)
 
@@ -1610,7 +1614,7 @@ class TestLaunchBackground(unittest.TestCase):
             ),
             patch(
                 "zing_ai.server.routes_command_center.exec_or_detach",
-                side_effect=LaunchError("tmux session already exists"),
+                side_effect=LaunchError("zellij session already exists"),
             ),
             patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback,
         ):
@@ -1731,10 +1735,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
     def test_kill_session_no_terminal_session_returns_404(self) -> None:
         """POST kill-session returns 404 when session has no terminal_session."""
-        self._create_cc_session(session_id="cc-no-tmux", terminal_session=None)
+        self._create_cc_session(session_id="cc-no-terminal", terminal_session=None)
         resp = self.client.post(
             "/command-center/kill-session",
-            json={"session_id": "cc-no-tmux"},
+            json={"session_id": "cc-no-terminal"},
         )
         self.assertEqual(resp.status_code, 404)
 

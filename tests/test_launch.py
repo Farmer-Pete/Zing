@@ -853,7 +853,7 @@ class TestExecOrDetach(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# create_session_on_server with tmux_session
+# create_session_on_server with terminal_session
 # ---------------------------------------------------------------------------
 
 
