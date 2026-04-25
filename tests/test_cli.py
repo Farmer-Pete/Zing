@@ -281,3 +281,37 @@ def test_mcp_custom_port():
     mock_run.assert_called_once()
     _args, kwargs = mock_run.call_args
     assert kwargs["port"] == 8080
+
+
+# -- launch subcommand: markdown target ----------------------------------------
+
+
+def test_launch_unrecognized_target_error():
+    """Unrecognized target prints an error listing all three target types."""
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),  # server check passes
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", "not-a-thing"])
+    assert result.exit_code == 1
+    assert "Unrecognized target" in result.output
+    assert "ticket ID" in result.output
+    assert "PR URL" in result.output
+    assert "markdown" in result.output
+
+
+def test_launch_markdown_nonexistent_file():
+    """Launching a nonexistent .md file prints a clear error."""
+    runner = CliRunner()
+    with (
+        patch("zing_ai.config.load_config") as mock_cfg,
+        patch("urllib.request.urlopen"),
+    ):
+        mock_cfg.return_value.git.workflow_mode = "worktree"
+        mock_cfg.return_value.command_center.claude_flags = ""
+        result = runner.invoke(cli, ["launch", "/nonexistent/plan.md"])
+    assert result.exit_code == 1
+    assert "not found" in result.output

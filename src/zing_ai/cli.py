@@ -171,7 +171,7 @@ def mcp_cmd(port: int) -> None:
 
 
 @cli.command()
-@click.argument("target")  # ticket ID or PR URL
+@click.argument("target")  # ticket ID, PR URL, or markdown file path
 @click.option(
     "--resume",
     is_flag=False,
@@ -195,7 +195,7 @@ def mcp_cmd(port: int) -> None:
 def launch(
     target: str, resume: str, port: int, skill: str | None, detach: bool, setup_only: bool
 ) -> None:
-    """Launch a Claude Code session for a ticket or PR."""
+    """Launch a Claude Code session for a ticket, PR, or plan file."""
     from zing_ai.config import ConfigError, load_config
     from zing_ai.launch import (
         TICKET_ID_PATTERN,
@@ -207,6 +207,7 @@ def launch(
         create_worktree,
         derive_branch_name,
         detect_action,
+        detect_action_by_title,
         exec_or_detach,
         extract_ticket_id,
         fetch_pr_data,
@@ -217,6 +218,7 @@ def launch(
         resolve_repo_root,
         rollback_worktree,
         run_init_script,
+        validate_markdown_target,
     )
 
     server_url = f"http://127.0.0.1:{port}"
@@ -246,8 +248,9 @@ def launch(
         if detach:
             require_tmux()
 
-        # Detect target type: ticket ID or PR URL
+        # Detect target type: ticket ID, markdown file, or PR URL
         is_ticket = bool(re.match(rf"^{TICKET_ID_PATTERN}$", target))
+        is_markdown = not is_ticket and target.endswith(".md")
 
         if is_ticket:
             ticket_id = target
@@ -420,10 +423,134 @@ def launch(
             )
             exec_or_detach(args, work_dir, tmux_name)
 
+        elif is_markdown:
+            # Markdown plan file flow
+            md_path = validate_markdown_target(target)
+            md_name = md_path.stem
+            branch_name = md_name
+
+            # Check for existing session
+            if setup_only:
+                action, existing_session_id, existing_worktree = "new", None, None
+            elif resume == "auto":
+                action, existing_session_id, existing_worktree = detect_action_by_title(
+                    md_name, server_url
+                )
+            elif resume:
+                session_data = fetch_session(server_url, resume)
+                existing_worktree = session_data.get("worktree_path") if session_data else None
+                action, existing_session_id = "resume", resume
+            else:
+                action, existing_session_id, existing_worktree = "new", None, None
+
+            if action == "resume" and existing_session_id is not None:
+                args = build_claude_args(
+                    skill="resume",
+                    session_id=existing_session_id,
+                    name=md_name,
+                    claude_flags=cfg.command_center.claude_flags,
+                )
+                resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
+                tmux_name = build_tmux_session_name(md_name) if detach else None
+                result = subprocess.run(args, cwd=resume_cwd)
+                if result.returncode == 0:
+                    return
+                click.echo(
+                    f"Resume failed (exit {result.returncode}); starting a new session instead.",
+                    err=True,
+                )
+
+            repo_root = resolve_repo_root(Path.cwd())
+
+            # Handle workflow_mode
+            if workflow_mode == "ask":
+                workflow_mode = click.prompt(
+                    "Workflow mode",
+                    type=click.Choice(["worktree", "branch", "none"]),
+                    default="worktree",
+                )
+
+            session_id = str(uuid.uuid4())
+            worktree_path: Path | None = None
+
+            if workflow_mode == "worktree":
+                worktree_path = create_worktree(
+                    repo_root=repo_root,
+                    branch_name=branch_name,
+                    worktree_root_template=git_cfg.worktree_root,
+                    branch_prefix=git_cfg.branch_prefix,
+                )
+                work_dir = worktree_path
+            elif workflow_mode == "branch":
+                full_branch = f"{git_cfg.branch_prefix}{branch_name}"
+                try:
+                    subprocess.run(
+                        ["git", "checkout", "-b", full_branch],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        cwd=Path.cwd(),
+                    )
+                except subprocess.CalledProcessError as exc:
+                    raise LaunchError(
+                        f"git checkout -b {full_branch} failed: {exc.stderr.strip()}"
+                    ) from exc
+                work_dir = Path.cwd()
+            else:
+                # workflow_mode == "none"
+                work_dir = Path.cwd()
+
+            tmux_name = build_tmux_session_name(md_name) if detach else None
+            md_skill = skill or "build"
+            succeeded = False
+            try:
+                run_init_script(
+                    repo_root=repo_root,
+                    script_name=git_cfg.zing_init_script,
+                    worktree_path=work_dir,
+                    branch=branch_name,
+                )
+                create_session_on_server(
+                    server_url=server_url,
+                    session_id=session_id,
+                    title=md_name,
+                    ticket_id=None,
+                    worktree_path=str(work_dir) if work_dir else None,
+                    skill=md_skill,
+                    tmux_session=tmux_name,
+                )
+                succeeded = True
+            finally:
+                if not succeeded and worktree_path is not None:
+                    rollback_worktree(worktree_path)
+
+            if setup_only:
+                click.echo(f"Environment ready: {work_dir}")
+                click.echo(f"Session ID: {session_id}")
+                click.echo(f"To start: cd {work_dir} && claude /zing:{md_skill} {md_path}")
+                return
+
+            args = build_claude_args(
+                skill=md_skill,
+                session_id=session_id,
+                name=md_name,
+                target=str(md_path),
+                claude_flags=cfg.command_center.claude_flags,
+            )
+            exec_or_detach(args, work_dir, tmux_name)
+
         else:
             # PR URL flow
+            try:
+                owner, repo, pr_number = parse_pr_url(target)
+            except LaunchError:
+                raise LaunchError(
+                    f"Unrecognized target: {target!r}. Expected one of:\n"
+                    "  - A Linear ticket ID (e.g. ENG-123)\n"
+                    "  - A GitHub PR URL (e.g. https://github.com/owner/repo/pull/123)\n"
+                    "  - A path to a markdown file (e.g. .zing/my-plan.md)"
+                ) from None
             pr_skill = skill or "pr-audit"
-            owner, repo, pr_number = parse_pr_url(target)
             pr_data = fetch_pr_data(owner, repo, pr_number)
             branch_name = pr_data["headRefName"]
             pr_title = pr_data.get("title", "")
