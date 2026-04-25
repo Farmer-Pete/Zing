@@ -1156,3 +1156,120 @@ a.strip-ci-dot[href] { cursor: pointer; }
 .btn-rev { background: var(--orange); color: var(--white); }
 .btn-ans { background: var(--cyan); color: var(--white); }
 .btn-att { background: var(--blue); color: var(--white); }
+
+/* ──────────────────────────────────────────────
+   CARD ATTACH STRIP (blue — Claude Code pending question)
+────────────────────────────────────────────── */
+
+.card-attach-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.6rem;
+    background: linear-gradient(135deg, #eff6ff, #dbeafe);
+    border-top: 1px solid rgba(59, 130, 246, 0.3);
+    font-size: 0.48rem;
+}
+
+/* Pulsing blue dot */
+.card-attach-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--blue);
+    flex-shrink: 0;
+    animation: card-attach-pulse 2s ease-out infinite;
+}
+
+@keyframes card-attach-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+    70%  { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+}
+
+.card-attach-text {
+    font-weight: 600;
+    color: var(--blue-dark);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.card-attach-btn {
+    padding: 0.12rem 0.35rem;
+    border-radius: 3px;
+    background: var(--blue);
+    color: var(--white);
+    border: none;
+    font-size: 0.42rem;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    flex-shrink: 0;
+    transition: opacity 0.15s;
+}
+.card-attach-btn:hover { opacity: 0.85; }
+
+/* ──────────────────────────────────────────────
+   CARD SESSION STRIP (history — subtle, with mini timeline)
+────────────────────────────────────────────── */
+
+.card-session-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.6rem;
+    border-top: 1px solid var(--gray-100);
+    cursor: pointer;
+    transition: background 0.1s;
+    font-size: 0.48rem;
+}
+
+.card-session-strip:hover {
+    background: var(--gray-50);
+}
+
+/* Mini 6px phase bar */
+.card-session-phases {
+    display: flex;
+    gap: 1px;
+    height: 6px;
+    flex: 1;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+/* Phase segment base */
+.css-seg {
+    height: 100%;
+}
+
+/* Phase segment color variants — mirror prototype .css-p/.css-a/.css-b/.css-r/.css-w/.css-u */
+.css-p { background: var(--orange); }
+.css-a { background: var(--amber); }
+.css-b { background: #7c3aed; }
+.css-r { background: var(--cyan-dim); }
+.css-w { background: #e2e8f0; }
+.css-u { background: #16a34a; }
+
+.card-session-label {
+    font-size: 0.42rem;
+    color: var(--gray-500);
+    font-weight: 600;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.card-session-view {
+    font-size: 0.42rem;
+    color: var(--orange);
+    font-weight: 700;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.card:hover .card-session-view {
+    opacity: 1;
+}

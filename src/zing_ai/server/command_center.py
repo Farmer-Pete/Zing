@@ -839,6 +839,83 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
     return "\n\n".join(sections)
 
 
+def build_session_phases(session: ZingSession) -> list[dict]:
+    """Build a list of phase segments for a session's mini timeline.
+
+    Each segment has a ``phase`` key (e.g. ``"plan"``, ``"build"``, ``"wait"``)
+    and a ``flex`` key — a relative weight computed from the duration of the
+    step compared to the total session duration.
+
+    The phase name maps to a CSS modifier class on `.css-seg`:
+    - ``"plan"``  → ``.css-p``  (orange)
+    - ``"audit"`` → ``.css-a``  (amber)
+    - ``"build"`` → ``.css-b``  (purple)
+    - ``"ready"`` → ``.css-r``  (cyan)
+    - ``"wait"``  → ``.css-w``  (gray)
+    - ``"done"``  → ``.css-u``  (green)
+
+    Uses adjacent-step timestamp heuristic: each step's duration is estimated
+    as the time between its ``created_at`` and the next step's ``created_at``
+    (or ``now`` for the last step).  Steps with zero or negative duration are
+    assigned a minimum flex of 0.1 so they still appear.
+
+    Returns an empty list when the session has no steps.
+    """
+    if not session.steps:
+        return []
+
+    now = datetime.now(UTC)
+
+    _PHASE_MAP: dict[str, str] = {
+        "plan": "plan",
+        "plan-audit": "audit",
+        "build": "build",
+        "build-audit": "audit",
+        "pr-audit": "audit",
+        "custom-audit": "audit",
+        "ready": "ready",
+    }
+
+    segments: list[dict] = []
+    total_seconds = 0.0
+
+    for i, step in enumerate(session.steps):
+        step_start = _ensure_utc(step.created_at)
+        if i + 1 < len(session.steps):
+            step_end = _ensure_utc(session.steps[i + 1].created_at)
+        else:
+            step_end = now
+
+        duration = max((step_end - step_start).total_seconds(), 0.0)
+        total_seconds += duration
+
+        # Determine phase name from step_name
+        phase = _PHASE_MAP.get(step.step_name, "build")
+        segments.append({"phase": phase, "duration": duration})
+
+    # Convert durations to flex values (normalised so max ≈ 10)
+    if total_seconds <= 0:
+        # Fallback: equal weights
+        return [{"phase": s["phase"], "flex": 1.0} for s in segments]
+
+    scale = 10.0 / total_seconds
+    result: list[dict] = []
+    for s in segments:
+        flex = max(round(s["duration"] * scale, 1), 0.1)
+        result.append({"phase": s["phase"], "flex": flex})
+
+    # Add a trailing "wait" segment if the session state is READY or STARTED
+    # (i.e., still running) — this represents the current waiting period.
+    if session.state in (SessionState.READY, SessionState.STARTED):
+        last_step_end = _ensure_utc(session.steps[-1].created_at)
+        waiting_secs = max((now - last_step_end).total_seconds(), 0.0)
+        if waiting_secs > 0:
+            wait_flex = max(round(waiting_secs * scale, 1), 0.2)
+            result.append({"phase": "wait", "flex": wait_flex})
+
+    return result
+
+
 def get_live_sessions() -> set[str]:
     """Return the set of live Zellij session names with the zing-- prefix."""
     try:

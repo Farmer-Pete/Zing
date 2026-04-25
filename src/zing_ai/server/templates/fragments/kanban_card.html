@@ -12,6 +12,23 @@
   {% set total_findings.count = total_findings.count + step.findings | length %}
 {% endfor %}
 
+{# ── Compute card_has_active_action:
+     True if any ZingSession has a READY step (audit findings waiting),
+     OR any ClaudeCodeSession has a pending (unanswered) question. ── #}
+{% set _active_action = namespace(found=false) %}
+{% for session in card.sessions %}
+  {% if session.session_type == 'zing' %}
+    {% for step in session.steps %}
+      {% if step.state.value == 'ready' %}
+        {% set _active_action.found = true %}
+      {% endif %}
+    {% endfor %}
+  {% elif session.session_type == 'claude_code' and session.pending_question %}
+    {% set _active_action.found = true %}
+  {% endif %}
+{% endfor %}
+{% set card_has_active_action = _active_action.found %}
+
 <div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}">
 
   {# ── Header: ticket ID + title + assignee ── #}
@@ -241,6 +258,15 @@
     </div>
   {% endfor %}
 
+  {# ── Blue attach strip: ClaudeCodeSession with a pending question ── #}
+  {% for session in card.sessions if session.session_type == 'claude_code' and session.pending_question %}
+    <div class="card-attach-strip">
+      <span class="card-attach-dot"></span>
+      <span class="card-attach-text">{{ session.pending_question.body | truncate(60) }}</span>
+      <button class="card-attach-btn" data-open-drawer="{{ session.session_id }}">Attach</button>
+    </div>
+  {% endfor %}
+
   {# ── Findings + waiting note ── #}
   {% if total_findings.count > 0 or (column_cls == "col-review" and card.review_group == "others") %}
     <div class="status-strip">
@@ -332,6 +358,52 @@
     </div>
   {% elif card.prs and column_cls == "col-progress" %}
     {# PR cards in progress: setup env button moved to PR kebab menu, no standalone footer needed #}
+  {% endif %}
+
+  {# ── Session history strip: shown when there are sessions but NO active action ── #}
+  {% if card.sessions and not card_has_active_action %}
+    {# Find the first ZingSession (for phases) or fall back to any session ── #}
+    {% set _zing_sessions = card.sessions | selectattr("session_type", "equalto", "zing") | list %}
+    {% if _zing_sessions %}
+      {% set _sess = _zing_sessions[0] %}
+      {# Compute elapsed: difference between now (via created_at of last step, or session) and session start ── #}
+      {% set _state_val = _sess.state.value %}
+      {% set _status_label = "done" if _state_val == "completed" else ("stopped" if _state_val == "stopped" else _state_val) %}
+      <div class="card-session-strip" data-open-drawer="{{ _sess.session_id }}" data-drawer-mode="history">
+        <div class="card-session-phases">
+          {# Phase segments rendered inline — build_session_phases() not callable from template,
+             so we render simple phase segments from step names directly ── #}
+          {% for step in _sess.steps %}
+            {% if step.step_name == 'plan' %}
+              <div class="css-seg css-p" style="flex:1"></div>
+            {% elif step.step_name in ('plan-audit', 'build-audit', 'pr-audit', 'custom-audit') %}
+              <div class="css-seg css-a" style="flex:1"></div>
+            {% elif step.step_name == 'build' %}
+              <div class="css-seg css-b" style="flex:1"></div>
+            {% elif step.step_name == 'ready' %}
+              <div class="css-seg css-r" style="flex:1"></div>
+            {% else %}
+              <div class="css-seg css-b" style="flex:1"></div>
+            {% endif %}
+          {% endfor %}
+          {% if not _sess.steps %}
+            <div class="css-seg css-w" style="flex:1"></div>
+          {% endif %}
+        </div>
+        <span class="card-session-label">{{ _status_label }}</span>
+        <span class="card-session-view">View session &rarr;</span>
+      </div>
+    {% elif card.sessions %}
+      {# ClaudeCodeSession with history but no active action ── #}
+      {% set _sess = card.sessions[0] %}
+      <div class="card-session-strip" data-open-drawer="{{ _sess.session_id }}" data-drawer-mode="history">
+        <div class="card-session-phases">
+          <div class="css-seg css-b" style="flex:1"></div>
+        </div>
+        <span class="card-session-label">session</span>
+        <span class="card-session-view">View session &rarr;</span>
+      </div>
+    {% endif %}
   {% endif %}
 
 </div>
