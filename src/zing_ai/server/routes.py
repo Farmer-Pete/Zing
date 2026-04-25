@@ -725,7 +725,7 @@ class _CreateClaudeCodeSessionBody(BaseModel):  # type: ignore[misc]
     skill: str | None = None
     pr_number: int | None = None
     pr_repo: str | None = None
-    tmux_session: str | None = None
+    terminal_session: str | None = None
 
 
 @router.post("/api/sessions/claude-code")
@@ -752,7 +752,7 @@ async def post_create_claude_code_session(
             skill=body.skill,
             pr_number=body.pr_number,
             pr_repo=body.pr_repo,
-            terminal_session=body.tmux_session,
+            terminal_session=body.terminal_session,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

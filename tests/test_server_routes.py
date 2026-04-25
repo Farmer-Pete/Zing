@@ -1263,22 +1263,22 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    def test_post_create_claude_code_session_with_tmux_session(self) -> None:
-        """POST /api/sessions/claude-code with tmux_session persists it."""
+    def test_post_create_claude_code_session_with_terminal_session(self) -> None:
+        """POST /api/sessions/claude-code with terminal_session persists it."""
         resp = self.client.post(
             "/api/sessions/claude-code",
             json={
                 "session_id": "cc-tmux-1",
                 "title": "Background Session",
                 "ticket_id": "FRO-123",
-                "tmux_session": "zing-fro-123",
+                "terminal_session": "zing--fro-123",
             },
         )
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("cc-tmux-1")
         self.assertIsNotNone(session)
         assert session is not None  # narrow for pyright
-        self.assertEqual(session.tmux_session, "zing-fro-123")  # type: ignore[union-attr]
+        self.assertEqual(session.terminal_session, "zing--fro-123")  # type: ignore[union-attr]
 
     def test_get_sessions_returns_all(self) -> None:
         """GET /api/sessions returns all sessions."""
@@ -1321,11 +1321,11 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         self.assertIn("session_id", session)
         self.assertIn("ticket_id", session)
 
-    def test_post_create_claude_code_session_with_tmux_session_shape(self) -> None:
+    def test_post_create_claude_code_session_with_terminal_session_shape(self) -> None:
         """POST /api/sessions/claude-code returns expected shape."""
         resp = self.client.post(
             "/api/sessions/claude-code",
-            json={"session_id": "cc-tmux-shape", "title": "Shape", "tmux_session": "zing-test"},
+            json={"session_id": "cc-tmux-shape", "title": "Shape", "terminal_session": "zing-test"},
         )
         self.assertEqual(resp.status_code, 200)
 
@@ -1513,7 +1513,7 @@ class TestLaunchBackground(unittest.TestCase):
         self.assertIn("already in progress", resp.json()["error"])
 
     def test_launch_background_success(self) -> None:
-        """Success path: session created with tmux_session, board_changed queued."""
+        """Success path: session created with terminal_session, board_changed queued."""
         import asyncio
         from pathlib import Path
         from unittest.mock import patch
@@ -1555,17 +1555,17 @@ class TestLaunchBackground(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data["status"], "launched")
         self.assertIn("session_id", data)
-        self.assertIn("tmux_session", data)
+        self.assertIn("terminal_session", data)
 
-        # Verify create_session_on_server was called with a tmux_session kwarg.
+        # Verify create_session_on_server was called with a terminal_session kwarg.
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        self.assertIsNotNone(call_kwargs.get("tmux_session"))
+        self.assertIsNotNone(call_kwargs.get("terminal_session"))
 
-        # exec_or_detach should be called with tmux_session set.
+        # exec_or_detach should be called with terminal_session set.
         mock_exec.assert_called_once()
         exec_kwargs = mock_exec.call_args.kwargs
-        self.assertIsNotNone(exec_kwargs.get("tmux_session"))
+        self.assertIsNotNone(exec_kwargs.get("terminal_session"))
 
         # board_changed should have been queued.
         queue: asyncio.Queue = asyncio.Queue()
@@ -1653,7 +1653,7 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         starlette_app = asgi_app.app  # type: ignore[attr-defined]
         self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
         self.fastapi_app.state.launching_set = set()
-        self.fastapi_app.state.live_tmux_sessions = set()
+        self.fastapi_app.state.live_sessions = set()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -1661,14 +1661,14 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
     def _create_cc_session(
         self,
         session_id: str = "cc-kill-1",
-        tmux_session: str | None = "zing-test",
+        terminal_session: str | None = "zing-test",
         worktree_path: str | None = None,
         ticket_id: str | None = None,
     ) -> None:
         """Create a ClaudeCodeSession via the API."""
         payload: dict = {"session_id": session_id, "title": "Test CC"}
-        if tmux_session is not None:
-            payload["tmux_session"] = tmux_session
+        if terminal_session is not None:
+            payload["terminal_session"] = terminal_session
         if worktree_path is not None:
             payload["worktree_path"] = worktree_path
         if ticket_id is not None:
@@ -1680,10 +1680,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_kill_session_success(self) -> None:
-        """POST kill-session kills the tmux session and cleans up."""
+        """POST kill-session kills the zellij session and cleans up."""
         from unittest.mock import patch
 
-        self._create_cc_session(session_id="cc-kill-ok", tmux_session="zing-kill-ok")
+        self._create_cc_session(session_id="cc-kill-ok", terminal_session="zing-kill-ok")
 
         with patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run:
             resp = self.client.post(
@@ -1694,9 +1694,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["status"], "killed")
 
-        # tmux kill-session should have been called.
+        # zellij kill-session should have been called.
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
+        self.assertEqual(call_args[0], "zellij")
         self.assertIn("kill-session", call_args)
         self.assertIn("zing-kill-ok", call_args)
 
@@ -1728,9 +1729,9 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 404)
 
-    def test_kill_session_no_tmux_returns_404(self) -> None:
-        """POST kill-session returns 404 when session has no tmux_session."""
-        self._create_cc_session(session_id="cc-no-tmux", tmux_session=None)
+    def test_kill_session_no_terminal_session_returns_404(self) -> None:
+        """POST kill-session returns 404 when session has no terminal_session."""
+        self._create_cc_session(session_id="cc-no-tmux", terminal_session=None)
         resp = self.client.post(
             "/command-center/kill-session",
             json={"session_id": "cc-no-tmux"},
@@ -1747,11 +1748,11 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
         self._create_cc_session(
             session_id="cc-wt-ok",
-            tmux_session="zing-wt-ok",
+            terminal_session="zing-wt-ok",
             worktree_path="/tmp/worktrees/repo-feature",
         )
-        # tmux is NOT alive → cleanup is allowed.
-        self.fastapi_app.state.live_tmux_sessions = set()
+        # terminal session is NOT alive → cleanup is allowed.
+        self.fastapi_app.state.live_sessions = set()
 
         with patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback:
             resp = self.client.post(
@@ -1768,14 +1769,14 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         self.assertIsNone(self.manager.get_session("cc-wt-ok"))
 
     def test_cleanup_worktree_while_running(self) -> None:
-        """POST cleanup-worktree returns 409 when session tmux is still alive."""
+        """POST cleanup-worktree returns 409 when session terminal session is still alive."""
         self._create_cc_session(
             session_id="cc-wt-alive",
-            tmux_session="zing-wt-alive",
+            terminal_session="zing--wt-alive",
             worktree_path="/tmp/worktrees/repo-alive",
         )
-        # Mark tmux as alive.
-        self.fastapi_app.state.live_tmux_sessions = {"zing-wt-alive"}
+        # Mark terminal session as alive.
+        self.fastapi_app.state.live_sessions = {"zing--wt-alive"}
 
         resp = self.client.post(
             "/command-center/cleanup-worktree",
@@ -1796,7 +1797,7 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         """POST cleanup-worktree returns 404 when session has no worktree_path."""
         self._create_cc_session(
             session_id="cc-no-wt",
-            tmux_session="zing-no-wt",
+            terminal_session="zing-no-wt",
             worktree_path=None,
         )
         resp = self.client.post(
@@ -1818,19 +1819,19 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         # and one with no ticket_id at all.
         self._create_cc_session(
             session_id="cc-orphan-done",
-            tmux_session="zing-done",
+            terminal_session="zing-done",
             worktree_path="/tmp/wt/done",
             ticket_id="BAK-100",
         )
         self._create_cc_session(
             session_id="cc-orphan-active",
-            tmux_session="zing-active",
+            terminal_session="zing-active",
             worktree_path="/tmp/wt/active",
             ticket_id="BAK-200",
         )
         self._create_cc_session(
             session_id="cc-orphan-no-ticket",
-            tmux_session="zing-no-ticket",
+            terminal_session="zing-no-ticket",
             worktree_path="/tmp/wt/no-ticket",
             ticket_id=None,
         )
@@ -1841,10 +1842,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         view = KanbanView(todo=[active_card], done=[done_card])
 
         sessions = self.manager.list_sessions()
-        live_tmux: set[str] = {"zing-active"}  # only cc-orphan-active is running
-        data = _build_tray_data(view, sessions, live_tmux)
+        live_sessions: set[str] = {"zing-active"}  # only cc-orphan-active is running
+        data = _build_tray_data(view, sessions, live_sessions)
 
-        # running_sessions: only the one whose tmux is in live_tmux_sessions
+        # running_sessions: only the one whose terminal session is in live_sessions
         running_ids = {s.session_id for s in data["running_sessions"]}
         self.assertIn("cc-orphan-active", running_ids)
         self.assertNotIn("cc-orphan-done", running_ids)
