@@ -315,14 +315,14 @@ def launch(
             return False
 
         def _detect_resume(
-            detect_fn: object,
+            detect_fn: Callable[[str, str], tuple[str, str | None, str | None]],
             detect_arg: str,
         ) -> tuple[str, str | None, str | None]:
             """Determine whether to resume or start new based on flags."""
             if setup_only:
                 return "new", None, None
             if resume == "auto":
-                return detect_fn(detect_arg, server_url)  # type: ignore[operator]
+                return detect_fn(detect_arg, server_url)
             if resume:
                 session_data = fetch_session(server_url, resume)
                 existing_wt = session_data.get("worktree_path") if session_data else None
@@ -330,6 +330,7 @@ def launch(
             return "new", None, None
 
         def _create_new_branch_worktree(
+            repo_root: Path,
             branch_name: str,
             wf_mode: str,
         ) -> tuple[Path, Path | None]:
@@ -338,7 +339,6 @@ def launch(
             Returns (work_dir, worktree_path). worktree_path is set only when
             workflow_mode == "worktree" (needed for rollback).
             """
-            repo_root = resolve_repo_root(Path.cwd())
             worktree_path: Path | None = None
 
             if wf_mode == "worktree":
@@ -369,6 +369,7 @@ def launch(
 
         def _init_create_and_launch(
             *,
+            repo_root: Path,
             work_dir: Path,
             worktree_path: Path | None,
             branch_name: str,
@@ -378,12 +379,11 @@ def launch(
             title: str,
             ticket_id: str | None,
             tmux_name: str | None,
-            pre_create_hook: object | None = None,
+            pre_create_hook: Callable[[], None] | None = None,
             pr_number: int | None = None,
             pr_repo: str | None = None,
         ) -> None:
             """Run init script, create session, and launch (or print setup-only)."""
-            repo_root = resolve_repo_root(Path.cwd())
             session_id = str(uuid.uuid4())
             succeeded = False
             try:
@@ -394,7 +394,7 @@ def launch(
                     branch=branch_name,
                 )
                 if pre_create_hook is not None:
-                    pre_create_hook()  # type: ignore[operator]
+                    pre_create_hook()
                 create_session_on_server(
                     server_url=server_url,
                     session_id=session_id,
@@ -469,13 +469,15 @@ def launch(
                     f"Could not read Linear API key from {lr_config_path}: {e}"
                 ) from e
 
+            repo_root = resolve_repo_root(Path.cwd())
             branch_name = derive_branch_name(ticket_id, api_key)
             wf_mode = _prompt_workflow_mode()
-            work_dir, worktree_path = _create_new_branch_worktree(branch_name, wf_mode)
+            work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
             tmux_name = build_tmux_session_name(ticket_id) if detach else None
             ticket_skill = skill or "new"
 
             _init_create_and_launch(
+                repo_root=repo_root,
                 work_dir=work_dir,
                 worktree_path=worktree_path,
                 branch_name=branch_name,
@@ -506,12 +508,14 @@ def launch(
             ):
                 return
 
+            repo_root = resolve_repo_root(Path.cwd())
             wf_mode = _prompt_workflow_mode()
-            work_dir, worktree_path = _create_new_branch_worktree(branch_name, wf_mode)
+            work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
             tmux_name = build_tmux_session_name(md_name) if detach else None
             md_skill = skill or "build"
 
             _init_create_and_launch(
+                repo_root=repo_root,
                 work_dir=work_dir,
                 worktree_path=worktree_path,
                 branch_name=branch_name,
@@ -573,6 +577,7 @@ def launch(
             tmux_name = build_tmux_session_name(target, pr_number=pr_number) if detach else None
 
             _init_create_and_launch(
+                repo_root=repo_root,
                 work_dir=work_dir,
                 worktree_path=worktree_path,
                 branch_name=branch_name,
