@@ -826,10 +826,12 @@ def build_drawer_context(
     notification = None
     notification_body = ""
 
+    phase_segments: list[dict] = []
     if isinstance(session, ZingSession):
         steps = list(session.steps)
         # Current step = last READY step.
         current_step = next((s for s in reversed(steps) if s.state.value == "ready"), None)
+        phase_segments = build_session_phases(session)
     elif isinstance(session, ClaudeCodeSession):
         notification = session.pending_question
         notification_body = notification.body if notification else ""
@@ -838,6 +840,7 @@ def build_drawer_context(
         "session": session,
         "steps": steps,
         "current_step": current_step,
+        "phase_segments": phase_segments,
         "mode": mode,
         "queue_position": queue_position,
         "queue_total": max(queue_total, 1),

@@ -24,12 +24,12 @@
     {% for item in attention_items %}
       {% if item.action_type == "findings" %}
         {% set type_cls = "type-findings" %}
-        {% set icon = "&#9998;" %}
+        {% set icon = "✎" %}
         {% set btn_cls = "btn-rev" %}
         {% set btn_lbl = "Review" %}
       {% elif item.action_type == "attach" %}
         {% set type_cls = "type-attach" %}
-        {% set icon = "&#9654;" %}
+        {% set icon = "▶" %}
         {% set btn_cls = "btn-att" %}
         {% set btn_lbl = "Attach" %}
       {% else %}

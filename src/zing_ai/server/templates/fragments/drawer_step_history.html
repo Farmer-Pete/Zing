@@ -8,7 +8,7 @@
   Rendered per-step via the GET /command-center/drawer/{session_id}/step/{step_id} route.
 #}
 <div class="step-section" id="step-section-{{ step.step_id }}">
-  <div class="step-hdr" onclick="this.parentElement.classList.toggle('open')">
+  <div class="step-hdr" data-step-toggle>
     <span class="step-chv">&#9654;</span>
     {% if step.step_name == "plan" %}
       <span class="step-ico">&#128269;</span>

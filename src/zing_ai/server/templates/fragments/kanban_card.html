@@ -7,6 +7,7 @@
     current_username — GitHub username of the current user
     live_sessions — set of live zellij session names
 #}
+{% from "fragments/_phase_strip.html" import phase_strip %}
 {% set total_findings = namespace(count=0) %}
 {% for step in card.audit_steps %}
   {% set total_findings.count = total_findings.count + step.findings | length %}
@@ -102,7 +103,7 @@
         {% endif %}
       {% endif %}
       {# Kebab menu — always present #}
-      <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+      <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
       <div class="strip-menu">
         {% if pr.merged_at %}
           {# Merged: links only #}
@@ -115,7 +116,7 @@
         {% else %}
           {# Non-merged PR: full menu with search for complex menus #}
           {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
-            <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+            <input class="menu-search" type="text" placeholder="Search actions..." data-kebab-search>
           {% endif %}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -201,7 +202,7 @@
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
         <button class="strip-primary-btn strip-primary-btn-blue" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -221,7 +222,7 @@
       {% endif %}
       {% if session.ticket_id and not is_alive %}
         <button class="strip-primary-btn" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}">Resume</button>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -287,7 +288,7 @@
         <button class="strip-primary-btn" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -316,7 +317,7 @@
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build">Build</button>
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" onclick="toggleMenu(this)" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
@@ -371,28 +372,10 @@
       {% set _status_label = "done" if _state_val == "completed" else ("stopped" if _state_val == "stopped" else _state_val) %}
       <div class="card-session-strip" data-open-drawer="{{ _sess.session_id }}" data-drawer-mode="history">
         <div class="card-session-phases">
-          {% if session_phases and _sess.session_id in session_phases %}
-            {% for seg in session_phases[_sess.session_id] %}
-              <div class="css-seg css-{{ seg.phase[0] }}" style="flex:{{ seg.flex }}"></div>
-            {% endfor %}
+          {% if session_phases and _sess.session_id in session_phases and session_phases[_sess.session_id] %}
+            {{ phase_strip(session_phases[_sess.session_id], prefix="css") }}
           {% else %}
-            {# Phase segments rendered inline — equal-width fallback ── #}
-            {% for step in _sess.steps %}
-              {% if step.step_name == 'plan' %}
-                <div class="css-seg css-p" style="flex:1"></div>
-              {% elif step.step_name in ('plan-audit', 'build-audit', 'pr-audit', 'custom-audit') %}
-                <div class="css-seg css-a" style="flex:1"></div>
-              {% elif step.step_name == 'build' %}
-                <div class="css-seg css-b" style="flex:1"></div>
-              {% elif step.step_name == 'ready' %}
-                <div class="css-seg css-r" style="flex:1"></div>
-              {% else %}
-                <div class="css-seg css-b" style="flex:1"></div>
-              {% endif %}
-            {% endfor %}
-            {% if not _sess.steps %}
-              <div class="css-seg css-w" style="flex:1"></div>
-            {% endif %}
+            <div class="css-seg css-w" style="flex:1"></div>
           {% endif %}
         </div>
         <span class="card-session-label">{{ _status_label }}</span>

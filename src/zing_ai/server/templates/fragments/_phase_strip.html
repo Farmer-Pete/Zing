@@ -1,0 +1,26 @@
+{#
+  _phase_strip.html — shared macro for rendering a session's phase timeline.
+
+  Both the kanban card mini bar and the review drawer timeline render from
+  the same `session_phases`-derived list so they always look the same.
+
+  Usage:
+    {% from "fragments/_phase_strip.html" import phase_strip %}
+    {{ phase_strip(segments, prefix="css", show_labels=False) }}
+    {{ phase_strip(segments, prefix="ds", show_labels=True) }}
+
+  Args:
+    segments     — list of dicts with `token`, `label`, `flex`, `step_name`
+                   (as produced by `build_session_phases`)
+    prefix       — CSS class prefix: "css" (card) or "ds" (drawer)
+    show_labels  — if True, render `label` text inside each segment
+#}
+{% macro phase_strip(segments, prefix, show_labels=False) -%}
+  {%- for seg in segments -%}
+    {%- if prefix == "css" -%}
+      <div class="css-seg css-{{ seg.token }}" style="flex:{{ seg.flex }}" title="{{ seg.step_name }}">{% if show_labels %}{{ seg.label }}{% endif %}</div>
+    {%- else -%}
+      <div class="ds ds-{{ seg.token }}" style="flex:{{ seg.flex }}" title="{{ seg.step_name }}">{% if show_labels %}{{ seg.label }}{% endif %}</div>
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro %}

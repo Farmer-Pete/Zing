@@ -62,15 +62,9 @@
 <body{% if body_class %} class="{{ body_class }}"{% endif %}>
     <header class="brand-bar">
         <a href="/dashboard"><img src="/static/zing-logo.svg" alt="Zing"></a>
-        <button id="notif-opt-in" class="notif-opt-in-btn" style="display:none;"
-                onclick="Notification.requestPermission().then(p => { if (p !== 'default') this.style.display = 'none'; })">
+        <button id="notif-opt-in" class="notif-opt-in-btn" data-notif-opt-in style="display:none;">
             Enable notifications
         </button>
-        <script>
-            if ('Notification' in window && Notification.permission === 'default') {
-                document.getElementById('notif-opt-in').style.display = 'inline-block';
-            }
-        </script>
     </header>
     <nav class="top-nav">
         <a href="/dashboard"{% if current_path == "/dashboard" %} class="active"{% endif %}>Sessions</a>
@@ -81,5 +75,6 @@
     <main class="main-content">
         {% block content %}{% endblock %}
     </main>
+    <script src="/static/js/base.js?v={{ asset_version() }}" defer></script>
 </body>
 </html>

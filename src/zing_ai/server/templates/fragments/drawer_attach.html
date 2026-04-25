@@ -13,7 +13,7 @@
 #}
 
 {# ── Backdrop ── #}
-<div class="drawer-backdrop" onclick="window.closeReviewDrawer()"></div>
+<div class="drawer-backdrop" data-drawer-close></div>
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer">
@@ -21,15 +21,15 @@
   {# ── Header ── #}
   <div class="dh">
     <div class="dh-top">
-      <button class="dh-close" onclick="window.closeReviewDrawer()">&times;</button>
+      <button class="dh-close" data-drawer-close>&times;</button>
       {% if session.ticket_id %}
         <span class="dh-ticket">{{ session.ticket_id }}</span>
       {% endif %}
       <div class="dh-nav">
         <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
-        <button class="dh-nav-btn" onclick="window.drawerNavPrev()" title="Previous"
+        <button class="dh-nav-btn" data-drawer-nav="prev" title="Previous"
           {% if not prev_session_id %}disabled{% endif %}>&larr;</button>
-        <button class="dh-nav-btn" onclick="window.drawerNavNext()" title="Next"
+        <button class="dh-nav-btn" data-drawer-nav="next" title="Next"
           {% if not next_session_id %}disabled{% endif %}>&rarr;</button>
       </div>
     </div>
@@ -55,7 +55,7 @@
         <p>{{ notification.body }}</p>
       {% endif %}
       <button class="attach-hero-btn"
-        onclick="window.openTerminalFromDrawer('{{ session.terminal_session }}')">
+        data-attach-drawer-session="{{ session.terminal_session }}">
         Attach to Session
       </button>
     </div>
@@ -73,7 +73,7 @@
   {# ── Footer ── #}
   <div class="d-footer">
     <div class="d-fprog">Waiting for your response</div>
-    <button class="d-fskip" onclick="window.skipToNext()">Skip &rarr;</button>
+    <button class="d-fskip" data-drawer-skip>Skip &rarr;</button>
   </div>
 
   {# ── Up next queue ── #}
@@ -85,12 +85,12 @@
       {% for item in queue_items[:3] %}
         {% if item.action_type == "findings" %}
           {% set qi_cls = "qi-findings" %}
-          {% set qi_ico = "&#9998;" %}
+          {% set qi_ico = "✎" %}
           {% set qa_cls = "qa-review" %}
           {% set qa_lbl = "review" %}
         {% elif item.action_type == "attach" %}
           {% set qi_cls = "qi-attach" %}
-          {% set qi_ico = "&#9654;" %}
+          {% set qi_ico = "▶" %}
           {% set qa_cls = "qa-attach" %}
           {% set qa_lbl = "attach" %}
         {% else %}
@@ -100,7 +100,8 @@
           {% set qa_lbl = "answer" %}
         {% endif %}
         <div class="d-qi"
-             onclick="window.openReviewDrawer('{{ item.session_id }}', '{{ item.action_type }}')"
+             data-open-drawer="{{ item.session_id }}"
+             data-open-drawer-mode="{{ item.action_type }}"
              data-session-id="{{ item.session_id }}">
           <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
           {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}

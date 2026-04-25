@@ -11,6 +11,7 @@
     --cyan-dim: #2ba8b6;
     --red-orange: #e84430;
     --off-white: #f8f6f3;
+    --white: #ffffff;
     /* Tint tokens (for subtle backgrounds, glow shadows, and pill
        treatments where hard-coding opacity-wrapped brand colors would
        couple the CSS to specific hex values). */

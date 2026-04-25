@@ -16,9 +16,10 @@
   The outer drawer-backdrop and .drawer are rendered inline.
   The step history is included via a separate fragment call.
 #}
+{% from "fragments/_phase_strip.html" import phase_strip %}
 
 {# ── Backdrop ── #}
-<div class="drawer-backdrop" onclick="window.closeReviewDrawer()"></div>
+<div class="drawer-backdrop" data-drawer-close></div>
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer">
@@ -26,15 +27,15 @@
   {# ── Header ── #}
   <div class="dh">
     <div class="dh-top">
-      <button class="dh-close" onclick="window.closeReviewDrawer()">&times;</button>
+      <button class="dh-close" data-drawer-close>&times;</button>
       {% if session.ticket_id %}
         <span class="dh-ticket">{{ session.ticket_id }}</span>
       {% endif %}
       <div class="dh-nav">
         <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
-        <button class="dh-nav-btn" onclick="window.drawerNavPrev()" title="Previous"
+        <button class="dh-nav-btn" data-drawer-nav="prev" title="Previous"
           {% if not prev_session_id %}disabled{% endif %}>&larr;</button>
-        <button class="dh-nav-btn" onclick="window.drawerNavNext()" title="Next"
+        <button class="dh-nav-btn" data-drawer-nav="next" title="Next"
           {% if not next_session_id %}disabled{% endif %}>&rarr;</button>
       </div>
     </div>
@@ -53,27 +54,9 @@
   </div>
 
   {# ── Timeline bar ── #}
-  {% if steps %}
+  {% if phase_segments %}
     <div class="d-tl">
-      {% for step in steps %}
-        {% if step.state.value == "completed" %}
-          {% if step.step_name == "plan" %}
-            <div class="ds ds-p" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name in ("plan-audit", "build-audit") %}
-            <div class="ds ds-a" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name == "build" %}
-            <div class="ds ds-b" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% elif step.step_name == "code-review" %}
-            <div class="ds ds-r" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% else %}
-            <div class="ds ds-u" style="flex:{{ loop.index }}" title="{{ step.step_name }}">{{ step.step_name }}</div>
-          {% endif %}
-        {% elif step.state.value == "ready" %}
-          <div class="ds ds-wn" style="flex:{{ loop.index }}" title="{{ step.step_name }}">now</div>
-        {% else %}
-          <div class="ds ds-w" style="flex:{{ loop.index }}" title="{{ step.step_name }}"></div>
-        {% endif %}
-      {% endfor %}
+      {{ phase_strip(phase_segments, prefix="ds", show_labels=True) }}
     </div>
     <div class="d-tl-info">
       <span style="font-weight:600">{{ steps | length }} step{% if steps | length != 1 %}s{% endif %}</span>
@@ -86,7 +69,7 @@
     {% for step in steps %}
       {% if step != current_step %}
         <div class="step-section" id="step-section-{{ step.step_id }}">
-          <div class="step-hdr" onclick="this.parentElement.classList.toggle('open')">
+          <div class="step-hdr" data-step-toggle>
             <span class="step-chv">&#9654;</span>
             {% if step.step_name == "plan" %}
               <span class="step-ico">&#128269;</span>
@@ -157,7 +140,7 @@
           {% if notification_body %}
             <p>{{ notification_body }}</p>
           {% endif %}
-          <button class="attach-hero-btn" onclick="window.openTerminalFromDrawer('{{ session.terminal_session }}')">Attach to Session</button>
+          <button class="attach-hero-btn" data-attach-drawer-session="{{ session.terminal_session }}">Attach to Session</button>
         </div>
 
         {% if notification_body %}
@@ -170,7 +153,7 @@
       {% elif mode == "findings" and current_step.findings %}
         {# ── Current step header ── #}
         <div class="step-section open" id="step-section-{{ current_step.step_id }}">
-          <div class="step-hdr" style="background:rgba(62,207,224,0.06)" onclick="this.parentElement.classList.toggle('open')">
+          <div class="step-hdr" style="background:rgba(62,207,224,0.06)" data-step-toggle>
             <span class="step-chv">&#9654;</span>
             {% if current_step.step_name == "plan" %}
               <span class="step-ico">&#128269;</span>
@@ -227,9 +210,9 @@
               {% endif %}
               {% if finding.type == "triage" %}
                 <div class="df-tr">
-                  <button class="df-tb" data-action="accept" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Accept</button>
-                  <button class="df-tb" data-action="drop" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Drop</button>
-                  <button class="df-tb" data-action="discuss" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}" onclick="window.drawerTriage(this)">Discuss</button>
+                  <button class="df-tb" data-action="accept" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Accept</button>
+                  <button class="df-tb" data-action="drop" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Drop</button>
+                  <button class="df-tb" data-action="discuss" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Discuss</button>
                 </div>
               {% elif finding.type == "text" %}
                 <div class="df-tr">
@@ -253,14 +236,14 @@
         Waiting for response
       {% endif %}
     </div>
-    <button class="d-fskip" onclick="window.skipToNext()">Skip &rarr;</button>
+    <button class="d-fskip" data-drawer-skip>Skip &rarr;</button>
     {% if mode == "findings" and current_step %}
       <button class="d-fsub"
         id="drawer-submit-btn"
         data-session-id="{{ session.session_id }}"
         data-step-id="{{ current_step.step_id }}"
         data-next-session-id="{{ next_session_id or '' }}"
-        onclick="window.submitAndNext()">Submit &amp; Next</button>
+        data-drawer-submit>Submit &amp; Next</button>
     {% endif %}
   </div>
 
@@ -273,12 +256,12 @@
       {% for item in queue_items[:3] %}
         {% if item.action_type == "findings" %}
           {% set qi_cls = "qi-findings" %}
-          {% set qi_ico = "&#9998;" %}
+          {% set qi_ico = "✎" %}
           {% set qa_cls = "qa-review" %}
           {% set qa_lbl = "review" %}
         {% elif item.action_type == "attach" %}
           {% set qi_cls = "qi-attach" %}
-          {% set qi_ico = "&#9654;" %}
+          {% set qi_ico = "▶" %}
           {% set qa_cls = "qa-attach" %}
           {% set qa_lbl = "attach" %}
         {% else %}
@@ -287,7 +270,9 @@
           {% set qa_cls = "qa-answer" %}
           {% set qa_lbl = "answer" %}
         {% endif %}
-        <div class="d-qi" onclick="window.openReviewDrawer('{{ item.session_id }}', '{{ item.action_type }}')"
+        <div class="d-qi"
+             data-open-drawer="{{ item.session_id }}"
+             data-open-drawer-mode="{{ item.action_type }}"
              data-session-id="{{ item.session_id }}">
           <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
           {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}

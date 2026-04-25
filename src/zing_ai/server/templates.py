@@ -127,12 +127,14 @@ _env.filters["humanize_time"] = _humanize_time
 
 
 def _compute_asset_version() -> str:
-    """Return a cache-busting token derived from CSS file mtimes."""
-    css_dir = Path(__file__).parent / "static" / "css"
-    try:
-        mtimes = [int(p.stat().st_mtime) for p in sorted(css_dir.glob("*.css"))]
-    except FileNotFoundError:
-        return "0"
+    """Return a cache-busting token derived from CSS and JS file mtimes."""
+    static_dir = Path(__file__).parent / "static"
+    mtimes: list[int] = []
+    for sub, pattern in (("css", "*.css"), ("js", "*.js")):
+        try:
+            mtimes.extend(int(p.stat().st_mtime) for p in (static_dir / sub).glob(pattern))
+        except FileNotFoundError:
+            continue
     return str(max(mtimes)) if mtimes else "0"
 
 
