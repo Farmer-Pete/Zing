@@ -69,17 +69,94 @@
           {% endfor %}
         </div>
       {% endif %}
-      {# PR action buttons — inline #}
-      {% if loop.first %}
-        <span class="strip-spacer"></span>
-        {% set is_author = pr.author == current_username %}
-        <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Review">Review</button>
-        <button class="card-btn" data-launch-cmd="zing-ai launch {{ pr.url | e }}" data-launch-label="Start">Start</button>
-        {% if is_author %}
-          <button class="card-btn card-btn-primary" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Respond" data-launch-bg-skill="pr-respond">Respond</button>
-          <button class="card-btn" data-launch-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}" data-launch-label="Respond Cmd">Respond Cmd</button>
+      {# PR action buttons — per-PR primary + kebab #}
+      <span class="strip-spacer"></span>
+      {% set is_author = pr.author == current_username %}
+      {% if not pr.merged_at %}
+        {# Primary button — contextual label #}
+        {% if column_cls == "col-review" and not is_author %}
+          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="PR Audit" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}">PR Audit</button>
+        {% elif pr.review_decision == "CHANGES_REQUESTED" and is_author %}
+          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Respond" data-launch-bg-skill="pr-respond" data-launch-bg-pr="{{ pr.number }}">Respond</button>
+        {% elif is_author %}
+          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build Audit" data-launch-bg-skill="build-audit" data-launch-bg-pr="{{ pr.number }}">Build Audit</button>
+        {% else %}
+          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="PR Audit" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}">PR Audit</button>
         {% endif %}
       {% endif %}
+      {# Kebab menu — always present #}
+      <button class="strip-kebab" onclick="toggleMenu(this)">&#8942;</button>
+      <div class="strip-menu">
+        {% if pr.merged_at %}
+          {# Merged: links only #}
+          <div class="menu-items">
+            <button class="menu-row-link" onclick="window.open('{{ pr.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            {% if card.ticket %}
+              <button class="menu-row-link" onclick="window.open('{{ card.ticket.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+            {% endif %}
+          </div>
+        {% else %}
+          {# Non-merged PR: full menu with search for complex menus #}
+          {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+            <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+          {% endif %}
+          <div class="menu-col-header">
+            <span class="menu-col-header-label">Action</span>
+            <span class="menu-col-header-copy">&#128203;</span>
+          </div>
+          <div class="menu-items">
+            {# RESPOND section (own PR, changes requested only) #}
+            {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+              <div class="menu-section-label">Respond</div>
+              <div class="menu-row">
+                <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-respond" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Respond" data-s="respond to feedback"><span class="menu-icon">&#9997;</span> Respond<br><span class="menu-desc">Address review comments, fix CI, push</span></button>
+                <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}">&#128203;</button>
+              </div>
+              <div class="strip-menu-divider"></div>
+            {% endif %}
+            {# REVIEW section #}
+            <div class="menu-section-label">Review</div>
+            {% if not is_author or column_cls == "col-review" %}
+              <div class="menu-row">
+                <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Audit" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
+                <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-audit {{ pr.url | e }}">&#128203;</button>
+              </div>
+              {% if column_cls == "col-review" %}
+                <div class="menu-row">
+                  <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit-visual" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Visual Audit" data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
+                  <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-audit-visual {{ pr.url | e }}">&#128203;</button>
+                </div>
+              {% endif %}
+            {% endif %}
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="build-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Build Audit" data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill build-audit {{ pr.url | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="custom-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Custom Audit" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill custom-audit {{ pr.url | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            {# LOCAL section #}
+            <div class="menu-section-label">Local</div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Start locally" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ pr.url | e }}">&#128203;</button>
+            </div>
+            <div class="menu-row">
+              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Setup env" data-launch-bg-skill="setup-only" data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
+              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --setup-only {{ pr.url | e }}">&#128203;</button>
+            </div>
+            <div class="strip-menu-divider"></div>
+            {# LINKS section #}
+            <div class="menu-section-label">Links</div>
+            <button class="menu-row-link" onclick="window.open('{{ pr.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            {% if card.ticket %}
+              <button class="menu-row-link" onclick="window.open('{{ card.ticket.url | e }}', '_blank')"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
     </div>
     {# CI failure callout #}
     {% set failing = pr.ci_checks | selectattr("conclusion", "equalto", "failure") | list %}
