@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import subprocess
 import uuid
 from datetime import UTC, datetime
@@ -308,8 +309,15 @@ async def attach_session(request: Request) -> JSONResponse:
     """Attach to a zellij session via the browser proxy."""
     if not getattr(request.app.state, "zellij_available", False):
         return JSONResponse({"error": "Zellij is not available"}, status_code=503)
-    data = await request.json()
-    terminal_session = data["terminal_session"]
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    terminal_session = data.get("terminal_session")
+    if not terminal_session:
+        return JSONResponse({"error": "terminal_session is required"}, status_code=400)
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+        return JSONResponse({"error": "invalid session name"}, status_code=400)
     return JSONResponse({"url": f"/zellij/{terminal_session}"})
 
 

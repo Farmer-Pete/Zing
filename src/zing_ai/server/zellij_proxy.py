@@ -21,8 +21,19 @@ from starlette.responses import Response
 # Constants
 # ---------------------------------------------------------------------------
 
-ZELLIJ_WEB_PORT = 8082
-ZELLIJ_ORIGIN = f"http://127.0.0.1:{ZELLIJ_WEB_PORT}"
+_DEFAULT_ZELLIJ_WEB_PORT = 8082
+
+
+def _get_zellij_origin(request: Request) -> str:
+    """Return the Zellij web server origin URL, reading the port from app.state."""
+    port = getattr(request.app.state, "zellij_web_port", _DEFAULT_ZELLIJ_WEB_PORT)
+    return f"http://127.0.0.1:{port}"
+
+
+def _get_zellij_port(request: Request) -> int:
+    """Return the Zellij web server port from app.state."""
+    return getattr(request.app.state, "zellij_web_port", _DEFAULT_ZELLIJ_WEB_PORT)
+
 
 # ---------------------------------------------------------------------------
 # JS patch constants — extracted verbatim from the prototype
@@ -92,13 +103,15 @@ def _get_client(request: Request) -> httpx.AsyncClient:
     return request.app.state.zellij_http_client
 
 
-async def _proxy_ws(ws: WebSocket, upstream_path: str, session_cookie: str | None) -> None:
+async def _proxy_ws(
+    ws: WebSocket, upstream_path: str, session_cookie: str | None, port: int
+) -> None:
     """Proxy a WebSocket connection to the Zellij web server."""
     import websockets  # type: ignore[import-untyped]
 
     await ws.accept()
 
-    ws_url = f"ws://127.0.0.1:{ZELLIJ_WEB_PORT}{upstream_path}"
+    ws_url = f"ws://127.0.0.1:{port}{upstream_path}"
     if ws.query_params:
         ws_url += f"?{ws.query_params}"
 
@@ -160,7 +173,8 @@ def create_zellij_router() -> APIRouter:
             return err
 
         client = _get_client(request)
-        url = f"{ZELLIJ_ORIGIN}/{path}"
+        origin = _get_zellij_origin(request)
+        url = f"{origin}/{path}"
         if request.query_params:
             url += f"?{request.query_params}"
 
@@ -189,7 +203,8 @@ def create_zellij_router() -> APIRouter:
             return err
 
         client = _get_client(request)
-        resp = await client.get(f"{ZELLIJ_ORIGIN}/assets/{path}")
+        origin = _get_zellij_origin(request)
+        resp = await client.get(f"{origin}/assets/{path}")
         headers = _response_headers(resp)
 
         content = resp.content
@@ -214,7 +229,8 @@ def create_zellij_router() -> APIRouter:
     async def proxy_ws_terminal(ws: WebSocket, path: str) -> None:
         """Proxy terminal WebSocket to Zellij."""
         cookie = getattr(ws.app.state, "zellij_session_cookie", None)
-        await _proxy_ws(ws, f"/ws/terminal/{path}", cookie)
+        port = getattr(ws.app.state, "zellij_web_port", _DEFAULT_ZELLIJ_WEB_PORT)
+        await _proxy_ws(ws, f"/ws/terminal/{path}", cookie, port)
 
     # ------------------------------------------------------------------
     # WebSocket proxy: control channel
@@ -224,7 +240,8 @@ def create_zellij_router() -> APIRouter:
     async def proxy_ws_control(ws: WebSocket) -> None:
         """Proxy Zellij control WebSocket."""
         cookie = getattr(ws.app.state, "zellij_session_cookie", None)
-        await _proxy_ws(ws, "/ws/control", cookie)
+        port = getattr(ws.app.state, "zellij_web_port", _DEFAULT_ZELLIJ_WEB_PORT)
+        await _proxy_ws(ws, "/ws/control", cookie, port)
 
     # ------------------------------------------------------------------
     # HTTP proxy: command API
@@ -237,10 +254,11 @@ def create_zellij_router() -> APIRouter:
             return err
 
         client = _get_client(request)
+        origin = _get_zellij_origin(request)
         body = await request.body()
         resp = await client.request(
             method=request.method,
-            url=f"{ZELLIJ_ORIGIN}/command/{path}",
+            url=f"{origin}/command/{path}",
             headers=_forward_headers(request),
             content=body if body else None,
         )
@@ -263,10 +281,11 @@ def create_zellij_router() -> APIRouter:
             return err
 
         client = _get_client(request)
+        origin = _get_zellij_origin(request)
         body = await request.body()
         resp = await client.request(
             method=request.method,
-            url=f"{ZELLIJ_ORIGIN}/session",
+            url=f"{origin}/session",
             headers=_forward_headers(request),
             content=body if body else None,
         )
@@ -289,7 +308,8 @@ def create_zellij_router() -> APIRouter:
             return err
 
         client = _get_client(request)
-        resp = await client.get(f"{ZELLIJ_ORIGIN}/info/{path}")
+        origin = _get_zellij_origin(request)
+        resp = await client.get(f"{origin}/info/{path}")
         return Response(content=resp.content, status_code=resp.status_code)
 
     return router
