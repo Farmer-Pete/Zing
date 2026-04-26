@@ -288,7 +288,10 @@
   {% if not card.prs and card.ticket %}
     <div class="card-actions">
       {% if column_cls == "col-todo" %}
-        <button class="strip-primary-btn" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start">Start</button>
+        <button class="strip-primary-btn"
+                id="btn-start-{{ card.ticket.identifier | e }}"
+                data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
+                data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}})">Start</button>
         <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
         <span class="strip-spacer"></span>
         <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
@@ -300,7 +303,10 @@
           <div class="menu-items">
             <div class="menu-section-label">Zing</div>
             <div class="menu-row">
-              <button class="menu-row-main" data-start-ticket="{{ card.ticket.identifier | e }}" data-start-ticket-label="Start"><span class="menu-icon">&#9654;</span> Start Ticket</button>
+              <button class="menu-row-main"
+                      id="btn-start-{{ card.ticket.identifier | e }}"
+                      data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
+                      data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}}); $openKebab = null"><span class="menu-icon">&#9654;</span> Start Ticket</button>
               <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
             </div>
             <div class="menu-row">

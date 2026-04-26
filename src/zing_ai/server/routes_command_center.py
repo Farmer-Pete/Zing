@@ -633,42 +633,45 @@ def _push_board_changed(app: FastAPI) -> None:
 
 
 @router.post("/command-center/start-ticket")
-async def start_ticket(request: Request) -> JSONResponse:
+@datastar_response
+async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Move a Linear ticket to 'In Progress'."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     ticket_id = payload.get("ticket_id")
-    if not ticket_id:
-        return JSONResponse({"error": "ticket_id is required"}, status_code=400)
 
-    config = load_config()
-    api_key = config.command_center.linear_api_key
-    if not api_key:
-        return JSONResponse({"error": "Linear API key not configured"}, status_code=422)
+    async def _stream():  # noqa: ANN202
+        if not ticket_id:
+            yield _sse_toast("ticket_id is required", "err")
+            return
 
-    try:
-        await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
-    except LaunchError as exc:
-        logger.error("start-ticket failed for %s: %s", ticket_id, exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        config = load_config()
+        api_key = config.command_center.linear_api_key
+        if not api_key:
+            yield _sse_toast("Linear API key not configured", "err")
+            return
 
-    # Trigger a poll in the background to pick up the state change.
-    poller = getattr(request.app.state, "poller", None)
-    if poller is not None:
+        try:
+            await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
+        except LaunchError as exc:
+            logger.error("start-ticket failed for %s: %s", ticket_id, exc)
+            yield _sse_toast(str(exc), "err")
+            return
 
-        async def _bg_poll() -> None:
-            with contextlib.suppress(Exception):
-                await poller._poll_once()  # noqa: SLF001
+        # Trigger a poll in the background to pick up the state change.
+        poller = getattr(request.app.state, "poller", None)
+        if poller is not None:
+
+            async def _bg_poll() -> None:
+                with contextlib.suppress(Exception):
+                    await poller._poll_once()  # noqa: SLF001
+                _push_board_changed(request.app)
+
+            asyncio.create_task(_bg_poll())
+        else:
             _push_board_changed(request.app)
 
-        asyncio.create_task(_bg_poll())
-    else:
-        _push_board_changed(request.app)
+        yield _sse_toast("Ticket started", "ok")
 
-    return JSONResponse({"status": "started", "ticket_id": ticket_id})
+    return _stream()
 
 
 @router.post("/command-center/kill-session")

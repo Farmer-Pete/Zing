@@ -163,38 +163,6 @@ document.addEventListener('click', function(e) {
     });
 });
 
-// Start ticket (move to in-progress)
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-start-ticket]');
-    if (!btn || btn.disabled) return;
-    var ticketId = btn.getAttribute('data-start-ticket');
-    var label = btn.getAttribute('data-start-ticket-label');
-
-    btn.disabled = true;
-    btn.innerHTML = '&#9203; Starting\u2026';
-
-    fetch('/command-center/start-ticket', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ticket_id: ticketId})
-    }).then(function(resp) {
-        return resp.json().then(function(data) {
-            if (!resp.ok) {
-                showToast(data.error || ('Start failed (HTTP ' + resp.status + ')'), 'error');
-                btn.innerHTML = '&#10007; Failed';
-                setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-            } else {
-                showToast(ticketId + ' moved to In Progress', 'success');
-                btn.innerHTML = '&#10003; Started!';
-            }
-        });
-    }).catch(function(err) {
-        showToast('Start failed: ' + err.message, 'error');
-        btn.innerHTML = '&#10007; Failed';
-        setTimeout(function() { btn.innerHTML = label; btn.disabled = false; }, 3000);
-    });
-});
-
 // Management tray FAB toggles the slide-up panel and hides the FAB while open.
 document.addEventListener('click', function (e) {
     var fab = e.target.closest('[data-mgmt-toggle]');
