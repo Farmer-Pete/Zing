@@ -1,0 +1,22 @@
+{# Repo-chooser modal inner content.
+   Rendered as an INNER fragment by /command-center/launch-background (status=choose_repo).
+   No wrapper div — the stable #repo-chooser-modal-container in command_center.html holds it.
+   Context variables:
+     card_key  – ticket/card identifier, e.g. "TKT-1"
+     repos     – list of {path: str, label: str} dicts
+#}
+<h3 class="repo-chooser-heading">Choose a repo</h3>
+<p class="repo-chooser-hint">This ticket has no linked PR. Which repo does it belong to?</p>
+<div class="repo-chooser-list">
+  {% for repo in repos %}
+  <button class="repo-chooser-option"
+          data-on:click="@post('/command-center/launch-background',
+                               {payload: {card_key: '{{ card_key }}',
+                                          repo: '{{ repo.path }}',
+                                          btn_id: 'btn-launch-{{ card_key }}'}}); $modals.repoChooser = false">
+    {{ repo.label }}
+  </button>
+  {% endfor %}
+</div>
+<button class="repo-chooser-cancel"
+        data-on:click="$modals.repoChooser = false">Cancel</button>

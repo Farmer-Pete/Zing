@@ -500,3 +500,29 @@ class TestNotificationTimeline(unittest.TestCase):
         self.assertIn("09:05", html)
         self.assertIn("notification-title", html)
         self.assertIn("Build started", html)
+
+
+class TestRepoChooserModal(unittest.TestCase):
+    """Tests for the repo_chooser_modal.html fragment."""
+
+    def test_repo_chooser_modal_renders_standalone(self) -> None:
+        """repo_chooser_modal renders heading, repo buttons, and cancel standalone."""
+        repos = [
+            {"path": "owner/repo1", "label": "owner/repo1"},
+            {"path": "owner/repo2", "label": "owner/repo2"},
+        ]
+        html = render("fragments/repo_chooser_modal.html", card_key="TKT-1", repos=repos)
+        # Heading present
+        self.assertIn("Choose a repo", html)
+        # Both repo labels rendered
+        self.assertIn("owner/repo1", html)
+        self.assertIn("owner/repo2", html)
+        # Datastar post calls present
+        self.assertIn("@post('/command-center/launch-background'", html)
+        # card_key interpolated for both buttons
+        self.assertEqual(html.count("card_key: 'TKT-1'"), 2)
+        # repo paths interpolated
+        self.assertIn("repo: 'owner/repo1'", html)
+        self.assertIn("repo: 'owner/repo2'", html)
+        # Cancel button closes repoChooser signal
+        self.assertIn("$modals.repoChooser = false", html)
