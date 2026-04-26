@@ -282,9 +282,8 @@ def test_opening_second_menu_closes_first(server: _ServerInfo, page: Page) -> No
     first_menu = first_kebab.locator("+ .strip-menu")
     expect(first_menu).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
 
-    # Call toggleMenu directly on the second kebab via JS to avoid
-    # Playwright overlay-interception when the first menu covers it.
-    page.evaluate("toggleMenu(document.querySelectorAll('.strip-kebab')[1])")
+    # Dispatch click event on the second kebab toggle to bypass Playwright overlay checks.
+    page.locator("[data-kebab-toggle]").nth(1).dispatch_event("click")
     page.wait_for_timeout(300)
 
     # Second menu should now be open
