@@ -221,7 +221,10 @@
         </div>
       {% endif %}
       {% if session.ticket_id and not is_alive %}
-        <button class="strip-primary-btn" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}">Resume</button>
+        <button class="strip-primary-btn" id="btn-resume-{{ session.session_id | e }}"
+                data-indicator="$busyButtons.resume_{{ session.session_id | e }}"
+                data-attr:disabled="$busyButtons.resume_{{ session.session_id | e }}"
+                data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ session.ticket_id | e }}', skill: 'resume', btn_id: 'btn-resume-{{ session.session_id | e }}'}})">Resume</button>
         <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
@@ -230,7 +233,10 @@
           </div>
           <div class="menu-items">
             <div class="menu-row">
-              <button class="menu-row-main" data-resume-session="{{ session.session_id | e }}" data-resume-ticket="{{ session.ticket_id | e }}"><span class="menu-icon">&#128260;</span> Resume session</button>
+              <button class="menu-row-main" id="btn-resume-kebab-{{ session.session_id | e }}"
+                      data-indicator="$busyButtons.resume_{{ session.session_id | e }}"
+                      data-attr:disabled="$busyButtons.resume_{{ session.session_id | e }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ session.ticket_id | e }}', skill: 'resume', btn_id: 'btn-resume-{{ session.session_id | e }}'}}); $openKebab = null"><span class="menu-icon">&#128260;</span> Resume session</button>
               <button class="menu-row-copy" data-copy-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}">&#128203;</button>
             </div>
             <div class="menu-row">

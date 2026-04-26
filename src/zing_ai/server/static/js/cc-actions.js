@@ -192,38 +192,3 @@ document.addEventListener('keydown', function(e) {
         }
     }
 });
-
-// Resume stopped session
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-resume-session]');
-    if (!btn || btn.disabled) return;
-    var sessionId = btn.getAttribute('data-resume-session');
-    var ticketId = btn.getAttribute('data-resume-ticket');
-
-    btn.disabled = true;
-    btn.innerHTML = '&#9203; Resuming\u2026';
-
-    var payload = {card_key: ticketId, skill: 'resume'};
-
-    fetch('/command-center/launch-background', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    }).then(function(resp) {
-        return resp.json().then(function(data) {
-            if (!resp.ok) {
-                showToast(data.error || 'Resume failed', 'error');
-                btn.innerHTML = '&#10007; Failed';
-                setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 3000);
-            } else {
-                showToast('Session resumed', 'success');
-                btn.innerHTML = '&#10003; Resumed!';
-                setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 2000);
-            }
-        });
-    }).catch(function(err) {
-        showToast('Resume failed: ' + err.message, 'error');
-        btn.innerHTML = '&#10007; Failed';
-        setTimeout(function() { btn.innerHTML = 'Resume'; btn.disabled = false; }, 3000);
-    });
-});
