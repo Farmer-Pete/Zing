@@ -4,11 +4,11 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {"refresh": false}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {"refresh": false, "standup": false}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
      data-init="@get('/command-center/events')"
      data-on:keydown__window__key.escape="$modals.drawer = false; $modals.mgmt = false; $modals.standup = false; $modals.terminal = false; $modals.repoChooser = false"
      data-on-signal-patch-filter="{include: /^modals$/}"
-     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''">
+     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''; if (!$modals.terminal) document.dispatchEvent(new CustomEvent('close-terminal'))">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
@@ -22,7 +22,10 @@
 
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
-        <button class="cc-refresh-btn" id="cc-standup-btn" data-cc-standup>&#x270D; Standup</button>
+        <button class="cc-refresh-btn" id="cc-standup-btn"
+                data-on:click="@get('/command-center/standup')"
+                data-indicator="$busyButtons.standup"
+                data-attr:disabled="$busyButtons.standup">&#x270D; Standup</button>
         <button class="cc-refresh-btn" id="btn-refresh"
                 data-on:click="@post('/command-center/refresh')"
                 data-indicator="$busyButtons.refresh"
@@ -44,7 +47,8 @@
     <div id="terminal-modal" class="terminal-modal" style="display:none;">
       <div class="terminal-modal-bar">
         <span class="terminal-modal-title" id="terminal-modal-title"></span>
-        <button class="terminal-modal-close" id="terminal-modal-close">&times;</button>
+        <button class="terminal-modal-close" id="terminal-modal-close"
+                data-on:click="$modals.terminal = false; $terminalUrl = ''">&times;</button>
       </div>
       <iframe id="terminal-modal-iframe" class="terminal-modal-iframe"></iframe>
     </div>
@@ -72,23 +76,40 @@
       <!-- Patched INNER by /command-center/launch-background when status=choose_repo -->
     </div>
 
-    {# ── Standup modal ── #}
-    <div id="standup-modal" class="dialog-modal" style="display:none;">
+    {# ── Standup modal ── Signal-driven: $modals.standup controls open/close.
+       $standupTab controls tab switching. $standupHtml/$standupMarkdown hold
+       content populated by SSE from /command-center/standup. #}
+    <div id="standup-modal" class="dialog-modal"
+         data-class:open="$modals.standup">
       <div class="dialog-modal-bar">
         <span class="dialog-modal-title">Standup</span>
         <div class="dialog-modal-actions">
           <div class="standup-tabs">
-            <button class="standup-tab active" data-standup-tab="rendered">Rich Text</button>
-            <button class="standup-tab" data-standup-tab="markdown">Markdown</button>
+            <button class="standup-tab"
+                    data-on:click="$standupTab = 'rendered'"
+                    data-class:active="$standupTab === 'rendered'">Rich Text</button>
+            <button class="standup-tab"
+                    data-on:click="$standupTab = 'markdown'"
+                    data-class:active="$standupTab === 'markdown'">Markdown</button>
           </div>
-          <button class="standup-copy-btn" id="standup-copy-btn">Copy</button>
-          <button class="terminal-modal-close" id="standup-modal-close">&times;</button>
+          <button class="standup-copy-btn" id="standup-copy-btn"
+                  data-on:click="dispatchCopyStandup($standupHtml, $standupMarkdown)">Copy</button>
+          <button class="terminal-modal-close" id="standup-modal-close"
+                  data-on:click="$modals.standup = false">&times;</button>
         </div>
       </div>
-      <div class="standup-content standup-rendered" id="standup-rendered"></div>
-      <pre class="standup-content standup-markdown" id="standup-markdown" style="display:none;"></pre>
+      {# Tab panes: rendered tab is INNER-patched by SSE; markdown tab reads signal. #}
+      <div class="standup-content standup-rendered"
+           data-show="$standupTab === 'rendered'">
+        {# Stable INNER-patch target; SSE patches rendered HTML here. #}
+        <div id="standup-modal-body"></div>
+      </div>
+      <pre class="standup-content standup-markdown"
+           data-show="$standupTab === 'markdown'"
+           data-text="$standupMarkdown"></pre>
     </div>
-    <div id="standup-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
+    <div id="standup-modal-backdrop" class="terminal-modal-backdrop"
+         data-show="$modals.standup"></div>
 
     {# ── Terminal launcher ── Signal-patch watcher: fires when $terminalUrl is
        patched (e.g. by the attach-session SSE response). Calls dispatchOpenTerminal

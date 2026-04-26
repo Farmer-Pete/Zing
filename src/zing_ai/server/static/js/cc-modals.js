@@ -24,7 +24,7 @@ function mountModal(opts) {
     }
     function open() {
         if (opts.onOpen) opts.onOpen();
-        modal.style.display = '';
+        modal.style.display = 'flex';
         if (backdrop) backdrop.style.display = '';
     }
     if (opts.closeBtn) opts.closeBtn.addEventListener('click', close);
@@ -42,67 +42,6 @@ mountModal({
     closeBtn: document.getElementById('repo-chooser-close'),
 });
 
-// Standup modal
-(function() {
-    var modal = document.getElementById('standup-modal');
-    var copyBtn = document.getElementById('standup-copy-btn');
-    var renderedEl = document.getElementById('standup-rendered');
-    var markdownEl = document.getElementById('standup-markdown');
-    var tabs = modal.querySelectorAll('[data-standup-tab]');
-    var activeTab = 'rendered';
-    var standupData = {};
-
-    function switchTab(tab) {
-        activeTab = tab;
-        tabs.forEach(function(t) {
-            t.classList.toggle('active', t.getAttribute('data-standup-tab') === tab);
-        });
-        renderedEl.style.display = tab === 'rendered' ? '' : 'none';
-        markdownEl.style.display = tab === 'markdown' ? '' : 'none';
-    }
-
-    tabs.forEach(function(t) {
-        t.addEventListener('click', function() {
-            switchTab(t.getAttribute('data-standup-tab'));
-        });
-    });
-
-    var ctl = mountModal({
-        modal: modal,
-        backdrop: document.getElementById('standup-modal-backdrop'),
-        closeBtn: document.getElementById('standup-modal-close'),
-    });
-
-    copyBtn.addEventListener('click', function() {
-        var text;
-        if (activeTab === 'markdown') {
-            text = standupData.markdown || '';
-            navigator.clipboard.writeText(text).then(function() {
-                copyBtn.textContent = '\u2713 Copied!';
-                setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
-            });
-        } else {
-            // Copy rich text (HTML) so it pastes formatted in Slack/etc.
-            var blob = new Blob([standupData.html || ''], {type: 'text/html'});
-            var textBlob = new Blob([standupData.markdown || ''], {type: 'text/plain'});
-            var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
-            navigator.clipboard.write([item]).then(function() {
-                copyBtn.textContent = '\u2713 Copied!';
-                setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
-            });
-        }
-    });
-
-    // Expose loader for the toolbar button
-    window.openStandup = function(data) {
-        standupData = data;
-        renderedEl.innerHTML = data.html || '';
-        markdownEl.textContent = data.markdown || '';
-        switchTab('rendered');
-        ctl.open();
-    };
-})();
-
 // Terminal modal
 (function() {
     var modal = document.getElementById('terminal-modal');
@@ -112,7 +51,6 @@ mountModal({
     var ctl = mountModal({
         modal: modal,
         backdrop: document.getElementById('terminal-modal-backdrop'),
-        closeBtn: document.getElementById('terminal-modal-close'),
         onClose: function () {
             // Remove the iframe from the DOM entirely to avoid triggering the
             // "Leave site?" dialog when navigating it to about:blank.
@@ -137,9 +75,41 @@ mountModal({
 
 // Datastar signal-watcher entry point: the #terminal-launcher div fires
 // dispatchOpenTerminal($terminalUrl) via data-on-signal-patch, which dispatches
-// this event.  cc-drawer.js may also call window.openTerminal directly for the
-// legacy JSON fetch path (kept until cc-drawer.js is deleted in Step 24).
+// this event.
 document.addEventListener('open-terminal', function(e) {
     var url = e.detail && e.detail.url;
     if (url) window.openTerminal(url);
+});
+
+// Standup copy: dispatched by the Copy button via dispatchCopyStandup($standupHtml, $standupMarkdown).
+document.addEventListener('copy-standup', function(e) {
+    var html = e.detail && e.detail.html;
+    var markdown = e.detail && e.detail.markdown;
+    var copyBtn = document.getElementById('standup-copy-btn');
+    if (!html && !markdown) return;
+    var blob = new Blob([html || ''], {type: 'text/html'});
+    var textBlob = new Blob([markdown || ''], {type: 'text/plain'});
+    var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
+    navigator.clipboard.write([item]).then(function() {
+        if (copyBtn) {
+            copyBtn.textContent = '\u2713 Copied!';
+            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+        }
+    }).catch(function() {
+        if (copyBtn) {
+            copyBtn.textContent = 'Failed';
+            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+        }
+    });
+});
+
+// Terminal close: dispatched by the .cc-page signal-patch watcher when
+// $modals.terminal flips false. Tears down the iframe to avoid "Leave site?" dialog.
+document.addEventListener('close-terminal', function() {
+    var modal = document.getElementById('terminal-modal');
+    var backdrop = document.getElementById('terminal-modal-backdrop');
+    var iframe = document.getElementById('terminal-modal-iframe');
+    if (modal) modal.style.display = 'none';
+    if (backdrop) backdrop.style.display = 'none';
+    if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
 });

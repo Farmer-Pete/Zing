@@ -342,14 +342,30 @@ async def refresh_command_center(request: Request):  # noqa: ANN201
 
 
 @router.get("/command-center/standup")
-async def get_standup(request: Request) -> JSONResponse:
+@datastar_response
+async def get_standup(request: Request):  # noqa: ANN201
     """Generate a standup message from the current board state."""
-    view = _build_view(request.app)
-    cache = request.app.state.external_cache
-    username = cache.github_username or ""
-    markdown = generate_standup(view, username)
-    html = str(render_markdown(markdown))
-    return JSONResponse({"markdown": markdown, "html": html})
+
+    async def _stream():  # noqa: ANN202
+        view = _build_view(request.app)
+        cache = request.app.state.external_cache
+        username = cache.github_username or ""
+        markdown = generate_standup(view, username)
+        html = str(render_markdown(markdown))
+        yield SSE.patch_elements(
+            html,
+            selector="#standup-modal-body",
+            mode=ElementPatchMode.INNER,
+        )
+        yield SSE.patch_signals(
+            {
+                "modals": {"standup": True},
+                "standupHtml": html,
+                "standupMarkdown": markdown,
+            }
+        )
+
+    return _stream()
 
 
 # ---------------------------------------------------------------------------

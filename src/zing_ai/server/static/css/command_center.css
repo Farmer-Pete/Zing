@@ -738,9 +738,13 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 8px 32px rgba(15, 27, 45, 0.4);
-    display: flex;
+    display: none;
     flex-direction: column;
     background: #fff;
+}
+
+.dialog-modal.open {
+    display: flex;
 }
 
 .dialog-modal-bar {
