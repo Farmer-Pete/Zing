@@ -16,7 +16,8 @@
 <div class="drawer-backdrop" data-on:click="$modals.drawer = false"></div>
 
 {# ── Drawer panel ── #}
-<div class="drawer" id="review-drawer">
+<div class="drawer" id="review-drawer"
+     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}"}'>
 
   {# ── Header ── #}
   <div class="dh">
@@ -27,10 +28,12 @@
       {% endif %}
       <div class="dh-nav">
         <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
-        <button class="dh-nav-btn" data-drawer-nav="prev" title="Previous"
-          {% if not prev_session_id %}disabled{% endif %}>&larr;</button>
-        <button class="dh-nav-btn" data-drawer-nav="next" title="Next"
-          {% if not next_session_id %}disabled{% endif %}>&rarr;</button>
+        <button class="dh-nav-btn" title="Previous"
+          data-on:click="@get('/command-center/drawer/' + $prevSessionId)"
+          data-show="$prevSessionId">&larr;</button>
+        <button class="dh-nav-btn" title="Next"
+          data-on:click="@get('/command-center/drawer/' + $nextSessionId)"
+          data-show="$nextSessionId">&rarr;</button>
       </div>
     </div>
     <div class="dh-title">{{ session.title }}</div>
@@ -78,9 +81,7 @@
 
   {# ── Up next queue ── #}
   {% if queue_items %}
-    <div class="d-queue"
-      data-next-session-id="{{ next_session_id or '' }}"
-      data-prev-session-id="{{ prev_session_id or '' }}">
+    <div class="d-queue">
       <div class="d-qt">Up next <span class="d-qc">{{ queue_items | length }}</span></div>
       {% for item in queue_items[:3] %}
         {% if item.action_type == "findings" %}
