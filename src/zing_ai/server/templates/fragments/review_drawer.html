@@ -23,7 +23,7 @@
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer"
-     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}", "triage": {{ saved_triage_responses | tojson }}, "openSteps": {{ saved_open_steps | tojson }}}'>
+     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}", "sessionId": "{{ session.session_id }}", "stepId": "{{ current_step.step_id if current_step else "" }}", "triage": {{ saved_triage_responses | tojson }}, "openSteps": {{ saved_open_steps | tojson }}}'>
 
   {# ── Header ── #}
   <div class="dh">
@@ -253,9 +253,8 @@
     {% if mode == "findings" and current_step %}
       <button class="d-fsub"
         id="drawer-submit-btn"
-        data-session-id="{{ session.session_id }}"
-        data-step-id="{{ current_step.step_id }}"
-        data-drawer-submit>Submit &amp; Next</button>
+        data-drawer-submit
+        data-on:click="@post('/' + $sessionId + '/submit', {payload: {step_id: $stepId, responses: $triage}})">Submit &amp; Next</button>
     {% endif %}
   </div>
 
