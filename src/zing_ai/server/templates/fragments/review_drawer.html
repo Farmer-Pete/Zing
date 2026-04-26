@@ -19,7 +19,7 @@
 {% from "fragments/_phase_strip.html" import phase_strip %}
 
 {# ── Backdrop ── #}
-<div class="drawer-backdrop" data-drawer-close></div>
+<div class="drawer-backdrop" data-on:click="$modals.drawer = false"></div>
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer">
@@ -27,7 +27,7 @@
   {# ── Header ── #}
   <div class="dh">
     <div class="dh-top">
-      <button class="dh-close" data-drawer-close>&times;</button>
+      <button class="dh-close" data-on:click="$modals.drawer = false">&times;</button>
       {% if session.ticket_id %}
         <span class="dh-ticket">{{ session.ticket_id }}</span>
       {% endif %}
@@ -271,9 +271,9 @@
           {% set qa_lbl = "answer" %}
         {% endif %}
         <div class="d-qi"
-             data-open-drawer="{{ item.session_id }}"
-             data-open-drawer-mode="{{ item.action_type }}"
-             data-session-id="{{ item.session_id }}">
+             data-on:click="@get('/command-center/drawer/{{ item.session_id }}')"
+             data-session-id="{{ item.session_id }}"
+             style="cursor:pointer">
           <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
           {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}
           <span class="d-qtl">{{ item.title }}</span>

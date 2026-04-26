@@ -48,8 +48,7 @@
       {% endif %}
 
       <div class="attn-item"
-           data-open-drawer="{{ item.session_id }}"
-           data-open-drawer-mode="{{ item.action_type }}"
+           data-on:click="@get('/command-center/drawer/{{ item.session_id }}')"
            style="cursor:pointer">
         <div class="attn-type-ico {{ type_cls }}">{{ icon }}</div>
         <div class="attn-info">
@@ -75,8 +74,7 @@
           <span>{{ wait_lbl }}</span>
         </div>
         <button class="attn-btn {{ btn_cls }}"
-                data-open-drawer="{{ item.session_id }}"
-                data-open-drawer-mode="{{ item.action_type }}">{{ btn_lbl }}</button>
+                data-on:click.stop="@get('/command-center/drawer/{{ item.session_id }}')">{{ btn_lbl }}</button>
       </div>
     {% endfor %}
   </div>

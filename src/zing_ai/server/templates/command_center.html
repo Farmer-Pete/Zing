@@ -5,7 +5,10 @@
 {% block content %}
 <div class="cc-page"
      data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {"refresh": false}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
-     data-init="@get('/command-center/events')">
+     data-init="@get('/command-center/events')"
+     data-on:keydown__window__key.escape="$modals.drawer = false; $modals.mgmt = false; $modals.standup = false; $modals.terminal = false; $modals.repoChooser = false"
+     data-on-signal-patch-filter="{include: /^modals$/}"
+     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
@@ -35,7 +38,7 @@
     </div>
 
     {# ── Review drawer container ── #}
-    <div id="review-drawer-container" style="display:none"></div>
+    <div id="review-drawer-container" data-show="$modals.drawer"></div>
 
     {# ── Terminal modal (Zellij iframe) ── #}
     <div id="terminal-modal" class="terminal-modal" style="display:none;">
