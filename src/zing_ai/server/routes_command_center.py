@@ -929,6 +929,21 @@ def build_drawer_context(
         notification = session.pending_question
         notification_body = notification.body if notification else ""
 
+    # Build the triage signal dict for the drawer.
+    # Maps finding_id → action value string (or None) for pre-existing saved responses.
+    saved_triage_responses: dict[str, str | None] = {}
+    if current_step is not None:
+        for idx, finding in enumerate(current_step.findings):
+            if finding.type == "triage":
+                action_val: str | None = None
+                if (
+                    current_step.responses is not None
+                    and idx < len(current_step.responses)
+                    and current_step.responses[idx].action is not None
+                ):
+                    action_val = current_step.responses[idx].action.value
+                saved_triage_responses[finding.id] = action_val
+
     return {
         "session": session,
         "steps": steps,
@@ -943,6 +958,7 @@ def build_drawer_context(
         "waiting_label": waiting_label,
         "notification": notification,
         "notification_body": notification_body,
+        "saved_triage_responses": saved_triage_responses,
     }
 
 

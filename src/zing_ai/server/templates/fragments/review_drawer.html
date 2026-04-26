@@ -23,7 +23,7 @@
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer"
-     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}"}'>
+     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}", "triage": {{ saved_triage_responses | tojson }}}'>
 
   {# ── Header ── #}
   <div class="dh">
@@ -213,9 +213,15 @@
               {% endif %}
               {% if finding.type == "triage" %}
                 <div class="df-tr">
-                  <button class="df-tb" data-action="accept" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Accept</button>
-                  <button class="df-tb" data-action="drop" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Drop</button>
-                  <button class="df-tb" data-action="discuss" data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}">Discuss</button>
+                  <button class="df-tb" data-action="accept"
+                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'accept' ? null : 'accept'"
+                          data-class:sa="$triage['{{ finding.id }}'] === 'accept'">Accept</button>
+                  <button class="df-tb" data-action="drop"
+                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'drop' ? null : 'drop'"
+                          data-class:sd="$triage['{{ finding.id }}'] === 'drop'">Drop</button>
+                  <button class="df-tb" data-action="discuss"
+                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'discuss' ? null : 'discuss'"
+                          data-class:sdisc="$triage['{{ finding.id }}'] === 'discuss'">Discuss</button>
                 </div>
               {% elif finding.type == "text" %}
                 <div class="df-tr">
@@ -234,7 +240,7 @@
   <div class="d-footer">
     <div class="d-fprog">
       {% if mode == "findings" and current_step %}
-        <strong id="drawer-triage-count">0</strong> / {{ current_step.findings | length }} triaged
+        <span id="drawer-triage-count" data-text="Object.values($triage).filter(Boolean).length">0</span> / {{ current_step.findings | length }} triaged
       {% elif mode == "attach" %}
         Waiting for response
       {% endif %}
