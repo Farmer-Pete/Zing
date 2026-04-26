@@ -188,14 +188,14 @@ def test_copy_cmd_button_calls_clipboard_write_text(server: _ServerInfo, page: P
     expect(copy_btn).to_be_visible(timeout=3000)
 
     # Extract expected command from the inline data-on:click attribute.
-    # The expression looks like:
-    #   navigator.clipboard.writeText("zing-ai launch ..."); $openKebab = null
+    # The expression now uses the dispatchCopyCmd named-dispatch wrapper:
+    #   dispatchCopyCmd("zing-ai launch ..."); $openKebab = ""
     on_click = copy_btn.get_attribute("data-on:click")
     assert on_click, "Copy button must carry a data-on:click attribute"
     import re as _re
 
-    m = _re.search(r'writeText\((".*?")\)', on_click)
-    assert m, f"data-on:click must contain writeText(...) with a JSON string: {on_click!r}"
+    m = _re.search(r'dispatchCopyCmd\((".*?")\)', on_click)
+    assert m, f"data-on:click must contain dispatchCopyCmd(...) with a JSON string: {on_click!r}"
     import json as _json
 
     expected_cmd = _json.loads(m.group(1))
@@ -492,7 +492,7 @@ def test_launch_bg_primary_button_sends_skill_and_pr_number(
     #   {payload: {card_key: '...', btn_id: '...', skill: 'pr-audit', pr_number: 601}})
     on_click = primary_btn.get_attribute("data-on:click")
     assert on_click, "Primary button must carry a data-on:click attribute"
-    skill_match = re.search(r"skill:\s*'([^']+)'", on_click)
+    skill_match = re.search(r"skill:\s*['\"]([^'\"]+)['\"]", on_click)
     pr_match = re.search(r"pr_number:\s*(\d+)", on_click)
     assert skill_match, f"data-on:click must contain skill: '...': {on_click!r}"
     assert pr_match, f"data-on:click must contain pr_number: <int>: {on_click!r}"
@@ -541,7 +541,7 @@ def test_launch_bg_menu_row_sends_skill_and_pr_number(server: _ServerInfo, page:
     # Extract expected skill and pr_number from the inline data-on:click payload.
     on_click = row_btn.get_attribute("data-on:click")
     assert on_click, "Menu row must carry a data-on:click attribute"
-    skill_match = re.search(r"skill:\s*'([^']+)'", on_click)
+    skill_match = re.search(r"skill:\s*['\"]([^'\"]+)['\"]", on_click)
     pr_match = re.search(r"pr_number:\s*(\d+)", on_click)
     assert skill_match, f"data-on:click must contain skill: '...': {on_click!r}"
     assert pr_match, f"data-on:click must contain pr_number: <int>: {on_click!r}"

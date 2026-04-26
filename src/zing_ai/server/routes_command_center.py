@@ -41,8 +41,9 @@ from zing_ai.server.command_center import (
     generate_standup,
     infer_repo_for_ticket,
 )
-from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession, _to_signal_key
+from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
 
@@ -51,6 +52,8 @@ router = APIRouter()
 
 # Guards against concurrent manual-refresh clicks (Decision #22).
 _refresh_lock = asyncio.Lock()
+# Guards against concurrent launch-background invocations for the same card.
+_launch_lock = asyncio.Lock()
 
 
 def _format_last_polled(dt: datetime | None) -> str:
@@ -273,8 +276,6 @@ def _build_initial_signals(
         "lastError": last_error or "",
         # Attention bar open/closed.
         "attnBarOpen": True,
-        # Toast queue (legacy slot — not currently used; left for future use).
-        "toast": None,
         # Per-button busy/disabled flags (see helper above).
         "busyButtons": busy_buttons,
         # Modal open/closed flags. Five modals share this dict so a single
@@ -294,7 +295,6 @@ def _build_initial_signals(
         "kebabQuery": "",
         # Standup modal state.
         "standupTab": "rendered",
-        "standupHtml": "",
         "standupMarkdown": "",
         # Terminal modal — URL signal patched by /attach-session.
         "terminalUrl": "",
@@ -411,16 +411,22 @@ async def refresh_command_center(request: Request):  # noqa: ANN201
             try:
                 await poller._poll_once()  # noqa: SLF001
                 yield _sse_toast("Refreshed", "ok")
-            except Exception as e:  # noqa: BLE001
-                yield _sse_toast(str(e), "err")
+            except Exception:  # noqa: BLE001
+                logger.exception("cc-refresh failed", extra={"event": "cc_refresh_failed"})
+                yield _sse_toast("Refresh failed — see server logs", "err")
 
     return _stream()
 
 
-@router.get("/command-center/standup")
+@router.post("/command-center/standup")
 @datastar_response
 async def get_standup(request: Request):  # noqa: ANN201
-    """Generate a standup message from the current board state."""
+    """Generate a standup message from the current board state.
+
+    POST + SSE keeps verb semantics consistent with the rest of the file
+    (refresh, attach, kill, cleanup, drawer all use POST + SSE) and avoids
+    the cacheability concern of SSE-on-GET.
+    """
 
     async def _stream():  # noqa: ANN202
         view = _build_view(request.app)
@@ -433,10 +439,12 @@ async def get_standup(request: Request):  # noqa: ANN201
             selector="#standup-modal-body",
             mode=ElementPatchMode.INNER,
         )
+        # standupHtml signal intentionally NOT patched — the rendered HTML
+        # already lives in #standup-modal-body and the Copy button reads
+        # it from the DOM (see dispatchCopyStandup in cc-modals.js).
         yield SSE.patch_signals(
             {
                 "modals": {"standup": True},
-                "standupHtml": html,
                 "standupMarkdown": markdown,
             }
         )
@@ -456,13 +464,26 @@ async def attach_session(payload: dict[str, Any], request: Request):  # noqa: AN
 
     async def _stream():  # noqa: ANN202
         if not getattr(request.app.state, "zellij_available", False):
+            logger.warning(
+                "attach-session: zellij unavailable",
+                extra={"event": "cc_attach_unavailable"},
+            )
             yield _sse_toast("Zellij is not available", "err")
             return
         terminal_session = payload.get("terminal_session")
         if not terminal_session:
+            logger.warning(
+                "attach-session: missing terminal_session",
+                extra={"event": "cc_attach_invalid"},
+            )
             yield _sse_toast("terminal_session is required", "err")
             return
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+            logger.warning(
+                "attach-session: invalid session name %s",
+                terminal_session,
+                extra={"event": "cc_attach_invalid"},
+            )
             yield _sse_toast("invalid session name", "err")
             return
         url_for_zellij_session = f"/zellij/{terminal_session}"
@@ -499,6 +520,10 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
     async def _stream():  # noqa: ANN202
         if not card_key:
+            logger.warning(
+                "launch-background: missing card_key",
+                extra={"event": "cc_launch_invalid"},
+            )
             yield _sse_toast("card_key is required", "err")
             return
 
@@ -506,14 +531,21 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
         launching_set: set[str] = request.app.state.launching_set
 
-        if card_key in launching_set:
-            logger.warning("launch-background: duplicate launch for card %s", card_key)
-            yield _sse_toast("Launch already in progress for this card", "err")
-            if reset_busy is not None:
-                yield reset_busy
-            return
-
-        launching_set.add(card_key)
+        # Atomic check-and-add — without the lock, two concurrent SSE connections
+        # (second tab, rapid double-click) can both pass the membership check
+        # before either has called add(), creating two worktrees for the same card.
+        async with _launch_lock:
+            if card_key in launching_set:
+                logger.warning(
+                    "launch-background: duplicate launch for card %s",
+                    card_key,
+                    extra={"event": "cc_launch_duplicate", "card_key": card_key},
+                )
+                yield _sse_toast("Launch already in progress for this card", "err")
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+            launching_set.add(card_key)
 
         repo_path_cache: dict[str, Path] = request.app.state.repo_path_cache
 
@@ -599,6 +631,11 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     mode=ElementPatchMode.INNER,
                 )
                 yield SSE.patch_signals({"modals": {"repoChooser": True}})
+                # Symmetric with every other early-return branch — reset busy so
+                # the launch indicator clears and the chooser button picks up the
+                # in-flight state via its own data-indicator binding.
+                if reset_busy is not None:
+                    yield reset_busy
                 return
             else:
                 launching_set.discard(card_key)
@@ -761,19 +798,32 @@ async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN2
 
     async def _stream():  # noqa: ANN202
         if not ticket_id:
+            logger.warning(
+                "start-ticket: missing ticket_id",
+                extra={"event": "cc_start_invalid"},
+            )
             yield _sse_toast("ticket_id is required", "err")
             return
 
         config = load_config()
         api_key = config.command_center.linear_api_key
         if not api_key:
+            logger.warning(
+                "start-ticket: linear api key missing",
+                extra={"event": "cc_start_unconfigured", "ticket_id": ticket_id},
+            )
             yield _sse_toast("Linear API key not configured", "err")
             return
 
         try:
             await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
         except LaunchError as exc:
-            logger.error("start-ticket failed for %s: %s", ticket_id, exc)
+            logger.error(
+                "start-ticket failed for %s: %s",
+                ticket_id,
+                exc,
+                extra={"event": "cc_start_failed", "ticket_id": ticket_id},
+            )
             yield _sse_toast(str(exc), "err")
             return
 
@@ -803,6 +853,10 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
 
     async def _stream():  # noqa: ANN202
         if not session_id:
+            logger.warning(
+                "kill-session: missing session_id",
+                extra={"event": "cc_kill_invalid"},
+            )
             yield _sse_toast("session_id is required", "err")
             return
         manager = request.app.state.session_manager
@@ -812,6 +866,11 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
             or not isinstance(session, ClaudeCodeSession)
             or not session.terminal_session
         ):
+            logger.warning(
+                "kill-session: session not found %s",
+                session_id,
+                extra={"event": "cc_kill_not_found", "session_id": session_id},
+            )
             yield _sse_toast("Session not found", "err")
             return
         subprocess.run(
@@ -833,6 +892,10 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
 
     async def _stream():  # noqa: ANN202
         if not session_id:
+            logger.warning(
+                "cleanup-worktree: missing session_id",
+                extra={"event": "cc_cleanup_invalid"},
+            )
             yield _sse_toast("session_id is required", "err")
             return
         manager = request.app.state.session_manager
@@ -842,16 +905,31 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
             or not isinstance(session, ClaudeCodeSession)
             or not session.worktree_path
         ):
+            logger.warning(
+                "cleanup-worktree: session not found %s",
+                session_id,
+                extra={"event": "cc_cleanup_not_found", "session_id": session_id},
+            )
             yield _sse_toast("Session not found", "err")
             return
         live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
         if session.terminal_session and session.terminal_session in live_sessions:
+            logger.warning(
+                "cleanup-worktree: session %s still running",
+                session_id,
+                extra={"event": "cc_cleanup_running", "session_id": session_id},
+            )
             yield _sse_toast("Cannot clean up worktree while session is running", "err")
             return
         try:
             rollback_worktree(Path(session.worktree_path))
         except (LaunchError, OSError, subprocess.CalledProcessError) as exc:
-            logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
+            logger.error(
+                "Worktree rollback failed for session %s: %s",
+                session_id,
+                exc,
+                extra={"event": "cc_cleanup_failed", "session_id": session_id},
+            )
             yield _sse_toast(str(exc), "err")
             return
         manager.cleanup_session(session_id)

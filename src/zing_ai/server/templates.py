@@ -128,20 +128,25 @@ def _js_str(value: Any) -> markupsafe.Markup:
     Why this exists: ``| e`` (autoescape) converts ``'`` to ``&#39;`` which the
     browser decodes back to ``'`` inside a quoted attribute, breaking any
     surrounding single-quoted JS string. ``json.dumps`` produces a properly
-    JS-escaped double-quoted string literal whose only special character
-    inside the HTML attribute context is ``"`` — and that's what
-    ``markupsafe`` then escapes to ``&quot;``, which the browser correctly
-    decodes inside attribute parsing without breaking the JS literal.
+    JS-escaped double-quoted string literal; the ``"`` characters that delimit
+    that literal would themselves break a surrounding ``data-foo="..."``
+    attribute, so they are HTML-escaped to ``&quot;`` here. The browser
+    decodes ``&quot;`` back to ``"`` *inside attribute parsing only*, so the
+    JS literal stays intact.
 
-    The returned string includes the surrounding double quotes — callers
-    should NOT add their own quotes:
+    The returned string includes the surrounding (escaped) double quotes —
+    callers should NOT add their own quotes:
 
         data-foo="alert({{ name | js_str }})"  →  data-foo="alert(&quot;world&quot;)"
     """
     if value is None:
-        return markupsafe.Markup('""')
+        return markupsafe.Markup("&quot;&quot;")
     text = value if isinstance(value, str) else str(value)
-    return markupsafe.Markup(json.dumps(text))
+    # json.dumps handles JS-side escaping of \, control chars, and unicode.
+    # html.escape(quote=True) then HTML-escapes the surrounding " (and any
+    # < > & that json.dumps left alone) so the literal can sit inside a
+    # double-quoted HTML attribute without breaking it.
+    return markupsafe.Markup(html.escape(json.dumps(text), quote=True))
 
 
 _env = Environment(

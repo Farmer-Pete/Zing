@@ -60,7 +60,7 @@
         <p>{{ notification.body }}</p>
       {% endif %}
       <button class="attach-hero-btn"
-        data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $modals.drawer = false">
+        data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: {{ session.terminal_session | js_str }}}}); $modals.drawer = false">
         Attach to Session
       </button>
     </div>

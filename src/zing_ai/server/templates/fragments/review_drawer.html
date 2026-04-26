@@ -74,9 +74,9 @@
     {% for step in steps %}
       {% if step != current_step %}
         <div class="step-section" id="step-section-{{ step.step_id }}"
-             data-class:open="$openSteps['{{ step.step_id }}']">
+             data-class:open="$openSteps[{{ step.step_id | js_str }}]">
           <button class="step-hdr" data-step-toggle
-                  data-on:click="$openSteps['{{ step.step_id }}'] = !$openSteps['{{ step.step_id }}']">
+                  data-on:click="$openSteps[{{ step.step_id | js_str }}] = !$openSteps[{{ step.step_id | js_str }}]">
             <span class="step-chv">&#9654;</span>
             {{ step_icon(step.step_name) }}
             <span class="step-name">{{ step.step_name }}</span>
@@ -138,7 +138,7 @@
             <p>{{ notification_body }}</p>
           {% endif %}
           <button class="attach-hero-btn"
-                  data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $modals.drawer = false">Attach to Session</button>
+                  data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: {{ session.terminal_session | js_str }}}}); $modals.drawer = false">Attach to Session</button>
         </div>
 
         {% if notification_body %}
@@ -151,9 +151,9 @@
       {% elif mode == "findings" and current_step.findings %}
         {# ── Current step header ── #}
         <div class="step-section" id="step-section-{{ current_step.step_id }}"
-             data-class:open="$openSteps['{{ current_step.step_id }}']">
+             data-class:open="$openSteps[{{ current_step.step_id | js_str }}]">
           <button class="step-hdr" style="background:rgba(62,207,224,0.06)" data-step-toggle
-                  data-on:click="$openSteps['{{ current_step.step_id }}'] = !$openSteps['{{ current_step.step_id }}']">
+                  data-on:click="$openSteps[{{ current_step.step_id | js_str }}] = !$openSteps[{{ current_step.step_id | js_str }}]">
             <span class="step-chv">&#9654;</span>
             {{ step_icon(current_step.step_name) }}
             <span class="step-name">{{ current_step.step_name }}</span>
@@ -204,17 +204,17 @@
                    another action — Submit clears the selection by submitting. #}
                 <div class="df-tr">
                   <button class="df-tb" data-action="accept"
-                          data-on:click="$triage['{{ finding.id }}'] = 'accept'"
-                          data-class:sa="$triage['{{ finding.id }}'] === 'accept'">Accept</button>
+                          data-on:click="$triage[{{ finding.id | js_str }}] = 'accept'"
+                          data-class:sa="$triage[{{ finding.id | js_str }}] === 'accept'">Accept</button>
                   <button class="df-tb" data-action="drop"
-                          data-on:click="$triage['{{ finding.id }}'] = 'drop'"
-                          data-class:sd="$triage['{{ finding.id }}'] === 'drop'">Drop</button>
+                          data-on:click="$triage[{{ finding.id | js_str }}] = 'drop'"
+                          data-class:sd="$triage[{{ finding.id | js_str }}] === 'drop'">Drop</button>
                   <button class="df-tb" data-action="downgrade"
-                          data-on:click="$triage['{{ finding.id }}'] = 'downgrade'"
-                          data-class:sdng="$triage['{{ finding.id }}'] === 'downgrade'">Downgrade</button>
+                          data-on:click="$triage[{{ finding.id | js_str }}] = 'downgrade'"
+                          data-class:sdng="$triage[{{ finding.id | js_str }}] === 'downgrade'">Downgrade</button>
                   <button class="df-tb" data-action="discuss"
-                          data-on:click="$triage['{{ finding.id }}'] = 'discuss'"
-                          data-class:sdisc="$triage['{{ finding.id }}'] === 'discuss'">Discuss</button>
+                          data-on:click="$triage[{{ finding.id | js_str }}] = 'discuss'"
+                          data-class:sdisc="$triage[{{ finding.id | js_str }}] === 'discuss'">Discuss</button>
                 </div>
               {% elif finding.type == "text" %}
                 <div class="df-tr">

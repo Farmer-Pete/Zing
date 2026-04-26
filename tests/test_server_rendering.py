@@ -519,10 +519,12 @@ class TestRepoChooserModal(unittest.TestCase):
         self.assertIn("owner/repo2", html)
         # Datastar post calls present
         self.assertIn("@post('/command-center/launch-background'", html)
-        # card_key interpolated for both buttons
-        self.assertEqual(html.count("card_key: 'TKT-1'"), 2)
+        # card_key interpolated for both buttons via js_str (renders as
+        # double-quoted JS string literal with HTML-escaped quotes so the
+        # surrounding double-quoted data-on:click attribute stays well-formed)
+        self.assertEqual(html.count("card_key: &quot;TKT-1&quot;"), 2)
         # repo paths interpolated
-        self.assertIn("repo: 'owner/repo1'", html)
-        self.assertIn("repo: 'owner/repo2'", html)
+        self.assertIn("repo: &quot;owner/repo1&quot;", html)
+        self.assertIn("repo: &quot;owner/repo2&quot;", html)
         # Cancel button closes repoChooser signal
         self.assertIn("$modals.repoChooser = false", html)

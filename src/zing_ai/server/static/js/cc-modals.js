@@ -6,8 +6,23 @@ window.dispatchOpenTerminal = function(url) {
     document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));
 };
 
-window.dispatchCopyStandup = function(html, markdown) {
+window.dispatchCopyStandup = function(markdown) {
+    // Read HTML straight from the DOM rather than from a $standupHtml signal —
+    // the rendered HTML already lives in #standup-modal-body and storing a
+    // duplicate in the signal store added O(HTML-size) to every patch_signals.
+    var bodyEl = document.getElementById('standup-modal-body');
+    var html = bodyEl ? bodyEl.innerHTML : '';
     document.dispatchEvent(new CustomEvent('copy-standup', {detail: {html: html, markdown: markdown}, bubbles: true}));
+};
+
+// Centralised clipboard write — replaces 20 inline navigator.clipboard.writeText
+// expressions in kanban_card.html. One site to add toast/error feedback in.
+window.dispatchCopyCmd = function(text) {
+    if (!text) return;
+    navigator.clipboard.writeText(text).catch(function() {
+        // Silent failure is fine — kebab buttons don't have a feedback affordance
+        // today. Centralised here so a future toast can be added in one place.
+    });
 };
 
 // Wire a modal: backdrop click, close button click, and ESC all dismiss it.

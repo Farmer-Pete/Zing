@@ -1,23 +1,12 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from zing_ai.server.models import Session, WorkflowStep
-
-# Replace any character outside [A-Za-z0-9_] with `_` so the resulting string is
-# safe to use as a JavaScript identifier suffix (e.g. as a key inside the
-# Datastar ``$busyButtons`` signal proxy). Keys like ``BAK-1234`` would otherwise
-# parse as subtraction in Datastar expression context.
-_SIGNAL_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
-
-
-def _to_signal_key(value: str) -> str:
-    """Sanitise *value* for inclusion in a Datastar signal-property name."""
-    return _SIGNAL_KEY_RE.sub("_", value)
+from zing_ai.server.signals import to_signal_key as _to_signal_key
 
 
 class LinearIssue(BaseModel):
@@ -35,6 +24,16 @@ class LinearIssue(BaseModel):
     team: str | None  # team.name; null on triage / unassigned-team issues
     url: str
     updated_at: datetime
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`identifier` sanitised for use as a Datastar signal name.
+
+        Same purpose as :attr:`KanbanCard.signal_key` — see that property's
+        docstring for the rationale. Used by templates that build per-ticket
+        signals like ``$busyButtons.start_<signal_key>``.
+        """
+        return _to_signal_key(self.identifier)
 
 
 class CICheck(BaseModel):

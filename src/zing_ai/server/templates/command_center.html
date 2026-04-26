@@ -6,7 +6,7 @@
 <div class="cc-page"
      data-signals='{{ initial_signals | tojson }}'
      data-init="@get('/command-center/events')"
-     data-on:keydown__window__key.escape="$modals.drawer = false; $modals.mgmt = false; $modals.standup = false; $modals.terminal = false; $modals.repoChooser = false"
+     data-on:keydown__window="evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
      data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')"
      data-on-signal-patch-filter="{include: /^modals$/}"
      data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''">
@@ -24,7 +24,7 @@
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
         <button class="cc-refresh-btn" id="cc-standup-btn"
-                data-on:click="@get('/command-center/standup')"
+                data-on:click="@post('/command-center/standup')"
                 data-indicator="$busyButtons.standup"
                 data-attr:disabled="$busyButtons.standup">&#x270D; Standup</button>
         <button class="cc-refresh-btn" id="btn-refresh"
@@ -49,7 +49,7 @@
          the same close() so the iframe lifecycle stays in one place. ── #}
     <div id="terminal-modal" class="terminal-modal" style="display:none;"
          data-on-signal-patch-filter="{include: /^modals$/}"
-         data-on-signal-patch="if (!$modals.terminal) document.dispatchEvent(new CustomEvent('close-terminal'))">
+         data-on-signal-patch="$modals.terminal === false && document.dispatchEvent(new CustomEvent('close-terminal'))">
       <div class="terminal-modal-bar">
         <span class="terminal-modal-title" id="terminal-modal-title"></span>
         <button class="terminal-modal-close" id="terminal-modal-close" aria-label="Close terminal"
@@ -61,9 +61,12 @@
 
     {# ── Repo chooser modal (Datastar) ── Stable container; inner content is
        INNER-patched by /command-center/launch-background when status=choose_repo. #}
-    <div id="repo-chooser-modal-container" data-show="$modals.repoChooser">
+    <div id="repo-chooser-modal-container" class="dialog-modal"
+         data-class:open="$modals.repoChooser">
       <!-- Patched INNER by /command-center/launch-background when status=choose_repo -->
     </div>
+    <div id="repo-chooser-modal-backdrop" class="terminal-modal-backdrop"
+         data-show="$modals.repoChooser"></div>
 
     {# ── Standup modal ── Signal-driven: $modals.standup controls open/close.
        $standupTab controls tab switching. $standupHtml/$standupMarkdown hold
@@ -82,7 +85,7 @@
                     data-class:active="$standupTab === 'markdown'">Markdown</button>
           </div>
           <button class="standup-copy-btn" id="standup-copy-btn"
-                  data-on:click="dispatchCopyStandup($standupHtml, $standupMarkdown)">Copy</button>
+                  data-on:click="dispatchCopyStandup($standupMarkdown)">Copy</button>
           <button class="terminal-modal-close" id="standup-modal-close" aria-label="Close standup"
                   data-on:click="$modals.standup = false">&times;</button>
         </div>

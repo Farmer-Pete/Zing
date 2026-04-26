@@ -22,7 +22,7 @@
         <span class="mgmt-row-name">{{ session.terminal_session }}</span>
         <span class="mgmt-row-detail">{{ session.ticket_id or session.title }}</span>
         <button class="mgmt-row-action mgmt-btn-danger"
-                data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}'}})">
+                data-on:click="@post('/command-center/kill-session', {payload: {session_id: {{ session.session_id | js_str }}}})">
           Kill
         </button>
       </div>
@@ -42,7 +42,7 @@
         </span>
         {% if entry.orphaned %}
           <button class="mgmt-row-action mgmt-btn-danger"
-                  data-on:click="@post('/command-center/cleanup-worktree', {payload: {session_id: '{{ entry.session.session_id | e }}'}})">
+                  data-on:click="@post('/command-center/cleanup-worktree', {payload: {session_id: {{ entry.session.session_id | js_str }}}})">
             Clean up
           </button>
         {% endif %}

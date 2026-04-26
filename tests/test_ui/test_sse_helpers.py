@@ -21,7 +21,7 @@ def test_refresh_button_shows_ok_toast_then_removes(server: _ServerInfo, page: P
     """Clicking the Refresh button yields a cc-toast-ok containing 'Refreshed'.
 
     The toast should appear in #cc-toast-container and then be removed from the
-    DOM after ~5 seconds via the data-on-load__delay self-removal mechanism.
+    DOM after ~5 seconds via the data-init__delay.5000ms self-removal mechanism.
     No JS console errors should occur during the interaction.
     """
     # Install a no-op poller so the route doesn't return a 503-like err toast.

@@ -9,9 +9,9 @@
 #}
 {% from "fragments/_drawer_helpers.html" import step_icon %}
 <div class="step-section" id="step-section-{{ step.step_id }}"
-     data-class:open="$openSteps['{{ step.step_id }}']">
+     data-class:open="$openSteps[{{ step.step_id | js_str }}]">
   <button class="step-hdr" data-step-toggle
-          data-on:click="$openSteps['{{ step.step_id }}'] = !$openSteps['{{ step.step_id }}']">
+          data-on:click="$openSteps[{{ step.step_id | js_str }}] = !$openSteps[{{ step.step_id | js_str }}]">
     <span class="step-chv">&#9654;</span>
     {{ step_icon(step.step_name) }}
     <span class="step-name">{{ step.step_name }}</span>

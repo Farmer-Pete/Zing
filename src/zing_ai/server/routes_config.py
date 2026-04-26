@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from zing_ai.config import ConfigError, default_config, load_config, save_config
 from zing_ai.server.config_meta import FIELD_META
+from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render
 
 _PLATFORM_FIELD_META: dict[str, dict[str, Any]] = {
@@ -144,12 +145,12 @@ async def post_toggle_github_repo(payload: dict[str, Any]):  # noqa: ANN201
 
     async def _stream():  # noqa: ANN202
         if not repo:
-            yield SSE.patch_signals({"_toggleError": "repo is required"})
+            yield _sse_toast("repo is required", "err")
             return
         try:
             cfg = load_config()
         except ConfigError as e:
-            yield SSE.patch_signals({"_toggleError": str(e)})
+            yield _sse_toast(str(e), "err")
             return
         excluded = set(cfg.command_center.github_excluded_repos)
         if enabled:
@@ -160,7 +161,7 @@ async def post_toggle_github_repo(payload: dict[str, Any]):  # noqa: ANN201
         try:
             save_config(cfg)
         except Timeout:
-            yield SSE.patch_signals({"_toggleError": "config is locked, try again"})
+            yield _sse_toast("config is locked, try again", "err")
             return
         sig_name = repo.replace("/", "__")
         yield SSE.patch_signals({"repos": {sig_name: bool(enabled)}})
@@ -179,17 +180,17 @@ async def post_toggle_github_repo_group(  # noqa: ANN201
 
     async def _stream():  # noqa: ANN202
         if not owner:
-            yield SSE.patch_signals({"_toggleError": "owner is required"})
+            yield _sse_toast("owner is required", "err")
             return
         cache = request.app.state.external_cache  # type: ignore[attr-defined]
         group_repos = [r for r in cache.github_repos if r.partition("/")[0] == owner]
         if not group_repos:
-            yield SSE.patch_signals({"_toggleError": f"no repos for owner: {owner}"})
+            yield _sse_toast(f"no repos for owner: {owner}", "err")
             return
         try:
             cfg = load_config()
         except ConfigError as e:
-            yield SSE.patch_signals({"_toggleError": str(e)})
+            yield _sse_toast(str(e), "err")
             return
         excluded = set(cfg.command_center.github_excluded_repos)
         for repo in group_repos:
@@ -201,7 +202,7 @@ async def post_toggle_github_repo_group(  # noqa: ANN201
         try:
             save_config(cfg)
         except Timeout:
-            yield SSE.patch_signals({"_toggleError": "config is locked, try again"})
+            yield _sse_toast("config is locked, try again", "err")
             return
         repos_signals = {r.replace("/", "__"): bool(enabled) for r in group_repos}
         yield SSE.patch_signals({"repoGroups": {owner: bool(enabled)}, "repos": repos_signals})

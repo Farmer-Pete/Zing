@@ -168,6 +168,13 @@ def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> No
     """Submit & Next POSTs to /{session_id}/submit with the gathered responses
     and marks the step COMPLETED on the server."""
     step_id = _seed_session_with_findings(server)
+
+    # Track JS console errors throughout — Datastar binding failures in the
+    # submit response would silently fail rather than raise, so console-error
+    # assertion is the only reliable runtime signal.
+    errors: list[str] = []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+
     _open_drawer(server, page)
 
     # Triage one finding so the submit body has a populated responses object.
@@ -188,6 +195,7 @@ def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> No
     )
     _, step = server.manager.get_step_by_id(step_id)
     assert step.state.value == "completed"
+    assert errors == [], f"Unexpected JS console errors: {errors}"
 
 
 def test_drawer_triage_state_rehydrates_on_reload(server: _ServerInfo, page: Page) -> None:

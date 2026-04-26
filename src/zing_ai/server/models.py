@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -11,15 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
 
-# Replace any character outside [A-Za-z0-9_] with `_` so the resulting string is
-# safe to use as a JavaScript identifier suffix (e.g. as a key inside the
-# Datastar ``$busyButtons`` signal proxy).
-_SIGNAL_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
-
-
-def _to_signal_key(value: str) -> str:
-    """Sanitise *value* for inclusion in a Datastar signal-property name."""
-    return _SIGNAL_KEY_RE.sub("_", value)
+from zing_ai.server.signals import to_signal_key as _to_signal_key
 
 
 class Location(BaseModel):

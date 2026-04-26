@@ -297,19 +297,23 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
         len(responses),
     )
 
-    # Determine next session from attention queue (exclude the just-submitted session).
-    sessions = manager.list_sessions()
-    attention_queue = build_attention_queue(sessions, datetime.now(UTC))
-    next_item = next(
-        (item for item in attention_queue if item.session_id != session_id),
-        None,
-    )
-
     def _sse_patches():  # noqa: ANN202
         # Always patch the legacy review-page elements so the standalone
         # review page (/{session_id}) still shows "Review submitted" state.
         yield SSE.patch_elements(_submitted_status_html())
         yield SSE.patch_elements(_submitted_button_html())
+
+        # Recompute the attention queue inside the generator so the next-drawer
+        # fragment renders against a fresh snapshot — concurrent SSE events
+        # firing between the submit() and the consumer reading the response
+        # could otherwise leave prev/next pointers referencing ids that no
+        # longer match the rest of the page.
+        sessions = manager.list_sessions()
+        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
+        next_item = next(
+            (item for item in attention_queue if item.session_id != session_id),
+            None,
+        )
 
         # Command-center drawer path: load next session or close drawer.
         if next_item is not None:
