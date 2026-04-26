@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests.test_ui.conftest import _ServerInfo
+from zing_ai.server.models import ResponseAction, UserResponse
 from zing_ai.server.models_external import LinearIssue
 
 pytestmark = pytest.mark.ui
@@ -187,3 +188,151 @@ def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> No
     )
     _, step = server.manager.get_step_by_id(step_id)
     assert step.state.value == "completed"
+
+
+def test_drawer_triage_state_rehydrates_on_reload(server: _ServerInfo, page: Page) -> None:
+    """Pre-existing saved triage responses re-hydrate $triage on drawer open.
+
+    Seeds a session with one 'accept' response already persisted server-side,
+    then opens the drawer and asserts:
+      - the Accept button carries the .sa class (Datastar applied it from
+        the saved_triage_responses signal initialised in the template), and
+      - the triage counter shows "1".
+    """
+    manager = server.manager
+    step_id = _seed_session_with_findings(
+        server,
+        session_id="rehydrate-1",
+        finding_id="f-rehydrate",
+    )
+
+    # Pre-save an "accept" response so the server has state before the page loads.
+    manager.save_response(
+        "rehydrate-1",
+        step_id,
+        "f-rehydrate",
+        UserResponse(action=ResponseAction.ACCEPT),
+    )
+
+    # Navigate and open the drawer.
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    item = page.locator(".attn-item").first
+    expect(item).to_be_visible(timeout=5000)
+    item.click()
+
+    drawer = page.locator("#review-drawer")
+    expect(drawer).to_be_visible(timeout=5000)
+
+    # The Accept button for "f-rehydrate" should carry .sa because
+    # saved_triage_responses seeded $triage with {"f-rehydrate": "accept"}.
+    accept_btn = page.locator(".df-tb[data-action='accept']").first
+    expect(accept_btn).to_be_visible(timeout=3000)
+    expect(accept_btn).to_have_class("df-tb sa", timeout=3000)
+
+    # Counter should reflect the one pre-saved response.
+    expect(page.locator("#drawer-triage-count")).to_have_text("1", timeout=3000)
+
+
+def _seed_session_for_queue(
+    server: _ServerInfo,
+    *,
+    session_id: str,
+    ticket_id: str,
+    title: str,
+) -> str:
+    """Create a minimal ready ZingSession for attention-queue tests.
+
+    Returns the step_id.
+    """
+    from datetime import UTC, datetime
+
+    cache = server.external_cache
+    # Add the Linear issue if not already present.
+    existing_ids = {i.identifier for i in cache.issues}
+    if ticket_id not in existing_ids:
+        cache.issues = list(cache.issues) + [
+            LinearIssue(
+                id=f"uuid-{session_id}",
+                identifier=ticket_id,
+                title=title,
+                state="In Progress",
+                state_type="started",
+                assignee=None,
+                team="Backend",
+                url=f"https://linear.app/test/issue/{ticket_id}",
+                updated_at=datetime.now(tz=UTC),
+            )
+        ]
+
+    manager = server.manager
+    session = manager.create_session(session_id=session_id, title=title, steps=["build-audit"])
+    manager.update_session(session_id, ticket_id=ticket_id)
+    step = session.steps[0]
+    manager.start_step(session_id, step.step_id)
+    manager.add_finding(
+        session_id,
+        step.step_id,
+        {"type": "triage", "id": f"f-{session_id}", "title": f"Finding in {title}"},
+    )
+    manager.mark_step_ready(session_id, step.step_id)
+    return step.step_id
+
+
+def test_drawer_prev_next_navigation(server: _ServerInfo, page: Page) -> None:
+    """Clicking Prev/Next re-renders the drawer for the adjacent session.
+
+    Seeds three sessions into the attention queue, opens the middle one, then:
+      - clicks Next  → drawer title changes to the third session's title, and
+      - clicks Prev  → drawer title returns to the middle session's title.
+
+    The prev/next buttons are only shown when $prevSessionId/$nextSessionId are
+    non-empty (data-show), so their visibility is itself a signal assertion.
+    """
+    import time
+
+    # Create three sessions with deliberate time gaps so the attention queue
+    # sort (wait_seconds desc) is deterministic: s1 = oldest, s3 = newest.
+    _seed_session_for_queue(
+        server, session_id="nav-s1", ticket_id="BAK-3001", title="Nav Session 1"
+    )
+    time.sleep(0.05)
+    _seed_session_for_queue(
+        server, session_id="nav-s2", ticket_id="BAK-3002", title="Nav Session 2"
+    )
+    time.sleep(0.05)
+    _seed_session_for_queue(
+        server, session_id="nav-s3", ticket_id="BAK-3003", title="Nav Session 3"
+    )
+
+    # Attention queue order (wait_seconds desc): nav-s1, nav-s2, nav-s3.
+    # Open nav-s2 directly via its attention-bar item so it has both prev and next.
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    # Click the attention item that opens nav-s2.
+    s2_item = page.locator(".attn-item[data-on\\:click*='nav-s2']")
+    expect(s2_item).to_be_visible(timeout=5000)
+    s2_item.click()
+
+    drawer = page.locator("#review-drawer")
+    expect(drawer).to_be_visible(timeout=5000)
+    expect(page.locator("#review-drawer .dh-title")).to_contain_text("Nav Session 2", timeout=3000)
+
+    # Both Prev and Next buttons should be visible (nav-s2 is in the middle).
+    prev_btn = page.locator("#review-drawer .dh-nav-btn[title='Previous']")
+    next_btn = page.locator("#review-drawer .dh-nav-btn[title='Next']")
+    expect(prev_btn).to_be_visible(timeout=3000)
+    expect(next_btn).to_be_visible(timeout=3000)
+
+    # Click Next → should load nav-s3.
+    next_btn.click()
+    expect(page.locator("#review-drawer .dh-title")).to_contain_text("Nav Session 3", timeout=5000)
+
+    # Now at nav-s3 which is the last item; prev should be visible, next hidden.
+    expect(page.locator("#review-drawer .dh-nav-btn[title='Previous']")).to_be_visible(timeout=3000)
+
+    # Click Prev → should return to nav-s2.
+    page.locator("#review-drawer .dh-nav-btn[title='Previous']").click()
+    expect(page.locator("#review-drawer .dh-title")).to_contain_text("Nav Session 2", timeout=5000)
