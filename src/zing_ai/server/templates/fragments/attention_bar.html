@@ -14,7 +14,7 @@
 <div id="attention-bar">
 {% if attention_items %}
 <div class="attn-bar">
-  <div class="attn-hdr" data-on-click="$attnBarOpen = !$attnBarOpen" style="cursor:pointer">
+  <div class="attn-hdr" data-on:click="$attnBarOpen = !$attnBarOpen" style="cursor:pointer">
     <div class="attn-ico">!</div>
     <span class="attn-ttl">Needs your attention</span>
     <span class="attn-cnt">{{ attention_items | length }}</span>
