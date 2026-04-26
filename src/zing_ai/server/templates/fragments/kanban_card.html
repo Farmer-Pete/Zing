@@ -29,8 +29,11 @@
   {% endif %}
 {% endfor %}
 {% set card_has_active_action = _active_action.found %}
+{# Signal-safe key: replace /, # and - so $busyButtons.launch_<key> is valid JS property. #}
+{% set card_launch_sig = card.key | replace('/', '_') | replace('#', '_') | replace('-', '_') %}
 
-<div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}">
+<div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}"
+     data-signals='{"busyButtons": {"launch_{{ card_launch_sig }}": false}}'>
 
   {# ── Header: ticket ID + title + assignee ── #}
   <div class="card-header">
@@ -93,13 +96,53 @@
       {% if not pr.merged_at %}
         {# Primary button — contextual label #}
         {% if column_cls == "col-review" and not is_author %}
-          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="PR Audit" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}">PR Audit</button>
+          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-on:click="@post('/command-center/launch-background',
+                                       {payload: {card_key: '{{ card.key | e }}',
+                                                  btn_id: 'btn-launch-{{ card.key | e }}',
+                                                  skill: 'pr-audit',
+                                                  pr_number: {{ pr.number }}}})">
+            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">PR Audit</span>
+            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+          </button>
         {% elif pr.review_decision == "CHANGES_REQUESTED" and is_author %}
-          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Respond" data-launch-bg-skill="pr-respond" data-launch-bg-pr="{{ pr.number }}">Respond</button>
+          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-on:click="@post('/command-center/launch-background',
+                                       {payload: {card_key: '{{ card.key | e }}',
+                                                  btn_id: 'btn-launch-{{ card.key | e }}',
+                                                  skill: 'pr-respond',
+                                                  pr_number: {{ pr.number }}}})">
+            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Respond</span>
+            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+          </button>
         {% elif is_author %}
-          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build Audit" data-launch-bg-skill="build-audit" data-launch-bg-pr="{{ pr.number }}">Build Audit</button>
+          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-on:click="@post('/command-center/launch-background',
+                                       {payload: {card_key: '{{ card.key | e }}',
+                                                  btn_id: 'btn-launch-{{ card.key | e }}',
+                                                  skill: 'build-audit',
+                                                  pr_number: {{ pr.number }}}})">
+            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Build Audit</span>
+            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+          </button>
         {% else %}
-          <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="PR Audit" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}">PR Audit</button>
+          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                  data-on:click="@post('/command-center/launch-background',
+                                       {payload: {card_key: '{{ card.key | e }}',
+                                                  btn_id: 'btn-launch-{{ card.key | e }}',
+                                                  skill: 'pr-audit',
+                                                  pr_number: {{ pr.number }}}})">
+            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">PR Audit</span>
+            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+          </button>
         {% endif %}
       {% endif %}
       {# Kebab menu — always present #}
@@ -127,7 +170,15 @@
             {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
               <div class="menu-section-label">Respond</div>
               <div class="menu-row">
-                <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-respond" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Respond" data-s="respond to feedback"><span class="menu-icon">&#9997;</span> Respond<br><span class="menu-desc">Address review comments, fix CI, push</span></button>
+                <button class="menu-row-main"
+                        data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                        data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                        data-on:click="@post('/command-center/launch-background',
+                                             {payload: {card_key: '{{ card.key | e }}',
+                                                        btn_id: 'btn-launch-{{ card.key | e }}',
+                                                        skill: 'pr-respond',
+                                                        pr_number: {{ pr.number }}}}); $openKebab = null"
+                        data-s="respond to feedback"><span class="menu-icon">&#9997;</span> Respond<br><span class="menu-desc">Address review comments, fix CI, push</span></button>
                 <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-respond ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
               </div>
               <div class="strip-menu-divider"></div>
@@ -136,33 +187,80 @@
             <div class="menu-section-label">Review</div>
             {% if not is_author or column_cls == "col-review" %}
               <div class="menu-row">
-                <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Audit" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
+                <button class="menu-row-main"
+                        data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                        data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                        data-on:click="@post('/command-center/launch-background',
+                                             {payload: {card_key: '{{ card.key | e }}',
+                                                        btn_id: 'btn-launch-{{ card.key | e }}',
+                                                        skill: 'pr-audit',
+                                                        pr_number: {{ pr.number }}}}); $openKebab = null"
+                        data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
                 <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
               </div>
               {% if column_cls == "col-review" %}
                 <div class="menu-row">
-                  <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit-visual" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Visual Audit" data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
+                  <button class="menu-row-main"
+                          data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                          data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                          data-on:click="@post('/command-center/launch-background',
+                                               {payload: {card_key: '{{ card.key | e }}',
+                                                          btn_id: 'btn-launch-{{ card.key | e }}',
+                                                          skill: 'pr-audit-visual',
+                                                          pr_number: {{ pr.number }}}}); $openKebab = null"
+                          data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
                   <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit-visual ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
                 </div>
               {% endif %}
             {% endif %}
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="build-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Build Audit" data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'build-audit',
+                                                      pr_number: {{ pr.number }}}}); $openKebab = null"
+                      data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="custom-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Custom Audit" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'custom-audit',
+                                                      pr_number: {{ pr.number }}}}); $openKebab = null"
+                      data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill custom-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             {# LOCAL section #}
             <div class="menu-section-label">Local</div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Start locally" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      pr_number: {{ pr.number }}}}); $openKebab = null"
+                      data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Setup env" data-launch-bg-skill="setup-only" data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'setup-only',
+                                                      pr_number: {{ pr.number }}}}); $openKebab = null"
+                      data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
@@ -298,7 +396,16 @@
                 id="btn-start-{{ card.ticket.identifier | e }}"
                 data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
                 data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}})">Start</button>
-        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
+        <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                data-on:click="@post('/command-center/launch-background',
+                                     {payload: {card_key: '{{ card.key | e }}',
+                                                btn_id: 'btn-launch-{{ card.key | e }}',
+                                                skill: 'plan'}})">
+          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Plan</span>
+          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+        </button>
         <span class="strip-spacer"></span>
         <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
@@ -316,7 +423,13 @@
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'plan'}}); $openKebab = null"><span class="menu-icon">&#128221;</span> Plan</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
@@ -329,8 +442,26 @@
           </div>
         </div>
       {% elif column_cls == "col-progress" %}
-        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build">Build</button>
-        <button class="strip-primary-btn" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan">Plan</button>
+        <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
+                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                data-on:click="@post('/command-center/launch-background',
+                                     {payload: {card_key: '{{ card.key | e }}',
+                                                btn_id: 'btn-launch-{{ card.key | e }}',
+                                                skill: 'build'}})">
+          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Build</span>
+          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+        </button>
+        <button class="strip-primary-btn"
+                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                data-on:click="@post('/command-center/launch-background',
+                                     {payload: {card_key: '{{ card.key | e }}',
+                                                btn_id: 'btn-launch-{{ card.key | e }}',
+                                                skill: 'plan'}})">
+          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Plan</span>
+          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
+        </button>
         <span class="strip-spacer"></span>
         <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
@@ -341,25 +472,55 @@
           <div class="menu-items">
             <div class="menu-section-label">Zing</div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build"><span class="menu-icon">&#128296;</span> Build</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'build'}}); $openKebab = null"><span class="menu-icon">&#128296;</span> Build</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'plan'}}); $openKebab = null"><span class="menu-icon">&#128221;</span> Plan</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan Audit" data-launch-bg-skill="plan-audit"><span class="menu-icon">&#128269;</span> Plan Audit</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'plan-audit'}}); $openKebab = null"><span class="menu-icon">&#128269;</span> Plan Audit</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-audit ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan &rarr; Linear" data-launch-bg-skill="plan-linear"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'plan-linear'}}); $openKebab = null"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-linear ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             <div class="menu-section-label">Other</div>
             <div class="menu-row">
-              <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Setup Env" data-launch-bg-skill="setup-only"><span class="menu-icon">&#128736;</span> Setup Env</button>
+              <button class="menu-row-main"
+                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
+                      data-on:click="@post('/command-center/launch-background',
+                                           {payload: {card_key: '{{ card.key | e }}',
+                                                      btn_id: 'btn-launch-{{ card.key | e }}',
+                                                      skill: 'setup-only'}}); $openKebab = null"><span class="menu-icon">&#128736;</span> Setup Env</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">

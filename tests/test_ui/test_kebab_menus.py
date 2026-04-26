@@ -470,7 +470,7 @@ def test_card_menu_open_class_removed_when_menu_closes(server: _ServerInfo, page
 def test_launch_bg_primary_button_sends_skill_and_pr_number(
     server: _ServerInfo, page: Page
 ) -> None:
-    """Clicking a strip-primary-btn sends skill and pr_number in the POST body."""
+    """Clicking a strip-primary-btn sends skill and pr_number in the POST body via Datastar."""
     cache = _setup_cache(server, _OTHER_USER)  # reviewer, so "PR Audit" button shows
     pr = _make_pr(number=601, author=_PR_AUTHOR)
     pr.requested_reviewers = [_OTHER_USER]  # ensure card is visible to reviewer
@@ -483,13 +483,21 @@ def test_launch_bg_primary_button_sends_skill_and_pr_number(
     card = page.locator(".card").first
     card.hover()
 
-    primary_btn = page.locator(".strip-primary-btn[data-launch-bg-skill]").first
+    # Primary button now uses Datastar data-on:click — find it by its class
+    primary_btn = page.locator(".strip-primary-btn").first
     expect(primary_btn).to_be_visible(timeout=5000)
 
-    expected_skill = primary_btn.get_attribute("data-launch-bg-skill")
-    expected_pr = primary_btn.get_attribute("data-launch-bg-pr")
-    assert expected_skill, "Primary button must have data-launch-bg-skill"
-    assert expected_pr, "Primary button must have data-launch-bg-pr"
+    # Extract expected skill and pr_number from the inline data-on:click payload.
+    # The expression looks like: @post('/command-center/launch-background',
+    #   {payload: {card_key: '...', btn_id: '...', skill: 'pr-audit', pr_number: 601}})
+    on_click = primary_btn.get_attribute("data-on:click")
+    assert on_click, "Primary button must carry a data-on:click attribute"
+    skill_match = re.search(r"skill:\s*'([^']+)'", on_click)
+    pr_match = re.search(r"pr_number:\s*(\d+)", on_click)
+    assert skill_match, f"data-on:click must contain skill: '...': {on_click!r}"
+    assert pr_match, f"data-on:click must contain pr_number: <int>: {on_click!r}"
+    expected_skill = skill_match.group(1)
+    expected_pr = int(pr_match.group(1))
 
     # Capture the POST request before clicking
     with page.expect_request("**/launch-background", timeout=5000) as req_info:
@@ -497,12 +505,13 @@ def test_launch_bg_primary_button_sends_skill_and_pr_number(
 
     request = req_info.value
     body = json.loads(request.post_data or "{}")
+    payload = body.get("payload", body)
 
-    assert body.get("skill") == expected_skill, (
-        f"Expected skill={expected_skill!r}, got body={body}"
+    assert payload.get("skill") == expected_skill, (
+        f"Expected skill={expected_skill!r}, got payload={payload}"
     )
-    assert body.get("pr_number") == int(expected_pr), (
-        f"Expected pr_number={int(expected_pr)}, got body={body}"
+    assert payload.get("pr_number") == expected_pr, (
+        f"Expected pr_number={expected_pr}, got payload={payload}"
     )
 
 
@@ -523,26 +532,34 @@ def test_launch_bg_menu_row_sends_skill_and_pr_number(server: _ServerInfo, page:
     kebab.click()
     expect(page.locator(".strip-menu.open")).to_be_visible(timeout=3000)
 
-    # Pick the first menu-row-main that has a skill attribute
-    row_btn = page.locator(".strip-menu.open .menu-row-main[data-launch-bg-skill]").first
-    expect(row_btn).to_be_visible(timeout=3000)
+    # Pick the first menu-row-main that has a data-on:click with a skill payload.
+    # All launch buttons in the kebab now use Datastar data-on:click with @post.
+    row_btns = page.locator(".strip-menu.open .menu-row-main[data-on\\:click*='skill']")
+    expect(row_btns.first).to_be_visible(timeout=3000)
+    row_btn = row_btns.first
 
-    expected_skill = row_btn.get_attribute("data-launch-bg-skill")
-    expected_pr = row_btn.get_attribute("data-launch-bg-pr")
-    assert expected_skill, "Menu row must have data-launch-bg-skill"
-    assert expected_pr, "Menu row must have data-launch-bg-pr"
+    # Extract expected skill and pr_number from the inline data-on:click payload.
+    on_click = row_btn.get_attribute("data-on:click")
+    assert on_click, "Menu row must carry a data-on:click attribute"
+    skill_match = re.search(r"skill:\s*'([^']+)'", on_click)
+    pr_match = re.search(r"pr_number:\s*(\d+)", on_click)
+    assert skill_match, f"data-on:click must contain skill: '...': {on_click!r}"
+    assert pr_match, f"data-on:click must contain pr_number: <int>: {on_click!r}"
+    expected_skill = skill_match.group(1)
+    expected_pr = int(pr_match.group(1))
 
     with page.expect_request("**/launch-background", timeout=5000) as req_info:
         row_btn.click()
 
     request = req_info.value
     body = json.loads(request.post_data or "{}")
+    payload = body.get("payload", body)
 
-    assert body.get("skill") == expected_skill, (
-        f"Expected skill={expected_skill!r}, got body={body}"
+    assert payload.get("skill") == expected_skill, (
+        f"Expected skill={expected_skill!r}, got payload={payload}"
     )
-    assert body.get("pr_number") == int(expected_pr), (
-        f"Expected pr_number={int(expected_pr)}, got body={body}"
+    assert payload.get("pr_number") == expected_pr, (
+        f"Expected pr_number={expected_pr}, got payload={payload}"
     )
 
 
@@ -561,14 +578,17 @@ def test_launch_bg_pr_number_matches_pr_on_card(server: _ServerInfo, page: Page)
     card = page.locator(".card").first
     card.hover()
 
-    primary_btn = page.locator(".strip-primary-btn[data-launch-bg-pr='9999']").first
+    # Primary button now uses Datastar data-on:click with pr_number in payload.
+    # Find it by checking that data-on:click contains pr_number: 9999.
+    primary_btn = page.locator(".strip-primary-btn[data-on\\:click*='pr_number: 9999']").first
     expect(primary_btn).to_be_visible(timeout=5000)
 
     with page.expect_request("**/launch-background", timeout=5000) as req_info:
         primary_btn.click()
 
     body = json.loads(req_info.value.post_data or "{}")
-    assert body.get("pr_number") == 9999, f"Expected pr_number=9999, got body={body}"
+    payload = body.get("payload", body)
+    assert payload.get("pr_number") == 9999, f"Expected pr_number=9999, got payload={payload}"
 
 
 # ---------------------------------------------------------------------------

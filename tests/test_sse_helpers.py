@@ -72,12 +72,12 @@ class TestSseBtnState(unittest.TestCase):
                 self.assertIn(f'class="{cls}"', result)
 
     def test_reset_html_produces_button_with_delay_attribute(self) -> None:
-        """reset_html embeds JSON-encoded markup into a data-on-load__delay.{ms}ms attribute."""
+        """reset_html embeds JSON-encoded markup into a data-init__delay.{ms}ms attribute."""
         original_markup = '<button id="btn-1" class="btn">Click me</button>'
         result = sse_btn_state(
             "btn-1", "Done", kind="ok", reset_html=original_markup, reset_after_ms=2000
         )
-        expected_attr_prefix = "data-on-load__delay.2000ms="
+        expected_attr_prefix = "data-init__delay.2000ms="
         self.assertIn(expected_attr_prefix, result)
         # The reset markup must be JSON-encoded inside the attribute
         json_encoded = json.dumps(original_markup)
@@ -88,8 +88,8 @@ class TestSseBtnState(unittest.TestCase):
         result = sse_btn_state(
             "btn-x", "label", kind="ok", reset_html="<button/>", reset_after_ms=5000
         )
-        self.assertIn("data-on-load__delay.5000ms=", result)
-        self.assertNotIn("data-on-load__delay.2000ms=", result)
+        self.assertIn("data-init__delay.5000ms=", result)
+        self.assertNotIn("data-init__delay.2000ms=", result)
 
     def test_returns_valid_sse_patch_elements_event_with_correct_selector_and_mode(
         self,
@@ -107,9 +107,9 @@ class TestSseBtnState(unittest.TestCase):
         self.assertIn(" disabled", result)
 
     def test_no_reset_attr_when_reset_html_is_none(self) -> None:
-        """When reset_html is not provided, no data-on-load__delay attribute is present."""
+        """When reset_html is not provided, no data-init__delay attribute is present."""
         result = sse_btn_state("btn-3", "Go", kind="ok")
-        self.assertNotIn("data-on-load__delay", result)
+        self.assertNotIn("data-init__delay", result)
 
 
 if __name__ == "__main__":

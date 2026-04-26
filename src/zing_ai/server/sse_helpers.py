@@ -48,14 +48,14 @@ def sse_btn_state(
 
     For post-completion ok/err copy. If reset_html is provided, the patched
     button auto-restores the original interactive markup via
-    data-on-load__delay.{reset_after_ms}ms="el.outerHTML = ..."
+    data-init__delay.{reset_after_ms}ms="el.outerHTML = ..."
     so the button doesn't get stuck non-interactive.
     """
     cls = {"idle": "btn", "ok": "btn btn-ok", "err": "btn btn-err"}[kind]
     dis = " disabled" if disabled else ""
     if reset_html is not None:
         reset_attr = (
-            f'data-on-load__delay.{reset_after_ms}ms="el.outerHTML = {json.dumps(reset_html)}"'
+            f'data-init__delay.{reset_after_ms}ms="el.outerHTML = {json.dumps(reset_html)}"'
         )
     else:
         reset_attr = ""

@@ -23,7 +23,7 @@ function mountModal(opts) {
     return { open: open, close: close };
 }
 
-// Repo chooser modal — close-only wiring; opening is handled by handleRepoChoice.
+// Repo chooser modal — close-only wiring; opening is handled by Datastar signal $modals.repoChooser.
 mountModal({
     modal: document.getElementById('repo-chooser-modal'),
     backdrop: document.getElementById('repo-chooser-backdrop'),

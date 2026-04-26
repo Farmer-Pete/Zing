@@ -43,6 +43,7 @@ from zing_ai.server.command_center import (
 )
 from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.sse_helpers import sse_btn_state as _sse_btn_state
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
 
@@ -379,173 +380,226 @@ async def attach_session(request: Request) -> JSONResponse:
 
 
 @router.post("/command-center/launch-background")
-async def launch_background(request: Request) -> JSONResponse:
+@datastar_response
+async def launch_background(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Launch a background Claude Code session for a Kanban card."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        raw = await request.body()
-        logger.error("launch-background: invalid JSON body: %s", raw[:500])
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    # Datastar sends payload under a "payload" key in the signal store.
-    payload = body.get("payload", body)
     card_key = payload.get("card_key")
     repo_override = payload.get("repo")  # set when user picks from the chooser
     skill_override = payload.get("skill")  # e.g. "pr-respond" for respond buttons
-    if not card_key:
-        logger.error("launch-background: missing card_key in body: %s", body)
-        return JSONResponse({"error": "card_key is required"}, status_code=400)
+    btn_id = payload.get("btn_id", f"btn-launch-{card_key}")
 
-    logger.debug("launch-background: card_key=%s, body keys=%s", card_key, list(body.keys()))
+    # Snapshot original button HTML for sse_btn_state reset_html.
+    original_button_html = render(
+        "fragments/launch_button.html",
+        ticket_id=card_key,
+        btn_label="Launch",
+        btn_skill=skill_override,
+        btn_pr=payload.get("pr_number"),
+    )
 
-    # In-flight dedup lock — initialise lazily if not set by create_app.
-    launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
-    if not hasattr(request.app.state, "launching_set"):
-        request.app.state.launching_set = launching_set
+    async def _stream():  # noqa: ANN202
+        if not card_key:
+            yield _sse_toast("card_key is required", "err")
+            return
 
-    if card_key in launching_set:
-        logger.warning("launch-background: duplicate launch for card %s", card_key)
-        return JSONResponse({"error": "Launch already in progress for this card"}, status_code=409)
+        logger.debug("launch-background: card_key=%s", card_key)
 
-    launching_set.add(card_key)
+        # In-flight dedup lock — initialise lazily if not set by create_app.
+        launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
+        if not hasattr(request.app.state, "launching_set"):
+            request.app.state.launching_set = launching_set
 
-    # Lazy-init repo path cache.
-    repo_path_cache: dict[str, Path] = getattr(request.app.state, "repo_path_cache", None) or {}
-    if not hasattr(request.app.state, "repo_path_cache"):
-        request.app.state.repo_path_cache = repo_path_cache
+        if card_key in launching_set:
+            logger.warning("launch-background: duplicate launch for card %s", card_key)
+            yield _sse_toast("Launch already in progress for this card", "err")
+            return
 
-    config = load_config()
-    code_dir = config.git.code_dir
-    if not code_dir:
-        launching_set.discard(card_key)
-        logger.error("launch-background: code_dir is not configured")
-        return JSONResponse({"error": "code_dir is not configured"}, status_code=422)
+        launching_set.add(card_key)
 
-    # Locate the card in the current kanban view (search all columns).
-    kanban_view: KanbanView = _build_view(request.app)
-    card = None
-    for column in (
-        kanban_view.todo,
-        kanban_view.in_progress,
-        kanban_view.needs_review,
-        kanban_view.done,
-    ):
-        for c in column:
-            if c.key == card_key:
-                card = c
-                break
-        if card is not None:
-            break
+        # Lazy-init repo path cache.
+        repo_path_cache: dict[str, Path] = getattr(request.app.state, "repo_path_cache", None) or {}
+        if not hasattr(request.app.state, "repo_path_cache"):
+            request.app.state.repo_path_cache = repo_path_cache
 
-    # Derive repo name and branch/PR info from the card.
-    repo_name: str | None = None
-    branch_name: str | None = None
-    ticket_id: str | None = None
-    pr_number: int | None = None
-    pr_repo: str | None = None
-    is_pr_card = False
-
-    if card is not None:
-        if card.prs:
-            pr_number_override = payload.get("pr_number")
-            if pr_number_override is not None:
-                try:
-                    pr = next(
-                        (p for p in card.prs if p.number == int(pr_number_override)),
-                        card.prs[0],
-                    )
-                except ValueError:
-                    launching_set.discard(card_key)
-                    return JSONResponse(
-                        {"error": f"Invalid pr_number: {pr_number_override}"}, status_code=400
-                    )
-            else:
-                pr = card.prs[0]
-            if not repo_override:
-                repo_name = pr.repo  # "owner/repo"
-            branch_name = pr.head_ref
-            pr_number = pr.number
-            pr_repo = pr.repo
-            is_pr_card = True
-        if card.ticket is not None:
-            ticket_id = card.ticket.identifier
-
-    if repo_override:
-        repo_name = repo_override
-
-    # For ticket-only cards (no PRs), infer repo from same-team cards.
-    if repo_name is None:
-        kanban_view: KanbanView = _build_view(request.app)
-        team = card.ticket.team if (card is not None and card.ticket) else None
-        candidates = infer_repo_for_ticket(kanban_view, team)
-        if len(candidates) == 1:
-            repo_name = candidates[0]
-        elif candidates:
+        config = load_config()
+        code_dir = config.git.code_dir
+        if not code_dir:
             launching_set.discard(card_key)
-            return JSONResponse(
-                {"status": "choose_repo", "repos": candidates, "card_key": card_key}
+            logger.error("launch-background: code_dir is not configured")
+            yield _sse_toast("code_dir is not configured", "err")
+            yield _sse_btn_state(
+                btn_id,
+                "Failed",
+                kind="err",
+                reset_html=original_button_html,
+                reset_after_ms=2000,
             )
-        else:
+            return
+
+        # Locate the card in the current kanban view (search all columns).
+        kanban_view: KanbanView = _build_view(request.app)
+        card = None
+        for column in (
+            kanban_view.todo,
+            kanban_view.in_progress,
+            kanban_view.needs_review,
+            kanban_view.done,
+        ):
+            for c in column:
+                if c.key == card_key:
+                    card = c
+                    break
+            if card is not None:
+                break
+
+        # Derive repo name and branch/PR info from the card.
+        repo_name: str | None = None
+        branch_name: str | None = None
+        ticket_id: str | None = None
+        pr_number: int | None = None
+        pr_repo: str | None = None
+        is_pr_card = False
+
+        if card is not None:
+            if card.prs:
+                pr_number_override = payload.get("pr_number")
+                if pr_number_override is not None:
+                    try:
+                        pr = next(
+                            (p for p in card.prs if p.number == int(pr_number_override)),
+                            card.prs[0],
+                        )
+                    except ValueError:
+                        launching_set.discard(card_key)
+                        yield _sse_toast(f"Invalid pr_number: {pr_number_override}", "err")
+                        yield _sse_btn_state(
+                            btn_id,
+                            "Failed",
+                            kind="err",
+                            reset_html=original_button_html,
+                            reset_after_ms=2000,
+                        )
+                        return
+                else:
+                    pr = card.prs[0]
+                if not repo_override:
+                    repo_name = pr.repo  # "owner/repo"
+                branch_name = pr.head_ref
+                pr_number = pr.number
+                pr_repo = pr.repo
+                is_pr_card = True
+            if card.ticket is not None:
+                ticket_id = card.ticket.identifier
+
+        if repo_override:
+            repo_name = repo_override
+
+        # For ticket-only cards (no PRs), infer repo from same-team cards.
+        if repo_name is None:
+            team = card.ticket.team if (card is not None and card.ticket) else None
+            candidates = infer_repo_for_ticket(kanban_view, team)
+            if len(candidates) == 1:
+                repo_name = candidates[0]
+            elif candidates:
+                launching_set.discard(card_key)
+                candidates_dicts = [{"path": r, "label": r.split("/")[-1]} for r in candidates]
+                yield SSE.patch_elements(
+                    render(
+                        "fragments/repo_chooser_modal.html",
+                        card_key=card_key,
+                        repos=candidates_dicts,
+                    ),
+                    selector="#repo-chooser-modal-container",
+                    mode=ElementPatchMode.INNER,
+                )
+                yield SSE.patch_signals({"modals": {"repoChooser": True}})
+                return
+            else:
+                launching_set.discard(card_key)
+                logger.error(
+                    "launch-background: cannot determine repo for card %s "
+                    "(no PRs, no same-team cards)",
+                    card_key,
+                )
+                error_msg = (
+                    f"Cannot determine repository for card {card_key}. "
+                    "Ticket has no linked PR and no same-team cards have PRs."
+                )
+                yield _sse_toast(error_msg, "err")
+                yield _sse_btn_state(
+                    btn_id,
+                    "Failed",
+                    kind="err",
+                    reset_html=original_button_html,
+                    reset_after_ms=2000,
+                )
+                return
+
+        # Resolve local repo path.
+        assert repo_name is not None  # guarded above
+        repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
+        if repo_root is None:
+            launching_set.discard(card_key)
+            logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
+            yield _sse_toast(f"Repository {repo_name} not found under {code_dir}", "err")
+            yield _sse_btn_state(
+                btn_id,
+                "Failed",
+                kind="err",
+                reset_html=original_button_html,
+                reset_after_ms=2000,
+            )
+            return
+
+        # Derive branch name for ticket-only cards.
+        if branch_name is None and ticket_id is not None and config.command_center.linear_api_key:
+            try:
+                branch_name = derive_branch_name(ticket_id, config.command_center.linear_api_key)
+            except LaunchError as exc:
+                launching_set.discard(card_key)
+                logger.error(
+                    "launch-background: derive_branch_name failed for %s: %s", ticket_id, exc
+                )
+                yield _sse_toast(str(exc), "err")
+                yield _sse_btn_state(
+                    btn_id,
+                    "Failed",
+                    kind="err",
+                    reset_html=original_button_html,
+                    reset_after_ms=2000,
+                )
+                return
+
+        if branch_name is None:
             launching_set.discard(card_key)
             logger.error(
-                "launch-background: cannot determine repo for card %s (no PRs, no same-team cards)",
+                "launch-background: cannot determine branch for card %s "
+                "(ticket_id=%s, has_linear_key=%s)",
                 card_key,
+                ticket_id,
+                bool(config.command_center.linear_api_key),
             )
-            return JSONResponse(
-                {
-                    "error": f"Cannot determine repository for card {card_key}. "
-                    "Ticket has no linked PR and no same-team cards have PRs."
-                },
-                status_code=422,
+            yield _sse_toast(f"Cannot determine branch for card {card_key}", "err")
+            yield _sse_btn_state(
+                btn_id,
+                "Failed",
+                kind="err",
+                reset_html=original_button_html,
+                reset_after_ms=2000,
             )
+            return
 
-    # Resolve local repo path.
-    assert repo_name is not None  # guarded above
-    repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
-    if repo_root is None:
-        launching_set.discard(card_key)
-        logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
-        return JSONResponse(
-            {"error": f"Repository {repo_name} not found under {code_dir}"},
-            status_code=404,
+        title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
+        skill = skill_override or ("pr-audit" if is_pr_card else "new")
+        target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
+        session_name = build_session_name(
+            target=ticket_id or branch_name,
+            pr_number=pr_number,
         )
+        server_url = str(request.base_url).rstrip("/")
 
-    # Derive branch name for ticket-only cards.
-    if branch_name is None and ticket_id is not None and config.command_center.linear_api_key:
-        try:
-            branch_name = derive_branch_name(ticket_id, config.command_center.linear_api_key)
-        except LaunchError as exc:
-            launching_set.discard(card_key)
-            logger.error("launch-background: derive_branch_name failed for %s: %s", ticket_id, exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
 
-    if branch_name is None:
-        launching_set.discard(card_key)
-        logger.error(
-            "launch-background: cannot determine branch for card %s "
-            "(ticket_id=%s, has_linear_key=%s)",
-            card_key,
-            ticket_id,
-            bool(config.command_center.linear_api_key),
-        )
-        return JSONResponse(
-            {"error": f"Cannot determine branch for card {card_key}"},
-            status_code=422,
-        )
-
-    title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
-    skill = skill_override or ("pr-audit" if is_pr_card else "new")
-    target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
-    session_name = build_session_name(
-        target=ticket_id or branch_name,
-        pr_number=pr_number,
-    )
-    server_url = str(request.base_url).rstrip("/")
-
-    logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
-
-    async def _run_launch() -> JSONResponse:
         worktree_path: Path | None = None
         try:
 
@@ -595,16 +649,20 @@ async def launch_background(request: Request) -> JSONResponse:
 
                 return session_id, wt
 
-            session_id, wt = await asyncio.to_thread(_blocking)
+            session_id, _wt = await asyncio.to_thread(_blocking)
 
             logger.info("Background session launched: %s (session: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
-            for q in request.app.state.cc_queues:
-                q.put_nowait("board_changed")
+            _push_board_changed(request.app)
 
-            return JSONResponse(
-                {"status": "launched", "session_id": session_id, "terminal_session": session_name}
+            yield _sse_toast("Launched", "ok")
+            yield _sse_btn_state(
+                btn_id,
+                "✓ Launched!",
+                kind="ok",
+                reset_html=original_button_html,
+                reset_after_ms=2000,
             )
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
@@ -614,11 +672,18 @@ async def launch_background(request: Request) -> JSONResponse:
                     rollback_worktree(worktree_path)
                 except Exception as rollback_exc:  # noqa: BLE001
                     logger.warning("Rollback failed: %s", rollback_exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            yield _sse_toast(str(exc), "err")
+            yield _sse_btn_state(
+                btn_id,
+                "Failed",
+                kind="err",
+                reset_html=original_button_html,
+                reset_after_ms=2000,
+            )
         finally:
             launching_set.discard(card_key)
 
-    return await _run_launch()
+    return _stream()
 
 
 # ---------------------------------------------------------------------------

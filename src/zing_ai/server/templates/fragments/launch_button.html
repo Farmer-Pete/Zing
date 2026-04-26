@@ -1,0 +1,19 @@
+{# launch_button.html — canonical launch button fragment.
+   Context variables:
+     ticket_id  – card key / ticket identifier, e.g. "TKT-1"
+     btn_label  – button visible label, e.g. "PR Audit"
+     btn_skill  – skill name, e.g. "pr-audit" (optional, passed via payload)
+     btn_pr     – PR number (optional, passed via payload)
+#}
+<button id="btn-launch-{{ ticket_id }}"
+        class="strip-primary-btn"
+        data-indicator="$busyButtons.launch_{{ ticket_id }}"
+        data-attr:disabled="$busyButtons.launch_{{ ticket_id }}"
+        data-on:click="@post('/command-center/launch-background',
+                             {payload: {card_key: '{{ ticket_id }}',
+                                        btn_id: 'btn-launch-{{ ticket_id }}'{% if btn_skill %},
+                                        skill: '{{ btn_skill }}'{% endif %}{% if btn_pr %},
+                                        pr_number: {{ btn_pr }}{% endif %}}})">
+  <span data-show="!$busyButtons.launch_{{ ticket_id }}">{{ btn_label }}</span>
+  <span data-show="$busyButtons.launch_{{ ticket_id }}">&#9203; Launching&#8230;</span>
+</button>
