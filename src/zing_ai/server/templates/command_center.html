@@ -87,6 +87,15 @@
     </div>
     <div id="standup-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
+    {# ── Terminal launcher ── Signal-patch watcher: fires when $terminalUrl is
+       patched (e.g. by the attach-session SSE response). Calls dispatchOpenTerminal
+       which dispatches 'open-terminal' — the only entry point from Datastar signals.
+       No user-visible content; display:none keeps it out of layout. #}
+    <div id="terminal-launcher"
+         style="display:none"
+         data-on-signal-patch-filter="{include: /^terminalUrl$/}"
+         data-on-signal-patch="dispatchOpenTerminal($terminalUrl)"></div>
+
     {# Loaded in dependency order with `defer` (preserves order, runs after parse).
        cc-modals exposes window.openTerminal/openStandup used by cc-actions and
        cc-drawer; cc-kebab exposes closeAllMenus used by cc-actions; cc-actions

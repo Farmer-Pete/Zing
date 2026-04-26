@@ -1,3 +1,15 @@
+// Named dispatch functions (Decision #17): Datastar signal watchers call these
+// instead of inlining new CustomEvent(...) expressions in templates.
+
+window.dispatchOpenTerminal = function(url) {
+    if (!url) return;
+    document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));
+};
+
+window.dispatchCopyStandup = function(html, markdown) {
+    document.dispatchEvent(new CustomEvent('copy-standup', {detail: {html: html, markdown: markdown}, bubbles: true}));
+};
+
 // Wire a modal: backdrop click, close button click, and ESC all dismiss it.
 // Returns { open, close } so callers can drive show/hide programmatically.
 // onClose runs after the modal is hidden — used by the terminal modal to tear
@@ -122,3 +134,12 @@ mountModal({
         ctl.open();
     };
 })();
+
+// Datastar signal-watcher entry point: the #terminal-launcher div fires
+// dispatchOpenTerminal($terminalUrl) via data-on-signal-patch, which dispatches
+// this event.  cc-drawer.js may also call window.openTerminal directly for the
+// legacy JSON fetch path (kept until cc-drawer.js is deleted in Step 24).
+document.addEventListener('open-terminal', function(e) {
+    var url = e.detail && e.detail.url;
+    if (url) window.openTerminal(url);
+});
