@@ -183,3 +183,25 @@ Living reference for all UI design standards. The Zing brand is **bold**, **fast
 - Header: full-width bleed (negative margins + padding to compensate)
 - Body background: `--off-white` with subtle warm radial gradient at top
 - Main content wrapped in `<main class="main-content">` with `padding: 2rem 0`
+
+
+## Datastar conventions
+
+The server uses Datastar v1.0.0 for declarative reactivity. Most UI state lives in `data-signals` / `data-show` / `data-class` attributes; per-action endpoints respond with SSE patches. See the **Datastar usage** section in the root `CLAUDE.md` for the full architecture rule, decision tree, and helper APIs. Below are the design-system-specific bits.
+
+### Signal naming
+
+`camelCase`. Modal-open booleans group into a `modals: {}` sub-object on the page envelope (e.g. `$modals.drawer`, `$modals.standup`, `$modals.terminal`). Drawer-internal state lives on the drawer fragment itself.
+
+### Button-state pattern
+
+For server-side actions (kill, cleanup, launch, etc.):
+
+- Wire the button with `data-on:click="@post(...)"` carrying a payload that includes a stable `btn_id`.
+- Use `data-indicator="$busyButtons.X"` to flip a per-button busy signal automatically while the request is in flight.
+- Pre-initialize the busy signal to `false` in the parent `data-signals` envelope (Datastar v1 defaults uninitialized indicator signals to `true`).
+- For post-completion ok/err copy ("✓ Launched!", "Failed"), the server yields `_sse_btn_state(btn_id, "✓ Launched!", kind="ok", reset_html=<original>)` from `src/zing_ai/server/sse_helpers.py`. The patched button auto-restores the original markup after `reset_after_ms`.
+
+### Toast pattern
+
+For transient notifications, the server yields `_sse_toast("Refreshed", "ok")` from `sse_helpers.py`. Toasts append to `#cc-toast-container` and self-remove after 5s via `data-init__delay.5000ms="el.remove()"`. Toast kinds: `ok`, `err`, `info` — each maps to a `cc-toast-{kind}` class.
