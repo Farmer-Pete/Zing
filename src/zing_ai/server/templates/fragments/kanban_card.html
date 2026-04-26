@@ -214,7 +214,7 @@
               <button class="menu-row-copy" data-copy-cmd="tmux attach -t {{ session.terminal_session | e }}">&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-kill-session="{{ session.session_id | e }}"><span class="menu-icon">&#128683;</span> Kill session</button>
+              <button class="menu-row-main" id="btn-kill-{{ session.session_id | e }}" data-indicator="$busyButtons.kill_{{ session.session_id | e }}" data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-kill-{{ session.session_id | e }}'}}); $openKebab = null"><span class="menu-icon">&#128683;</span> Kill session</button>
               <span style="width:32px;"></span>
             </div>
           </div>

@@ -225,26 +225,6 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
-// Kill running session
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-kill-session]');
-    if (!btn) return;
-    var sessionId = btn.getAttribute('data-kill-session');
-    fetch('/command-center/kill-session', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sessionId})
-    }).then(function(resp) {
-        return resp.json().then(function(data) {
-            if (!resp.ok) showToast(data.error || 'Kill failed', 'error');
-            else showToast('Session killed', 'success');
-        });
-    }).catch(function(err) {
-        showToast('Kill failed: ' + err.message, 'error');
-    });
-    closeAllMenus();
-});
-
 // Cleanup/discard stopped session
 document.addEventListener('click', function(e) {
     var btn = e.target.closest('[data-cleanup-session]');

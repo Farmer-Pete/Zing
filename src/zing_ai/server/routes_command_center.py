@@ -11,6 +11,7 @@ import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.consts import ElementPatchMode
@@ -671,34 +672,33 @@ async def start_ticket(request: Request) -> JSONResponse:
 
 
 @router.post("/command-center/kill-session")
-async def kill_session(request: Request) -> JSONResponse:
+@datastar_response
+async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Kill a running zellij session and remove the session record."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     session_id = payload.get("session_id")
-    if not session_id:
-        return JSONResponse({"error": "session_id is required"}, status_code=400)
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
 
-    if (
-        session is None
-        or not isinstance(session, ClaudeCodeSession)
-        or not session.terminal_session
-    ):
-        return JSONResponse({"error": "session not found"}, status_code=404)
+    async def _stream():  # noqa: ANN202
+        if not session_id:
+            yield _sse_toast("session_id is required", "err")
+            return
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if (
+            session is None
+            or not isinstance(session, ClaudeCodeSession)
+            or not session.terminal_session
+        ):
+            yield _sse_toast("Session not found", "err")
+            return
+        subprocess.run(
+            ["zellij", "kill-session", session.terminal_session],
+            capture_output=True,
+        )
+        manager.cleanup_session(session_id)
+        _push_board_changed(request.app)
+        yield _sse_toast("Session killed", "ok")
 
-    subprocess.run(
-        ["zellij", "kill-session", session.terminal_session],
-        capture_output=True,
-    )
-
-    manager.cleanup_session(session_id)
-    _push_board_changed(request.app)
-    return JSONResponse({"status": "killed"})
+    return _stream()
 
 
 @router.post("/command-center/cleanup-worktree")
