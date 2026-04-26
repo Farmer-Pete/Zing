@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true} | tojson }}'
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
      data-init="@get('/command-center/events')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
