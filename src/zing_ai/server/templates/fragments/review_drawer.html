@@ -145,7 +145,8 @@
           {% if notification_body %}
             <p>{{ notification_body }}</p>
           {% endif %}
-          <button class="attach-hero-btn" data-attach-drawer-session="{{ session.terminal_session }}">Attach to Session</button>
+          <button class="attach-hero-btn"
+                  data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session }}'}}); $modals.drawer = false">Attach to Session</button>
         </div>
 
         {% if notification_body %}
@@ -249,7 +250,8 @@
         Waiting for response
       {% endif %}
     </div>
-    <button class="d-fskip" data-drawer-skip>Skip &rarr;</button>
+    <button class="d-fskip"
+            data-on:click="$nextSessionId ? @get('/command-center/drawer/' + $nextSessionId) : ($modals.drawer = false)">Skip &rarr;</button>
     {% if mode == "findings" and current_step %}
       <button class="d-fsub"
         id="drawer-submit-btn"

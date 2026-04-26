@@ -100,13 +100,12 @@
          data-on-signal-patch="dispatchOpenTerminal($terminalUrl)"></div>
 
     {# Loaded in dependency order with `defer` (preserves order, runs after parse).
-       cc-modals exposes window.openTerminal/openStandup used by cc-actions and
-       cc-drawer; cc-kebab exposes closeAllMenus used by cc-actions; cc-actions
-       defines showToast used by cc-drawer. #}
+       cc-modals exposes window.openTerminal/openStandup used by cc-actions;
+       cc-kebab exposes closeAllMenus used by cc-actions; cc-actions defines
+       showToast. #}
     <script src="/static/js/cc-modals.js?v={{ asset_version() }}" defer></script>
     <script src="/static/js/cc-kebab.js?v={{ asset_version() }}" defer></script>
     <script src="/static/js/cc-actions.js?v={{ asset_version() }}" defer></script>
-    <script src="/static/js/cc-drawer.js?v={{ asset_version() }}" defer></script>
 
 </div>
 {% endblock %}
