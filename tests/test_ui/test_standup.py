@@ -142,33 +142,48 @@ def test_standup_modal_tab_switch_toggles_content(server: _ServerInfo, page: Pag
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "ClipboardItem / clipboard.write() requires a secure context or browser "
-        "permission grant that may not be available in CI headless environments."
-    ),
-    strict=False,
-)
 def test_standup_copy_button_writes_to_clipboard(
     server: _ServerInfo, context: BrowserContext, page: Page
 ) -> None:
     """Clicking Copy calls navigator.clipboard.write() with the standup text.
 
-    Uses context.grant_permissions to allow clipboard-read/write so the async
-    clipboard API resolves inside the Playwright test.
-
-    The copy handler in cc-modals.js dispatches 'copy-standup' which calls
-    navigator.clipboard.write([ClipboardItem({text/html, text/plain})]).
-    Playwright can only read back text/plain reliably via readText().
+    Stubs ``ClipboardItem`` and ``navigator.clipboard.write`` so the test runs
+    deterministically in CI without requiring a secure context or
+    clipboard-write permission grant. The stub captures the items written and
+    we assert the expected text/plain payload was supplied.
     """
-    context.grant_permissions(["clipboard-read", "clipboard-write"])
+    del context  # not used after stub refactor
 
     _seed_cache(server)
 
-    # Navigate inside the granted context.
     page.goto(f"{server.base_url}/command-center")
     page.wait_for_load_state("domcontentloaded", timeout=5000)
     page.wait_for_timeout(400)
+
+    # Stub ClipboardItem and navigator.clipboard.write to capture the markdown
+    # payload. Stubs run before any user click so the standup copy handler
+    # picks up the patched globals. The stub turns each ClipboardItem into a
+    # serialisable dict the Playwright bridge can read back.
+    captured: list[dict[str, str]] = []
+    page.expose_function("__recordClipboardWrite", lambda payload: captured.append(payload))
+    page.evaluate(
+        """
+        (() => {
+            window.ClipboardItem = function(parts) { this._parts = parts; };
+            navigator.clipboard = navigator.clipboard || {};
+            navigator.clipboard.write = function(items) {
+                const item = items[0];
+                const blobToText = (b) => b.text();
+                return Promise.all([
+                    blobToText(item._parts['text/html']),
+                    blobToText(item._parts['text/plain']),
+                ]).then(([html, plain]) => {
+                    return window.__recordClipboardWrite({html: html, plain: plain});
+                });
+            };
+        })();
+        """
+    )
 
     btn = page.locator("#cc-standup-btn")
     expect(btn).to_be_visible(timeout=5000)
@@ -177,8 +192,7 @@ def test_standup_copy_button_writes_to_clipboard(
     modal = page.locator("#standup-modal")
     expect(modal).to_have_class(re.compile(r"\bopen\b"), timeout=8000)
 
-    # Wait for SSE content to arrive — standupMarkdown signal is non-empty once
-    # the SSE endpoint has fired its patch_signals event.
+    # Wait for SSE content to arrive.
     page.wait_for_function(
         "() => document.getElementById('standup-modal-body')?.innerHTML?.trim()?.length > 0",
         timeout=8000,
@@ -191,10 +205,7 @@ def test_standup_copy_button_writes_to_clipboard(
     # Allow the async clipboard.write() Promise to resolve.
     page.wait_for_timeout(800)
 
-    # Read back the plain-text portion of the clipboard.
-    clipboard_text: str = page.evaluate("navigator.clipboard.readText()")
-
-    assert isinstance(clipboard_text, str), (
-        f"Expected clipboard to contain a string, got: {clipboard_text!r}"
-    )
-    assert len(clipboard_text.strip()) > 0, "Expected clipboard to contain non-empty standup text"
+    assert captured, f"Expected clipboard.write to be called, got: {captured}"
+    payload = captured[0]
+    assert isinstance(payload.get("plain"), str)
+    assert payload["plain"].strip(), f"Expected non-empty text/plain payload, got: {payload!r}"

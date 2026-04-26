@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from zing_ai.server.models import Session, WorkflowStep
+
+# Replace any character outside [A-Za-z0-9_] with `_` so the resulting string is
+# safe to use as a JavaScript identifier suffix (e.g. as a key inside the
+# Datastar ``$busyButtons`` signal proxy). Keys like ``BAK-1234`` would otherwise
+# parse as subtraction in Datastar expression context.
+_SIGNAL_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _to_signal_key(value: str) -> str:
+    """Sanitise *value* for inclusion in a Datastar signal-property name."""
+    return _SIGNAL_KEY_RE.sub("_", value)
 
 
 class LinearIssue(BaseModel):
@@ -77,6 +89,16 @@ class KanbanCard(BaseModel):
     audit_steps: list[WorkflowStep] = Field(default_factory=list)
     review_group: str | None = None  # mine_passing, mine_failing, others (needs_review only)
     done_group: str | None = None  # ready_to_merge, completed (done only)
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`key` sanitised for use as a Datastar signal-property name.
+
+        Datastar parses ``$busyButtons.launch_BAK-1234`` as subtraction. The
+        signal_key replaces non-alphanumerics with ``_`` so templates can
+        compose ``$busyButtons.launch_<signal_key>`` without quirks.
+        """
+        return _to_signal_key(self.key)
 
 
 class KanbanView(BaseModel):

@@ -12,27 +12,29 @@
     waiting_label    — human-readable wait time (e.g. "5m")
 #}
 
+{% from "fragments/_drawer_helpers.html" import queue_item %}
+
 {# ── Backdrop ── #}
 <div class="drawer-backdrop" data-on:click="$modals.drawer = false"></div>
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer"
-     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}"}'>
+     data-signals='{{ drawer_signals | tojson }}'>
 
   {# ── Header ── #}
   <div class="dh">
     <div class="dh-top">
-      <button class="dh-close" data-on:click="$modals.drawer = false">&times;</button>
+      <button class="dh-close" aria-label="Close drawer" data-on:click="$modals.drawer = false">&times;</button>
       {% if session.ticket_id %}
         <span class="dh-ticket">{{ session.ticket_id }}</span>
       {% endif %}
       <div class="dh-nav">
         <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
         <button class="dh-nav-btn" title="Previous"
-          data-on:click="@get('/command-center/drawer/' + $prevSessionId)"
+          data-on:click="@post('/command-center/drawer/' + $prevSessionId)"
           data-show="$prevSessionId">&larr;</button>
         <button class="dh-nav-btn" title="Next"
-          data-on:click="@get('/command-center/drawer/' + $nextSessionId)"
+          data-on:click="@post('/command-center/drawer/' + $nextSessionId)"
           data-show="$nextSessionId">&rarr;</button>
       </div>
     </div>
@@ -58,7 +60,7 @@
         <p>{{ notification.body }}</p>
       {% endif %}
       <button class="attach-hero-btn"
-        data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session }}'}}); $modals.drawer = false">
+        data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $modals.drawer = false">
         Attach to Session
       </button>
     </div>
@@ -77,7 +79,7 @@
   <div class="d-footer">
     <div class="d-fprog">Waiting for your response</div>
     <button class="d-fskip"
-            data-on:click="$nextSessionId ? @get('/command-center/drawer/' + $nextSessionId) : ($modals.drawer = false)">Skip &rarr;</button>
+            data-on:click="$nextSessionId ? @post('/command-center/drawer/' + $nextSessionId) : ($modals.drawer = false)">Skip &rarr;</button>
   </div>
 
   {# ── Up next queue ── #}
@@ -85,31 +87,7 @@
     <div class="d-queue">
       <div class="d-qt">Up next <span class="d-qc">{{ queue_items | length }}</span></div>
       {% for item in queue_items[:3] %}
-        {% if item.action_type == "findings" %}
-          {% set qi_cls = "qi-findings" %}
-          {% set qi_ico = "✎" %}
-          {% set qa_cls = "qa-review" %}
-          {% set qa_lbl = "review" %}
-        {% elif item.action_type == "attach" %}
-          {% set qi_cls = "qi-attach" %}
-          {% set qi_ico = "▶" %}
-          {% set qa_cls = "qa-attach" %}
-          {% set qa_lbl = "attach" %}
-        {% else %}
-          {% set qi_cls = "qi-question" %}
-          {% set qi_ico = "?" %}
-          {% set qa_cls = "qa-answer" %}
-          {% set qa_lbl = "answer" %}
-        {% endif %}
-        <div class="d-qi"
-             data-on:click="@get('/command-center/drawer/{{ item.session_id }}')"
-             data-session-id="{{ item.session_id }}"
-             style="cursor:pointer">
-          <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
-          {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}
-          <span class="d-qtl">{{ item.title }}</span>
-          <span class="d-qa {{ qa_cls }}">{{ qa_lbl }}</span>
-        </div>
+        {{ queue_item(item) }}
       {% endfor %}
     </div>
   {% else %}

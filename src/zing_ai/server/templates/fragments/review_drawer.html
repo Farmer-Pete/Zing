@@ -12,33 +12,35 @@
     queue_items   — remaining attention items after this one
     next_session_id — session_id of next item (or None)
     prev_session_id — session_id of previous item (or None)
+    drawer_signals — pre-built dict serialised as data-signals via | tojson
 
   The outer drawer-backdrop and .drawer are rendered inline.
   The step history is included via a separate fragment call.
 #}
 {% from "fragments/_phase_strip.html" import phase_strip %}
+{% from "fragments/_drawer_helpers.html" import step_icon, queue_item %}
 
 {# ── Backdrop ── #}
 <div class="drawer-backdrop" data-on:click="$modals.drawer = false"></div>
 
 {# ── Drawer panel ── #}
 <div class="drawer" id="review-drawer"
-     data-signals='{"prevSessionId": "{{ prev_session_id or "" }}", "nextSessionId": "{{ next_session_id or "" }}", "sessionId": "{{ session.session_id }}", "stepId": "{{ current_step.step_id if current_step else "" }}", "triage": {{ saved_triage_responses | tojson }}, "openSteps": {{ saved_open_steps | tojson }}}'>
+     data-signals='{{ drawer_signals | tojson }}'>
 
   {# ── Header ── #}
   <div class="dh">
     <div class="dh-top">
-      <button class="dh-close" data-on:click="$modals.drawer = false">&times;</button>
+      <button class="dh-close" aria-label="Close drawer" data-on:click="$modals.drawer = false">&times;</button>
       {% if session.ticket_id %}
         <span class="dh-ticket">{{ session.ticket_id }}</span>
       {% endif %}
       <div class="dh-nav">
         <span class="dh-nav-lbl">{{ queue_position }} of {{ queue_total }}</span>
         <button class="dh-nav-btn" title="Previous"
-          data-on:click="@get('/command-center/drawer/' + $prevSessionId)"
+          data-on:click="@post('/command-center/drawer/' + $prevSessionId)"
           data-show="$prevSessionId">&larr;</button>
         <button class="dh-nav-btn" title="Next"
-          data-on:click="@get('/command-center/drawer/' + $nextSessionId)"
+          data-on:click="@post('/command-center/drawer/' + $nextSessionId)"
           data-show="$nextSessionId">&rarr;</button>
       </div>
     </div>
@@ -76,17 +78,7 @@
           <button class="step-hdr" data-step-toggle
                   data-on:click="$openSteps['{{ step.step_id }}'] = !$openSteps['{{ step.step_id }}']">
             <span class="step-chv">&#9654;</span>
-            {% if step.step_name == "plan" %}
-              <span class="step-ico">&#128269;</span>
-            {% elif step.step_name in ("plan-audit", "build-audit") %}
-              <span class="step-ico">&#128203;</span>
-            {% elif step.step_name == "build" %}
-              <span class="step-ico">&#128736;</span>
-            {% elif step.step_name == "code-review" %}
-              <span class="step-ico">&#128270;</span>
-            {% else %}
-              <span class="step-ico">&#9654;</span>
-            {% endif %}
+            {{ step_icon(step.step_name) }}
             <span class="step-name">{{ step.step_name }}</span>
             {% if step.state.value == "completed" %}
               <span class="step-badge sbg-completed">completed</span>
@@ -146,7 +138,7 @@
             <p>{{ notification_body }}</p>
           {% endif %}
           <button class="attach-hero-btn"
-                  data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session }}'}}); $modals.drawer = false">Attach to Session</button>
+                  data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $modals.drawer = false">Attach to Session</button>
         </div>
 
         {% if notification_body %}
@@ -163,17 +155,7 @@
           <button class="step-hdr" style="background:rgba(62,207,224,0.06)" data-step-toggle
                   data-on:click="$openSteps['{{ current_step.step_id }}'] = !$openSteps['{{ current_step.step_id }}']">
             <span class="step-chv">&#9654;</span>
-            {% if current_step.step_name == "plan" %}
-              <span class="step-ico">&#128269;</span>
-            {% elif current_step.step_name in ("plan-audit", "build-audit") %}
-              <span class="step-ico">&#128203;</span>
-            {% elif current_step.step_name == "build" %}
-              <span class="step-ico">&#128736;</span>
-            {% elif current_step.step_name == "code-review" %}
-              <span class="step-ico">&#128270;</span>
-            {% else %}
-              <span class="step-ico">&#9654;</span>
-            {% endif %}
+            {{ step_icon(current_step.step_name) }}
             <span class="step-name">{{ current_step.step_name }}</span>
             <span class="step-badge sbg-ready">ready for review</span>
           </button>
@@ -217,15 +199,21 @@
                 <div class="df-l">{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</div>
               {% endif %}
               {% if finding.type == "triage" %}
+                {# Triage buttons select an action; clicking the same button no
+                   longer toggles back to null. The user must explicitly pick
+                   another action — Submit clears the selection by submitting. #}
                 <div class="df-tr">
                   <button class="df-tb" data-action="accept"
-                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'accept' ? null : 'accept'"
+                          data-on:click="$triage['{{ finding.id }}'] = 'accept'"
                           data-class:sa="$triage['{{ finding.id }}'] === 'accept'">Accept</button>
                   <button class="df-tb" data-action="drop"
-                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'drop' ? null : 'drop'"
+                          data-on:click="$triage['{{ finding.id }}'] = 'drop'"
                           data-class:sd="$triage['{{ finding.id }}'] === 'drop'">Drop</button>
+                  <button class="df-tb" data-action="downgrade"
+                          data-on:click="$triage['{{ finding.id }}'] = 'downgrade'"
+                          data-class:sdng="$triage['{{ finding.id }}'] === 'downgrade'">Downgrade</button>
                   <button class="df-tb" data-action="discuss"
-                          data-on:click="$triage['{{ finding.id }}'] = $triage['{{ finding.id }}'] === 'discuss' ? null : 'discuss'"
+                          data-on:click="$triage['{{ finding.id }}'] = 'discuss'"
                           data-class:sdisc="$triage['{{ finding.id }}'] === 'discuss'">Discuss</button>
                 </div>
               {% elif finding.type == "text" %}
@@ -251,7 +239,7 @@
       {% endif %}
     </div>
     <button class="d-fskip"
-            data-on:click="$nextSessionId ? @get('/command-center/drawer/' + $nextSessionId) : ($modals.drawer = false)">Skip &rarr;</button>
+            data-on:click="$nextSessionId ? @post('/command-center/drawer/' + $nextSessionId) : ($modals.drawer = false)">Skip &rarr;</button>
     {% if mode == "findings" and current_step %}
       <button class="d-fsub"
         id="drawer-submit-btn"
@@ -265,31 +253,7 @@
     <div class="d-queue">
       <div class="d-qt">Up next <span class="d-qc">{{ queue_items | length }}</span></div>
       {% for item in queue_items[:3] %}
-        {% if item.action_type == "findings" %}
-          {% set qi_cls = "qi-findings" %}
-          {% set qi_ico = "✎" %}
-          {% set qa_cls = "qa-review" %}
-          {% set qa_lbl = "review" %}
-        {% elif item.action_type == "attach" %}
-          {% set qi_cls = "qi-attach" %}
-          {% set qi_ico = "▶" %}
-          {% set qa_cls = "qa-attach" %}
-          {% set qa_lbl = "attach" %}
-        {% else %}
-          {% set qi_cls = "qi-question" %}
-          {% set qi_ico = "?" %}
-          {% set qa_cls = "qa-answer" %}
-          {% set qa_lbl = "answer" %}
-        {% endif %}
-        <div class="d-qi"
-             data-on:click="@get('/command-center/drawer/{{ item.session_id }}')"
-             data-session-id="{{ item.session_id }}"
-             style="cursor:pointer">
-          <div class="d-qi-ico {{ qi_cls }}">{{ qi_ico }}</div>
-          {% if item.ticket_id %}<span class="d-qid">{{ item.ticket_id }}</span>{% endif %}
-          <span class="d-qtl">{{ item.title }}</span>
-          <span class="d-qa {{ qa_cls }}">{{ qa_lbl }}</span>
-        </div>
+        {{ queue_item(item) }}
       {% endfor %}
     </div>
   {% else %}

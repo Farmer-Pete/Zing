@@ -11,9 +11,8 @@
   {% for repo in repos %}
   <button class="repo-chooser-option"
           data-on:click="@post('/command-center/launch-background',
-                               {payload: {card_key: '{{ card_key }}',
-                                          repo: '{{ repo.path }}',
-                                          btn_id: 'btn-launch-{{ card_key }}'}}); $modals.repoChooser = false">
+                               {payload: {card_key: '{{ card_key | e }}',
+                                          repo: '{{ repo.path | e }}'}}); $modals.repoChooser = false">
     {{ repo.label }}
   </button>
   {% endfor %}

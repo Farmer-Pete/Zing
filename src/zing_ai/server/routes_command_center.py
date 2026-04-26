@@ -41,9 +41,8 @@ from zing_ai.server.command_center import (
     generate_standup,
     infer_repo_for_ticket,
 )
-from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
+from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession, _to_signal_key
 from zing_ai.server.models_external import KanbanView
-from zing_ai.server.sse_helpers import sse_btn_state as _sse_btn_state
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
 
@@ -232,6 +231,76 @@ def _render_tray_fragment(app: FastAPI) -> str:
     return render("fragments/management_tray.html", **tray_data)
 
 
+def _build_initial_signals(
+    view: KanbanView,
+    sessions: list,
+    last_polled_label: str,
+    last_error: str,
+) -> dict[str, Any]:
+    """Build the initial signal envelope rendered onto ``.cc-page``.
+
+    Centralising the defaults here makes them diffable / commentable in Python
+    rather than hidden inside a ~250-character minified JSON blob in the
+    template. Per-card ``$busyButtons`` keys are pre-computed from the kanban
+    view so every key the page may reference exists with the safe value
+    ``False`` — Datastar v1 otherwise treats undefined indicator signals as
+    truthy on first read, which would gate the launch / kill / attach /
+    cleanup / resume / start buttons closed at page load.
+    """
+    busy_buttons: dict[str, bool] = {
+        # Toolbar buttons.
+        "refresh": False,
+        "standup": False,
+    }
+    # Pre-init every per-card / per-session indicator key the page may dereference.
+    for column in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in column:
+            sig = card.signal_key
+            busy_buttons[f"launch_{sig}"] = False
+            if card.ticket is not None:
+                busy_buttons[f"start_{_to_signal_key(card.ticket.identifier)}"] = False
+    for s in sessions:
+        if isinstance(s, ClaudeCodeSession):
+            sig = s.signal_key
+            busy_buttons[f"attach_{sig}"] = False
+            busy_buttons[f"kill_{sig}"] = False
+            busy_buttons[f"resume_{sig}"] = False
+            busy_buttons[f"cleanup_{sig}"] = False
+
+    return {
+        # Polling status (also patched via SSE).
+        "lastPolledLabel": last_polled_label or "",
+        "lastError": last_error or "",
+        # Attention bar open/closed.
+        "attnBarOpen": True,
+        # Toast queue (legacy slot — not currently used; left for future use).
+        "toast": None,
+        # Per-button busy/disabled flags (see helper above).
+        "busyButtons": busy_buttons,
+        # Modal open/closed flags. Five modals share this dict so a single
+        # data-on-signal-patch-filter on .cc-page can react to any change.
+        "modals": {
+            "drawer": False,
+            "mgmt": False,
+            "standup": False,
+            "terminal": False,
+            "repoChooser": False,
+        },
+        # Currently-open kebab key (empty string = none open). Empty string
+        # rather than null because Datastar deletes null'd keys from the proxy
+        # silently, which breaks close-on-outside-click watchers.
+        "openKebab": "",
+        # Kebab search input (clears when a menu opens).
+        "kebabQuery": "",
+        # Standup modal state.
+        "standupTab": "rendered",
+        "standupHtml": "",
+        "standupMarkdown": "",
+        # Terminal modal — URL signal patched by /attach-session.
+        "terminalUrl": "",
+    }
+
+
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
@@ -245,6 +314,12 @@ async def get_command_center(request: Request) -> HTMLResponse:
     for s in sessions:
         if hasattr(s, "steps"):
             session_phases[s.session_id] = build_session_phases(s)
+    initial_signals = _build_initial_signals(
+        view,
+        sessions,
+        last_polled_label=_format_last_polled(cache.last_polled_at),
+        last_error=cache.last_error or "",
+    )
     return HTMLResponse(
         render(
             "command_center.html",
@@ -258,6 +333,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             live_sessions=live_sessions,
             attention_items=attention_items,
             session_phases=session_phases,
+            initial_signals=initial_signals,
             **tray_data,
         )
     )
@@ -413,15 +489,12 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
     card_key = payload.get("card_key")
     repo_override = payload.get("repo")  # set when user picks from the chooser
     skill_override = payload.get("skill")  # e.g. "pr-respond" for respond buttons
-    btn_id = payload.get("btn_id", f"btn-launch-{card_key}")
-
-    # Snapshot original button HTML for sse_btn_state reset_html.
-    original_button_html = render(
-        "fragments/launch_button.html",
-        ticket_id=card_key,
-        btn_label="Launch",
-        btn_skill=skill_override,
-        btn_pr=payload.get("pr_number"),
+    # Reset $busyButtons.launch_<sig> on every exit so the button returns to its
+    # interactive state. The card_key may legitimately be missing here (early
+    # error path); callers handle that case explicitly with a fallback.
+    sig_key = _to_signal_key(card_key) if card_key else ""
+    reset_busy = (
+        SSE.patch_signals({"busyButtons": {f"launch_{sig_key}": False}}) if sig_key else None
     )
 
     async def _stream():  # noqa: ANN202
@@ -431,22 +504,18 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
         logger.debug("launch-background: card_key=%s", card_key)
 
-        # In-flight dedup lock — initialise lazily if not set by create_app.
-        launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
-        if not hasattr(request.app.state, "launching_set"):
-            request.app.state.launching_set = launching_set
+        launching_set: set[str] = request.app.state.launching_set
 
         if card_key in launching_set:
             logger.warning("launch-background: duplicate launch for card %s", card_key)
             yield _sse_toast("Launch already in progress for this card", "err")
+            if reset_busy is not None:
+                yield reset_busy
             return
 
         launching_set.add(card_key)
 
-        # Lazy-init repo path cache.
-        repo_path_cache: dict[str, Path] = getattr(request.app.state, "repo_path_cache", None) or {}
-        if not hasattr(request.app.state, "repo_path_cache"):
-            request.app.state.repo_path_cache = repo_path_cache
+        repo_path_cache: dict[str, Path] = request.app.state.repo_path_cache
 
         config = load_config()
         code_dir = config.git.code_dir
@@ -454,13 +523,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             launching_set.discard(card_key)
             logger.error("launch-background: code_dir is not configured")
             yield _sse_toast("code_dir is not configured", "err")
-            yield _sse_btn_state(
-                btn_id,
-                "Failed",
-                kind="err",
-                reset_html=original_button_html,
-                reset_after_ms=2000,
-            )
+            if reset_busy is not None:
+                yield reset_busy
             return
 
         # Locate the card in the current kanban view (search all columns).
@@ -499,13 +563,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     except ValueError:
                         launching_set.discard(card_key)
                         yield _sse_toast(f"Invalid pr_number: {pr_number_override}", "err")
-                        yield _sse_btn_state(
-                            btn_id,
-                            "Failed",
-                            kind="err",
-                            reset_html=original_button_html,
-                            reset_after_ms=2000,
-                        )
+                        if reset_busy is not None:
+                            yield reset_busy
                         return
                 else:
                     pr = card.prs[0]
@@ -553,13 +612,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     "Ticket has no linked PR and no same-team cards have PRs."
                 )
                 yield _sse_toast(error_msg, "err")
-                yield _sse_btn_state(
-                    btn_id,
-                    "Failed",
-                    kind="err",
-                    reset_html=original_button_html,
-                    reset_after_ms=2000,
-                )
+                if reset_busy is not None:
+                    yield reset_busy
                 return
 
         # Resolve local repo path.
@@ -569,13 +623,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             launching_set.discard(card_key)
             logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
             yield _sse_toast(f"Repository {repo_name} not found under {code_dir}", "err")
-            yield _sse_btn_state(
-                btn_id,
-                "Failed",
-                kind="err",
-                reset_html=original_button_html,
-                reset_after_ms=2000,
-            )
+            if reset_busy is not None:
+                yield reset_busy
             return
 
         # Derive branch name for ticket-only cards.
@@ -588,13 +637,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     "launch-background: derive_branch_name failed for %s: %s", ticket_id, exc
                 )
                 yield _sse_toast(str(exc), "err")
-                yield _sse_btn_state(
-                    btn_id,
-                    "Failed",
-                    kind="err",
-                    reset_html=original_button_html,
-                    reset_after_ms=2000,
-                )
+                if reset_busy is not None:
+                    yield reset_busy
                 return
 
         if branch_name is None:
@@ -607,13 +651,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                 bool(config.command_center.linear_api_key),
             )
             yield _sse_toast(f"Cannot determine branch for card {card_key}", "err")
-            yield _sse_btn_state(
-                btn_id,
-                "Failed",
-                kind="err",
-                reset_html=original_button_html,
-                reset_after_ms=2000,
-            )
+            if reset_busy is not None:
+                yield reset_busy
             return
 
         title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
@@ -684,29 +723,19 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             _push_board_changed(request.app)
 
             yield _sse_toast("Launched", "ok")
-            yield _sse_btn_state(
-                btn_id,
-                "✓ Launched!",
-                kind="ok",
-                reset_html=original_button_html,
-                reset_after_ms=2000,
-            )
+            if reset_busy is not None:
+                yield reset_busy
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
             logger.error("Background launch failed for card %s: %s", card_key, exc)
             if worktree_path is not None:
                 try:
                     rollback_worktree(worktree_path)
-                except Exception as rollback_exc:  # noqa: BLE001
+                except (OSError, subprocess.CalledProcessError) as rollback_exc:
                     logger.warning("Rollback failed: %s", rollback_exc)
             yield _sse_toast(str(exc), "err")
-            yield _sse_btn_state(
-                btn_id,
-                "Failed",
-                kind="err",
-                reset_html=original_button_html,
-                reset_after_ms=2000,
-            )
+            if reset_busy is not None:
+                yield reset_busy
         finally:
             launching_set.discard(card_key)
 
@@ -821,7 +850,7 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
             return
         try:
             rollback_worktree(Path(session.worktree_path))
-        except Exception as exc:  # noqa: BLE001
+        except (LaunchError, OSError, subprocess.CalledProcessError) as exc:
             logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
             yield _sse_toast(str(exc), "err")
             return
@@ -946,25 +975,42 @@ def build_drawer_context(
         notification_body = notification.body if notification else ""
 
     # Build the triage signal dict for the drawer.
-    # Maps finding_id → action value string (or None) for pre-existing saved responses.
+    # Maps finding_id → action value string (or None) for pre-existing saved
+    # responses. The legacy storage layer pairs findings and responses by list
+    # index — that ordering is fragile if findings are inserted, deleted, or
+    # reordered mid-step. The mapping here is intentionally finding_id-keyed so
+    # the drawer's signal envelope is robust to ordering drift; index-by-index
+    # is only used as a fallback when both lists are the same length AND the
+    # responses don't carry per-finding identifiers (the current schema).
     saved_triage_responses: dict[str, str | None] = {}
     if current_step is not None:
+        responses = current_step.responses or []
+        same_length = len(responses) == len(current_step.findings)
         for idx, finding in enumerate(current_step.findings):
-            if finding.type == "triage":
-                action_val: str | None = None
-                if (
-                    current_step.responses is not None
-                    and idx < len(current_step.responses)
-                    and current_step.responses[idx].action is not None
-                ):
-                    action_val = current_step.responses[idx].action.value
-                saved_triage_responses[finding.id] = action_val
+            if finding.type != "triage":
+                continue
+            action_val: str | None = None
+            if same_length and idx < len(responses) and responses[idx].action is not None:
+                action_val = responses[idx].action.value
+            saved_triage_responses[finding.id] = action_val
 
     # Build the openSteps signal dict for the step-section accordion.
     # Default: all past steps closed; current step open (if present).
     saved_open_steps: dict[str, bool] = {}
     if current_step is not None:
         saved_open_steps[current_step.step_id] = True
+
+    # Build the drawer's data-signals envelope server-side as a single dict so
+    # we can render it via | tojson once on the template. Hand-building the
+    # JSON with raw ``{{ ... }}`` substitutions invites quote-handling drift.
+    drawer_signals: dict[str, object] = {
+        "prevSessionId": prev_session_id or "",
+        "nextSessionId": next_session_id or "",
+        "sessionId": session.session_id,
+        "stepId": current_step.step_id if current_step else "",
+        "triage": saved_triage_responses,
+        "openSteps": saved_open_steps,
+    }
 
     return {
         "session": session,
@@ -982,10 +1028,11 @@ def build_drawer_context(
         "notification_body": notification_body,
         "saved_triage_responses": saved_triage_responses,
         "saved_open_steps": saved_open_steps,
+        "drawer_signals": drawer_signals,
     }
 
 
-@router.get("/command-center/drawer/{session_id}")
+@router.post("/command-center/drawer/{session_id}")
 @datastar_response
 async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
     """Return the drawer HTML fragment for a session via SSE.
@@ -1024,7 +1071,7 @@ async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
     return _stream()
 
 
-@router.get(
+@router.post(
     "/command-center/drawer/{session_id}/step/{step_id}",
 )
 @datastar_response

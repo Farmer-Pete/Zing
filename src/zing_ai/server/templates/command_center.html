@@ -4,12 +4,12 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {"refresh": false, "standup": false}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": "", "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
+     data-signals='{{ initial_signals | tojson }}'
      data-init="@get('/command-center/events')"
      data-on:keydown__window__key.escape="$modals.drawer = false; $modals.mgmt = false; $modals.standup = false; $modals.terminal = false; $modals.repoChooser = false"
      data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')"
      data-on-signal-patch-filter="{include: /^modals$/}"
-     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''; if (!$modals.terminal) document.dispatchEvent(new CustomEvent('close-terminal'))">
+     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
@@ -44,35 +44,23 @@
     {# ── Review drawer container ── #}
     <div id="review-drawer-container" data-show="$modals.drawer"></div>
 
-    {# ── Terminal modal (Zellij iframe) ── #}
-    <div id="terminal-modal" class="terminal-modal" style="display:none;">
+    {# ── Terminal modal (Zellij iframe). Closes via mountModal.close() — the
+         body-level signal-patch watcher dispatches close-terminal which calls
+         the same close() so the iframe lifecycle stays in one place. ── #}
+    <div id="terminal-modal" class="terminal-modal" style="display:none;"
+         data-on-signal-patch-filter="{include: /^modals$/}"
+         data-on-signal-patch="if (!$modals.terminal) document.dispatchEvent(new CustomEvent('close-terminal'))">
       <div class="terminal-modal-bar">
         <span class="terminal-modal-title" id="terminal-modal-title"></span>
-        <button class="terminal-modal-close" id="terminal-modal-close"
+        <button class="terminal-modal-close" id="terminal-modal-close" aria-label="Close terminal"
                 data-on:click="$modals.terminal = false; $terminalUrl = ''">&times;</button>
       </div>
       <iframe id="terminal-modal-iframe" class="terminal-modal-iframe"></iframe>
     </div>
     <div id="terminal-modal-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
 
-    {# ── Repo chooser modal ── #}
-    <div id="repo-chooser-modal" class="dialog-modal" style="display:none;">
-      <div class="dialog-modal-bar">
-        <span class="dialog-modal-title">Choose Repository</span>
-        <div class="dialog-modal-actions">
-          <button class="terminal-modal-close" id="repo-chooser-close">&times;</button>
-        </div>
-      </div>
-      <div class="repo-chooser-body">
-        <p class="repo-chooser-hint">This ticket has no linked PR. Which repo does it belong to?</p>
-        <div id="repo-chooser-list" class="repo-chooser-list"></div>
-      </div>
-    </div>
-    <div id="repo-chooser-backdrop" class="terminal-modal-backdrop" style="display:none;"></div>
-
     {# ── Repo chooser modal (Datastar) ── Stable container; inner content is
-       INNER-patched by /command-center/launch-background when status=choose_repo.
-       Patched by Step 13's launch-background endpoint. #}
+       INNER-patched by /command-center/launch-background when status=choose_repo. #}
     <div id="repo-chooser-modal-container" data-show="$modals.repoChooser">
       <!-- Patched INNER by /command-center/launch-background when status=choose_repo -->
     </div>
@@ -95,7 +83,7 @@
           </div>
           <button class="standup-copy-btn" id="standup-copy-btn"
                   data-on:click="dispatchCopyStandup($standupHtml, $standupMarkdown)">Copy</button>
-          <button class="terminal-modal-close" id="standup-modal-close"
+          <button class="terminal-modal-close" id="standup-modal-close" aria-label="Close standup"
                   data-on:click="$modals.standup = false">&times;</button>
         </div>
       </div>

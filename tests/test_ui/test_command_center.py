@@ -304,18 +304,21 @@ def test_repo_chooser_flow_offers_candidates_then_relaunches(
     target = page.locator("#card-bak-2099")
     expect(target).to_be_visible(timeout=5000)
 
-    launch_btn = target.locator("#btn-launch-BAK-2099")
+    # The launch button id is now ``btn-launch-<key>-<slot>`` per the
+    # launch_button macro (slot makes ids unique within a card). Use a
+    # prefix selector to find the footer-todo Plan button.
+    launch_btn = target.locator("[id^='btn-launch-BAK-2099-']").first
     expect(launch_btn).to_be_visible(timeout=3000)
     launch_btn.click()
 
     chooser = page.locator("#repo-chooser-modal-container")
     expect(chooser).to_be_visible(timeout=5000)
     repo_buttons = chooser.locator("button").filter(has_text="repo-")
-    # If the heuristic produced 0 candidates, the modal won't show — gracefully
-    # skip the rest of the flow instead of asserting a non-existent payload.
+    # If the heuristic produced 0 candidates, the test data is deterministic so
+    # this is a regression — fail loud rather than silently skipping CI coverage.
     candidate_count = repo_buttons.count()
     if candidate_count == 0:
-        pytest.skip(
+        pytest.fail(
             "infer_repo_for_ticket produced no candidates for this seeded state; "
             "the kanban builder did not pair our PRs to their tickets."
         )
@@ -334,6 +337,7 @@ def test_repo_chooser_flow_offers_candidates_then_relaunches(
     body = json.loads(repo_posts[0].post_data or "{}")
     payload = body.get("payload", body)
     assert payload.get("card_key") == "BAK-2099"
-    assert payload.get("btn_id") == "btn-launch-BAK-2099"
+    # btn_id is no longer required by the route (the OUTER patch reset_html
+    # path was dropped); the repo-chooser repost intentionally omits it.
     assert payload.get("repo")  # non-empty
     assert chosen_label.strip() in payload["repo"] or payload["repo"] in chosen_label

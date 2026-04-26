@@ -41,3 +41,64 @@ def test_no_dashed_data_on_attributes() -> None:
                 f"{path.relative_to(TEMPLATE_ROOT.parent.parent)}:{line_num} → {attr_name}"
             )
     assert not offenders, "Dashed data-on-* attributes found:\n" + "\n".join(offenders)
+
+
+# Match a literal id="..." attribute. We deliberately don't try to handle
+# templated ids (those contain Jinja tags); the regex below ignores any
+# id whose value contains "{{" or "{%" because at lint time we can't tell
+# whether the rendered ids will collide. This still catches the bug class
+# the lint exists for: hard-coded "id=..." literals duplicated within a
+# single fragment.
+_ID_LITERAL_RE = re.compile(r'\bid="([^"{}]+)"')
+
+# A handful of fragments are *partials* that get rendered multiple times in
+# a single page (e.g. one per row in a list comprehension). Their literal
+# ids necessarily repeat at the *page* level — but they're still unique
+# within a single render of the fragment, which is what this lint enforces.
+# These shouldn't be allowed to have literal-id collisions either.
+_FRAGMENTS_TO_LINT = [
+    "fragments/kanban_card.html",
+    "fragments/kanban_board.html",
+    "fragments/kanban_column.html",
+    "fragments/kanban_column_done.html",
+    "fragments/kanban_column_review.html",
+    "fragments/review_drawer.html",
+    "fragments/drawer_attach.html",
+    "fragments/drawer_step_history.html",
+    "fragments/launch_button.html",
+    "fragments/attention_bar.html",
+    "fragments/management_tray.html",
+    "command_center.html",
+]
+
+
+def test_no_duplicate_literal_html_ids_within_fragments() -> None:
+    """No template fragment may emit two literal ``id="..."`` with the same value.
+
+    CSS ``#id`` selectors and ``getElementById`` both match the *first*
+    element only. Multiple identical literal ids inside one fragment is a
+    silent bug — server SSE patches and Datastar selectors alike will only
+    affect one of the supposed-to-be-multiple elements. Templated ids
+    (those containing Jinja tags ``{{`` / ``{%``) are skipped because lint
+    can't reason about runtime collisions; per-row macros disambiguate
+    them with a slot suffix (see ``launch_button.html``).
+    """
+    offenders: list[str] = []
+    # Strip Jinja {# ... #} comments before scanning so docs/examples inside
+    # comments don't count.
+    jinja_comment_re = re.compile(r"\{#.*?#\}", re.DOTALL)
+    for rel in _FRAGMENTS_TO_LINT:
+        path = TEMPLATE_ROOT / rel
+        if not path.exists():
+            continue
+        raw = path.read_text()
+        text = jinja_comment_re.sub("", raw)
+        seen: dict[str, list[int]] = {}
+        for match in _ID_LITERAL_RE.finditer(text):
+            value = match.group(1)
+            line = text[: match.start()].count("\n") + 1
+            seen.setdefault(value, []).append(line)
+        for value, lines in seen.items():
+            if len(lines) > 1:
+                offenders.append(f"{rel}: duplicate literal id={value!r} on lines {lines}")
+    assert not offenders, "Duplicate literal HTML ids in fragment(s):\n" + "\n".join(offenders)

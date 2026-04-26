@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -241,13 +241,16 @@ def _seed_session_for_queue(
     session_id: str,
     ticket_id: str,
     title: str,
+    created_at: datetime | None = None,
 ) -> str:
     """Create a minimal ready ZingSession for attention-queue tests.
 
+    The optional ``created_at`` override seeds the session and its initial
+    step with a deterministic timestamp so attention-queue ordering tests
+    don't need ``time.sleep`` to disambiguate wait_seconds.
+
     Returns the step_id.
     """
-    from datetime import UTC, datetime
-
     cache = server.external_cache
     # Add the Linear issue if not already present.
     existing_ids = {i.identifier for i in cache.issues}
@@ -267,7 +270,9 @@ def _seed_session_for_queue(
         ]
 
     manager = server.manager
-    session = manager.create_session(session_id=session_id, title=title, steps=["build-audit"])
+    session = manager.create_session(
+        session_id=session_id, title=title, steps=["build-audit"], created_at=created_at
+    )
     manager.update_session(session_id, ticket_id=ticket_id)
     step = session.steps[0]
     manager.start_step(session_id, step.step_id)
@@ -290,20 +295,30 @@ def test_drawer_prev_next_navigation(server: _ServerInfo, page: Page) -> None:
     The prev/next buttons are only shown when $prevSessionId/$nextSessionId are
     non-empty (data-show), so their visibility is itself a signal assertion.
     """
-    import time
-
-    # Create three sessions with deliberate time gaps so the attention queue
-    # sort (wait_seconds desc) is deterministic: s1 = oldest, s3 = newest.
+    # Use explicit timestamps with 1-second gaps so the attention queue
+    # sort (wait_seconds desc) is deterministic regardless of CI host load.
+    # Past timestamps so wait_seconds is meaningful: s1 = oldest, s3 = newest.
+    base = datetime.now(tz=UTC).replace(microsecond=0)
     _seed_session_for_queue(
-        server, session_id="nav-s1", ticket_id="BAK-3001", title="Nav Session 1"
+        server,
+        session_id="nav-s1",
+        ticket_id="BAK-3001",
+        title="Nav Session 1",
+        created_at=base - timedelta(seconds=30),
     )
-    time.sleep(0.05)
     _seed_session_for_queue(
-        server, session_id="nav-s2", ticket_id="BAK-3002", title="Nav Session 2"
+        server,
+        session_id="nav-s2",
+        ticket_id="BAK-3002",
+        title="Nav Session 2",
+        created_at=base - timedelta(seconds=20),
     )
-    time.sleep(0.05)
     _seed_session_for_queue(
-        server, session_id="nav-s3", ticket_id="BAK-3003", title="Nav Session 3"
+        server,
+        session_id="nav-s3",
+        ticket_id="BAK-3003",
+        title="Nav Session 3",
+        created_at=base - timedelta(seconds=10),
     )
 
     # Attention queue order (wait_seconds desc): nav-s1, nav-s2, nav-s3.

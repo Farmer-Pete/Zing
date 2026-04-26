@@ -200,7 +200,7 @@ For server-side actions (kill, cleanup, launch, etc.):
 - Wire the button with `data-on:click="@post(...)"` carrying a payload that includes a stable `btn_id`.
 - Use `data-indicator="$busyButtons.X"` to flip a per-button busy signal automatically while the request is in flight.
 - Pre-initialize the busy signal to `false` in the parent `data-signals` envelope (Datastar v1 defaults uninitialized indicator signals to `true`).
-- For post-completion ok/err copy ("✓ Launched!", "Failed"), the server yields `_sse_btn_state(btn_id, "✓ Launched!", kind="ok", reset_html=<original>)` from `src/zing_ai/server/sse_helpers.py`. The patched button auto-restores the original markup after `reset_after_ms`.
+- For post-completion ok/err copy ("✓ Launched!", "Failed"), the server yields `_sse_btn_state(btn_id, "Failed", kind="err")` from `src/zing_ai/server/sse_helpers.py`. The button is restored to its interactive state by yielding `SSE.patch_signals({"busyButtons": {f"<verb>_<sig>": False}})` so the per-card pre-init returns the indicator to its idle state — there is no auto-reset / outer-HTML snapshot.
 
 ### Toast pattern
 

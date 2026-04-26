@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import unittest
 
 from zing_ai.server.sse_helpers import sse_btn_state, sse_toast
@@ -71,26 +70,6 @@ class TestSseBtnState(unittest.TestCase):
                 result = sse_btn_state("btn-1", "label", kind=kind)  # type: ignore[arg-type]
                 self.assertIn(f'class="{cls}"', result)
 
-    def test_reset_html_produces_button_with_delay_attribute(self) -> None:
-        """reset_html embeds JSON-encoded markup into a data-init__delay.{ms}ms attribute."""
-        original_markup = '<button id="btn-1" class="btn">Click me</button>'
-        result = sse_btn_state(
-            "btn-1", "Done", kind="ok", reset_html=original_markup, reset_after_ms=2000
-        )
-        expected_attr_prefix = "data-init__delay.2000ms="
-        self.assertIn(expected_attr_prefix, result)
-        # The reset markup must be JSON-encoded inside the attribute
-        json_encoded = json.dumps(original_markup)
-        self.assertIn(json_encoded, result)
-
-    def test_reset_html_respects_custom_delay(self) -> None:
-        """reset_after_ms controls the delay value in the attribute name."""
-        result = sse_btn_state(
-            "btn-x", "label", kind="ok", reset_html="<button/>", reset_after_ms=5000
-        )
-        self.assertIn("data-init__delay.5000ms=", result)
-        self.assertNotIn("data-init__delay.2000ms=", result)
-
     def test_returns_valid_sse_patch_elements_event_with_correct_selector_and_mode(
         self,
     ) -> None:
@@ -106,10 +85,25 @@ class TestSseBtnState(unittest.TestCase):
         result = sse_btn_state("btn-2", "Wait", kind="idle", disabled=True)
         self.assertIn(" disabled", result)
 
-    def test_no_reset_attr_when_reset_html_is_none(self) -> None:
-        """When reset_html is not provided, no data-init__delay attribute is present."""
-        result = sse_btn_state("btn-3", "Go", kind="ok")
-        self.assertNotIn("data-init__delay", result)
+    def test_invalid_button_id_raises_value_error(self) -> None:
+        """button_id with characters outside [A-Za-z0-9_-] raises ValueError."""
+        for bad_id in (
+            'x" onclick="alert(1)',
+            "btn with space",
+            "btn.dot",
+            "",
+            "btn/slash",
+        ):
+            with self.subTest(bad_id=bad_id), self.assertRaises(ValueError):
+                sse_btn_state(bad_id, "label", kind="ok")
+
+    def test_valid_button_ids_accepted(self) -> None:
+        """Letters, digits, hyphens and underscores are all accepted in button_id."""
+        for good_id in ("btn-launch-BAK-1234", "btn_kill_session", "abc123"):
+            with self.subTest(good_id=good_id):
+                # Should not raise.
+                result = sse_btn_state(good_id, "label", kind="ok")
+                self.assertIn(f'id="{good_id}"', result)
 
 
 if __name__ == "__main__":

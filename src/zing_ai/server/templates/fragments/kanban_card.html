@@ -8,6 +8,24 @@
     live_sessions — set of live zellij session names
 #}
 {% from "fragments/_phase_strip.html" import phase_strip %}
+{% from "fragments/launch_button.html" import launch_button %}
+
+{# Kebab macros — the empty-string trap is documented once here. Datastar v1
+   treats setting a signal to ``null`` as "delete from the proxy without firing
+   watchers". The kebab close-on-outside-click watcher only fires when the
+   signal is reassigned, so we use ``''`` (empty string) as the closed state. #}
+{%- macro kebab_toggle(menu_key, controls_id="") -%}
+<button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
+        {% if controls_id %}aria-controls="{{ controls_id | e }}"{% endif %}
+        data-on:click="$openKebab = $openKebab === '{{ menu_key | e }}' ? '' : '{{ menu_key | e }}'; $kebabQuery = $openKebab !== '' ? '' : $kebabQuery"
+        data-attr:aria-expanded="$openKebab === '{{ menu_key | e }}'">&#8942;</button>
+{%- endmacro -%}
+
+{%- macro kebab_menu_open(menu_key, menu_id="") -%}
+<div class="strip-menu" {% if menu_id %}id="{{ menu_id | e }}"{% endif %}
+     data-class:open="$openKebab === '{{ menu_key | e }}'">
+{%- endmacro -%}
+
 {% set total_findings = namespace(count=0) %}
 {% for step in card.audit_steps %}
   {% set total_findings.count = total_findings.count + step.findings | length %}
@@ -29,12 +47,9 @@
   {% endif %}
 {% endfor %}
 {% set card_has_active_action = _active_action.found %}
-{# Signal-safe key: replace /, # and - so $busyButtons.launch_<key> is valid JS property. #}
-{% set card_launch_sig = card.key | replace('/', '_') | replace('#', '_') | replace('-', '_') %}
 
 <div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}"
-     data-signals='{"busyButtons": {"launch_{{ card_launch_sig }}": false}}'
-     data-class:menu-open="$openKebab && $openKebab.startsWith('card-{{ card.key }}')">
+     data-class:menu-open="$openKebab && $openKebab.startsWith('card-{{ card.key | e }}')">
 
   {# ── Header: ticket ID + title + assignee ── #}
   <div class="card-header">
@@ -60,6 +75,8 @@
 
   {# ── PR strips: one per PR, with inline action buttons ── #}
   {% for pr in card.prs %}
+    {% set pr_menu_key = 'card-' ~ card.key ~ '-pr-' ~ pr.number %}
+    {% set pr_menu_id = 'kebab-menu-' ~ card.signal_key ~ '-pr-' ~ pr.number %}
     <div class="status-strip">
       <a href="{{ pr.url }}" target="_blank" rel="noopener" class="strip-pr{% if pr.draft %} strip-pr-draft{% endif %}" title="{{ pr.repo }}#{{ pr.number }} by {{ pr.author }}">
         {% if pr.merged_at %}
@@ -97,61 +114,18 @@
       {% if not pr.merged_at %}
         {# Primary button — contextual label #}
         {% if column_cls == "col-review" and not is_author %}
-          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-on:click="@post('/command-center/launch-background',
-                                       {payload: {card_key: '{{ card.key | e }}',
-                                                  btn_id: 'btn-launch-{{ card.key | e }}',
-                                                  skill: 'pr-audit',
-                                                  pr_number: {{ pr.number }}}})">
-            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">PR Audit</span>
-            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-          </button>
+          {{ launch_button(card, label="PR Audit", slot="pr-" ~ pr.number, skill="pr-audit", pr_number=pr.number) }}
         {% elif pr.review_decision == "CHANGES_REQUESTED" and is_author %}
-          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-on:click="@post('/command-center/launch-background',
-                                       {payload: {card_key: '{{ card.key | e }}',
-                                                  btn_id: 'btn-launch-{{ card.key | e }}',
-                                                  skill: 'pr-respond',
-                                                  pr_number: {{ pr.number }}}})">
-            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Respond</span>
-            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-          </button>
+          {{ launch_button(card, label="Respond", slot="pr-" ~ pr.number, skill="pr-respond", pr_number=pr.number) }}
         {% elif is_author %}
-          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-on:click="@post('/command-center/launch-background',
-                                       {payload: {card_key: '{{ card.key | e }}',
-                                                  btn_id: 'btn-launch-{{ card.key | e }}',
-                                                  skill: 'build-audit',
-                                                  pr_number: {{ pr.number }}}})">
-            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Build Audit</span>
-            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-          </button>
+          {{ launch_button(card, label="Build Audit", slot="pr-" ~ pr.number, skill="build-audit", pr_number=pr.number) }}
         {% else %}
-          <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                  data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                  data-on:click="@post('/command-center/launch-background',
-                                       {payload: {card_key: '{{ card.key | e }}',
-                                                  btn_id: 'btn-launch-{{ card.key | e }}',
-                                                  skill: 'pr-audit',
-                                                  pr_number: {{ pr.number }}}})">
-            <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">PR Audit</span>
-            <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-          </button>
+          {{ launch_button(card, label="PR Audit", slot="pr-" ~ pr.number, skill="pr-audit", pr_number=pr.number) }}
         {% endif %}
       {% endif %}
       {# Kebab menu — always present #}
-      <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
-              data-on:click="$openKebab = $openKebab === 'card-{{ card.key }}-pr-{{ pr.number }}' ? '' : 'card-{{ card.key }}-pr-{{ pr.number }}'; $kebabQuery = $openKebab !== '' ? '' : $kebabQuery"
-              data-attr:aria-expanded="$openKebab === 'card-{{ card.key }}-pr-{{ pr.number }}'">&#8942;</button>
-      <div class="strip-menu"
-           data-class:open="$openKebab === 'card-{{ card.key }}-pr-{{ pr.number }}'">
+      {{ kebab_toggle(pr_menu_key, controls_id=pr_menu_id) }}
+      {{ kebab_menu_open(pr_menu_key, menu_id=pr_menu_id) }}
         {% if pr.merged_at %}
           {# Merged: links only #}
           <div class="menu-items">
@@ -177,13 +151,9 @@
               <div class="menu-row" data-s="respond to feedback"
                    data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
                 <button class="menu-row-main"
-                        data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                        data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                        data-on:click="@post('/command-center/launch-background',
-                                             {payload: {card_key: '{{ card.key | e }}',
-                                                        btn_id: 'btn-launch-{{ card.key | e }}',
-                                                        skill: 'pr-respond',
-                                                        pr_number: {{ pr.number }}}}); $openKebab = ''"
+                        data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                        data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                        data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-respond', skill: 'pr-respond', pr_number: {{ pr.number }}}}); $openKebab = ''"
                         data-s="respond to feedback"><span class="menu-icon">&#9997;</span> Respond<br><span class="menu-desc">Address review comments, fix CI, push</span></button>
                 <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-respond ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
               </div>
@@ -195,13 +165,9 @@
               <div class="menu-row" data-s="pr audit line comments"
                    data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
                 <button class="menu-row-main"
-                        data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                        data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                        data-on:click="@post('/command-center/launch-background',
-                                             {payload: {card_key: '{{ card.key | e }}',
-                                                        btn_id: 'btn-launch-{{ card.key | e }}',
-                                                        skill: 'pr-audit',
-                                                        pr_number: {{ pr.number }}}}); $openKebab = ''"
+                        data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                        data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                        data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-pr-audit', skill: 'pr-audit', pr_number: {{ pr.number }}}}); $openKebab = ''"
                         data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
                 <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
               </div>
@@ -209,13 +175,9 @@
                 <div class="menu-row" data-s="pr visual audit browser"
                      data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
                   <button class="menu-row-main"
-                          data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                          data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                          data-on:click="@post('/command-center/launch-background',
-                                               {payload: {card_key: '{{ card.key | e }}',
-                                                          btn_id: 'btn-launch-{{ card.key | e }}',
-                                                          skill: 'pr-audit-visual',
-                                                          pr_number: {{ pr.number }}}}); $openKebab = ''"
+                          data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                          data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                          data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-visual', skill: 'pr-audit-visual', pr_number: {{ pr.number }}}}); $openKebab = ''"
                           data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
                   <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit-visual ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
                 </div>
@@ -224,26 +186,18 @@
             <div class="menu-row" data-s="build audit code review"
                  data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'build-audit',
-                                                      pr_number: {{ pr.number }}}}); $openKebab = ''"
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-build-audit', skill: 'build-audit', pr_number: {{ pr.number }}}}); $openKebab = ''"
                       data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build-audit ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row" data-s="custom audit"
                  data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'custom-audit',
-                                                      pr_number: {{ pr.number }}}}); $openKebab = ''"
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-custom-audit', skill: 'custom-audit', pr_number: {{ pr.number }}}}); $openKebab = ''"
                       data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill custom-audit ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
@@ -253,25 +207,18 @@
             <div class="menu-row" data-s="start locally"
                  data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      pr_number: {{ pr.number }}}}); $openKebab = ''"
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-start', pr_number: {{ pr.number }}}}); $openKebab = ''"
                       data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row" data-s="setup environment"
                  data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'setup-only',
-                                                      pr_number: {{ pr.number }}}}); $openKebab = ''"
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-setup', skill: 'setup-only', pr_number: {{ pr.number }}}}); $openKebab = ''"
                       data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
@@ -300,6 +247,11 @@
   {# ── Claude Code sessions with inline attach/resume buttons ── #}
   {% for session in card.sessions if session.session_type == 'claude_code' %}
     {% set is_alive = session.terminal_session and session.terminal_session in live_sessions %}
+    {% set sess_sig = session.signal_key %}
+    {% set sess_menu_key = 'card-' ~ card.key ~ '-sess-' ~ session.session_id %}
+    {% set sess_menu_id = 'kebab-menu-' ~ sess_sig ~ '-sess' %}
+    {% set resume_menu_key = 'card-' ~ card.key ~ '-resume-' ~ session.session_id %}
+    {% set resume_menu_id = 'kebab-menu-' ~ sess_sig ~ '-resume' %}
     <div class="status-strip">
       <span class="strip-session-dot {% if is_alive %}strip-session-alive{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% else %}Stopped{% endif %}"></span>
       {% if is_alive %}
@@ -311,23 +263,20 @@
       {% endif %}
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
-        <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ session.session_id | e }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}})">Attach</button>
-        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
-                data-on:click="$openKebab = $openKebab === 'card-{{ card.key }}-sess-{{ session.session_id }}' ? '' : 'card-{{ card.key }}-sess-{{ session.session_id }}'"
-                data-attr:aria-expanded="$openKebab === 'card-{{ card.key }}-sess-{{ session.session_id }}'">&#8942;</button>
-        <div class="strip-menu"
-             data-class:open="$openKebab === 'card-{{ card.key }}-sess-{{ session.session_id }}'">
+        <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}})">Attach</button>
+        {{ kebab_toggle(sess_menu_key, controls_id=sess_menu_id) }}
+        {{ kebab_menu_open(sess_menu_key, menu_id=sess_menu_id) }}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
             <span class="menu-col-header-copy">&#128203;</span>
           </div>
           <div class="menu-items">
             <div class="menu-row">
-              <button class="menu-row-main" id="btn-attach-kebab-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ session.session_id | e }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Attach</button>
+              <button class="menu-row-main" id="btn-attach-kebab-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Attach</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('tmux attach -t ' ~ session.terminal_session) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" id="btn-kill-{{ session.session_id | e }}" data-indicator="$busyButtons.kill_{{ session.session_id | e }}" data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-kill-{{ session.session_id | e }}'}}); $openKebab = ''"><span class="menu-icon">&#128683;</span> Kill session</button>
+              <button class="menu-row-main" id="btn-kill-{{ session.session_id | e }}" data-indicator="$busyButtons.kill_{{ sess_sig }}" data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-kill-{{ session.session_id | e }}'}}); $openKebab = ''"><span class="menu-icon">&#128683;</span> Kill session</button>
               <span style="width:32px;"></span>
             </div>
           </div>
@@ -335,14 +284,11 @@
       {% endif %}
       {% if session.ticket_id and not is_alive %}
         <button class="strip-primary-btn" id="btn-resume-{{ session.session_id | e }}"
-                data-indicator="$busyButtons.resume_{{ session.session_id | e }}"
-                data-attr:disabled="$busyButtons.resume_{{ session.session_id | e }}"
+                data-indicator="$busyButtons.resume_{{ sess_sig }}"
+                data-attr:disabled="$busyButtons.resume_{{ sess_sig }}"
                 data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ session.ticket_id | e }}', skill: 'resume', btn_id: 'btn-resume-{{ session.session_id | e }}'}})">Resume</button>
-        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
-                data-on:click="$openKebab = $openKebab === 'card-{{ card.key }}-resume-{{ session.session_id }}' ? '' : 'card-{{ card.key }}-resume-{{ session.session_id }}'"
-                data-attr:aria-expanded="$openKebab === 'card-{{ card.key }}-resume-{{ session.session_id }}'">&#8942;</button>
-        <div class="strip-menu"
-             data-class:open="$openKebab === 'card-{{ card.key }}-resume-{{ session.session_id }}'">
+        {{ kebab_toggle(resume_menu_key, controls_id=resume_menu_id) }}
+        {{ kebab_menu_open(resume_menu_key, menu_id=resume_menu_id) }}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
             <span class="menu-col-header-copy">&#128203;</span>
@@ -350,15 +296,15 @@
           <div class="menu-items">
             <div class="menu-row">
               <button class="menu-row-main" id="btn-resume-kebab-{{ session.session_id | e }}"
-                      data-indicator="$busyButtons.resume_{{ session.session_id | e }}"
-                      data-attr:disabled="$busyButtons.resume_{{ session.session_id | e }}"
+                      data-indicator="$busyButtons.resume_{{ sess_sig }}"
+                      data-attr:disabled="$busyButtons.resume_{{ sess_sig }}"
                       data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ session.ticket_id | e }}', skill: 'resume', btn_id: 'btn-resume-{{ session.session_id | e }}'}}); $openKebab = ''"><span class="menu-icon">&#128260;</span> Resume session</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --resume ' ~ session.session_id ~ ' ' ~ session.ticket_id) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button id="btn-cleanup-{{ session.session_id | e }}"
                       class="menu-row-main"
-                      data-indicator="$busyButtons.cleanup_{{ session.session_id | e }}"
+                      data-indicator="$busyButtons.cleanup_{{ sess_sig }}"
                       data-on:click="@post('/command-center/cleanup-worktree', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-cleanup-{{ session.session_id | e }}'}}); $openKebab = ''"><span class="menu-icon">&#128683;</span> Discard session</button>
               <span style="width:32px;"></span>
             </div>
@@ -389,7 +335,7 @@
     <div class="card-attach-strip">
       <span class="card-attach-dot"></span>
       <span class="card-attach-text">{{ session.pending_question.body | truncate(60) }}</span>
-      <button class="card-attach-btn" data-on:click="@get('/command-center/drawer/{{ session.session_id }}')">Attach</button>
+      <button class="card-attach-btn" data-on:click="@post('/command-center/drawer/{{ session.session_id }}')">Attach</button>
     </div>
   {% endfor %}
 
@@ -408,28 +354,18 @@
 
   {# ── Footer actions ── #}
   {% if not card.prs and card.ticket %}
+    {% set footer_menu_key = 'card-' ~ card.key ~ '-footer-' ~ (column_cls | replace('col-', '')) %}
+    {% set footer_menu_id = 'kebab-menu-' ~ card.signal_key ~ '-footer' %}
     <div class="card-actions">
       {% if column_cls == "col-todo" %}
         <button class="strip-primary-btn"
                 id="btn-start-{{ card.ticket.identifier | e }}"
-                data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
+                data-indicator="$busyButtons.start_{{ card.ticket.identifier | replace('-', '_') | e }}"
                 data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}})">Start</button>
-        <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                data-on:click="@post('/command-center/launch-background',
-                                     {payload: {card_key: '{{ card.key | e }}',
-                                                btn_id: 'btn-launch-{{ card.key | e }}',
-                                                skill: 'plan'}})">
-          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Plan</span>
-          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-        </button>
+        {{ launch_button(card, label="Plan", slot="footer-todo", skill="plan") }}
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
-                data-on:click="$openKebab = $openKebab === 'card-{{ card.key }}-footer-todo' ? '' : 'card-{{ card.key }}-footer-todo'"
-                data-attr:aria-expanded="$openKebab === 'card-{{ card.key }}-footer-todo'">&#8942;</button>
-        <div class="strip-menu"
-             data-class:open="$openKebab === 'card-{{ card.key }}-footer-todo'">
+        {{ kebab_toggle(footer_menu_key, controls_id=footer_menu_id) }}
+        {{ kebab_menu_open(footer_menu_key, menu_id=footer_menu_id) }}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
             <span class="menu-col-header-copy">&#128203;</span>
@@ -438,19 +374,16 @@
             <div class="menu-section-label">Zing</div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      id="btn-start-{{ card.ticket.identifier | e }}"
-                      data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
+                      id="btn-start-kebab-{{ card.ticket.identifier | e }}"
+                      data-indicator="$busyButtons.start_{{ card.ticket.identifier | replace('-', '_') | e }}"
                       data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}}); $openKebab = ''"><span class="menu-icon">&#9654;</span> Start Ticket</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'plan'}}); $openKebab = ''"><span class="menu-icon">&#128221;</span> Plan</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-todo-plan-menu', skill: 'plan'}}); $openKebab = ''"><span class="menu-icon">&#128221;</span> Plan</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
@@ -463,32 +396,11 @@
           </div>
         </div>
       {% elif column_cls == "col-progress" %}
-        <button id="btn-launch-{{ card.key | e }}" class="strip-primary-btn"
-                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                data-on:click="@post('/command-center/launch-background',
-                                     {payload: {card_key: '{{ card.key | e }}',
-                                                btn_id: 'btn-launch-{{ card.key | e }}',
-                                                skill: 'build'}})">
-          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Build</span>
-          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-        </button>
-        <button class="strip-primary-btn"
-                data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                data-on:click="@post('/command-center/launch-background',
-                                     {payload: {card_key: '{{ card.key | e }}',
-                                                btn_id: 'btn-launch-{{ card.key | e }}',
-                                                skill: 'plan'}})">
-          <span data-show="!$busyButtons.launch_{{ card_launch_sig }}">Plan</span>
-          <span data-show="$busyButtons.launch_{{ card_launch_sig }}">&#9203; Launching&#8230;</span>
-        </button>
+        {{ launch_button(card, label="Build", slot="footer-progress-build", skill="build") }}
+        {{ launch_button(card, label="Plan", slot="footer-progress-plan", skill="plan") }}
         <span class="strip-spacer"></span>
-        <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true"
-                data-on:click="$openKebab = $openKebab === 'card-{{ card.key }}-footer-progress' ? '' : 'card-{{ card.key }}-footer-progress'"
-                data-attr:aria-expanded="$openKebab === 'card-{{ card.key }}-footer-progress'">&#8942;</button>
-        <div class="strip-menu"
-             data-class:open="$openKebab === 'card-{{ card.key }}-footer-progress'">
+        {{ kebab_toggle(footer_menu_key, controls_id=footer_menu_id) }}
+        {{ kebab_menu_open(footer_menu_key, menu_id=footer_menu_id) }}
           <div class="menu-col-header">
             <span class="menu-col-header-label">Action</span>
             <span class="menu-col-header-copy">&#128203;</span>
@@ -497,54 +409,39 @@
             <div class="menu-section-label">Zing</div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'build'}}); $openKebab = ''"><span class="menu-icon">&#128296;</span> Build</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-build-menu', skill: 'build'}}); $openKebab = ''"><span class="menu-icon">&#128296;</span> Build</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'plan'}}); $openKebab = ''"><span class="menu-icon">&#128221;</span> Plan</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-plan-menu', skill: 'plan'}}); $openKebab = ''"><span class="menu-icon">&#128221;</span> Plan</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'plan-audit'}}); $openKebab = ''"><span class="menu-icon">&#128269;</span> Plan Audit</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-plan-audit-menu', skill: 'plan-audit'}}); $openKebab = ''"><span class="menu-icon">&#128269;</span> Plan Audit</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-audit ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'plan-linear'}}); $openKebab = ''"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-plan-linear-menu', skill: 'plan-linear'}}); $openKebab = ''"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-linear ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             <div class="menu-section-label">Other</div>
             <div class="menu-row">
               <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card_launch_sig }}"
-                      data-on:click="@post('/command-center/launch-background',
-                                           {payload: {card_key: '{{ card.key | e }}',
-                                                      btn_id: 'btn-launch-{{ card.key | e }}',
-                                                      skill: 'setup-only'}}); $openKebab = ''"><span class="menu-icon">&#128736;</span> Setup Env</button>
+                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
+                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
+                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ card.key | e }}', btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-setup-menu', skill: 'setup-only'}}); $openKebab = ''"><span class="menu-icon">&#128736;</span> Setup Env</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
@@ -570,7 +467,7 @@
       {# Compute elapsed: difference between now (via created_at of last step, or session) and session start ── #}
       {% set _state_val = _sess.state.value %}
       {% set _status_label = "done" if _state_val == "completed" else ("stopped" if _state_val == "stopped" else _state_val) %}
-      <div class="card-session-strip" data-on:click="@get('/command-center/drawer/{{ _sess.session_id }}')" style="cursor:pointer">
+      <div class="card-session-strip" data-on:click="@post('/command-center/drawer/{{ _sess.session_id }}')" style="cursor:pointer">
         <div class="card-session-phases">
           {% if session_phases and _sess.session_id in session_phases and session_phases[_sess.session_id] %}
             {{ phase_strip(session_phases[_sess.session_id], prefix="css") }}
@@ -584,7 +481,7 @@
     {% elif card.sessions %}
       {# ClaudeCodeSession with history but no active action ── #}
       {% set _sess = card.sessions[0] %}
-      <div class="card-session-strip" data-on:click="@get('/command-center/drawer/{{ _sess.session_id }}')" style="cursor:pointer">
+      <div class="card-session-strip" data-on:click="@post('/command-center/drawer/{{ _sess.session_id }}')" style="cursor:pointer">
         <div class="card-session-phases">
           <div class="css-seg css-b" style="flex:1"></div>
         </div>

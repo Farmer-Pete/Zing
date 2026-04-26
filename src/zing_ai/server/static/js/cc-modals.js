@@ -35,14 +35,11 @@ function mountModal(opts) {
     return { open: open, close: close };
 }
 
-// Repo chooser modal — close-only wiring; opening is handled by Datastar signal $modals.repoChooser.
-mountModal({
-    modal: document.getElementById('repo-chooser-modal'),
-    backdrop: document.getElementById('repo-chooser-backdrop'),
-    closeBtn: document.getElementById('repo-chooser-close'),
-});
-
-// Terminal modal
+// Terminal modal — sole owner of the iframe lifecycle.
+// Both the X button (modal.style.display) and the body-level signal-patch
+// watcher (which dispatches 'close-terminal') route through ctl.close() so the
+// onClose hook runs exactly once and the IIFE-scoped iframe variable stays in
+// sync with the DOM (no stale-reference bug on reopen).
 (function() {
     var modal = document.getElementById('terminal-modal');
     var iframe = document.getElementById('terminal-modal-iframe');
@@ -71,15 +68,22 @@ mountModal({
         iframe.src = url;
         ctl.open();
     };
-})();
 
-// Datastar signal-watcher entry point: the #terminal-launcher div fires
-// dispatchOpenTerminal($terminalUrl) via data-on-signal-patch, which dispatches
-// this event.
-document.addEventListener('open-terminal', function(e) {
-    var url = e.detail && e.detail.url;
-    if (url) window.openTerminal(url);
-});
+    // Datastar signal-watcher entry point: the #terminal-launcher div fires
+    // dispatchOpenTerminal($terminalUrl) via data-on-signal-patch, which dispatches
+    // this event.
+    document.addEventListener('open-terminal', function(e) {
+        var url = e.detail && e.detail.url;
+        if (url) window.openTerminal(url);
+    });
+
+    // Body-level signal-patch watcher dispatches 'close-terminal' when
+    // $modals.terminal flips to false. Route through ctl.close() so the IIFE's
+    // iframe ref is kept consistent — never a parallel teardown path.
+    document.addEventListener('close-terminal', function() {
+        ctl.close();
+    });
+})();
 
 // Standup copy: dispatched by the Copy button via dispatchCopyStandup($standupHtml, $standupMarkdown).
 document.addEventListener('copy-standup', function(e) {
@@ -101,15 +105,4 @@ document.addEventListener('copy-standup', function(e) {
             setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
         }
     });
-});
-
-// Terminal close: dispatched by the .cc-page signal-patch watcher when
-// $modals.terminal flips false. Tears down the iframe to avoid "Leave site?" dialog.
-document.addEventListener('close-terminal', function() {
-    var modal = document.getElementById('terminal-modal');
-    var backdrop = document.getElementById('terminal-modal-backdrop');
-    var iframe = document.getElementById('terminal-modal-iframe');
-    if (modal) modal.style.display = 'none';
-    if (backdrop) backdrop.style.display = 'none';
-    if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
 });

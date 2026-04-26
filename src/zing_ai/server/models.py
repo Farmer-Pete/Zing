@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
+
+# Replace any character outside [A-Za-z0-9_] with `_` so the resulting string is
+# safe to use as a JavaScript identifier suffix (e.g. as a key inside the
+# Datastar ``$busyButtons`` signal proxy).
+_SIGNAL_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _to_signal_key(value: str) -> str:
+    """Sanitise *value* for inclusion in a Datastar signal-property name."""
+    return _SIGNAL_KEY_RE.sub("_", value)
 
 
 class Location(BaseModel):
@@ -291,6 +302,15 @@ class SessionBase(BaseModel):
     title: str
     ticket_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`session_id` sanitised for use as a Datastar signal name.
+
+        Same purpose as :attr:`KanbanCard.signal_key` — see that property's
+        docstring for the rationale.
+        """
+        return _to_signal_key(self.session_id)
 
 
 class ZingSession(SessionBase):

@@ -40,7 +40,7 @@ The web server (`src/zing_ai/server/`) renders Jinja templates and pushes update
 
 **Decision tree for new interactions.**
 
-- Server data or persistence? → server endpoint, decorate with `@datastar_response`, `yield` an async generator that emits `SSE.patch_elements` / `SSE.patch_signals`. Use the helpers `sse_toast(message, kind)` and `sse_btn_state(button_id, label, *, kind, reset_html=...)` from `src/zing_ai/server/sse_helpers.py`.
+- Server data or persistence? → server endpoint, decorate with `@datastar_response`, `yield` an async generator that emits `SSE.patch_elements` / `SSE.patch_signals`. Use the helpers `sse_toast(message, kind)` and `sse_btn_state(button_id, label, *, kind)` from `src/zing_ai/server/sse_helpers.py`. Reset the button's busy state by yielding `SSE.patch_signals({"busyButtons": {f"<verb>_<sig>": False}})` rather than snapshotting the original HTML.
 - Pure UI state (modal open, kebab open, tab selection, accordion expand)? → `data-signals` + `data-show` / `data-class` / `data-text`. View-local state lives on the page or fragment that owns it; never round-trip the server.
 - Browser API only (clipboard, notifications, iframe lifecycle)? → small JS file, dispatched via a named `window.dispatchX(...)` function called from a `data-on:click` so templates stay declarative.
 
