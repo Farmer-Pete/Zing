@@ -944,6 +944,12 @@ def build_drawer_context(
                     action_val = current_step.responses[idx].action.value
                 saved_triage_responses[finding.id] = action_val
 
+    # Build the openSteps signal dict for the step-section accordion.
+    # Default: all past steps closed; current step open (if present).
+    saved_open_steps: dict[str, bool] = {}
+    if current_step is not None:
+        saved_open_steps[current_step.step_id] = True
+
     return {
         "session": session,
         "steps": steps,
@@ -959,6 +965,7 @@ def build_drawer_context(
         "notification": notification,
         "notification_body": notification_body,
         "saved_triage_responses": saved_triage_responses,
+        "saved_open_steps": saved_open_steps,
     }
 
 

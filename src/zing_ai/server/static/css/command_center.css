@@ -1498,6 +1498,13 @@ body.drawer-open .mgmt-fab {
     cursor: pointer;
     user-select: none;
     transition: background 0.1s;
+    /* button reset — step-hdr is now a <button> */
+    width: 100%;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
 }
 
 .step-hdr:hover {

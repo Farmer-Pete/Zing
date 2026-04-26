@@ -109,6 +109,60 @@ def test_drawer_triage_button_toggles_state(server: _ServerInfo, page: Page) -> 
     expect(counter).to_have_text("1", timeout=3000)
 
 
+def test_drawer_step_toggle_accordion(server: _ServerInfo, page: Page) -> None:
+    """Clicking a past-step header expands and collapses the step-content via Datastar signals."""
+    cache = server.external_cache
+    cache.issues = [
+        LinearIssue(
+            id="linear-uuid-accordion",
+            identifier="BAK-2099",
+            title="Accordion test",
+            state="In Progress",
+            state_type="started",
+            assignee=None,
+            team="Backend",
+            url="https://linear.app/test/issue/BAK-2099",
+            updated_at=datetime.now(tz=UTC),
+        )
+    ]
+
+    manager = server.manager
+    # Two steps: plan (completes when build-audit starts) + build-audit (current/ready).
+    session = manager.create_session(
+        session_id="accordion-1", title="Accordion test", steps=["plan", "build-audit"]
+    )
+    manager.update_session("accordion-1", ticket_id="BAK-2099")
+    plan_step = session.steps[0]
+    audit_step = session.steps[1]
+
+    manager.start_step("accordion-1", plan_step.step_id)
+    manager.mark_step_ready("accordion-1", plan_step.step_id)
+    # Starting audit auto-completes plan.
+    manager.start_step("accordion-1", audit_step.step_id)
+    manager.add_finding(
+        "accordion-1",
+        audit_step.step_id,
+        {"type": "triage", "id": "f-acc", "title": "Accordion finding"},
+    )
+    manager.mark_step_ready("accordion-1", audit_step.step_id)
+
+    _open_drawer(server, page)
+
+    # The plan step-section should be present (past step) and initially collapsed.
+    past_section = page.locator(f"#step-section-{plan_step.step_id}")
+    expect(past_section).to_be_visible(timeout=5000)
+    # step-content is display:none when .open is absent; confirm collapsed.
+    expect(past_section.locator(".step-content")).to_be_hidden(timeout=3000)
+
+    # Click the toggle button to expand.
+    past_section.locator("button[data-step-toggle]").click()
+    expect(past_section.locator(".step-content")).to_be_visible(timeout=3000)
+
+    # Click again to collapse.
+    past_section.locator("button[data-step-toggle]").click()
+    expect(past_section.locator(".step-content")).to_be_hidden(timeout=3000)
+
+
 def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> None:
     """Submit & Next POSTs to /{session_id}/submit with the gathered responses
     and marks the step COMPLETED on the server."""
