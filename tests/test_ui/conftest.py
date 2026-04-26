@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+from fastapi import FastAPI
 
 from zing_ai.server.app import create_app
 from zing_ai.server.external_cache import ExternalCache
@@ -17,7 +18,7 @@ from zing_ai.server.sessions import SessionManager
 
 
 class _ServerInfo:
-    """Holds the base URL, session manager, external cache, and SSE queues for a test server."""
+    """Holds the base URL, session manager, external cache, SSE queues, and FastAPI app."""
 
     def __init__(
         self,
@@ -25,11 +26,13 @@ class _ServerInfo:
         manager: SessionManager,
         external_cache: ExternalCache,
         cc_queues: list[asyncio.Queue[str]],
+        fastapi_app: FastAPI,
     ) -> None:
         self.base_url = base_url
         self.manager = manager
         self.external_cache = external_cache
         self.cc_queues = cc_queues
+        self.fastapi_app = fastapi_app
 
 
 @pytest.fixture(scope="session")
@@ -49,6 +52,12 @@ def ui_server() -> Generator[_ServerInfo]:
         cc_queues=cc_queues,
         disable_polling=True,
     )
+
+    # Navigate the ASGI middleware chain to the inner FastAPI app so tests can
+    # inspect or mutate app.state (e.g. inject a mock poller).
+    # Chain: MCPDebugMiddleware -> Starlette -> Mount("/", app=FastAPI)
+    _starlette = app.app  # type: ignore[attr-defined]
+    _fastapi_app: FastAPI = _starlette.routes[-1].app  # type: ignore[attr-defined]
 
     # Use port 0 to let the OS assign a free port
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
@@ -70,6 +79,7 @@ def ui_server() -> Generator[_ServerInfo]:
         manager=manager,
         external_cache=external_cache,
         cc_queues=cc_queues,
+        fastapi_app=_fastapi_app,
     )
 
     server.should_exit = True

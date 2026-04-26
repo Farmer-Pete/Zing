@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.consts import ElementPatchMode
+from datastar_py.sse import DatastarEvent
 
 
 def sse_toast(
@@ -20,7 +21,7 @@ def sse_toast(
     kind: Literal["ok", "err", "info"] = "info",
     *,
     toast_id: str | None = None,
-) -> str:
+) -> DatastarEvent:
     """Yield an APPEND patch that adds a toast to #cc-toast-container.
 
     Toast self-removes after 5s via data-on-load__delay.5000ms (Decision #2).
@@ -28,7 +29,7 @@ def sse_toast(
     tid = toast_id or f"toast-{uuid4().hex[:8]}"
     html = (
         f'<div id="{tid}" class="cc-toast cc-toast-{kind}" '
-        f'data-on-load__delay.5000ms="el.remove()">'
+        f'data-init__delay.5000ms="el.remove()">'
         f"{html_escape(message)}</div>"
     )
     return SSE.patch_elements(html, selector="#cc-toast-container", mode=ElementPatchMode.APPEND)
@@ -42,7 +43,7 @@ def sse_btn_state(
     disabled: bool = False,
     reset_html: str | None = None,
     reset_after_ms: int = 2000,
-) -> str:
+) -> DatastarEvent:
     """Yield an OUTER patch replacing the button.
 
     For post-completion ok/err copy. If reset_html is provided, the patched

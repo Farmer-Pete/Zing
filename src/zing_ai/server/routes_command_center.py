@@ -42,10 +42,14 @@ from zing_ai.server.command_center import (
 )
 from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Guards against concurrent manual-refresh clicks (Decision #22).
+_refresh_lock = asyncio.Lock()
 
 
 def _format_last_polled(dt: datetime | None) -> str:
@@ -313,17 +317,26 @@ async def command_center_events(request: Request):  # noqa: ANN201
 
 
 @router.post("/command-center/refresh")
-async def refresh_command_center(request: Request) -> JSONResponse:
+@datastar_response
+async def refresh_command_center(request: Request):  # noqa: ANN201
     """Trigger an immediate poll of Linear/GitHub and refresh the board."""
     poller = getattr(request.app.state, "poller", None)
-    if poller is None:
-        return JSONResponse({"error": "Poller not available"}, status_code=503)
-    try:
-        await poller._poll_once()  # noqa: SLF001
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Manual refresh failed: %s", exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse({"status": "refreshed"})
+
+    async def _stream():  # noqa: ANN202
+        if poller is None:
+            yield _sse_toast("Poller not available", "err")
+            return
+        if _refresh_lock.locked():
+            yield _sse_toast("Refresh already in progress", "info")
+            return
+        async with _refresh_lock:
+            try:
+                await poller._poll_once()  # noqa: SLF001
+                yield _sse_toast("Refreshed", "ok")
+            except Exception as e:  # noqa: BLE001
+                yield _sse_toast(str(e), "err")
+
+    return _stream()
 
 
 @router.get("/command-center/standup")

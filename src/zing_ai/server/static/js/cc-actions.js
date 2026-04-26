@@ -36,24 +36,6 @@ document.addEventListener('click', function (e) {
         });
 });
 
-// Toolbar Refresh button — POST and flash a confirmation.
-document.addEventListener('click', function (e) {
-    var btn = e.target.closest('[data-cc-refresh]');
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = 'Refreshing\u2026';
-    function reset(label) {
-        btn.textContent = label;
-        setTimeout(function () {
-            btn.innerHTML = '&#x21BB; Refresh';
-            btn.disabled = false;
-        }, 1500);
-    }
-    fetch('/command-center/refresh', { method: 'POST' })
-        .then(function (r) { reset(r.ok ? '\u2713 Refreshed' : 'Failed'); })
-        .catch(function () { reset('Failed'); });
-});
-
 // Open external URLs from data-open-url attributes (replaces inline onclick)
 document.addEventListener('click', function(e) {
     var btn = e.target.closest('[data-open-url]');

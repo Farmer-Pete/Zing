@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="cc-page"
-     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
+     data-signals='{{ {"lastPolledLabel": last_polled_label or "", "lastError": last_error or "", "launchingCards": [], "attnBarOpen": true, "toast": none, "busyButtons": {"refresh": false}, "modals": {"drawer": false, "mgmt": false, "standup": false, "terminal": false, "repoChooser": false}, "openKebab": none, "kebabQuery": "", "standupTab": "rendered", "standupHtml": "", "standupMarkdown": "", "terminalUrl": ""} | tojson }}'
      data-init="@get('/command-center/events')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
@@ -20,7 +20,10 @@
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
         <button class="cc-refresh-btn" id="cc-standup-btn" data-cc-standup>&#x270D; Standup</button>
-        <button class="cc-refresh-btn" id="cc-refresh-btn" data-cc-refresh>&#x21BB; Refresh</button>
+        <button class="cc-refresh-btn" id="btn-refresh"
+                data-on:click="@post('/command-center/refresh')"
+                data-indicator="$busyButtons.refresh"
+                data-attr:disabled="$busyButtons.refresh">&#x21BB; Refresh</button>
     </div>
 
 {% include 'fragments/attention_bar.html' %}

@@ -43,6 +43,12 @@ class TestSseToast(unittest.TestCase):
         self.assertIn("data: selector #cc-toast-container", result)
         self.assertIn("data: mode append", result)
 
+    def test_toast_uses_data_init_delay_for_self_removal(self) -> None:
+        """Toast element uses data-init__delay.5000ms to self-remove after 5 s."""
+        result = sse_toast("bye")
+        self.assertIn("data-init__delay.5000ms=", result)
+        self.assertIn("el.remove()", result)
+
 
 class TestSseBtnState(unittest.TestCase):
     """Tests for sse_btn_state()."""
