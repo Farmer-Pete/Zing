@@ -234,7 +234,10 @@
               <button class="menu-row-copy" data-copy-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}">&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-cleanup-session="{{ session.session_id | e }}"><span class="menu-icon">&#128683;</span> Discard session</button>
+              <button id="btn-cleanup-{{ session.session_id | e }}"
+                      class="menu-row-main"
+                      data-indicator="$busyButtons.cleanup_{{ session.session_id | e }}"
+                      data-on:click="@post('/command-center/cleanup-worktree', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-cleanup-{{ session.session_id | e }}'}}); $openKebab = null"><span class="menu-icon">&#128683;</span> Discard session</button>
               <span style="width:32px;"></span>
             </div>
           </div>

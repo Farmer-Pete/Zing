@@ -702,38 +702,39 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
 
 
 @router.post("/command-center/cleanup-worktree")
-async def cleanup_worktree(request: Request) -> JSONResponse:
+@datastar_response
+async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Roll back a worktree and remove the session record."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     session_id = payload.get("session_id")
-    if not session_id:
-        return JSONResponse({"error": "session_id is required"}, status_code=400)
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
 
-    if session is None or not isinstance(session, ClaudeCodeSession) or not session.worktree_path:
-        return JSONResponse({"error": "session not found"}, status_code=404)
+    async def _stream():  # noqa: ANN202
+        if not session_id:
+            yield _sse_toast("session_id is required", "err")
+            return
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if (
+            session is None
+            or not isinstance(session, ClaudeCodeSession)
+            or not session.worktree_path
+        ):
+            yield _sse_toast("Session not found", "err")
+            return
+        live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
+        if session.terminal_session and session.terminal_session in live_sessions:
+            yield _sse_toast("Cannot clean up worktree while session is running", "err")
+            return
+        try:
+            rollback_worktree(Path(session.worktree_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
+            yield _sse_toast(str(exc), "err")
+            return
+        manager.cleanup_session(session_id)
+        _push_board_changed(request.app)
+        yield _sse_toast("Worktree cleaned up", "ok")
 
-    live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
-    if session.terminal_session and session.terminal_session in live_sessions:
-        return JSONResponse(
-            {"error": "Cannot clean up worktree while session is running"},
-            status_code=409,
-        )
-
-    try:
-        rollback_worktree(Path(session.worktree_path))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-    manager.cleanup_session(session_id)
-    _push_board_changed(request.app)
-    return JSONResponse({"status": "cleaned_up"})
+    return _stream()
 
 
 @router.post("/command-center/session-question")

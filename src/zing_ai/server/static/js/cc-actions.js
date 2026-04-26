@@ -225,26 +225,6 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
-// Cleanup/discard stopped session
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-cleanup-session]');
-    if (!btn) return;
-    var sessionId = btn.getAttribute('data-cleanup-session');
-    fetch('/command-center/cleanup-worktree', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sessionId})
-    }).then(function(resp) {
-        return resp.json().then(function(data) {
-            if (!resp.ok) showToast(data.error || 'Cleanup failed', 'error');
-            else showToast('Session discarded', 'success');
-        });
-    }).catch(function(err) {
-        showToast('Cleanup failed: ' + err.message, 'error');
-    });
-    closeAllMenus();
-});
-
 // Resume stopped session
 document.addEventListener('click', function(e) {
     var btn = e.target.closest('[data-resume-session]');
