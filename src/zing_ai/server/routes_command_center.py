@@ -946,57 +946,75 @@ def build_drawer_context(
     }
 
 
-@router.get("/command-center/drawer/{session_id}", response_class=HTMLResponse)
-async def get_drawer(session_id: str, request: Request) -> HTMLResponse:
-    """Return the drawer HTML fragment for a session.
+@router.get("/command-center/drawer/{session_id}")
+@datastar_response
+async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
+    """Return the drawer HTML fragment for a session via SSE.
 
-    The fragment includes backdrop + panel.  The JS injects it into
-    #review-drawer-container and sets display:block.
+    Patches the fragment into #review-drawer-container and opens the drawer
+    by setting modals.drawer = true in the Datastar signals.
     """
-    manager = request.app.state.session_manager
-    sessions = manager.list_sessions()
-    attention_queue = build_attention_queue(sessions, datetime.now(UTC))
 
-    ctx = build_drawer_context(session_id, manager, attention_queue)
-    if not ctx:
-        logger.warning("Drawer requested for unknown session: %s", session_id)
-        return HTMLResponse("<div>Session not found</div>", status_code=404)
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        sessions = manager.list_sessions()
+        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
 
-    session = ctx["session"]
+        ctx = build_drawer_context(session_id, manager, attention_queue)
+        if not ctx:
+            logger.warning("Drawer requested for unknown session: %s", session_id)
+            yield _sse_toast("Session not found", "err")
+            return
 
-    if isinstance(session, ClaudeCodeSession):
-        # Attach mode — use the simpler attach template.
-        html = render("fragments/drawer_attach.html", **ctx)
-    else:
-        # Findings/questions mode.
-        html = render("fragments/review_drawer.html", **ctx)
+        session = ctx["session"]
 
-    return HTMLResponse(html)
+        if isinstance(session, ClaudeCodeSession):
+            # Attach mode — use the simpler attach template.
+            html = render("fragments/drawer_attach.html", **ctx)
+        else:
+            # Findings/questions mode.
+            html = render("fragments/review_drawer.html", **ctx)
+
+        yield SSE.patch_elements(
+            html,
+            selector="#review-drawer-container",
+            mode=ElementPatchMode.INNER,
+        )
+        yield SSE.patch_signals({"modals": {"drawer": True}})
+
+    return _stream()
 
 
 @router.get(
     "/command-center/drawer/{session_id}/step/{step_id}",
-    response_class=HTMLResponse,
 )
-async def get_drawer_step(
-    session_id: str,
-    step_id: str,
-    request: Request,
-) -> HTMLResponse:
-    """Return a single step-history fragment for the drawer.
+@datastar_response
+async def get_drawer_step(session_id: str, step_id: str, request: Request):  # noqa: ANN201
+    """Return a single step-history fragment for the drawer via SSE.
 
-    The JS can inject individual step sections when expanding collapsed history.
+    Patches the step section into #review-drawer-container and opens the drawer.
     """
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
-    if session is None or not isinstance(session, ZingSession):
-        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-        return HTMLResponse("<div>Session not found</div>", status_code=404)
 
-    step = next((s for s in session.steps if s.step_id == step_id), None)
-    if step is None:
-        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-        return HTMLResponse("<div>Step not found</div>", status_code=404)
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if session is None or not isinstance(session, ZingSession):
+            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+            yield _sse_toast("Session not found", "err")
+            return
 
-    html = render("fragments/drawer_step_history.html", step=step, session=session)
-    return HTMLResponse(html)
+        step = next((s for s in session.steps if s.step_id == step_id), None)
+        if step is None:
+            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+            yield _sse_toast("Step not found", "err")
+            return
+
+        html = render("fragments/drawer_step_history.html", step=step, session=session)
+        yield SSE.patch_elements(
+            html,
+            selector="#review-drawer-container",
+            mode=ElementPatchMode.INNER,
+        )
+        yield SSE.patch_signals({"modals": {"drawer": True}})
+
+    return _stream()
