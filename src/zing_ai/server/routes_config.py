@@ -6,6 +6,8 @@ import sys
 from collections import OrderedDict
 from typing import Any
 
+from datastar_py import ServerSentEventGenerator as SSE
+from datastar_py.fastapi import datastar_response
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from filelock import Timeout
@@ -67,6 +69,16 @@ def get_config_page(request: Request) -> HTMLResponse:
     cache = request.app.state.external_cache  # type: ignore[attr-defined]
     excluded = set(cfg.command_center.github_excluded_repos)
     github_repo_groups = _group_repos(cache.github_repos, excluded)
+    # Initial signal state for Datastar bindings on the repo checkboxes.
+    # Signal names must be valid JS identifiers — replace "/" with "__".
+    repo_groups_signals: dict[str, bool] = {
+        owner: all(r["enabled"] for r in repos) for owner, repos in github_repo_groups.items()
+    }
+    repos_signals: dict[str, bool] = {
+        str(r["name"]).replace("/", "__"): bool(r["enabled"])
+        for repos in github_repo_groups.values()
+        for r in repos
+    }
     return HTMLResponse(
         render(
             "config.html",
@@ -75,6 +87,8 @@ def get_config_page(request: Request) -> HTMLResponse:
             current_path="/config",
             config_error=config_error,
             github_repo_groups=github_repo_groups,
+            repo_groups_signals=repo_groups_signals,
+            repos_signals=repos_signals,
         )
     )
 
@@ -122,53 +136,74 @@ def get_github_repos(request: Request) -> JSONResponse:
 
 
 @router.post("/config/github-repos/toggle")
-def post_toggle_github_repo(payload: dict[str, Any]) -> JSONResponse:
-    """Toggle a repo's inclusion in polling."""
+@datastar_response
+async def post_toggle_github_repo(payload: dict[str, Any]):  # noqa: ANN201
+    """Toggle a repo's inclusion in polling. Returns SSE so Datastar can process it."""
     repo = payload.get("repo", "")
     enabled = payload.get("enabled", True)
-    if not repo:
-        return JSONResponse({"error": "repo is required"}, status_code=400)
-    try:
-        cfg = load_config()
-    except ConfigError as e:
-        return JSONResponse({"error": str(e)}, status_code=422)
-    excluded = set(cfg.command_center.github_excluded_repos)
-    if enabled:
-        excluded.discard(repo)
-    else:
-        excluded.add(repo)
-    cfg.command_center.github_excluded_repos = sorted(excluded)
-    try:
-        save_config(cfg)
-    except Timeout:
-        return JSONResponse({"error": "config is locked, try again"}, status_code=503)
-    return JSONResponse({"status": "ok"})
 
-
-@router.post("/config/github-repos/toggle-group")
-def post_toggle_github_repo_group(request: Request, payload: dict[str, Any]) -> JSONResponse:
-    """Toggle all repos under an owner prefix."""
-    owner = payload.get("owner", "")
-    enabled = payload.get("enabled", True)
-    if not owner:
-        return JSONResponse({"error": "owner is required"}, status_code=400)
-    cache = request.app.state.external_cache  # type: ignore[attr-defined]
-    group_repos = [r for r in cache.github_repos if r.partition("/")[0] == owner]
-    if not group_repos:
-        return JSONResponse({"error": f"no repos for owner: {owner}"}, status_code=404)
-    try:
-        cfg = load_config()
-    except ConfigError as e:
-        return JSONResponse({"error": str(e)}, status_code=422)
-    excluded = set(cfg.command_center.github_excluded_repos)
-    for repo in group_repos:
+    async def _stream():  # noqa: ANN202
+        if not repo:
+            yield SSE.patch_signals({"_toggleError": "repo is required"})
+            return
+        try:
+            cfg = load_config()
+        except ConfigError as e:
+            yield SSE.patch_signals({"_toggleError": str(e)})
+            return
+        excluded = set(cfg.command_center.github_excluded_repos)
         if enabled:
             excluded.discard(repo)
         else:
             excluded.add(repo)
-    cfg.command_center.github_excluded_repos = sorted(excluded)
-    try:
-        save_config(cfg)
-    except Timeout:
-        return JSONResponse({"error": "config is locked, try again"}, status_code=503)
-    return JSONResponse({"status": "ok", "repos": group_repos})
+        cfg.command_center.github_excluded_repos = sorted(excluded)
+        try:
+            save_config(cfg)
+        except Timeout:
+            yield SSE.patch_signals({"_toggleError": "config is locked, try again"})
+            return
+        sig_name = repo.replace("/", "__")
+        yield SSE.patch_signals({"repos": {sig_name: bool(enabled)}})
+
+    return _stream()
+
+
+@router.post("/config/github-repos/toggle-group")
+@datastar_response
+async def post_toggle_github_repo_group(  # noqa: ANN201
+    request: Request, payload: dict[str, Any]
+):
+    """Toggle all repos under an owner prefix. Returns SSE so Datastar can process it."""
+    owner = payload.get("owner", "")
+    enabled = payload.get("enabled", True)
+
+    async def _stream():  # noqa: ANN202
+        if not owner:
+            yield SSE.patch_signals({"_toggleError": "owner is required"})
+            return
+        cache = request.app.state.external_cache  # type: ignore[attr-defined]
+        group_repos = [r for r in cache.github_repos if r.partition("/")[0] == owner]
+        if not group_repos:
+            yield SSE.patch_signals({"_toggleError": f"no repos for owner: {owner}"})
+            return
+        try:
+            cfg = load_config()
+        except ConfigError as e:
+            yield SSE.patch_signals({"_toggleError": str(e)})
+            return
+        excluded = set(cfg.command_center.github_excluded_repos)
+        for repo in group_repos:
+            if enabled:
+                excluded.discard(repo)
+            else:
+                excluded.add(repo)
+        cfg.command_center.github_excluded_repos = sorted(excluded)
+        try:
+            save_config(cfg)
+        except Timeout:
+            yield SSE.patch_signals({"_toggleError": "config is locked, try again"})
+            return
+        repos_signals = {r.replace("/", "__"): bool(enabled) for r in group_repos}
+        yield SSE.patch_signals({"repoGroups": {owner: bool(enabled)}, "repos": repos_signals})
+
+    return _stream()
