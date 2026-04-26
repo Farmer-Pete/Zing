@@ -36,30 +36,7 @@ document.addEventListener('click', function (e) {
         });
 });
 
-// Open external URLs from data-open-url attributes (replaces inline onclick)
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-open-url]');
-    if (!btn) return;
-    window.open(btn.getAttribute('data-open-url'), '_blank');
-    closeAllMenus();
-});
 
-// Copy-to-clipboard for kebab menu copy buttons
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-copy-cmd]');
-    if (!btn) return;
-    var cmd = btn.getAttribute('data-copy-cmd');
-    var original = btn.innerHTML;
-    navigator.clipboard.writeText(cmd).then(function() {
-        btn.innerHTML = '&#10003;';
-        btn.classList.add('copied');
-        setTimeout(function() {
-            btn.innerHTML = original;
-            btn.classList.remove('copied');
-        }, 1500);
-    });
-    closeAllMenus();
-});
 
 // Repo chooser: shows a popup when the server can't determine which repo to use.
 // After the user picks, retries the original request with the chosen repo.

@@ -108,9 +108,9 @@
         {% if pr.merged_at %}
           {# Merged: links only #}
           <div class="menu-items">
-            <button class="menu-row-link" data-open-url="{{ pr.url | e }}"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="menu-row-link" data-on:click='window.open({{ pr.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open on GitHub</button>
             {% if card.ticket %}
-              <button class="menu-row-link" data-open-url="{{ card.ticket.url | e }}"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+              <button class="menu-row-link" data-on:click='window.open({{ card.ticket.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open in Linear</button>
             {% endif %}
           </div>
         {% else %}
@@ -128,7 +128,7 @@
               <div class="menu-section-label">Respond</div>
               <div class="menu-row">
                 <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-respond" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Respond" data-s="respond to feedback"><span class="menu-icon">&#9997;</span> Respond<br><span class="menu-desc">Address review comments, fix CI, push</span></button>
-                <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-respond {{ pr.url | e }}">&#128203;</button>
+                <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-respond ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
               </div>
               <div class="strip-menu-divider"></div>
             {% endif %}
@@ -137,40 +137,40 @@
             {% if not is_author or column_cls == "col-review" %}
               <div class="menu-row">
                 <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Audit" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
-                <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-audit {{ pr.url | e }}">&#128203;</button>
+                <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
               </div>
               {% if column_cls == "col-review" %}
                 <div class="menu-row">
                   <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="pr-audit-visual" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="PR Visual Audit" data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
-                  <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill pr-audit-visual {{ pr.url | e }}">&#128203;</button>
+                  <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill pr-audit-visual ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
                 </div>
               {% endif %}
             {% endif %}
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="build-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Build Audit" data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill build-audit {{ pr.url | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-skill="custom-audit" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Custom Audit" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill custom-audit {{ pr.url | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill custom-audit ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             {# LOCAL section #}
             <div class="menu-section-label">Local</div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Start locally" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ pr.url | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-pr="{{ pr.number }}" data-launch-bg-label="Setup env" data-launch-bg-skill="setup-only" data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --setup-only {{ pr.url | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ pr.url) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             {# LINKS section #}
             <div class="menu-section-label">Links</div>
-            <button class="menu-row-link" data-open-url="{{ pr.url | e }}"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="menu-row-link" data-on:click='window.open({{ pr.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open on GitHub</button>
             {% if card.ticket %}
-              <button class="menu-row-link" data-open-url="{{ card.ticket.url | e }}"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+              <button class="menu-row-link" data-on:click='window.open({{ card.ticket.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open in Linear</button>
             {% endif %}
           </div>
         {% endif %}
@@ -211,7 +211,7 @@
           <div class="menu-items">
             <div class="menu-row">
               <button class="menu-row-main" data-attach-session="{{ session.terminal_session | e }}"><span class="menu-icon">&#9655;</span> Attach</button>
-              <button class="menu-row-copy" data-copy-cmd="tmux attach -t {{ session.terminal_session | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('tmux attach -t ' ~ session.terminal_session) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" id="btn-kill-{{ session.session_id | e }}" data-indicator="$busyButtons.kill_{{ session.session_id | e }}" data-on:click="@post('/command-center/kill-session', {payload: {session_id: '{{ session.session_id | e }}', btn_id: 'btn-kill-{{ session.session_id | e }}'}}); $openKebab = null"><span class="menu-icon">&#128683;</span> Kill session</button>
@@ -237,7 +237,7 @@
                       data-indicator="$busyButtons.resume_{{ session.session_id | e }}"
                       data-attr:disabled="$busyButtons.resume_{{ session.session_id | e }}"
                       data-on:click="@post('/command-center/launch-background', {payload: {card_key: '{{ session.ticket_id | e }}', skill: 'resume', btn_id: 'btn-resume-{{ session.session_id | e }}'}}); $openKebab = null"><span class="menu-icon">&#128260;</span> Resume session</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --resume {{ session.session_id | e }} {{ session.ticket_id | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --resume ' ~ session.session_id ~ ' ' ~ session.ticket_id) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button id="btn-cleanup-{{ session.session_id | e }}"
@@ -313,19 +313,19 @@
                       id="btn-start-{{ card.ticket.identifier | e }}"
                       data-indicator="$busyButtons.start_{{ card.ticket.identifier | e }}"
                       data-on:click="@post('/command-center/start-ticket', {payload: {ticket_id: '{{ card.ticket.identifier | e }}', btn_id: 'btn-start-{{ card.ticket.identifier | e }}'}}); $openKebab = null"><span class="menu-icon">&#9654;</span> Start Ticket</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             <div class="menu-row">
-              <button class="menu-row-main" data-copy-cmd="zing-ai launch {{ card.key | e }}"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-main" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
-            <button class="menu-row-link" data-open-url="{{ card.ticket.url | e }}"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+            <button class="menu-row-link" data-on:click='window.open({{ card.ticket.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open in Linear</button>
           </div>
         </div>
       {% elif column_cls == "col-progress" %}
@@ -342,32 +342,32 @@
             <div class="menu-section-label">Zing</div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Build" data-launch-bg-skill="build"><span class="menu-icon">&#128296;</span> Build</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill build {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill build ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan" data-launch-bg-skill="plan"><span class="menu-icon">&#128221;</span> Plan</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan Audit" data-launch-bg-skill="plan-audit"><span class="menu-icon">&#128269;</span> Plan Audit</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan-audit {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-audit ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Plan &rarr; Linear" data-launch-bg-skill="plan-linear"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --skill plan-linear {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --skill plan-linear ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
             <div class="menu-section-label">Other</div>
             <div class="menu-row">
               <button class="menu-row-main" data-launch-bg="{{ card.key | e }}" data-launch-bg-label="Setup Env" data-launch-bg-skill="setup-only"><span class="menu-icon">&#128736;</span> Setup Env</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch --setup-only {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch --setup-only ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">
-              <button class="menu-row-main" data-copy-cmd="zing-ai launch {{ card.key | e }}"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
-              <button class="menu-row-copy" data-copy-cmd="zing-ai launch {{ card.key | e }}">&#128203;</button>
+              <button class="menu-row-main" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+              <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="strip-menu-divider"></div>
-            <button class="menu-row-link" data-open-url="{{ card.ticket.url | e }}"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+            <button class="menu-row-link" data-on:click='window.open({{ card.ticket.url | tojson }}, "_blank"); $openKebab = null'><span class="menu-icon">&#8599;</span> Open in Linear</button>
           </div>
         </div>
       {% endif %}
