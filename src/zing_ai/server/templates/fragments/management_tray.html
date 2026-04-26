@@ -1,16 +1,18 @@
 {# Management tray: FAB + slide-up panel for session/worktree management #}
-<div class="mgmt-fab" id="mgmt-fab" data-mgmt-toggle>
+<button class="mgmt-fab" id="mgmt-fab"
+        data-on:click="$modals.mgmt = !$modals.mgmt"
+        data-class:hidden="$modals.mgmt">
   {# Terminal/grid icon #}
   &#9881;
   {% if running_count + orphan_count > 0 %}
     <span class="mgmt-badge">{{ running_count + orphan_count }}</span>
   {% endif %}
-</div>
+</button>
 
-<div class="mgmt-panel" id="mgmt-panel">
+<div class="mgmt-panel" id="mgmt-panel" data-class:open="$modals.mgmt">
   <div class="mgmt-panel-header">
     <span class="mgmt-panel-title">Sessions & Worktrees</span>
-    <button class="mgmt-panel-close" data-mgmt-close>&times;</button>
+    <button class="mgmt-panel-close" data-on:click="$modals.mgmt = false">&times;</button>
   </div>
 
   <div class="mgmt-section">

@@ -35,34 +35,3 @@ document.addEventListener('click', function (e) {
             }, 1500);
         });
 });
-
-
-// Management tray FAB toggles the slide-up panel and hides the FAB while open.
-document.addEventListener('click', function (e) {
-    var fab = e.target.closest('[data-mgmt-toggle]');
-    if (!fab) return;
-    var panel = document.getElementById('mgmt-panel');
-    if (!panel) return;
-    panel.classList.toggle('open');
-    fab.classList.toggle('hidden');
-});
-
-// Management tray close button.
-document.addEventListener('click', function (e) {
-    if (!e.target.closest('[data-mgmt-close]')) return;
-    var panel = document.getElementById('mgmt-panel');
-    var fab = document.getElementById('mgmt-fab');
-    if (panel) panel.classList.remove('open');
-    if (fab) fab.classList.remove('hidden');
-});
-
-// ESC to close management tray
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        var panel = document.getElementById('mgmt-panel');
-        if (panel && panel.classList.contains('open')) {
-            panel.classList.remove('open');
-            document.getElementById('mgmt-fab').classList.remove('hidden');
-        }
-    }
-});
