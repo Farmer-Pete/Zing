@@ -299,7 +299,7 @@
       {% endif %}
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
-        <button class="strip-primary-btn strip-primary-btn-blue" data-attach-session="{{ session.terminal_session | e }}">Attach</button>
+        <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ session.session_id | e }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}})">Attach</button>
         <button class="strip-kebab" data-kebab-toggle aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="strip-menu">
           <div class="menu-col-header">
@@ -308,7 +308,7 @@
           </div>
           <div class="menu-items">
             <div class="menu-row">
-              <button class="menu-row-main" data-attach-session="{{ session.terminal_session | e }}"><span class="menu-icon">&#9655;</span> Attach</button>
+              <button class="menu-row-main" id="btn-attach-kebab-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ session.session_id | e }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: '{{ session.terminal_session | e }}'}}); $openKebab = null"><span class="menu-icon">&#9655;</span> Attach</button>
               <button class="menu-row-copy" data-on:click='navigator.clipboard.writeText({{ ('tmux attach -t ' ~ session.terminal_session) | tojson }}); $openKebab = null'>&#128203;</button>
             </div>
             <div class="menu-row">

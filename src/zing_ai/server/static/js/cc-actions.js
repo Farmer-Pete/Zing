@@ -37,41 +37,6 @@ document.addEventListener('click', function (e) {
 });
 
 
-// Attach session (browser via Zellij)
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-attach-session]');
-    if (!btn || btn.disabled) return;
-    var terminalSession = btn.getAttribute('data-attach-session');
-
-    btn.disabled = true;
-    btn.innerHTML = '&#9203; Attaching\u2026';
-
-    fetch('/command-center/attach-session', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({terminal_session: terminalSession})
-    }).then(function(resp) {
-        return resp.json().then(function(data) {
-            if (!resp.ok) {
-                showToast(data.error || ('Attach failed (HTTP ' + resp.status + ')'), 'error');
-                btn.innerHTML = '&#10007; Failed';
-                setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
-            } else if (data.url) {
-                openTerminal(data.url, terminalSession);
-                btn.innerHTML = '&#10003; Opened!';
-                setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
-            } else {
-                btn.innerHTML = '&#10003; Attached!';
-                setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 2000);
-            }
-        });
-    }).catch(function(err) {
-        showToast('Attach failed: ' + err.message, 'error');
-        btn.innerHTML = '&#10007; Failed';
-        setTimeout(function() { btn.innerHTML = 'Attach'; btn.disabled = false; }, 3000);
-    });
-});
-
 // Management tray FAB toggles the slide-up panel and hides the FAB while open.
 document.addEventListener('click', function (e) {
     var fab = e.target.closest('[data-mgmt-toggle]');
