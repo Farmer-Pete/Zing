@@ -873,10 +873,20 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
             )
             yield _sse_toast("Session not found", "err")
             return
-        subprocess.run(
-            ["zellij", "kill-session", session.terminal_session],
-            capture_output=True,
-        )
+        # zellij may legitimately be absent (CI runners, dev machines without
+        # the binary). Surface a soft warning but still clean up the session
+        # record so the UI reflects the user's intent.
+        try:
+            subprocess.run(
+                ["zellij", "kill-session", session.terminal_session],
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "kill-session: zellij binary not found; cleaning up session record only",
+                extra={"event": "cc_kill_no_zellij", "session_id": session_id},
+            )
         manager.cleanup_session(session_id)
         _push_board_changed(request.app)
         yield _sse_toast("Session killed", "ok")

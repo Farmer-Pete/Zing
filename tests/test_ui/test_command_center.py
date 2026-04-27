@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -312,7 +313,11 @@ def test_repo_chooser_flow_offers_candidates_then_relaunches(
     launch_btn.click()
 
     chooser = page.locator("#repo-chooser-modal-container")
-    expect(chooser).to_be_visible(timeout=5000)
+    # Assert the .open class instead of to_be_visible() — the dialog-modal
+    # flex container's empty-during-INNER-patch state can briefly have a
+    # zero-height bounding box on slower runners, which Playwright reports
+    # as "hidden" even though the binding fired correctly.
+    expect(chooser).to_have_class(re.compile(r"\bopen\b"), timeout=5000)
     repo_buttons = chooser.locator("button").filter(has_text="repo-")
     # If the heuristic produced 0 candidates, the test data is deterministic so
     # this is a regression — fail loud rather than silently skipping CI coverage.
@@ -327,8 +332,8 @@ def test_repo_chooser_flow_offers_candidates_then_relaunches(
     chosen_label = repo_buttons.first.text_content() or ""
     repo_buttons.first.click()
 
-    # Modal hides via data-show="$modals.repoChooser".
-    expect(chooser).not_to_be_visible(timeout=5000)
+    # Modal hides by losing the .open class (data-class:open driven by signal).
+    expect(chooser).not_to_have_class(re.compile(r"\bopen\b"), timeout=5000)
 
     # Find the second POST (the one carrying repo).
     page.wait_for_timeout(500)
