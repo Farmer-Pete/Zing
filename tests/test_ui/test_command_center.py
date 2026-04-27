@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 from playwright.sync_api import Page, Request, expect
 
 from tests.test_ui.conftest import _ServerInfo
+from zing_ai.config import Config, GitConfig
 from zing_ai.server.models_external import CICheck, GitHubPR, LinearIssue
 
 pytestmark = pytest.mark.ui
@@ -310,33 +312,44 @@ def test_repo_chooser_flow_offers_candidates_then_relaunches(
     # prefix selector to find the footer-todo Plan button.
     launch_btn = target.locator("[id^='btn-launch-BAK-2099-']").first
     expect(launch_btn).to_be_visible(timeout=3000)
-    launch_btn.click()
 
-    chooser = page.locator("#repo-chooser-modal-container")
-    # Assert the .open class instead of to_be_visible() — the dialog-modal
-    # flex container's empty-during-INNER-patch state can briefly have a
-    # zero-height bounding box on slower runners, which Playwright reports
-    # as "hidden" even though the binding fired correctly.
-    expect(chooser).to_have_class(re.compile(r"\bopen\b"), timeout=5000)
-    repo_buttons = chooser.locator("button").filter(has_text="repo-")
-    # If the heuristic produced 0 candidates, the test data is deterministic so
-    # this is a regression — fail loud rather than silently skipping CI coverage.
-    candidate_count = repo_buttons.count()
-    if candidate_count == 0:
-        pytest.fail(
-            "infer_repo_for_ticket produced no candidates for this seeded state; "
-            "the kanban builder did not pair our PRs to their tickets."
-        )
+    # The /command-center/launch-background route reads code_dir from the
+    # process config; on CI runners with no zing-ai config file the route
+    # exits early with "code_dir is not configured" before opening the
+    # chooser. Inject a config with code_dir set so the route reaches the
+    # repo-inference branch where multiple candidates trigger the modal.
+    fake_config = Config(git=GitConfig(code_dir="/tmp/code"))
+    with patch(
+        "zing_ai.server.routes_command_center.load_config",
+        return_value=fake_config,
+    ):
+        launch_btn.click()
 
-    assert candidate_count >= 1, "Expected at least one repo candidate button"
-    chosen_label = repo_buttons.first.text_content() or ""
-    repo_buttons.first.click()
+        chooser = page.locator("#repo-chooser-modal-container")
+        # Assert the .open class instead of to_be_visible() — the dialog-modal
+        # flex container's empty-during-INNER-patch state can briefly have a
+        # zero-height bounding box on slower runners, which Playwright reports
+        # as "hidden" even though the binding fired correctly.
+        expect(chooser).to_have_class(re.compile(r"\bopen\b"), timeout=5000)
+        repo_buttons = chooser.locator("button").filter(has_text="repo-")
+        # If the heuristic produced 0 candidates, the test data is deterministic so
+        # this is a regression — fail loud rather than silently skipping CI coverage.
+        candidate_count = repo_buttons.count()
+        if candidate_count == 0:
+            pytest.fail(
+                "infer_repo_for_ticket produced no candidates for this seeded state; "
+                "the kanban builder did not pair our PRs to their tickets."
+            )
 
-    # Modal hides by losing the .open class (data-class:open driven by signal).
-    expect(chooser).not_to_have_class(re.compile(r"\bopen\b"), timeout=5000)
+        assert candidate_count >= 1, "Expected at least one repo candidate button"
+        chosen_label = repo_buttons.first.text_content() or ""
+        repo_buttons.first.click()
 
-    # Find the second POST (the one carrying repo).
-    page.wait_for_timeout(500)
+        # Modal hides by losing the .open class (data-class:open driven by signal).
+        expect(chooser).not_to_have_class(re.compile(r"\bopen\b"), timeout=5000)
+
+        # Find the second POST (the one carrying repo).
+        page.wait_for_timeout(500)
     repo_posts = [p for p in posts if p.post_data and '"repo"' in p.post_data]
     assert repo_posts, f"Expected a launch POST with repo set; got {len(posts)}"
     body = json.loads(repo_posts[0].post_data or "{}")
