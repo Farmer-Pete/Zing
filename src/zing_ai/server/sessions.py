@@ -140,6 +140,8 @@ class SessionManager:
         title: str,
         zing_file: str | None = None,
         steps: list[str] | None = None,
+        *,
+        created_at: datetime | None = None,
     ) -> ZingSession:
         """Create a new review session.
 
@@ -148,6 +150,10 @@ class SessionManager:
             title: Human-readable title for the session.
             zing_file: Absolute path to the zing file, or None if no zing doc.
             steps: Optional list of step names to pre-create as PENDING steps.
+            created_at: Optional override for the session's ``created_at`` /
+                pre-created steps' ``created_at``. Tests use this to seed
+                deterministically-ordered fixtures without relying on
+                ``time.sleep`` between calls.
 
         Returns:
             The newly created Session.
@@ -169,10 +175,18 @@ class SessionManager:
                 logger.warning("Rejected zing_file (not markdown): %s", zing_file)
                 msg = f"zing_file must be a markdown file (.md), got: {zing_file}"
                 raise ValueError(msg)
-        session = ZingSession(session_id=session_id, title=title, zing_file=zing_file)
+        if created_at is not None:
+            session = ZingSession(
+                session_id=session_id, title=title, zing_file=zing_file, created_at=created_at
+            )
+        else:
+            session = ZingSession(session_id=session_id, title=title, zing_file=zing_file)
         if steps:
             for i, step_name in enumerate(steps):
-                step = WorkflowStep(step_name=step_name, sequence=i)
+                if created_at is not None:
+                    step = WorkflowStep(step_name=step_name, sequence=i, created_at=created_at)
+                else:
+                    step = WorkflowStep(step_name=step_name, sequence=i)
                 session.steps.append(step)
                 self._steps_by_id[step.step_id] = (session_id, i)
                 key = self._event_key(session_id, step.step_id)

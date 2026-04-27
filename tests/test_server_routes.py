@@ -15,6 +15,28 @@ from zing_ai.server.models import ZingSession
 from zing_ai.server.routes import _dashboard_queues, _sse_queues
 
 
+def _parse_sse(response) -> list[str]:
+    """Read text/event-stream response into a list of full event blocks.
+
+    Each event in the stream is separated by a blank line; this helper
+    yields each event as a single concatenated string (including its
+    `event:` and all `data:` lines) so test assertions can do
+    substring matching against expected selectors and HTML.
+    """
+    events = []
+    current: list[str] = []
+    for line in response.iter_lines():
+        if not line:
+            if current:
+                events.append("\n".join(current))
+                current = []
+        else:
+            current.append(line if isinstance(line, str) else line.decode("utf-8"))
+    if current:
+        events.append("\n".join(current))
+    return events
+
+
 class TestRemovedEndpoints(ServerTestBase):
     """Tests that removed REST endpoints return 404."""
 
@@ -1449,24 +1471,31 @@ class TestLaunchBackground(unittest.TestCase):
         cache.prs = [pr]
 
     def test_launch_background_no_code_dir(self) -> None:
-        """Returns 422 when code_dir is empty."""
+        """Returns SSE error toast when code_dir is empty."""
         from unittest.mock import patch
 
         from zing_ai.config import Config
 
-        with patch(
-            "zing_ai.server.routes_command_center.load_config",
-            return_value=Config(),
-        ):
-            resp = self.client.post(
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=Config(),
+            ),
+            self.client.stream(
+                "POST",
                 "/command-center/launch-background",
                 json={"card_key": "BAK-1"},
-            )
-        self.assertEqual(resp.status_code, 422)
-        self.assertIn("code_dir", resp.json()["error"])
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "code_dir" in e for e in events),
+            f"Expected code_dir error toast in events: {events}",
+        )
 
     def test_launch_background_repo_not_found(self) -> None:
-        """Returns 404 when find_repo_path returns None."""
+        """Returns SSE error toast when find_repo_path returns None."""
         from unittest.mock import patch
 
         from zing_ai.config import Config, GitConfig
@@ -1483,16 +1512,21 @@ class TestLaunchBackground(unittest.TestCase):
                 "zing_ai.server.routes_command_center.find_repo_path",
                 return_value=None,
             ),
-        ):
-            resp = self.client.post(
+            self.client.stream(
+                "POST",
                 "/command-center/launch-background",
                 json={"card_key": "BAK-2"},
-            )
-        self.assertEqual(resp.status_code, 404)
-        self.assertIn("not found", resp.json()["error"])
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
+        )
 
     def test_launch_background_duplicate(self) -> None:
-        """Second POST returns 409 when the card is already in launching_set."""
+        """Returns SSE error toast when the card is already in launching_set."""
         from unittest.mock import patch
 
         from zing_ai.config import Config, GitConfig
@@ -1504,17 +1538,24 @@ class TestLaunchBackground(unittest.TestCase):
 
         config = Config(git=GitConfig(code_dir="/tmp/code"))
 
-        with patch(
-            "zing_ai.server.routes_command_center.load_config",
-            return_value=config,
-        ):
-            resp = self.client.post(
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            self.client.stream(
+                "POST",
                 "/command-center/launch-background",
                 json={"card_key": "BAK-3"},
-            )
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
 
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn("already in progress", resp.json()["error"])
+        self.assertTrue(
+            any("cc-toast-err" in e and "already in progress" in e for e in events),
+            f"Expected already-in-progress error toast in events: {events}",
+        )
 
     def test_launch_background_success(self) -> None:
         """Success path: session created with terminal_session, board_changed queued."""
@@ -1549,17 +1590,20 @@ class TestLaunchBackground(unittest.TestCase):
                 return_value=["claude", "/zing:pr-audit"],
             ),
             patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
-        ):
-            resp = self.client.post(
+            self.client.stream(
+                "POST",
                 "/command-center/launch-background",
                 json={"card_key": "BAK-4"},
-            )
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
 
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertEqual(data["status"], "launched")
-        self.assertIn("session_id", data)
-        self.assertIn("terminal_session", data)
+        # Success toast was yielded.
+        self.assertTrue(
+            any("cc-toast-ok" in e and "Launched" in e for e in events),
+            f"Expected success toast in events: {events}",
+        )
 
         # Verify create_session_on_server was called with a terminal_session kwarg.
         mock_create.assert_called_once()
@@ -1617,14 +1661,20 @@ class TestLaunchBackground(unittest.TestCase):
                 side_effect=LaunchError("zellij session already exists"),
             ),
             patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback,
-        ):
-            resp = self.client.post(
+            self.client.stream(
+                "POST",
                 "/command-center/launch-background",
                 json={"card_key": "BAK-5"},
-            )
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
 
-        self.assertEqual(resp.status_code, 500)
-        self.assertIn("error", resp.json())
+        # Error toast should contain the LaunchError message.
+        self.assertTrue(
+            any("cc-toast-err" in e and "zellij session already exists" in e for e in events),
+            f"Expected LaunchError toast in events: {events}",
+        )
         mock_rollback.assert_called_once_with(worktree_path)
 
 
@@ -1689,14 +1739,22 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
         self._create_cc_session(session_id="cc-kill-ok", terminal_session="zing-kill-ok")
 
-        with patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run:
-            resp = self.client.post(
+        with (
+            patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run,
+            self.client.stream(
+                "POST",
                 "/command-center/kill-session",
                 json={"session_id": "cc-kill-ok"},
-            )
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["status"], "killed")
+        # Success toast was yielded.
+        self.assertTrue(
+            any("cc-toast-ok" in e and "Session killed" in e for e in events),
+            f"Expected success toast in events: {events}",
+        )
 
         # zellij kill-session should have been called.
         mock_run.assert_called_once()
@@ -1709,15 +1767,21 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         self.assertIsNone(self.manager.get_session("cc-kill-ok"))
 
     def test_kill_session_not_found(self) -> None:
-        """POST kill-session returns 404 for an unknown session_id."""
-        resp = self.client.post(
+        """POST kill-session returns SSE error toast for an unknown session_id."""
+        with self.client.stream(
+            "POST",
             "/command-center/kill-session",
             json={"session_id": "no-such-session"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "Session not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 404)
 
     def test_kill_session_zing_session_returns_404(self) -> None:
-        """POST kill-session returns 404 when session is a ZingSession (not ClaudeCodeSession)."""
+        """POST kill-session returns SSE error when session is a ZingSession."""
         from pathlib import Path
 
         from zing_ai.server.sessions import SessionManager
@@ -1727,20 +1791,32 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         # Inject into the manager used by the app.
         self.manager.create_session("zing-s2", "Zing Session 2", steps=["review"])
 
-        resp = self.client.post(
+        with self.client.stream(
+            "POST",
             "/command-center/kill-session",
             json={"session_id": "zing-s2"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "Session not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 404)
 
     def test_kill_session_no_terminal_session_returns_404(self) -> None:
-        """POST kill-session returns 404 when session has no terminal_session."""
+        """POST kill-session returns SSE error when session has no terminal_session."""
         self._create_cc_session(session_id="cc-no-terminal", terminal_session=None)
-        resp = self.client.post(
+        with self.client.stream(
+            "POST",
             "/command-center/kill-session",
             json={"session_id": "cc-no-terminal"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "Session not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
     # cleanup-worktree tests
@@ -1748,6 +1824,7 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
     def test_cleanup_worktree_success(self) -> None:
         """POST cleanup-worktree rolls back worktree and cleans up session."""
+        from pathlib import Path
         from unittest.mock import patch
 
         self._create_cc_session(
@@ -1758,22 +1835,28 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         # terminal session is NOT alive → cleanup is allowed.
         self.fastapi_app.state.live_sessions = set()
 
-        with patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback:
-            resp = self.client.post(
+        with (
+            patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback,
+            self.client.stream(
+                "POST",
                 "/command-center/cleanup-worktree",
                 json={"session_id": "cc-wt-ok"},
-            )
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["status"], "cleaned_up")
-
-        from pathlib import Path
+        # Success toast was yielded.
+        self.assertTrue(
+            any("cc-toast-ok" in e and "Worktree cleaned up" in e for e in events),
+            f"Expected success toast in events: {events}",
+        )
 
         mock_rollback.assert_called_once_with(Path("/tmp/worktrees/repo-feature"))
         self.assertIsNone(self.manager.get_session("cc-wt-ok"))
 
     def test_cleanup_worktree_while_running(self) -> None:
-        """POST cleanup-worktree returns 409 when session terminal session is still alive."""
+        """POST cleanup-worktree returns SSE error when session terminal session is still alive."""
         self._create_cc_session(
             session_id="cc-wt-alive",
             terminal_session="zing--wt-alive",
@@ -1782,33 +1865,50 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         # Mark terminal session as alive.
         self.fastapi_app.state.live_sessions = {"zing--wt-alive"}
 
-        resp = self.client.post(
+        with self.client.stream(
+            "POST",
             "/command-center/cleanup-worktree",
             json={"session_id": "cc-wt-alive"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "running" in e for e in events),
+            f"Expected running-session error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn("running", resp.json()["error"])
 
     def test_cleanup_worktree_not_found(self) -> None:
-        """POST cleanup-worktree returns 404 for unknown session."""
-        resp = self.client.post(
+        """POST cleanup-worktree returns SSE error toast for unknown session."""
+        with self.client.stream(
+            "POST",
             "/command-center/cleanup-worktree",
             json={"session_id": "no-such"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "Session not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 404)
 
     def test_cleanup_worktree_no_worktree_returns_404(self) -> None:
-        """POST cleanup-worktree returns 404 when session has no worktree_path."""
+        """POST cleanup-worktree returns SSE error when session has no worktree_path."""
         self._create_cc_session(
             session_id="cc-no-wt",
             terminal_session="zing-no-wt",
             worktree_path=None,
         )
-        resp = self.client.post(
+        with self.client.stream(
+            "POST",
             "/command-center/cleanup-worktree",
             json={"session_id": "cc-no-wt"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        self.assertTrue(
+            any("cc-toast-err" in e and "Session not found" in e for e in events),
+            f"Expected not-found error toast in events: {events}",
         )
-        self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
     # Orphan detection test
@@ -1975,3 +2075,268 @@ class TestZellijLifespan(unittest.TestCase):
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
                 self.assertEqual(resp.status_code, 503)
+
+
+# ---------------------------------------------------------------------------
+# HTML-parsing helpers + tests for SSE escape correctness (Rule 4)
+# ---------------------------------------------------------------------------
+
+
+def _extract_toasts(events: list[str]) -> list[dict[str, str]]:
+    """Parse SSE events and return every toast div with class + text content.
+
+    Rule 4: assertions on escape correctness must verify attribute boundaries
+    via a real HTML parser, not just substring matching. The substring-only
+    pattern would also match a malformed attribute like
+    ``id="cc-toast-errnot-a-class"`` or content rendered outside any attribute.
+    """
+    from html.parser import HTMLParser
+
+    class _ToastCollector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.toasts: list[dict[str, str]] = []
+            self._current: dict[str, str] | None = None
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag != "div":
+                return
+            attr_dict = {k: (v or "") for k, v in attrs}
+            cls = attr_dict.get("class", "")
+            if "cc-toast" in cls.split():
+                self._current = {
+                    "id": attr_dict.get("id", ""),
+                    "class": cls,
+                    "text": "",
+                }
+
+        def handle_data(self, data: str) -> None:
+            if self._current is not None:
+                self._current["text"] += data
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "div" and self._current is not None:
+                self.toasts.append(self._current)
+                self._current = None
+
+    parser = _ToastCollector()
+    # Strip SSE framing — we only want the data: lines that contain HTML.
+    for event in events:
+        for line in event.splitlines():
+            if line.startswith("data: elements "):
+                parser.feed(line[len("data: elements ") :])
+    return parser.toasts
+
+
+class TestSseToastEscapeBoundaries(unittest.TestCase):
+    """Rule 4 — assert that error-toast SSE responses are well-formed HTML."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manager = SessionManager(data_dir=Path(self._tmp.name))
+        self.cc_queues: list[asyncio.Queue] = []
+        asgi_app = create_app(
+            session_manager=self.manager,
+            cc_queues=self.cc_queues,
+        )
+        self.client = TestClient(asgi_app, raise_server_exceptions=True)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+        self.fastapi_app.state.launching_set = set()
+        self.fastapi_app.state.live_sessions = set()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_kill_session_not_found_emits_well_formed_toast(self) -> None:
+        """Error toast renders as a single <div> with cc-toast-err class and exact text."""
+        with self.client.stream(
+            "POST",
+            "/command-center/kill-session",
+            json={"session_id": "no-such-session"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1, f"expected 1 toast, got {toasts}")
+        toast = toasts[0]
+        self.assertIn("cc-toast", toast["class"].split())
+        self.assertIn("cc-toast-err", toast["class"].split())
+        self.assertEqual(toast["text"], "Session not found")
+        self.assertRegex(toast["id"], r"^toast-[0-9a-f]{8}$")
+
+
+# ---------------------------------------------------------------------------
+# SSE-shape tests for /attach-session and /start-ticket (Finding #5)
+# ---------------------------------------------------------------------------
+
+
+class TestAttachSession(unittest.TestCase):
+    """Tests for POST /command-center/attach-session SSE responses."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manager = SessionManager(data_dir=Path(self._tmp.name))
+        self.cc_queues: list[asyncio.Queue] = []
+        asgi_app = create_app(
+            session_manager=self.manager,
+            cc_queues=self.cc_queues,
+        )
+        self.client = TestClient(asgi_app, raise_server_exceptions=True)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+        self.fastapi_app.state.zellij_available = True
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_attach_session_missing_terminal_session_emits_error_toast(self) -> None:
+        """Missing terminal_session yields a cc-toast-err."""
+        with self.client.stream("POST", "/command-center/attach-session", json={}) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertEqual(toasts[0]["text"], "terminal_session is required")
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_attach_session_invalid_name_emits_error_toast(self) -> None:
+        """Names with characters outside [A-Za-z0-9_-] yield a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/attach-session",
+            json={"terminal_session": "bad name with spaces"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertEqual(toasts[0]["text"], "invalid session name")
+
+    def test_attach_session_zellij_unavailable_emits_error_toast(self) -> None:
+        """Zellij unavailable yields a cc-toast-err."""
+        self.fastapi_app.state.zellij_available = False
+        with self.client.stream(
+            "POST",
+            "/command-center/attach-session",
+            json={"terminal_session": "valid-name"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertEqual(toasts[0]["text"], "Zellij is not available")
+
+    def test_attach_session_success_patches_terminal_url_and_modal_signal(self) -> None:
+        """Valid request patches terminalUrl + modals.terminal signals and emits ok toast."""
+        with self.client.stream(
+            "POST",
+            "/command-center/attach-session",
+            json={"terminal_session": "my-zellij-1"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        # Signal patch carries terminalUrl + modals.terminal.
+        sig_events = [e for e in events if "datastar-patch-signals" in e]
+        self.assertTrue(sig_events, f"expected signal patch in {events}")
+        joined = "\n".join(sig_events)
+        self.assertIn("terminalUrl", joined)
+        self.assertIn("/zellij/my-zellij-1", joined)
+        self.assertIn("terminal", joined)  # modals.terminal: True
+        # OK toast was emitted.
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Terminal opened" in t["text"] for t in toasts))
+
+
+class TestStartTicket(unittest.TestCase):
+    """Tests for POST /command-center/start-ticket SSE responses."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manager = SessionManager(data_dir=Path(self._tmp.name))
+        self.cc_queues: list[asyncio.Queue] = []
+        asgi_app = create_app(
+            session_manager=self.manager,
+            cc_queues=self.cc_queues,
+        )
+        self.client = TestClient(asgi_app, raise_server_exceptions=True)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_start_ticket_missing_ticket_id_emits_error_toast(self) -> None:
+        """Missing ticket_id yields a cc-toast-err."""
+        with self.client.stream("POST", "/command-center/start-ticket", json={}) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertEqual(toasts[0]["text"], "ticket_id is required")
+
+    def test_start_ticket_no_api_key_emits_error_toast(self) -> None:
+        """Missing Linear API key yields a cc-toast-err."""
+        from unittest.mock import patch
+
+        from zing_ai.config import Config
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=Config(),
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/start-ticket",
+                json={"ticket_id": "BAK-99"},
+            ) as resp,
+        ):
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertEqual(toasts[0]["text"], "Linear API key not configured")
+
+    def test_start_ticket_success_emits_ok_toast(self) -> None:
+        """Successful POST emits a cc-toast-ok with 'Ticket started'."""
+        from unittest.mock import patch
+
+        from zing_ai.config import CommandCenterConfig, Config
+
+        config = Config(command_center=CommandCenterConfig(linear_api_key="test-key"))
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.move_ticket_in_progress",
+                return_value=None,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/start-ticket",
+                json={"ticket_id": "BAK-99"},
+            ) as resp,
+        ):
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Ticket started" in t["text"] for t in toasts))
+        self.assertTrue(any("cc-toast-ok" in t["class"].split() for t in toasts))

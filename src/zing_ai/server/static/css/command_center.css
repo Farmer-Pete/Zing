@@ -738,9 +738,13 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 8px 32px rgba(15, 27, 45, 0.4);
-    display: flex;
+    display: none;
     flex-direction: column;
     background: #fff;
+}
+
+.dialog-modal.open {
+    display: flex;
 }
 
 .dialog-modal-bar {
@@ -1498,6 +1502,13 @@ body.drawer-open .mgmt-fab {
     cursor: pointer;
     user-select: none;
     transition: background 0.1s;
+    /* button reset — step-hdr is now a <button> */
+    width: 100%;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
 }
 
 .step-hdr:hover {

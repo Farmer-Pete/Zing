@@ -5,22 +5,15 @@
     step     — WorkflowStep object
     session  — the parent session (for session_id)
 
-  Rendered per-step via the GET /command-center/drawer/{session_id}/step/{step_id} route.
+  Rendered per-step via the POST /command-center/drawer/{session_id}/step/{step_id} route.
 #}
-<div class="step-section" id="step-section-{{ step.step_id }}">
-  <div class="step-hdr" data-step-toggle>
+{% from "fragments/_drawer_helpers.html" import step_icon %}
+<div class="step-section" id="step-section-{{ step.step_id }}"
+     data-class:open="$openSteps[{{ step.step_id | js_str }}]">
+  <button class="step-hdr" data-step-toggle
+          data-on:click="$openSteps[{{ step.step_id | js_str }}] = !$openSteps[{{ step.step_id | js_str }}]">
     <span class="step-chv">&#9654;</span>
-    {% if step.step_name == "plan" %}
-      <span class="step-ico">&#128269;</span>
-    {% elif step.step_name in ("plan-audit", "build-audit") %}
-      <span class="step-ico">&#128203;</span>
-    {% elif step.step_name == "build" %}
-      <span class="step-ico">&#128736;</span>
-    {% elif step.step_name == "code-review" %}
-      <span class="step-ico">&#128270;</span>
-    {% else %}
-      <span class="step-ico">&#9654;</span>
-    {% endif %}
+    {{ step_icon(step.step_name) }}
     <span class="step-name">{{ step.step_name }}</span>
     {% if step.state.value == "completed" %}
       <span class="step-badge sbg-completed">completed</span>
@@ -32,7 +25,7 @@
     {% if step.agents %}
       <span class="step-time">{{ step.agents | length }} agent{% if step.agents | length != 1 %}s{% endif %}</span>
     {% endif %}
-  </div>
+  </button>
   <div class="step-content">
     {# Agent rows #}
     {% for agent in step.agents %}

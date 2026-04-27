@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Request, expect
 
 from tests.test_ui.conftest import _ServerInfo
-from zing_ai.server.models_external import LinearIssue
+from zing_ai.config import Config, GitConfig
+from zing_ai.server.models_external import CICheck, GitHubPR, LinearIssue
 
 pytestmark = pytest.mark.ui
 
@@ -215,3 +219,143 @@ def test_no_console_errors_after_page_load(server: _ServerInfo, page: Page) -> N
     page.wait_for_timeout(1000)
 
     assert errors == [], f"Unexpected JS console errors: {errors}"
+
+
+def _make_pr_for_repo(number: int, repo: str, *, ticket: str = "") -> GitHubPR:
+    """Build a minimal GitHubPR pointing at a specific repo and optionally
+    referencing a ticket identifier in the head_ref so the kanban builder
+    pairs it to the matching ticket card."""
+    head_ref = f"feature/{ticket}-pr-{number}" if ticket else f"feature/pr-{number}"
+    return GitHubPR(
+        number=number,
+        title=f"PR #{number}",
+        state="open",
+        draft=False,
+        head_ref=head_ref,
+        base_ref="main",
+        body=None,
+        author="dev-user",
+        repo=repo,
+        requested_reviewers=[],
+        reviewers=[],
+        reviewer_states={},
+        review_decision=None,
+        mergeable_state="clean",
+        ci_status=None,
+        ci_checks=list[CICheck](),
+        url=f"https://github.com/{repo}/pull/{number}",
+        updated_at=datetime.now(tz=UTC),
+    )
+
+
+def _make_issue(identifier: str, *, has_pr_team_match: bool) -> LinearIssue:
+    """Build a Backend-team LinearIssue. has_pr_team_match controls team name."""
+    return LinearIssue(
+        id=f"uuid-{identifier.lower()}",
+        identifier=identifier,
+        title=f"Issue {identifier}",
+        state="In Progress",
+        state_type="started",
+        assignee=None,
+        team="Backend" if has_pr_team_match else "Frontend",
+        url=f"https://linear.app/test/issue/{identifier}",
+        updated_at=datetime.now(tz=UTC),
+    )
+
+
+def test_repo_chooser_flow_offers_candidates_then_relaunches(
+    server: _ServerInfo, page: Page
+) -> None:
+    """A ticket-only card with multiple same-team repo candidates opens the
+    repo-chooser modal on Launch; picking a repo posts a second
+    /launch-background with {card_key, repo, btn_id} and closes the modal."""
+    cache = server.external_cache
+    cache.github_username = "dev-user"
+
+    # Two Backend cards WITH PRs in different repos — these provide the
+    # candidate repos infer_repo_for_ticket() will surface.
+    cache.issues = [
+        _make_issue("BAK-2001", has_pr_team_match=True),
+        _make_issue("BAK-2002", has_pr_team_match=True),
+        # The launch target — a ticket-only card with no PRs of its own.
+        _make_issue("BAK-2099", has_pr_team_match=True),
+    ]
+    cache.prs = [
+        _make_pr_for_repo(2001, "org/repo-alpha", ticket="BAK-2001"),
+        _make_pr_for_repo(2002, "org/repo-beta", ticket="BAK-2002"),
+    ]
+    # Linear hint: associate the first two issues with their PRs so they're
+    # cards-with-prs (not ticket-only) when the board is built. The kanban
+    # builder pairs PRs to issues by title/branch heuristics; see the seeded
+    # head_ref above. If the heuristic fails, infer_repo_for_ticket still
+    # walks `card.prs` so what matters is that some same-team cards have
+    # `card.prs` populated. The simplest approach: the matching happens via
+    # the issue identifier embedded in the PR title or branch.
+
+    # Capture launch-background POSTs.
+    posts: list[Request] = []
+
+    def _on_request(req: Request) -> None:
+        if req.method == "POST" and "/command-center/launch-background" in req.url:
+            posts.append(req)
+
+    page.on("request", _on_request)
+
+    page.goto(f"{server.base_url}/command-center")
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+    target = page.locator("#card-bak-2099")
+    expect(target).to_be_visible(timeout=5000)
+
+    # The launch button id is now ``btn-launch-<key>-<slot>`` per the
+    # launch_button macro (slot makes ids unique within a card). Use a
+    # prefix selector to find the footer-todo Plan button.
+    launch_btn = target.locator("[id^='btn-launch-BAK-2099-']").first
+    expect(launch_btn).to_be_visible(timeout=3000)
+
+    # The /command-center/launch-background route reads code_dir from the
+    # process config; on CI runners with no zing-ai config file the route
+    # exits early with "code_dir is not configured" before opening the
+    # chooser. Inject a config with code_dir set so the route reaches the
+    # repo-inference branch where multiple candidates trigger the modal.
+    fake_config = Config(git=GitConfig(code_dir="/tmp/code"))
+    with patch(
+        "zing_ai.server.routes_command_center.load_config",
+        return_value=fake_config,
+    ):
+        launch_btn.click()
+
+        chooser = page.locator("#repo-chooser-modal-container")
+        # Assert the .open class instead of to_be_visible() — the dialog-modal
+        # flex container's empty-during-INNER-patch state can briefly have a
+        # zero-height bounding box on slower runners, which Playwright reports
+        # as "hidden" even though the binding fired correctly.
+        expect(chooser).to_have_class(re.compile(r"\bopen\b"), timeout=5000)
+        repo_buttons = chooser.locator("button").filter(has_text="repo-")
+        # If the heuristic produced 0 candidates, the test data is deterministic so
+        # this is a regression — fail loud rather than silently skipping CI coverage.
+        candidate_count = repo_buttons.count()
+        if candidate_count == 0:
+            pytest.fail(
+                "infer_repo_for_ticket produced no candidates for this seeded state; "
+                "the kanban builder did not pair our PRs to their tickets."
+            )
+
+        assert candidate_count >= 1, "Expected at least one repo candidate button"
+        chosen_label = repo_buttons.first.text_content() or ""
+        repo_buttons.first.click()
+
+        # Modal hides by losing the .open class (data-class:open driven by signal).
+        expect(chooser).not_to_have_class(re.compile(r"\bopen\b"), timeout=5000)
+
+        # Find the second POST (the one carrying repo).
+        page.wait_for_timeout(500)
+    repo_posts = [p for p in posts if p.post_data and '"repo"' in p.post_data]
+    assert repo_posts, f"Expected a launch POST with repo set; got {len(posts)}"
+    body = json.loads(repo_posts[0].post_data or "{}")
+    payload = body.get("payload", body)
+    assert payload.get("card_key") == "BAK-2099"
+    # btn_id is no longer required by the route (the OUTER patch reset_html
+    # path was dropped); the repo-chooser repost intentionally omits it.
+    assert payload.get("repo")  # non-empty
+    assert chosen_label.strip() in payload["repo"] or payload["repo"] in chosen_label

@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag, model_validator
 
+from zing_ai.server.signals import to_signal_key as _to_signal_key
+
 
 class Location(BaseModel):
     """A file location with optional line number."""
@@ -291,6 +293,15 @@ class SessionBase(BaseModel):
     title: str
     ticket_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`session_id` sanitised for use as a Datastar signal name.
+
+        Same purpose as :attr:`KanbanCard.signal_key` — see that property's
+        docstring for the rationale.
+        """
+        return _to_signal_key(self.session_id)
 
 
 class ZingSession(SessionBase):

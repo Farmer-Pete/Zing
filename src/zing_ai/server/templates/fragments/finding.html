@@ -5,7 +5,7 @@
     {% if finding.context %}
     <div class="finding-meta">{{ finding.context }}</div>
     {% endif %}
-    <textarea data-bind="responses.{{ finding.id }}" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', answer: $responses['{{ finding.id }}']})" placeholder="Type your answer..."></textarea>
+    <textarea data-bind="responses.{{ finding.id }}" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, answer: $responses[{{ finding.id | js_str }}]})" placeholder="Type your answer..."></textarea>
 </div>
 {% elif finding.type == "triage" %}
 <div id="finding-{{ finding.id }}" class="finding"
@@ -26,22 +26,22 @@
     {% endif %}
     <div class="complexity-selector" role="radiogroup" aria-label="Fix complexity">
         <span class="complexity-label">Complexity:</span>
-        <button class="complexity-btn" data-complexity="simple" data-attr:aria-pressed="$responses['{{ finding.id }}_complexity'] === 'simple'" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'simple'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'simple'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'simple'})" type="button">Simple</button>
-        <button class="complexity-btn" data-complexity="standard" data-attr:aria-pressed="$responses['{{ finding.id }}_complexity'] === 'standard'" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'standard'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'standard'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'standard'})" type="button">Standard</button>
-        <button class="complexity-btn" data-complexity="complex" data-attr:aria-pressed="$responses['{{ finding.id }}_complexity'] === 'complex'" data-class:selected="$responses['{{ finding.id }}_complexity'] === 'complex'" data-on:click="$responses['{{ finding.id }}_complexity'] = 'complex'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', complexity: 'complex'})" type="button">Complex</button>
+        <button class="complexity-btn" data-complexity="simple" data-attr:aria-pressed="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'simple'" data-class:selected="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'simple'" data-on:click="$responses[{{ (finding.id ~ '_complexity') | js_str }}] = 'simple'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, complexity: 'simple'})" type="button">Simple</button>
+        <button class="complexity-btn" data-complexity="standard" data-attr:aria-pressed="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'standard'" data-class:selected="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'standard'" data-on:click="$responses[{{ (finding.id ~ '_complexity') | js_str }}] = 'standard'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, complexity: 'standard'})" type="button">Standard</button>
+        <button class="complexity-btn" data-complexity="complex" data-attr:aria-pressed="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'complex'" data-class:selected="$responses[{{ (finding.id ~ '_complexity') | js_str }}] === 'complex'" data-on:click="$responses[{{ (finding.id ~ '_complexity') | js_str }}] = 'complex'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, complexity: 'complex'})" type="button">Complex</button>
     </div>
     <div class="action-group">
-        <button class="action-btn" data-action="accept" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept'})" type="button">Accept</button>
-        <button class="action-btn" data-action="drop" data-class:selected="$responses.{{ finding.id }} === 'drop'" data-on:click="$responses.{{ finding.id }} = 'drop'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'drop'})" type="button">Drop</button>
-        <button class="action-btn" data-action="downgrade" data-class:selected="$responses.{{ finding.id }} === 'downgrade'" data-on:click="$responses.{{ finding.id }} = 'downgrade'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'downgrade'})" type="button">Downgrade</button>
-        <button class="action-btn" data-action="discuss" data-class:selected="$responses.{{ finding.id }} === 'discuss'" data-on:click="$responses.{{ finding.id }} = 'discuss'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'discuss'})" type="button">Discuss</button>
+        <button class="action-btn" data-action="accept" data-class:selected="$responses.{{ finding.id }} === 'accept'" data-on:click="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'accept'})" type="button">Accept</button>
+        <button class="action-btn" data-action="drop" data-class:selected="$responses.{{ finding.id }} === 'drop'" data-on:click="$responses.{{ finding.id }} = 'drop'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'drop'})" type="button">Drop</button>
+        <button class="action-btn" data-action="downgrade" data-class:selected="$responses.{{ finding.id }} === 'downgrade'" data-on:click="$responses.{{ finding.id }} = 'downgrade'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'downgrade'})" type="button">Downgrade</button>
+        <button class="action-btn" data-action="discuss" data-class:selected="$responses.{{ finding.id }} === 'discuss'" data-on:click="$responses.{{ finding.id }} = 'discuss'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'discuss'})" type="button">Discuss</button>
     </div>
     {% if finding.options %}
     <div class="triage-options">
         <div class="triage-options-label">Suggested approaches:</div>
         {% for option in finding.options %}
         <label class="option-card">
-            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="{{ option.label }}" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept', selected: $responses['{{ finding.id }}_approach']})">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="{{ option.label }}" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'accept', selected: $responses[{{ (finding.id ~ '_approach') | js_str }}]})">
             <div class="option-content">
                 <div class="option-label">{{ option.label }}</div>
                 <div class="option-description">{{ option.description }}</div>
@@ -49,14 +49,14 @@
         </label>
         {% endfor %}
         <label class="option-card">
-            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="__other__" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', action: 'accept', selected: $responses['{{ finding.id }}_approach']})">
+            <input type="radio" name="approach-{{ finding.id }}" data-bind="responses.{{ finding.id }}_approach" value="__other__" data-on:change="$responses.{{ finding.id }} = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, action: 'accept', selected: $responses[{{ (finding.id ~ '_approach') | js_str }}]})">
             <div class="option-content">
                 <div class="option-label">Other</div>
                 <div class="option-description">Describe a different approach</div>
             </div>
         </label>
-        <div data-show="$responses['{{ finding.id }}_approach'] === '__other__'" style="margin-top: 0.5rem;">
-            <textarea data-bind="responses.{{ finding.id }}_approach_other" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: '{{ finding.id }}', selected: $responses['{{ finding.id }}_approach'], other_text: $responses['{{ finding.id }}_approach_other']})" placeholder="Describe your preferred approach..."></textarea>
+        <div data-show="$responses[{{ (finding.id ~ '_approach') | js_str }}] === '__other__'" style="margin-top: 0.5rem;">
+            <textarea data-bind="responses.{{ finding.id }}_approach_other" data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ finding.id | js_str }}, selected: $responses[{{ (finding.id ~ '_approach') | js_str }}], other_text: $responses[{{ (finding.id ~ '_approach_other') | js_str }}]})" placeholder="Describe your preferred approach..."></textarea>
         </div>
     </div>
     {% endif %}

@@ -32,6 +32,39 @@ CLI tool that installs skill/command markdown files into a user's Claude Code or
 3. Manifest writes installed file hashes so future installs can detect user modifications
 4. Backup saves user-modified files as patches before overwriting, and can reapply them after reinstall
 
+## Datastar usage
+
+The web server (`src/zing_ai/server/`) renders Jinja templates and pushes updates to the browser via [Datastar v1.0.0](https://data-star.dev) (loaded from CDN at `templates/base.html`). The browser side is intentionally thin: nearly all interactivity is declarative (HTML attributes), and the server is the source of truth for visual state. Two small JS files remain (`base.js` for notification opt-in, `cc-modals.js` for iframe lifecycle and `ClipboardItem` writes) — both browser-API-only.
+
+**Architecture rule.** Browser interactions either mutate a `data-signals` value (view-local UI state) or call a server endpoint that responds with SSE patches (`SSE.patch_elements` / `SSE.patch_signals`). Do not write `fetch()` + `.then(...)` + DOM mutation in JS. If you find yourself reaching for one, you are working against the framework.
+
+**Decision tree for new interactions.**
+
+- Server data or persistence? → server endpoint, decorate with `@datastar_response`, `yield` an async generator that emits `SSE.patch_elements` / `SSE.patch_signals`. Use the helpers `sse_toast(message, kind)` and `sse_btn_state(button_id, label, *, kind)` from `src/zing_ai/server/sse_helpers.py`. Reset the button's busy state by yielding `SSE.patch_signals({"busyButtons": {f"<verb>_<sig>": False}})` rather than snapshotting the original HTML.
+- Pure UI state (modal open, kebab open, tab selection, accordion expand)? → `data-signals` + `data-show` / `data-class` / `data-text`. View-local state lives on the page or fragment that owns it; never round-trip the server.
+- Browser API only (clipboard, notifications, iframe lifecycle)? → small JS file, dispatched via a named `window.dispatchX(...)` function called from a `data-on:click` so templates stay declarative.
+
+**Attribute syntax canon.** Event listeners use the colon form: `data-on:click`, `data-on:input`, `data-on:keydown__window__key.escape`. Lifecycle and signal-watch attributes use dashed names because they are *attribute names* in v1, not event listeners: `data-init` (fires on element initialization — page load and patch-into-DOM), `data-on-signal-patch`, `data-on-signal-patch-filter`. Never use `data-on-click` (legacy alias; banned by `tests/test_lint.py`). Never use `data-on-load` on a non-`<body>` element — the DOM `load` event does not fire on `<div>`/`<button>`/etc.; reach for `data-init` instead.
+
+**Server response idioms.** When an endpoint is reached via `data-on:*`, decorate it with `@datastar_response` and follow the inner-`_stream()` pattern (see `routes_command_center.py` for canonical examples):
+
+```python
+@router.post("/foo")
+@datastar_response
+async def foo(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    async def _stream():  # noqa: ANN202
+        yield _sse_toast("done", "ok")
+    return _stream()
+```
+
+Single-line signature, `# noqa: ANN201/ANN202`, no `-> AsyncGenerator[...]` annotations (pyright strict rejects them; `routes_install.py` is the established pattern). Return `JSONResponse` only when the caller is a non-Datastar client (CLI, external webhook — e.g., `/command-center/session-question` is a shell-hook called by `notify-zing.sh`). Two small Datastar quirks worth remembering: setting a signal to `null` deletes it from the proxy *without* triggering reactive notifications (use `""` as the unset value for string signals), and `data-bind` takes a signal path (`kebabQuery`), not a `$`-prefixed expression.
+
+**Signal naming.** `camelCase`, scoped to the page or fragment that owns them. Modal-open booleans group into a `modals: {}` sub-object on the page envelope (e.g. `$modals.drawer`, `$modals.standup`). Drawer-internal state (`triage`, `openSteps`, `prevSessionId`, `nextSessionId`, `sessionId`, `stepId`) lives on the drawer fragment's own `data-signals` so it clears with the DOM when the drawer closes.
+
+**Where to look up Datastar.** Claude's training data on Datastar is out of date — the v1 API differs materially from earlier versions. When writing or reviewing Datastar code, always look up current docs via Context7: `mcp__context7__resolve-library-id "datastar"`, then `mcp__context7__query-docs` with `/websites/data-star_dev`.
+
+**Canonical examples in this repo.** `templates/fragments/finding.html` (signals + bind + click + class binding + `@post`), `templates/fragments/config_field.html` (debounced `@post`), `routes_command_center.py:command_center_events` (mixing `patch_elements` + `patch_signals` in one stream), `sse_helpers.py` (helper-builder pattern), `cc-modals.js` (browser-API + named dispatch functions).
+
 ## Testing philosophy
 
 The Playwright UI tests in `tests/test_ui/` are the most important safety net for the web server. When modifying server templates, routes, or Datastar bindings, always update or add Playwright tests that verify the **end-to-end behavior**, not just HTML structure.

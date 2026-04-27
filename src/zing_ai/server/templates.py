@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,12 +119,43 @@ def _humanize_time(value: Any) -> str:
     return f"on {value.strftime('%Y-%m-%d')}"
 
 
+def _js_str(value: Any) -> markupsafe.Markup:
+    """Jinja2 filter: return ``value`` rendered as a safe JS string literal.
+
+    Use inside a Datastar / inline JS expression embedded in an HTML attribute,
+    e.g. ``data-on:click="@post(..., {payload: {card_key: {{ card.key | js_str }}}})"``.
+
+    Why this exists: ``| e`` (autoescape) converts ``'`` to ``&#39;`` which the
+    browser decodes back to ``'`` inside a quoted attribute, breaking any
+    surrounding single-quoted JS string. ``json.dumps`` produces a properly
+    JS-escaped double-quoted string literal; the ``"`` characters that delimit
+    that literal would themselves break a surrounding ``data-foo="..."``
+    attribute, so they are HTML-escaped to ``&quot;`` here. The browser
+    decodes ``&quot;`` back to ``"`` *inside attribute parsing only*, so the
+    JS literal stays intact.
+
+    The returned string includes the surrounding (escaped) double quotes —
+    callers should NOT add their own quotes:
+
+        data-foo="alert({{ name | js_str }})"  →  data-foo="alert(&quot;world&quot;)"
+    """
+    if value is None:
+        return markupsafe.Markup("&quot;&quot;")
+    text = value if isinstance(value, str) else str(value)
+    # json.dumps handles JS-side escaping of \, control chars, and unicode.
+    # html.escape(quote=True) then HTML-escapes the surrounding " (and any
+    # < > & that json.dumps left alone) so the literal can sit inside a
+    # double-quoted HTML attribute without breaking it.
+    return markupsafe.Markup(html.escape(json.dumps(text), quote=True))
+
+
 _env = Environment(
     loader=PackageLoader("zing_ai", "server/templates"),
     autoescape=True,
 )
 _env.filters["markdown"] = _render_markdown
 _env.filters["humanize_time"] = _humanize_time
+_env.filters["js_str"] = _js_str
 
 
 def _compute_asset_version() -> str:

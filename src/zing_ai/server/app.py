@@ -388,6 +388,13 @@ def create_app(
     fastapi_app.state.sse_queues = _sse_queues
     fastapi_app.state.dashboard_queues = _dashboard_queues
     fastapi_app.state.live_sessions = set()
+    # In-flight launch dedup lock — initialised here so two concurrent
+    # /launch-background requests can't each create their own private set
+    # (TOCTOU between getattr() and hasattr() in the lazy-init path).
+    fastapi_app.state.launching_set = set()
+    # Cache of repo-name → resolved Path used by /launch-background. Initialised
+    # here for the same reason as launching_set above.
+    fastapi_app.state.repo_path_cache = {}
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has

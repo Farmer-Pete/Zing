@@ -1,0 +1,31 @@
+{# Repo-chooser modal inner content.
+   Rendered as an INNER fragment by /command-center/launch-background (status=choose_repo).
+   The stable #repo-chooser-modal-container in command_center.html holds it and
+   carries the .dialog-modal class + backdrop, so this fragment only needs the
+   internal layout (header bar + body).
+   Context variables:
+     card_key  – ticket/card identifier, e.g. "TKT-1"
+     repos     – list of {path: str, label: str} dicts
+#}
+<div class="dialog-modal-bar">
+  <span class="dialog-modal-title">Choose a repo</span>
+  <button class="terminal-modal-close" aria-label="Close repo chooser"
+          data-on:click="$modals.repoChooser = false">&times;</button>
+</div>
+<div class="repo-chooser-body">
+  <p class="repo-chooser-hint">This ticket has no linked PR. Which repo does it belong to?</p>
+  <div class="repo-chooser-list">
+    {% for repo in repos %}
+    <button class="repo-chooser-option"
+            data-indicator="$busyButtons.launch_{{ card_key | replace('-', '_') | e }}"
+            data-attr:disabled="$busyButtons.launch_{{ card_key | replace('-', '_') | e }}"
+            data-on:click="@post('/command-center/launch-background',
+                                 {payload: {card_key: {{ card_key | js_str }},
+                                            repo: {{ repo.path | js_str }}}}); $modals.repoChooser = false">
+      {{ repo.label }}
+    </button>
+    {% endfor %}
+  </div>
+  <button class="repo-chooser-cancel"
+          data-on:click="$modals.repoChooser = false">Cancel</button>
+</div>

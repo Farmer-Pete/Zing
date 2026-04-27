@@ -11,6 +11,7 @@ import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from datastar_py import ServerSentEventGenerator as SSE
 from datastar_py.consts import ElementPatchMode
@@ -42,10 +43,17 @@ from zing_ai.server.command_center import (
 )
 from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.signals import to_signal_key as _to_signal_key
+from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Guards against concurrent manual-refresh clicks (Decision #22).
+_refresh_lock = asyncio.Lock()
+# Guards against concurrent launch-background invocations for the same card.
+_launch_lock = asyncio.Lock()
 
 
 def _format_last_polled(dt: datetime | None) -> str:
@@ -226,6 +234,73 @@ def _render_tray_fragment(app: FastAPI) -> str:
     return render("fragments/management_tray.html", **tray_data)
 
 
+def _build_initial_signals(
+    view: KanbanView,
+    sessions: list,
+    last_polled_label: str,
+    last_error: str,
+) -> dict[str, Any]:
+    """Build the initial signal envelope rendered onto ``.cc-page``.
+
+    Centralising the defaults here makes them diffable / commentable in Python
+    rather than hidden inside a ~250-character minified JSON blob in the
+    template. Per-card ``$busyButtons`` keys are pre-computed from the kanban
+    view so every key the page may reference exists with the safe value
+    ``False`` — Datastar v1 otherwise treats undefined indicator signals as
+    truthy on first read, which would gate the launch / kill / attach /
+    cleanup / resume / start buttons closed at page load.
+    """
+    busy_buttons: dict[str, bool] = {
+        # Toolbar buttons.
+        "refresh": False,
+        "standup": False,
+    }
+    # Pre-init every per-card / per-session indicator key the page may dereference.
+    for column in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in column:
+            sig = card.signal_key
+            busy_buttons[f"launch_{sig}"] = False
+            if card.ticket is not None:
+                busy_buttons[f"start_{_to_signal_key(card.ticket.identifier)}"] = False
+    for s in sessions:
+        if isinstance(s, ClaudeCodeSession):
+            sig = s.signal_key
+            busy_buttons[f"attach_{sig}"] = False
+            busy_buttons[f"kill_{sig}"] = False
+            busy_buttons[f"resume_{sig}"] = False
+            busy_buttons[f"cleanup_{sig}"] = False
+
+    return {
+        # Polling status (also patched via SSE).
+        "lastPolledLabel": last_polled_label or "",
+        "lastError": last_error or "",
+        # Attention bar open/closed.
+        "attnBarOpen": True,
+        # Per-button busy/disabled flags (see helper above).
+        "busyButtons": busy_buttons,
+        # Modal open/closed flags. Five modals share this dict so a single
+        # data-on-signal-patch-filter on .cc-page can react to any change.
+        "modals": {
+            "drawer": False,
+            "mgmt": False,
+            "standup": False,
+            "terminal": False,
+            "repoChooser": False,
+        },
+        # Currently-open kebab key (empty string = none open). Empty string
+        # rather than null because Datastar deletes null'd keys from the proxy
+        # silently, which breaks close-on-outside-click watchers.
+        "openKebab": "",
+        # Kebab search input (clears when a menu opens).
+        "kebabQuery": "",
+        # Standup modal state.
+        "standupTab": "rendered",
+        "standupMarkdown": "",
+        # Terminal modal — URL signal patched by /attach-session.
+        "terminalUrl": "",
+    }
+
+
 @router.get("/command-center", response_class=HTMLResponse)
 async def get_command_center(request: Request) -> HTMLResponse:
     """Return the Command Center HTML page."""
@@ -239,6 +314,12 @@ async def get_command_center(request: Request) -> HTMLResponse:
     for s in sessions:
         if hasattr(s, "steps"):
             session_phases[s.session_id] = build_session_phases(s)
+    initial_signals = _build_initial_signals(
+        view,
+        sessions,
+        last_polled_label=_format_last_polled(cache.last_polled_at),
+        last_error=cache.last_error or "",
+    )
     return HTMLResponse(
         render(
             "command_center.html",
@@ -252,6 +333,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             live_sessions=live_sessions,
             attention_items=attention_items,
             session_phases=session_phases,
+            initial_signals=initial_signals,
             **tray_data,
         )
     )
@@ -313,28 +395,61 @@ async def command_center_events(request: Request):  # noqa: ANN201
 
 
 @router.post("/command-center/refresh")
-async def refresh_command_center(request: Request) -> JSONResponse:
+@datastar_response
+async def refresh_command_center(request: Request):  # noqa: ANN201
     """Trigger an immediate poll of Linear/GitHub and refresh the board."""
     poller = getattr(request.app.state, "poller", None)
-    if poller is None:
-        return JSONResponse({"error": "Poller not available"}, status_code=503)
-    try:
-        await poller._poll_once()  # noqa: SLF001
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Manual refresh failed: %s", exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse({"status": "refreshed"})
+
+    async def _stream():  # noqa: ANN202
+        if poller is None:
+            yield _sse_toast("Poller not available", "err")
+            return
+        if _refresh_lock.locked():
+            yield _sse_toast("Refresh already in progress", "info")
+            return
+        async with _refresh_lock:
+            try:
+                await poller._poll_once()  # noqa: SLF001
+                yield _sse_toast("Refreshed", "ok")
+            except Exception:  # noqa: BLE001
+                logger.exception("cc-refresh failed", extra={"event": "cc_refresh_failed"})
+                yield _sse_toast("Refresh failed — see server logs", "err")
+
+    return _stream()
 
 
-@router.get("/command-center/standup")
-async def get_standup(request: Request) -> JSONResponse:
-    """Generate a standup message from the current board state."""
-    view = _build_view(request.app)
-    cache = request.app.state.external_cache
-    username = cache.github_username or ""
-    markdown = generate_standup(view, username)
-    html = str(render_markdown(markdown))
-    return JSONResponse({"markdown": markdown, "html": html})
+@router.post("/command-center/standup")
+@datastar_response
+async def get_standup(request: Request):  # noqa: ANN201
+    """Generate a standup message from the current board state.
+
+    POST + SSE keeps verb semantics consistent with the rest of the file
+    (refresh, attach, kill, cleanup, drawer all use POST + SSE) and avoids
+    the cacheability concern of SSE-on-GET.
+    """
+
+    async def _stream():  # noqa: ANN202
+        view = _build_view(request.app)
+        cache = request.app.state.external_cache
+        username = cache.github_username or ""
+        markdown = generate_standup(view, username)
+        html = str(render_markdown(markdown))
+        yield SSE.patch_elements(
+            html,
+            selector="#standup-modal-body",
+            mode=ElementPatchMode.INNER,
+        )
+        # standupHtml signal intentionally NOT patched — the rendered HTML
+        # already lives in #standup-modal-body and the Copy button reads
+        # it from the DOM (see dispatchCopyStandup in cc-modals.js).
+        yield SSE.patch_signals(
+            {
+                "modals": {"standup": True},
+                "standupMarkdown": markdown,
+            }
+        )
+
+    return _stream()
 
 
 # ---------------------------------------------------------------------------
@@ -343,20 +458,44 @@ async def get_standup(request: Request) -> JSONResponse:
 
 
 @router.post("/command-center/attach-session")
-async def attach_session(request: Request) -> JSONResponse:
+@datastar_response
+async def attach_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Attach to a zellij session via the browser proxy."""
-    if not getattr(request.app.state, "zellij_available", False):
-        return JSONResponse({"error": "Zellij is not available"}, status_code=503)
-    try:
-        data = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    terminal_session = data.get("terminal_session")
-    if not terminal_session:
-        return JSONResponse({"error": "terminal_session is required"}, status_code=400)
-    if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
-        return JSONResponse({"error": "invalid session name"}, status_code=400)
-    return JSONResponse({"url": f"/zellij/{terminal_session}"})
+
+    async def _stream():  # noqa: ANN202
+        if not getattr(request.app.state, "zellij_available", False):
+            logger.warning(
+                "attach-session: zellij unavailable",
+                extra={"event": "cc_attach_unavailable"},
+            )
+            yield _sse_toast("Zellij is not available", "err")
+            return
+        terminal_session = payload.get("terminal_session")
+        if not terminal_session:
+            logger.warning(
+                "attach-session: missing terminal_session",
+                extra={"event": "cc_attach_invalid"},
+            )
+            yield _sse_toast("terminal_session is required", "err")
+            return
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+            logger.warning(
+                "attach-session: invalid session name %s",
+                terminal_session,
+                extra={"event": "cc_attach_invalid"},
+            )
+            yield _sse_toast("invalid session name", "err")
+            return
+        url_for_zellij_session = f"/zellij/{terminal_session}"
+        yield SSE.patch_signals(
+            {
+                "terminalUrl": url_for_zellij_session,
+                "modals": {"terminal": True},
+            }
+        )
+        yield _sse_toast("Terminal opened", "ok")
+
+    return _stream()
 
 
 # ---------------------------------------------------------------------------
@@ -365,173 +504,205 @@ async def attach_session(request: Request) -> JSONResponse:
 
 
 @router.post("/command-center/launch-background")
-async def launch_background(request: Request) -> JSONResponse:
+@datastar_response
+async def launch_background(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Launch a background Claude Code session for a Kanban card."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        raw = await request.body()
-        logger.error("launch-background: invalid JSON body: %s", raw[:500])
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    # Datastar sends payload under a "payload" key in the signal store.
-    payload = body.get("payload", body)
     card_key = payload.get("card_key")
     repo_override = payload.get("repo")  # set when user picks from the chooser
     skill_override = payload.get("skill")  # e.g. "pr-respond" for respond buttons
-    if not card_key:
-        logger.error("launch-background: missing card_key in body: %s", body)
-        return JSONResponse({"error": "card_key is required"}, status_code=400)
+    # Reset $busyButtons.launch_<sig> on every exit so the button returns to its
+    # interactive state. The card_key may legitimately be missing here (early
+    # error path); callers handle that case explicitly with a fallback.
+    sig_key = _to_signal_key(card_key) if card_key else ""
+    reset_busy = (
+        SSE.patch_signals({"busyButtons": {f"launch_{sig_key}": False}}) if sig_key else None
+    )
 
-    logger.debug("launch-background: card_key=%s, body keys=%s", card_key, list(body.keys()))
-
-    # In-flight dedup lock — initialise lazily if not set by create_app.
-    launching_set: set[str] = getattr(request.app.state, "launching_set", None) or set()
-    if not hasattr(request.app.state, "launching_set"):
-        request.app.state.launching_set = launching_set
-
-    if card_key in launching_set:
-        logger.warning("launch-background: duplicate launch for card %s", card_key)
-        return JSONResponse({"error": "Launch already in progress for this card"}, status_code=409)
-
-    launching_set.add(card_key)
-
-    # Lazy-init repo path cache.
-    repo_path_cache: dict[str, Path] = getattr(request.app.state, "repo_path_cache", None) or {}
-    if not hasattr(request.app.state, "repo_path_cache"):
-        request.app.state.repo_path_cache = repo_path_cache
-
-    config = load_config()
-    code_dir = config.git.code_dir
-    if not code_dir:
-        launching_set.discard(card_key)
-        logger.error("launch-background: code_dir is not configured")
-        return JSONResponse({"error": "code_dir is not configured"}, status_code=422)
-
-    # Locate the card in the current kanban view (search all columns).
-    kanban_view: KanbanView = _build_view(request.app)
-    card = None
-    for column in (
-        kanban_view.todo,
-        kanban_view.in_progress,
-        kanban_view.needs_review,
-        kanban_view.done,
-    ):
-        for c in column:
-            if c.key == card_key:
-                card = c
-                break
-        if card is not None:
-            break
-
-    # Derive repo name and branch/PR info from the card.
-    repo_name: str | None = None
-    branch_name: str | None = None
-    ticket_id: str | None = None
-    pr_number: int | None = None
-    pr_repo: str | None = None
-    is_pr_card = False
-
-    if card is not None:
-        if card.prs:
-            pr_number_override = payload.get("pr_number")
-            if pr_number_override is not None:
-                try:
-                    pr = next(
-                        (p for p in card.prs if p.number == int(pr_number_override)),
-                        card.prs[0],
-                    )
-                except ValueError:
-                    launching_set.discard(card_key)
-                    return JSONResponse(
-                        {"error": f"Invalid pr_number: {pr_number_override}"}, status_code=400
-                    )
-            else:
-                pr = card.prs[0]
-            if not repo_override:
-                repo_name = pr.repo  # "owner/repo"
-            branch_name = pr.head_ref
-            pr_number = pr.number
-            pr_repo = pr.repo
-            is_pr_card = True
-        if card.ticket is not None:
-            ticket_id = card.ticket.identifier
-
-    if repo_override:
-        repo_name = repo_override
-
-    # For ticket-only cards (no PRs), infer repo from same-team cards.
-    if repo_name is None:
-        kanban_view: KanbanView = _build_view(request.app)
-        team = card.ticket.team if (card is not None and card.ticket) else None
-        candidates = infer_repo_for_ticket(kanban_view, team)
-        if len(candidates) == 1:
-            repo_name = candidates[0]
-        elif candidates:
-            launching_set.discard(card_key)
-            return JSONResponse(
-                {"status": "choose_repo", "repos": candidates, "card_key": card_key}
+    async def _stream():  # noqa: ANN202
+        if not card_key:
+            logger.warning(
+                "launch-background: missing card_key",
+                extra={"event": "cc_launch_invalid"},
             )
-        else:
+            yield _sse_toast("card_key is required", "err")
+            return
+
+        logger.debug("launch-background: card_key=%s", card_key)
+
+        launching_set: set[str] = request.app.state.launching_set
+
+        # Atomic check-and-add — without the lock, two concurrent SSE connections
+        # (second tab, rapid double-click) can both pass the membership check
+        # before either has called add(), creating two worktrees for the same card.
+        async with _launch_lock:
+            if card_key in launching_set:
+                logger.warning(
+                    "launch-background: duplicate launch for card %s",
+                    card_key,
+                    extra={"event": "cc_launch_duplicate", "card_key": card_key},
+                )
+                yield _sse_toast("Launch already in progress for this card", "err")
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+            launching_set.add(card_key)
+
+        repo_path_cache: dict[str, Path] = request.app.state.repo_path_cache
+
+        config = load_config()
+        code_dir = config.git.code_dir
+        if not code_dir:
+            launching_set.discard(card_key)
+            logger.error("launch-background: code_dir is not configured")
+            yield _sse_toast("code_dir is not configured", "err")
+            if reset_busy is not None:
+                yield reset_busy
+            return
+
+        # Locate the card in the current kanban view (search all columns).
+        kanban_view: KanbanView = _build_view(request.app)
+        card = None
+        for column in (
+            kanban_view.todo,
+            kanban_view.in_progress,
+            kanban_view.needs_review,
+            kanban_view.done,
+        ):
+            for c in column:
+                if c.key == card_key:
+                    card = c
+                    break
+            if card is not None:
+                break
+
+        # Derive repo name and branch/PR info from the card.
+        repo_name: str | None = None
+        branch_name: str | None = None
+        ticket_id: str | None = None
+        pr_number: int | None = None
+        pr_repo: str | None = None
+        is_pr_card = False
+
+        if card is not None:
+            if card.prs:
+                pr_number_override = payload.get("pr_number")
+                if pr_number_override is not None:
+                    try:
+                        pr = next(
+                            (p for p in card.prs if p.number == int(pr_number_override)),
+                            card.prs[0],
+                        )
+                    except ValueError:
+                        launching_set.discard(card_key)
+                        yield _sse_toast(f"Invalid pr_number: {pr_number_override}", "err")
+                        if reset_busy is not None:
+                            yield reset_busy
+                        return
+                else:
+                    pr = card.prs[0]
+                if not repo_override:
+                    repo_name = pr.repo  # "owner/repo"
+                branch_name = pr.head_ref
+                pr_number = pr.number
+                pr_repo = pr.repo
+                is_pr_card = True
+            if card.ticket is not None:
+                ticket_id = card.ticket.identifier
+
+        if repo_override:
+            repo_name = repo_override
+
+        # For ticket-only cards (no PRs), infer repo from same-team cards.
+        if repo_name is None:
+            team = card.ticket.team if (card is not None and card.ticket) else None
+            candidates = infer_repo_for_ticket(kanban_view, team)
+            if len(candidates) == 1:
+                repo_name = candidates[0]
+            elif candidates:
+                launching_set.discard(card_key)
+                candidates_dicts = [{"path": r, "label": r.split("/")[-1]} for r in candidates]
+                yield SSE.patch_elements(
+                    render(
+                        "fragments/repo_chooser_modal.html",
+                        card_key=card_key,
+                        repos=candidates_dicts,
+                    ),
+                    selector="#repo-chooser-modal-container",
+                    mode=ElementPatchMode.INNER,
+                )
+                yield SSE.patch_signals({"modals": {"repoChooser": True}})
+                # Symmetric with every other early-return branch — reset busy so
+                # the launch indicator clears and the chooser button picks up the
+                # in-flight state via its own data-indicator binding.
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+            else:
+                launching_set.discard(card_key)
+                logger.error(
+                    "launch-background: cannot determine repo for card %s "
+                    "(no PRs, no same-team cards)",
+                    card_key,
+                )
+                error_msg = (
+                    f"Cannot determine repository for card {card_key}. "
+                    "Ticket has no linked PR and no same-team cards have PRs."
+                )
+                yield _sse_toast(error_msg, "err")
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+
+        # Resolve local repo path.
+        assert repo_name is not None  # guarded above
+        repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
+        if repo_root is None:
+            launching_set.discard(card_key)
+            logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
+            yield _sse_toast(f"Repository {repo_name} not found under {code_dir}", "err")
+            if reset_busy is not None:
+                yield reset_busy
+            return
+
+        # Derive branch name for ticket-only cards.
+        if branch_name is None and ticket_id is not None and config.command_center.linear_api_key:
+            try:
+                branch_name = derive_branch_name(ticket_id, config.command_center.linear_api_key)
+            except LaunchError as exc:
+                launching_set.discard(card_key)
+                logger.error(
+                    "launch-background: derive_branch_name failed for %s: %s", ticket_id, exc
+                )
+                yield _sse_toast(str(exc), "err")
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+
+        if branch_name is None:
             launching_set.discard(card_key)
             logger.error(
-                "launch-background: cannot determine repo for card %s (no PRs, no same-team cards)",
+                "launch-background: cannot determine branch for card %s "
+                "(ticket_id=%s, has_linear_key=%s)",
                 card_key,
+                ticket_id,
+                bool(config.command_center.linear_api_key),
             )
-            return JSONResponse(
-                {
-                    "error": f"Cannot determine repository for card {card_key}. "
-                    "Ticket has no linked PR and no same-team cards have PRs."
-                },
-                status_code=422,
-            )
+            yield _sse_toast(f"Cannot determine branch for card {card_key}", "err")
+            if reset_busy is not None:
+                yield reset_busy
+            return
 
-    # Resolve local repo path.
-    assert repo_name is not None  # guarded above
-    repo_root = find_repo_path(code_dir, repo_name, repo_path_cache)
-    if repo_root is None:
-        launching_set.discard(card_key)
-        logger.error("launch-background: repo %s not found under %s", repo_name, code_dir)
-        return JSONResponse(
-            {"error": f"Repository {repo_name} not found under {code_dir}"},
-            status_code=404,
+        title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
+        skill = skill_override or ("pr-audit" if is_pr_card else "new")
+        target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
+        session_name = build_session_name(
+            target=ticket_id or branch_name,
+            pr_number=pr_number,
         )
+        server_url = str(request.base_url).rstrip("/")
 
-    # Derive branch name for ticket-only cards.
-    if branch_name is None and ticket_id is not None and config.command_center.linear_api_key:
-        try:
-            branch_name = derive_branch_name(ticket_id, config.command_center.linear_api_key)
-        except LaunchError as exc:
-            launching_set.discard(card_key)
-            logger.error("launch-background: derive_branch_name failed for %s: %s", ticket_id, exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
 
-    if branch_name is None:
-        launching_set.discard(card_key)
-        logger.error(
-            "launch-background: cannot determine branch for card %s "
-            "(ticket_id=%s, has_linear_key=%s)",
-            card_key,
-            ticket_id,
-            bool(config.command_center.linear_api_key),
-        )
-        return JSONResponse(
-            {"error": f"Cannot determine branch for card {card_key}"},
-            status_code=422,
-        )
-
-    title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
-    skill = skill_override or ("pr-audit" if is_pr_card else "new")
-    target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
-    session_name = build_session_name(
-        target=ticket_id or branch_name,
-        pr_number=pr_number,
-    )
-    server_url = str(request.base_url).rstrip("/")
-
-    logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
-
-    async def _run_launch() -> JSONResponse:
         worktree_path: Path | None = None
         try:
 
@@ -581,30 +752,31 @@ async def launch_background(request: Request) -> JSONResponse:
 
                 return session_id, wt
 
-            session_id, wt = await asyncio.to_thread(_blocking)
+            session_id, _wt = await asyncio.to_thread(_blocking)
 
             logger.info("Background session launched: %s (session: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
-            for q in request.app.state.cc_queues:
-                q.put_nowait("board_changed")
+            _push_board_changed(request.app)
 
-            return JSONResponse(
-                {"status": "launched", "session_id": session_id, "terminal_session": session_name}
-            )
+            yield _sse_toast("Launched", "ok")
+            if reset_busy is not None:
+                yield reset_busy
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
             logger.error("Background launch failed for card %s: %s", card_key, exc)
             if worktree_path is not None:
                 try:
                     rollback_worktree(worktree_path)
-                except Exception as rollback_exc:  # noqa: BLE001
+                except (OSError, subprocess.CalledProcessError) as rollback_exc:
                     logger.warning("Rollback failed: %s", rollback_exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            yield _sse_toast(str(exc), "err")
+            if reset_busy is not None:
+                yield reset_busy
         finally:
             launching_set.discard(card_key)
 
-    return await _run_launch()
+    return _stream()
 
 
 # ---------------------------------------------------------------------------
@@ -619,108 +791,162 @@ def _push_board_changed(app: FastAPI) -> None:
 
 
 @router.post("/command-center/start-ticket")
-async def start_ticket(request: Request) -> JSONResponse:
+@datastar_response
+async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Move a Linear ticket to 'In Progress'."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     ticket_id = payload.get("ticket_id")
-    if not ticket_id:
-        return JSONResponse({"error": "ticket_id is required"}, status_code=400)
 
-    config = load_config()
-    api_key = config.command_center.linear_api_key
-    if not api_key:
-        return JSONResponse({"error": "Linear API key not configured"}, status_code=422)
+    async def _stream():  # noqa: ANN202
+        if not ticket_id:
+            logger.warning(
+                "start-ticket: missing ticket_id",
+                extra={"event": "cc_start_invalid"},
+            )
+            yield _sse_toast("ticket_id is required", "err")
+            return
 
-    try:
-        await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
-    except LaunchError as exc:
-        logger.error("start-ticket failed for %s: %s", ticket_id, exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        config = load_config()
+        api_key = config.command_center.linear_api_key
+        if not api_key:
+            logger.warning(
+                "start-ticket: linear api key missing",
+                extra={"event": "cc_start_unconfigured", "ticket_id": ticket_id},
+            )
+            yield _sse_toast("Linear API key not configured", "err")
+            return
 
-    # Trigger a poll in the background to pick up the state change.
-    poller = getattr(request.app.state, "poller", None)
-    if poller is not None:
+        try:
+            await asyncio.to_thread(move_ticket_in_progress, ticket_id, api_key)
+        except LaunchError as exc:
+            logger.error(
+                "start-ticket failed for %s: %s",
+                ticket_id,
+                exc,
+                extra={"event": "cc_start_failed", "ticket_id": ticket_id},
+            )
+            yield _sse_toast(str(exc), "err")
+            return
 
-        async def _bg_poll() -> None:
-            with contextlib.suppress(Exception):
-                await poller._poll_once()  # noqa: SLF001
+        # Trigger a poll in the background to pick up the state change.
+        poller = getattr(request.app.state, "poller", None)
+        if poller is not None:
+
+            async def _bg_poll() -> None:
+                with contextlib.suppress(Exception):
+                    await poller._poll_once()  # noqa: SLF001
+                _push_board_changed(request.app)
+
+            asyncio.create_task(_bg_poll())
+        else:
             _push_board_changed(request.app)
 
-        asyncio.create_task(_bg_poll())
-    else:
-        _push_board_changed(request.app)
+        yield _sse_toast("Ticket started", "ok")
 
-    return JSONResponse({"status": "started", "ticket_id": ticket_id})
+    return _stream()
 
 
 @router.post("/command-center/kill-session")
-async def kill_session(request: Request) -> JSONResponse:
+@datastar_response
+async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Kill a running zellij session and remove the session record."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     session_id = payload.get("session_id")
-    if not session_id:
-        return JSONResponse({"error": "session_id is required"}, status_code=400)
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
 
-    if (
-        session is None
-        or not isinstance(session, ClaudeCodeSession)
-        or not session.terminal_session
-    ):
-        return JSONResponse({"error": "session not found"}, status_code=404)
+    async def _stream():  # noqa: ANN202
+        if not session_id:
+            logger.warning(
+                "kill-session: missing session_id",
+                extra={"event": "cc_kill_invalid"},
+            )
+            yield _sse_toast("session_id is required", "err")
+            return
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if (
+            session is None
+            or not isinstance(session, ClaudeCodeSession)
+            or not session.terminal_session
+        ):
+            logger.warning(
+                "kill-session: session not found %s",
+                session_id,
+                extra={"event": "cc_kill_not_found", "session_id": session_id},
+            )
+            yield _sse_toast("Session not found", "err")
+            return
+        # zellij may legitimately be absent (CI runners, dev machines without
+        # the binary). Surface a soft warning but still clean up the session
+        # record so the UI reflects the user's intent.
+        try:
+            subprocess.run(
+                ["zellij", "kill-session", session.terminal_session],
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "kill-session: zellij binary not found; cleaning up session record only",
+                extra={"event": "cc_kill_no_zellij", "session_id": session_id},
+            )
+        manager.cleanup_session(session_id)
+        _push_board_changed(request.app)
+        yield _sse_toast("Session killed", "ok")
 
-    subprocess.run(
-        ["zellij", "kill-session", session.terminal_session],
-        capture_output=True,
-    )
-
-    manager.cleanup_session(session_id)
-    _push_board_changed(request.app)
-    return JSONResponse({"status": "killed"})
+    return _stream()
 
 
 @router.post("/command-center/cleanup-worktree")
-async def cleanup_worktree(request: Request) -> JSONResponse:
+@datastar_response
+async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Roll back a worktree and remove the session record."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    payload = body.get("payload", body)
     session_id = payload.get("session_id")
-    if not session_id:
-        return JSONResponse({"error": "session_id is required"}, status_code=400)
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
 
-    if session is None or not isinstance(session, ClaudeCodeSession) or not session.worktree_path:
-        return JSONResponse({"error": "session not found"}, status_code=404)
+    async def _stream():  # noqa: ANN202
+        if not session_id:
+            logger.warning(
+                "cleanup-worktree: missing session_id",
+                extra={"event": "cc_cleanup_invalid"},
+            )
+            yield _sse_toast("session_id is required", "err")
+            return
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if (
+            session is None
+            or not isinstance(session, ClaudeCodeSession)
+            or not session.worktree_path
+        ):
+            logger.warning(
+                "cleanup-worktree: session not found %s",
+                session_id,
+                extra={"event": "cc_cleanup_not_found", "session_id": session_id},
+            )
+            yield _sse_toast("Session not found", "err")
+            return
+        live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
+        if session.terminal_session and session.terminal_session in live_sessions:
+            logger.warning(
+                "cleanup-worktree: session %s still running",
+                session_id,
+                extra={"event": "cc_cleanup_running", "session_id": session_id},
+            )
+            yield _sse_toast("Cannot clean up worktree while session is running", "err")
+            return
+        try:
+            rollback_worktree(Path(session.worktree_path))
+        except (LaunchError, OSError, subprocess.CalledProcessError) as exc:
+            logger.error(
+                "Worktree rollback failed for session %s: %s",
+                session_id,
+                exc,
+                extra={"event": "cc_cleanup_failed", "session_id": session_id},
+            )
+            yield _sse_toast(str(exc), "err")
+            return
+        manager.cleanup_session(session_id)
+        _push_board_changed(request.app)
+        yield _sse_toast("Worktree cleaned up", "ok")
 
-    live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
-    if session.terminal_session and session.terminal_session in live_sessions:
-        return JSONResponse(
-            {"error": "Cannot clean up worktree while session is running"},
-            status_code=409,
-        )
-
-    try:
-        rollback_worktree(Path(session.worktree_path))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Worktree rollback failed for session %s: %s", session_id, exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-    manager.cleanup_session(session_id)
-    _push_board_changed(request.app)
-    return JSONResponse({"status": "cleaned_up"})
+    return _stream()
 
 
 @router.post("/command-center/session-question")
@@ -836,6 +1062,44 @@ def build_drawer_context(
         notification = session.pending_question
         notification_body = notification.body if notification else ""
 
+    # Build the triage signal dict for the drawer.
+    # Maps finding_id → action value string (or None) for pre-existing saved
+    # responses. The legacy storage layer pairs findings and responses by list
+    # index — that ordering is fragile if findings are inserted, deleted, or
+    # reordered mid-step. The mapping here is intentionally finding_id-keyed so
+    # the drawer's signal envelope is robust to ordering drift; index-by-index
+    # is only used as a fallback when both lists are the same length AND the
+    # responses don't carry per-finding identifiers (the current schema).
+    saved_triage_responses: dict[str, str | None] = {}
+    if current_step is not None:
+        responses = current_step.responses or []
+        same_length = len(responses) == len(current_step.findings)
+        for idx, finding in enumerate(current_step.findings):
+            if finding.type != "triage":
+                continue
+            action_val: str | None = None
+            if same_length and idx < len(responses) and responses[idx].action is not None:
+                action_val = responses[idx].action.value
+            saved_triage_responses[finding.id] = action_val
+
+    # Build the openSteps signal dict for the step-section accordion.
+    # Default: all past steps closed; current step open (if present).
+    saved_open_steps: dict[str, bool] = {}
+    if current_step is not None:
+        saved_open_steps[current_step.step_id] = True
+
+    # Build the drawer's data-signals envelope server-side as a single dict so
+    # we can render it via | tojson once on the template. Hand-building the
+    # JSON with raw ``{{ ... }}`` substitutions invites quote-handling drift.
+    drawer_signals: dict[str, object] = {
+        "prevSessionId": prev_session_id or "",
+        "nextSessionId": next_session_id or "",
+        "sessionId": session.session_id,
+        "stepId": current_step.step_id if current_step else "",
+        "triage": saved_triage_responses,
+        "openSteps": saved_open_steps,
+    }
+
     return {
         "session": session,
         "steps": steps,
@@ -850,60 +1114,81 @@ def build_drawer_context(
         "waiting_label": waiting_label,
         "notification": notification,
         "notification_body": notification_body,
+        "saved_triage_responses": saved_triage_responses,
+        "saved_open_steps": saved_open_steps,
+        "drawer_signals": drawer_signals,
     }
 
 
-@router.get("/command-center/drawer/{session_id}", response_class=HTMLResponse)
-async def get_drawer(session_id: str, request: Request) -> HTMLResponse:
-    """Return the drawer HTML fragment for a session.
+@router.post("/command-center/drawer/{session_id}")
+@datastar_response
+async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
+    """Return the drawer HTML fragment for a session via SSE.
 
-    The fragment includes backdrop + panel.  The JS injects it into
-    #review-drawer-container and sets display:block.
+    Patches the fragment into #review-drawer-container and opens the drawer
+    by setting modals.drawer = true in the Datastar signals.
     """
-    manager = request.app.state.session_manager
-    sessions = manager.list_sessions()
-    attention_queue = build_attention_queue(sessions, datetime.now(UTC))
 
-    ctx = build_drawer_context(session_id, manager, attention_queue)
-    if not ctx:
-        logger.warning("Drawer requested for unknown session: %s", session_id)
-        return HTMLResponse("<div>Session not found</div>", status_code=404)
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        sessions = manager.list_sessions()
+        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
 
-    session = ctx["session"]
+        ctx = build_drawer_context(session_id, manager, attention_queue)
+        if not ctx:
+            logger.warning("Drawer requested for unknown session: %s", session_id)
+            yield _sse_toast("Session not found", "err")
+            return
 
-    if isinstance(session, ClaudeCodeSession):
-        # Attach mode — use the simpler attach template.
-        html = render("fragments/drawer_attach.html", **ctx)
-    else:
-        # Findings/questions mode.
-        html = render("fragments/review_drawer.html", **ctx)
+        session = ctx["session"]
 
-    return HTMLResponse(html)
+        if isinstance(session, ClaudeCodeSession):
+            # Attach mode — use the simpler attach template.
+            html = render("fragments/drawer_attach.html", **ctx)
+        else:
+            # Findings/questions mode.
+            html = render("fragments/review_drawer.html", **ctx)
+
+        yield SSE.patch_elements(
+            html,
+            selector="#review-drawer-container",
+            mode=ElementPatchMode.INNER,
+        )
+        yield SSE.patch_signals({"modals": {"drawer": True}})
+
+    return _stream()
 
 
-@router.get(
+@router.post(
     "/command-center/drawer/{session_id}/step/{step_id}",
-    response_class=HTMLResponse,
 )
-async def get_drawer_step(
-    session_id: str,
-    step_id: str,
-    request: Request,
-) -> HTMLResponse:
-    """Return a single step-history fragment for the drawer.
+@datastar_response
+async def get_drawer_step(session_id: str, step_id: str, request: Request):  # noqa: ANN201
+    """Return a single step-history fragment for the drawer via SSE.
 
-    The JS can inject individual step sections when expanding collapsed history.
+    Patches the step section into #review-drawer-container and opens the drawer.
     """
-    manager = request.app.state.session_manager
-    session = manager.get_session(session_id)
-    if session is None or not isinstance(session, ZingSession):
-        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-        return HTMLResponse("<div>Session not found</div>", status_code=404)
 
-    step = next((s for s in session.steps if s.step_id == step_id), None)
-    if step is None:
-        logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-        return HTMLResponse("<div>Step not found</div>", status_code=404)
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        session = manager.get_session(session_id)
+        if session is None or not isinstance(session, ZingSession):
+            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+            yield _sse_toast("Session not found", "err")
+            return
 
-    html = render("fragments/drawer_step_history.html", step=step, session=session)
-    return HTMLResponse(html)
+        step = next((s for s in session.steps if s.step_id == step_id), None)
+        if step is None:
+            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+            yield _sse_toast("Step not found", "err")
+            return
+
+        html = render("fragments/drawer_step_history.html", step=step, session=session)
+        yield SSE.patch_elements(
+            html,
+            selector="#review-drawer-container",
+            mode=ElementPatchMode.INNER,
+        )
+        yield SSE.patch_signals({"modals": {"drawer": True}})
+
+    return _stream()

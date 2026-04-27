@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from zing_ai.server.models import Session, WorkflowStep
+from zing_ai.server.signals import to_signal_key as _to_signal_key
 
 
 class LinearIssue(BaseModel):
@@ -23,6 +24,16 @@ class LinearIssue(BaseModel):
     team: str | None  # team.name; null on triage / unassigned-team issues
     url: str
     updated_at: datetime
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`identifier` sanitised for use as a Datastar signal name.
+
+        Same purpose as :attr:`KanbanCard.signal_key` — see that property's
+        docstring for the rationale. Used by templates that build per-ticket
+        signals like ``$busyButtons.start_<signal_key>``.
+        """
+        return _to_signal_key(self.identifier)
 
 
 class CICheck(BaseModel):
@@ -77,6 +88,16 @@ class KanbanCard(BaseModel):
     audit_steps: list[WorkflowStep] = Field(default_factory=list)
     review_group: str | None = None  # mine_passing, mine_failing, others (needs_review only)
     done_group: str | None = None  # ready_to_merge, completed (done only)
+
+    @property
+    def signal_key(self) -> str:
+        """Return :attr:`key` sanitised for use as a Datastar signal-property name.
+
+        Datastar parses ``$busyButtons.launch_BAK-1234`` as subtraction. The
+        signal_key replaces non-alphanumerics with ``_`` so templates can
+        compose ``$busyButtons.launch_<signal_key>`` without quirks.
+        """
+        return _to_signal_key(self.key)
 
 
 class KanbanView(BaseModel):

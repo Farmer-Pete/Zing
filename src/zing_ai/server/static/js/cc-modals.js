@@ -1,3 +1,30 @@
+// Named dispatch functions (Decision #17): Datastar signal watchers call these
+// instead of inlining new CustomEvent(...) expressions in templates.
+
+window.dispatchOpenTerminal = function(url) {
+    if (!url) return;
+    document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));
+};
+
+window.dispatchCopyStandup = function(markdown) {
+    // Read HTML straight from the DOM rather than from a $standupHtml signal —
+    // the rendered HTML already lives in #standup-modal-body and storing a
+    // duplicate in the signal store added O(HTML-size) to every patch_signals.
+    var bodyEl = document.getElementById('standup-modal-body');
+    var html = bodyEl ? bodyEl.innerHTML : '';
+    document.dispatchEvent(new CustomEvent('copy-standup', {detail: {html: html, markdown: markdown}, bubbles: true}));
+};
+
+// Centralised clipboard write — replaces 20 inline navigator.clipboard.writeText
+// expressions in kanban_card.html. One site to add toast/error feedback in.
+window.dispatchCopyCmd = function(text) {
+    if (!text) return;
+    navigator.clipboard.writeText(text).catch(function() {
+        // Silent failure is fine — kebab buttons don't have a feedback affordance
+        // today. Centralised here so a future toast can be added in one place.
+    });
+};
+
 // Wire a modal: backdrop click, close button click, and ESC all dismiss it.
 // Returns { open, close } so callers can drive show/hide programmatically.
 // onClose runs after the modal is hidden — used by the terminal modal to tear
@@ -12,7 +39,7 @@ function mountModal(opts) {
     }
     function open() {
         if (opts.onOpen) opts.onOpen();
-        modal.style.display = '';
+        modal.style.display = 'flex';
         if (backdrop) backdrop.style.display = '';
     }
     if (opts.closeBtn) opts.closeBtn.addEventListener('click', close);
@@ -23,75 +50,11 @@ function mountModal(opts) {
     return { open: open, close: close };
 }
 
-// Repo chooser modal — close-only wiring; opening is handled by handleRepoChoice.
-mountModal({
-    modal: document.getElementById('repo-chooser-modal'),
-    backdrop: document.getElementById('repo-chooser-backdrop'),
-    closeBtn: document.getElementById('repo-chooser-close'),
-});
-
-// Standup modal
-(function() {
-    var modal = document.getElementById('standup-modal');
-    var copyBtn = document.getElementById('standup-copy-btn');
-    var renderedEl = document.getElementById('standup-rendered');
-    var markdownEl = document.getElementById('standup-markdown');
-    var tabs = modal.querySelectorAll('[data-standup-tab]');
-    var activeTab = 'rendered';
-    var standupData = {};
-
-    function switchTab(tab) {
-        activeTab = tab;
-        tabs.forEach(function(t) {
-            t.classList.toggle('active', t.getAttribute('data-standup-tab') === tab);
-        });
-        renderedEl.style.display = tab === 'rendered' ? '' : 'none';
-        markdownEl.style.display = tab === 'markdown' ? '' : 'none';
-    }
-
-    tabs.forEach(function(t) {
-        t.addEventListener('click', function() {
-            switchTab(t.getAttribute('data-standup-tab'));
-        });
-    });
-
-    var ctl = mountModal({
-        modal: modal,
-        backdrop: document.getElementById('standup-modal-backdrop'),
-        closeBtn: document.getElementById('standup-modal-close'),
-    });
-
-    copyBtn.addEventListener('click', function() {
-        var text;
-        if (activeTab === 'markdown') {
-            text = standupData.markdown || '';
-            navigator.clipboard.writeText(text).then(function() {
-                copyBtn.textContent = '\u2713 Copied!';
-                setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
-            });
-        } else {
-            // Copy rich text (HTML) so it pastes formatted in Slack/etc.
-            var blob = new Blob([standupData.html || ''], {type: 'text/html'});
-            var textBlob = new Blob([standupData.markdown || ''], {type: 'text/plain'});
-            var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
-            navigator.clipboard.write([item]).then(function() {
-                copyBtn.textContent = '\u2713 Copied!';
-                setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
-            });
-        }
-    });
-
-    // Expose loader for the toolbar button
-    window.openStandup = function(data) {
-        standupData = data;
-        renderedEl.innerHTML = data.html || '';
-        markdownEl.textContent = data.markdown || '';
-        switchTab('rendered');
-        ctl.open();
-    };
-})();
-
-// Terminal modal
+// Terminal modal — sole owner of the iframe lifecycle.
+// Both the X button (modal.style.display) and the body-level signal-patch
+// watcher (which dispatches 'close-terminal') route through ctl.close() so the
+// onClose hook runs exactly once and the IIFE-scoped iframe variable stays in
+// sync with the DOM (no stale-reference bug on reopen).
 (function() {
     var modal = document.getElementById('terminal-modal');
     var iframe = document.getElementById('terminal-modal-iframe');
@@ -100,7 +63,6 @@ mountModal({
     var ctl = mountModal({
         modal: modal,
         backdrop: document.getElementById('terminal-modal-backdrop'),
-        closeBtn: document.getElementById('terminal-modal-close'),
         onClose: function () {
             // Remove the iframe from the DOM entirely to avoid triggering the
             // "Leave site?" dialog when navigating it to about:blank.
@@ -121,4 +83,41 @@ mountModal({
         iframe.src = url;
         ctl.open();
     };
+
+    // Datastar signal-watcher entry point: the #terminal-launcher div fires
+    // dispatchOpenTerminal($terminalUrl) via data-on-signal-patch, which dispatches
+    // this event.
+    document.addEventListener('open-terminal', function(e) {
+        var url = e.detail && e.detail.url;
+        if (url) window.openTerminal(url);
+    });
+
+    // Body-level signal-patch watcher dispatches 'close-terminal' when
+    // $modals.terminal flips to false. Route through ctl.close() so the IIFE's
+    // iframe ref is kept consistent — never a parallel teardown path.
+    document.addEventListener('close-terminal', function() {
+        ctl.close();
+    });
 })();
+
+// Standup copy: dispatched by the Copy button via dispatchCopyStandup($standupHtml, $standupMarkdown).
+document.addEventListener('copy-standup', function(e) {
+    var html = e.detail && e.detail.html;
+    var markdown = e.detail && e.detail.markdown;
+    var copyBtn = document.getElementById('standup-copy-btn');
+    if (!html && !markdown) return;
+    var blob = new Blob([html || ''], {type: 'text/html'});
+    var textBlob = new Blob([markdown || ''], {type: 'text/plain'});
+    var item = new ClipboardItem({'text/html': blob, 'text/plain': textBlob});
+    navigator.clipboard.write([item]).then(function() {
+        if (copyBtn) {
+            copyBtn.textContent = '\u2713 Copied!';
+            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+        }
+    }).catch(function() {
+        if (copyBtn) {
+            copyBtn.textContent = 'Failed';
+            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+        }
+    });
+});
