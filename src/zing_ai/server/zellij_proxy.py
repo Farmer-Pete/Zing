@@ -40,6 +40,10 @@ def _get_zellij_port(request: Request) -> int:
 # ---------------------------------------------------------------------------
 
 # Patch 1: Add Cmd+C and Cmd+A passthrough alongside the existing Cmd+V passthrough.
+# Also drop modifier-only key presses (Meta/Cmd alone) before they reach the kitty
+# encoder — Zellij excludes Shift/Alt/Ctrl by keyCode but misses Meta. Without this,
+# pressing Cmd by itself sends `\\x1b[77;9u` (because ev.key.charCodeAt(0) of "Meta"
+# is 77 = 'M') and the shell renders an "m"/"M" in the terminal.
 _INPUT_JS_PATCH_TARGET = """\
             if (isMac() && ev.key == "v" && ev.metaKey) {
                 // pass cmd-v onwards so that paste is interpreted by xterm.js
@@ -56,6 +60,12 @@ _INPUT_JS_PATCH_REPLACEMENT = """\
             }
             if (isMac() && ev.key == "a" && ev.metaKey) {
                 // pass cmd-a onwards so that select all works
+                return;
+            }
+            if (ev.key == "Meta" || ev.key == "Control" || ev.key == "Shift" || ev.key == "Alt") {
+                // Modifier-only keypress: don't encode. Zellij's encode_kitty_key
+                // does ev.key.charCodeAt(0) which for "Meta" is 77 ('M'), causing a
+                // spurious "m"/"M" to appear in the terminal when Cmd is pressed alone.
                 return;
             }"""
 
@@ -198,7 +208,7 @@ def create_zellij_router() -> APIRouter:
 
     @router.get("/assets/{path:path}")
     async def proxy_assets(request: Request, path: str) -> Response:
-        """Proxy Zellij static assets, patching input.js for Cmd+C/A and Shift+Enter."""
+        """Proxy Zellij static assets, patching input.js."""
         if (err := _check_available(request)) is not None:
             return err
 

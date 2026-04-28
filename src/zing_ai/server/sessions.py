@@ -24,6 +24,7 @@ from zing_ai.server.models import (
     Finding,
     LogEntry,
     Notification,
+    QuestionData,
     ReviewItem,
     ReviewResponse,
     Session,
@@ -854,12 +855,34 @@ class SessionManager:
         return session
 
     def add_notification(
-        self, session_id: str, title: str, body: str = "", url: str | None = None
+        self,
+        session_id: str,
+        title: str,
+        body: str = "",
+        url: str | None = None,
+        question: QuestionData | None = None,
     ) -> Notification:
         """Create a notification, append it to the session, persist, and notify."""
         session = self._get_session_or_raise(session_id)
-        notification = Notification(title=title, body=body, url=url)
+        notification = Notification(title=title, body=body, url=url, question=question)
         session.notifications.append(notification)
         self._persist(session)
         self._notify(f"notification_added:{notification.id}", session_id)
+        return notification
+
+    def mark_pending_question_answered(self, session_id: str) -> Notification | None:
+        """Stamp ``answered_at`` on the latest unanswered notification.
+
+        Returns the notification that was marked, or ``None`` if no session,
+        no unanswered notification, or the session is not a ClaudeCodeSession.
+        """
+        session = self._sessions.get(session_id)
+        if not isinstance(session, ClaudeCodeSession):
+            return None
+        notification = session.pending_question
+        if notification is None:
+            return None
+        notification.answered_at = datetime.now()
+        self._persist(session)
+        self._notify(f"notification_answered:{notification.id}", session_id)
         return notification

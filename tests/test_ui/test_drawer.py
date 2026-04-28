@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -74,7 +75,7 @@ def test_drawer_opens_from_attention_bar(server: _ServerInfo, page: Page) -> Non
     _open_drawer(server, page)
 
     expect(page.locator("#review-drawer .dh-title")).to_contain_text("Drawer test", timeout=3000)
-    expect(page.locator(".df-tb[data-action='accept']").first).to_be_visible(timeout=3000)
+    expect(page.locator(".action-btn[data-action='accept']").first).to_be_visible(timeout=3000)
 
 
 def test_drawer_close_button_dismisses_drawer(server: _ServerInfo, page: Page) -> None:
@@ -96,17 +97,17 @@ def test_drawer_escape_key_dismisses_drawer(server: _ServerInfo, page: Page) -> 
 
 
 def test_drawer_triage_button_toggles_state(server: _ServerInfo, page: Page) -> None:
-    """Clicking Accept on a finding adds the .sa class and bumps the triage counter."""
+    """Clicking Accept on a finding adds the .selected class and bumps the triage counter."""
     _seed_session_with_findings(server)
     _open_drawer(server, page)
 
     counter = page.locator("#drawer-triage-count")
     expect(counter).to_have_text("0", timeout=3000)
 
-    accept = page.locator(".df-tb[data-action='accept']").first
+    accept = page.locator(".action-btn[data-action='accept']").first
     accept.click()
 
-    expect(accept).to_have_class("df-tb sa", timeout=3000)
+    expect(accept).to_have_class(re.compile(r"\bselected\b"), timeout=3000)
     expect(counter).to_have_text("1", timeout=3000)
 
 
@@ -178,7 +179,7 @@ def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> No
     _open_drawer(server, page)
 
     # Triage one finding so the submit body has a populated responses object.
-    page.locator(".df-tb[data-action='accept']").first.click()
+    page.locator(".action-btn[data-action='accept']").first.click()
 
     # Capture the submit POST so we can assert on its payload.
     with page.expect_request(lambda r: "/submit" in r.url and r.method == "POST") as info:
@@ -199,12 +200,12 @@ def test_drawer_submit_posts_and_advances(server: _ServerInfo, page: Page) -> No
 
 
 def test_drawer_triage_state_rehydrates_on_reload(server: _ServerInfo, page: Page) -> None:
-    """Pre-existing saved triage responses re-hydrate $triage on drawer open.
+    """Pre-existing saved triage responses re-hydrate $responses on drawer open.
 
     Seeds a session with one 'accept' response already persisted server-side,
     then opens the drawer and asserts:
-      - the Accept button carries the .sa class (Datastar applied it from
-        the saved_triage_responses signal initialised in the template), and
+      - the Accept button carries the .selected class (Datastar applied it
+        from the drawer_signals envelope initialised in the template), and
       - the triage counter shows "1".
     """
     manager = server.manager
@@ -233,11 +234,11 @@ def test_drawer_triage_state_rehydrates_on_reload(server: _ServerInfo, page: Pag
     drawer = page.locator("#review-drawer")
     expect(drawer).to_be_visible(timeout=5000)
 
-    # The Accept button for "f-rehydrate" should carry .sa because
-    # saved_triage_responses seeded $triage with {"f-rehydrate": "accept"}.
-    accept_btn = page.locator(".df-tb[data-action='accept']").first
+    # The Accept button for "f-rehydrate" should carry .selected because
+    # build_drawer_context seeded $responses with {"f-rehydrate": "accept"}.
+    accept_btn = page.locator(".action-btn[data-action='accept']").first
     expect(accept_btn).to_be_visible(timeout=3000)
-    expect(accept_btn).to_have_class("df-tb sa", timeout=3000)
+    expect(accept_btn).to_have_class(re.compile(r"\bselected\b"), timeout=3000)
 
     # Counter should reflect the one pre-saved response.
     expect(page.locator("#drawer-triage-count")).to_have_text("1", timeout=3000)

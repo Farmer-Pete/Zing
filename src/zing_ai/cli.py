@@ -217,7 +217,6 @@ def launch(
         parse_pr_url,
         require_session_backend,
         resolve_repo_root,
-        rollback_worktree,
         run_init_script,
         sanitize_branch_name,
         validate_markdown_target,
@@ -386,31 +385,25 @@ def launch(
         ) -> None:
             """Run init script, create session, and launch (or print setup-only)."""
             session_id = str(uuid.uuid4())
-            succeeded = False
-            try:
-                run_init_script(
-                    repo_root=repo_root,
-                    script_name=git_cfg.zing_init_script,
-                    worktree_path=work_dir,
-                    branch=branch_name,
-                )
-                if pre_create_hook is not None:
-                    pre_create_hook()
-                create_session_on_server(
-                    server_url=server_url,
-                    session_id=session_id,
-                    title=title,
-                    ticket_id=ticket_id,
-                    worktree_path=str(work_dir) if work_dir else None,
-                    skill=resolved_skill,
-                    pr_number=pr_number,
-                    pr_repo=pr_repo,
-                    terminal_session=session_name,
-                )
-                succeeded = True
-            finally:
-                if not succeeded and worktree_path is not None:
-                    rollback_worktree(worktree_path)
+            run_init_script(
+                repo_root=repo_root,
+                script_name=git_cfg.zing_init_script,
+                worktree_path=work_dir,
+                branch=branch_name,
+            )
+            if pre_create_hook is not None:
+                pre_create_hook()
+            create_session_on_server(
+                server_url=server_url,
+                session_id=session_id,
+                title=title,
+                ticket_id=ticket_id,
+                worktree_path=str(work_dir) if work_dir else None,
+                skill=resolved_skill,
+                pr_number=pr_number,
+                pr_repo=pr_repo,
+                terminal_session=session_name,
+            )
 
             if setup_only:
                 click.echo(f"Environment ready: {work_dir}")

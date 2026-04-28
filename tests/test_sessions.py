@@ -1373,6 +1373,50 @@ class TestClaudeCodeSession(unittest.TestCase):
         ]
         assert len(matching) == 1
 
+    def test_mark_pending_question_answered_clears_attention(self) -> None:
+        """Stamping answered_at clears pending_question and fires a listener event."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-ans", title="Answer Test")
+        notif = self.manager.add_notification("cc-ans", "Input needed", body="Q?")
+        events: list[tuple[str, str]] = []
+        self.manager.add_listener(lambda et, sid: events.append((et, sid)))
+
+        marked = self.manager.mark_pending_question_answered("cc-ans")
+
+        assert marked is not None
+        assert marked.id == notif.id
+        session = self.manager.get_session("cc-ans")
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.pending_question is None
+        assert session.notifications[0].answered_at is not None
+        assert (f"notification_answered:{notif.id}", "cc-ans") in events
+
+    def test_mark_pending_question_answered_persists(self) -> None:
+        """answered_at survives a manager restart."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-ans-p", title="Persist")
+        self.manager.add_notification("cc-ans-p", "Input needed")
+        self.manager.mark_pending_question_answered("cc-ans-p")
+
+        manager2 = SessionManager(data_dir=self.data_dir)
+        loaded = manager2.get_session("cc-ans-p")
+        assert isinstance(loaded, ClaudeCodeSession)
+        assert loaded.pending_question is None
+        assert loaded.notifications[0].answered_at is not None
+
+    def test_mark_pending_question_answered_no_notification_returns_none(self) -> None:
+        """No-op when the session has no unanswered notification."""
+        self.manager.create_claude_code_session(session_id="cc-empty", title="Empty")
+        assert self.manager.mark_pending_question_answered("cc-empty") is None
+
+    def test_mark_pending_question_answered_zing_session_returns_none(self) -> None:
+        """ZingSessions are not affected — only ClaudeCodeSession is touched."""
+        self.manager.create_session("zs1", "Zing")
+        assert self.manager.mark_pending_question_answered("zs1") is None
+        assert self.manager.mark_pending_question_answered("missing") is None
+
 
 if __name__ == "__main__":
     unittest.main()

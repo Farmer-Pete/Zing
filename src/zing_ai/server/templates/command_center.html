@@ -5,11 +5,19 @@
 {% block content %}
 <div class="cc-page"
      data-signals='{{ initial_signals | tojson }}'
-     data-init="@get('/command-center/events')"
+     {# filterSignals with empty-string include sends no signals on this SSE
+        connection. The events endpoint is server-push only and never reads
+        the request body, so transmitting the entire $busyButtons envelope
+        (one entry per session per action) was wasting kilobytes per request. #}
+     data-init="@get('/command-center/events', {filterSignals: {include: /^$/}})"
      data-on:keydown__window="evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
      data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')"
-     data-on-signal-patch-filter="{include: /^modals$/}"
-     data-on-signal-patch="if (!$modals.drawer) document.querySelector('#review-drawer-container').innerHTML = ''">
+     {# Logical-AND form (not `if (…) …`). Datastar wraps the body in
+        `new Function('return ' + expr)`, which makes `if` an unexpected token
+        the moment any signal change forces a recompile (e.g. an @post JSON
+        response merging keys into the signal store). Use a JS expression. #}
+     data-on-signal-patch-filter="{include: /^modals\.drawer$/}"
+     data-on-signal-patch="!$modals.drawer && (document.querySelector('#review-drawer-container').innerHTML = '')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
@@ -48,7 +56,7 @@
          body-level signal-patch watcher dispatches close-terminal which calls
          the same close() so the iframe lifecycle stays in one place. ── #}
     <div id="terminal-modal" class="terminal-modal" style="display:none;"
-         data-on-signal-patch-filter="{include: /^modals$/}"
+         data-on-signal-patch-filter="{include: /^modals\.terminal$/}"
          data-on-signal-patch="$modals.terminal === false && document.dispatchEvent(new CustomEvent('close-terminal'))">
       <div class="terminal-modal-bar">
         <span class="terminal-modal-title" id="terminal-modal-title"></span>

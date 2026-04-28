@@ -189,12 +189,34 @@ class LogEntry(BaseModel):
     message: str = ""
 
 
+class QuestionOption(BaseModel):
+    """A single labeled option in a structured AskUserQuestion notification."""
+
+    label: str
+    description: str = ""
+
+
+class QuestionData(BaseModel):
+    """Structured payload for an AskUserQuestion-style notification.
+
+    Carries the question text plus optional UI hints (header, options,
+    multi-select) so the drawer can render real labelled choices instead of a
+    JSON dump of the raw tool input.
+    """
+
+    question: str
+    header: str = ""
+    multi_select: bool = False
+    options: list[QuestionOption] = Field(default_factory=list)
+
+
 class Notification(BaseModel):
     """A notification record stored per-session."""
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     title: str
     body: str = ""
+    question: QuestionData | None = None
     url: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     answered_at: datetime | None = None

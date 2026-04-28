@@ -6,7 +6,7 @@
 <h1>Dashboard</h1>
 
 {% if sessions %}
-<div data-signals="{_d: true}" data-init="@get('/dashboard/events')">
+<div data-signals="{_d: true}" data-init="@get('/dashboard/events', {filterSignals: {include: /^$/}})">
 <div class="timeline">
     {% set current_day = namespace(value="") %}
     {% for s in sessions %}

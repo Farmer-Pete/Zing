@@ -74,7 +74,7 @@ class TestProxyAssets(unittest.TestCase):
     """Tests for the /assets/{path} route."""
 
     def test_proxy_assets_patches_input_js(self):
-        """GET /assets/input.js should have Cmd+C/A and Shift+Enter patches applied."""
+        """GET /assets/input.js applies Cmd+C/A, modifier-only drop, and Shift+Enter patches."""
         # Build fake input.js that contains both patch targets
         original_js = (
             "some js before\n"
@@ -92,11 +92,25 @@ class TestProxyAssets(unittest.TestCase):
         # Patch 1 replacement should be present
         self.assertIn("pass cmd-c onwards so that copy is interpreted by the browser", body)
         self.assertIn("pass cmd-a onwards so that select all works", body)
+        # Modifier-only key drop (regression: pressing Cmd alone used to type "m").
+        self.assertIn('ev.key == "Meta"', body)
         # Patch 2 replacement should be present
         self.assertIn('sendFunction("\\x1b[13;2u")', body)
         # The full replacement strings should be present verbatim in the output.
         self.assertIn(_INPUT_JS_PATCH_REPLACEMENT, body)
         self.assertIn(_INPUT_JS_PATCH2_REPLACEMENT, body)
+
+    def test_proxy_assets_passes_through_links_js(self):
+        """GET /assets/links.js is no longer patched — Zellij's stock handler runs."""
+        original_js = (
+            b"const newWindow = window.open(uri, '_blank');\n"
+            b"if (newWindow) newWindow.opener = null;\n"
+        )
+        app = _make_app(response_content=original_js)
+        client = TestClient(app)
+        resp = client.get("/assets/links.js")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content, original_js)
 
     def test_proxy_assets_passes_through_other_files(self):
         """GET /assets/styles.css should return content unchanged."""

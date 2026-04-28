@@ -32,7 +32,7 @@ from zing_ai.launch import (
     exec_or_detach,
     find_repo_path,
     move_ticket_in_progress,
-    rollback_worktree,
+    rollback_worktree,  # used by /cleanup-worktree (explicit user action)
 )
 from zing_ai.server.attention import AttentionItem, build_attention_queue
 from zing_ai.server.command_center import (
@@ -41,7 +41,13 @@ from zing_ai.server.command_center import (
     generate_standup,
     infer_repo_for_ticket,
 )
-from zing_ai.server.models import ClaudeCodeSession, Session, ZingSession
+from zing_ai.server.models import (
+    ClaudeCodeSession,
+    QuestionData,
+    QuestionOption,
+    Session,
+    ZingSession,
+)
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
@@ -703,12 +709,64 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
         logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
 
-        worktree_path: Path | None = None
+        # Reconcile against any existing Zellij session with the same name before
+        # we hand off to exec_or_detach (which would fail with "Session already
+        # exists"). Two cases:
+        #   - Live + tracked by an in-app session → redirect user to attach.
+        #   - Live + orphaned (no record claims it) → kill the stale Zellij
+        #     session and proceed.
+        live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
+        if session_name in live_sessions:
+            session_manager = request.app.state.session_manager
+            tracked = next(
+                (
+                    s
+                    for s in session_manager.list_sessions()
+                    if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_name
+                ),
+                None,
+            )
+            if tracked is not None:
+                logger.info(
+                    "launch-background: %s already running for session %s — attaching",
+                    session_name,
+                    tracked.session_id,
+                )
+                launching_set.discard(card_key)
+                yield _sse_toast(f"Session {session_name} already running — attaching", "info")
+                yield SSE.patch_signals(
+                    {
+                        "terminalUrl": f"/zellij/{session_name}",
+                        "modals": {"terminal": True},
+                    }
+                )
+                if reset_busy is not None:
+                    yield reset_busy
+                return
+            logger.warning(
+                "launch-background: pruning orphaned Zellij session %s "
+                "(no in-app record claims it)",
+                session_name,
+            )
+            # `kill-session` only signals the session — the name lingers in
+            # `list-sessions` as EXITED until the record is removed, which
+            # would still trip exec_or_detach's collision check. `delete-session
+            # --force` kills (if alive) and removes the record in one step.
+            await asyncio.to_thread(
+                subprocess.run,
+                ["zellij", "delete-session", "--force", session_name],
+                capture_output=True,
+                check=False,
+            )
+            # Drop from cache so the 0.5s poll lag doesn't re-trip the check.
+            live_sessions.discard(session_name)
+
         try:
 
             def _blocking() -> tuple[str, Path]:
-                nonlocal worktree_path
-                # Create worktree
+                # Create worktree (or reuse if it already exists — see create_worktree
+                # / checkout_pr_branch). On downstream failure we deliberately leave
+                # the worktree on disk so the next launch attempt can reuse it.
                 if is_pr_card:
                     wt = checkout_pr_branch(
                         repo_root,
@@ -722,7 +780,6 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                         config.git.worktree_root,
                         config.git.branch_prefix,
                     )
-                worktree_path = wt
 
                 # Move Linear ticket to in-progress for ticket-based launches.
                 if ticket_id and config.command_center.linear_api_key:
@@ -765,11 +822,6 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
         except (LaunchError, subprocess.CalledProcessError) as exc:
             logger.error("Background launch failed for card %s: %s", card_key, exc)
-            if worktree_path is not None:
-                try:
-                    rollback_worktree(worktree_path)
-                except (OSError, subprocess.CalledProcessError) as rollback_exc:
-                    logger.warning("Rollback failed: %s", rollback_exc)
             yield _sse_toast(str(exc), "err")
             if reset_busy is not None:
                 yield reset_busy
@@ -951,15 +1003,27 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
 
 @router.post("/command-center/session-question")
 async def session_question(request: Request) -> JSONResponse:
-    """Receive a question from a Claude Code hook and add it as a notification."""
+    """Receive a question from a Claude Code hook and add it as a notification.
+
+    The ``question`` field may be either a plain string (legacy form) or a
+    structured object ``{question, header, multiSelect, options: [{label,
+    description}]}`` from the AskUserQuestion tool. Structured payloads are
+    stored as ``QuestionData`` so the drawer can render labelled choices
+    instead of dumping the raw JSON.
+    """
     try:
         body = await request.json()
     except json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     session_id = body.get("session_id")
-    question = body.get("question")
-    if not session_id or not question:
+    raw_question = body.get("question")
+    if not session_id or not raw_question:
         return JSONResponse({"status": "ignored"})
+
+    question_text, question_data = _parse_question_payload(raw_question)
+    if not question_text:
+        return JSONResponse({"status": "ignored"})
+
     manager = request.app.state.session_manager
     # Direct lookup first.
     session = manager.get_session(session_id)
@@ -975,8 +1039,82 @@ async def session_question(request: Request) -> JSONResponse:
     if session is None:
         logger.debug("session_question ignored: session_id=%s not found", session_id)
         return JSONResponse({"status": "ignored"})
-    manager.add_notification(session_id, title="Input needed", body=question)
+    manager.add_notification(
+        session_id, title="Input needed", body=question_text, question=question_data
+    )
     return JSONResponse({"status": "ok"})
+
+
+@router.post("/command-center/session-idle")
+async def session_idle(request: Request) -> JSONResponse:
+    """Receive an idle / attention-needed event from a Claude Code hook.
+
+    Triggered by Claude Code's ``Notification`` hook when the prompt has been
+    idle for ~60s waiting for input or a permission decision is pending. The
+    payload mirrors ``session-question`` minus the structured question — just
+    a ``title`` and ``body`` string. We append it as a plain notification so
+    the existing dot / drawer-list / browser-toast pipeline lights up without
+    auto-opening the drawer (no ``question`` payload).
+    """
+    try:
+        body_payload = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    session_id = body_payload.get("session_id")
+    title = body_payload.get("title") or "Claude is waiting"
+    body = body_payload.get("body") or ""
+    if not session_id:
+        return JSONResponse({"status": "ignored"})
+
+    manager = request.app.state.session_manager
+    session = manager.get_session(session_id)
+    if session is not None and not isinstance(session, ClaudeCodeSession):
+        session = None
+    if session is None:
+        for s in manager.list_sessions():
+            if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_id:
+                session = s
+                session_id = s.session_id
+                break
+    if session is None:
+        logger.debug("session_idle ignored: session_id=%s not found", session_id)
+        return JSONResponse({"status": "ignored"})
+    manager.add_notification(session_id, title=title, body=body)
+    return JSONResponse({"status": "ok"})
+
+
+def _parse_question_payload(raw: object) -> tuple[str, QuestionData | None]:
+    """Normalise the hook payload into (display_text, structured_data)."""
+    if isinstance(raw, str):
+        return raw, None
+    if not isinstance(raw, dict):
+        return "", None
+    text = raw.get("question")
+    if not isinstance(text, str) or not text:
+        return "", None
+    raw_options = raw.get("options") or []
+    options: list[QuestionOption] = []
+    if isinstance(raw_options, list):
+        for opt in raw_options:
+            if not isinstance(opt, dict):
+                continue
+            label = opt.get("label")
+            if not isinstance(label, str) or not label:
+                continue
+            description = opt.get("description")
+            options.append(
+                QuestionOption(
+                    label=label,
+                    description=description if isinstance(description, str) else "",
+                )
+            )
+    header = raw.get("header")
+    return text, QuestionData(
+        question=text,
+        header=header if isinstance(header, str) else "",
+        multi_select=bool(raw.get("multiSelect")),
+        options=options,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1062,25 +1200,37 @@ def build_drawer_context(
         notification = session.pending_question
         notification_body = notification.body if notification else ""
 
-    # Build the triage signal dict for the drawer.
-    # Maps finding_id → action value string (or None) for pre-existing saved
-    # responses. The legacy storage layer pairs findings and responses by list
-    # index — that ordering is fragile if findings are inserted, deleted, or
-    # reordered mid-step. The mapping here is intentionally finding_id-keyed so
-    # the drawer's signal envelope is robust to ordering drift; index-by-index
-    # is only used as a fallback when both lists are the same length AND the
-    # responses don't carry per-finding identifiers (the current schema).
-    saved_triage_responses: dict[str, str | None] = {}
+    # Build the responses signal dict for the drawer. Mirrors the standalone
+    # review page's saved_responses builder (see routes.get_session_page) so
+    # the shared render_finding macro sees the same envelope shape on both
+    # surfaces. Keys mirror what _map_signals_to_responses reads back on save:
+    #   <finding_id>                 → triage action / text answer
+    #   <finding_id>_approach        → selected suggested-approach label
+    #   <finding_id>_approach_other  → free-text "Other" approach
+    #   <finding_id>_complexity      → complexity override
+    # Storage pairs findings and responses by list index, which is fragile if
+    # findings are inserted, deleted, or reordered mid-step. The envelope is
+    # intentionally finding_id-keyed so it is robust to ordering drift; the
+    # index lookup below is only used to fetch the matching UserResponse.
+    saved_responses: dict[str, str] = {}
     if current_step is not None:
         responses = current_step.responses or []
         same_length = len(responses) == len(current_step.findings)
         for idx, finding in enumerate(current_step.findings):
-            if finding.type != "triage":
+            if not (same_length and idx < len(responses)):
                 continue
-            action_val: str | None = None
-            if same_length and idx < len(responses) and responses[idx].action is not None:
-                action_val = responses[idx].action.value
-            saved_triage_responses[finding.id] = action_val
+            resp = responses[idx]
+            if finding.type == "triage":
+                if resp.action is not None:
+                    saved_responses[finding.id] = resp.action.value
+                if resp.selected is not None:
+                    saved_responses[f"{finding.id}_approach"] = resp.selected
+                    if resp.other_text is not None:
+                        saved_responses[f"{finding.id}_approach_other"] = resp.other_text
+                if resp.complexity is not None:
+                    saved_responses[f"{finding.id}_complexity"] = resp.complexity.value
+            elif finding.type == "text" and resp.answer is not None:
+                saved_responses[finding.id] = resp.answer
 
     # Build the openSteps signal dict for the step-section accordion.
     # Default: all past steps closed; current step open (if present).
@@ -1091,12 +1241,14 @@ def build_drawer_context(
     # Build the drawer's data-signals envelope server-side as a single dict so
     # we can render it via | tojson once on the template. Hand-building the
     # JSON with raw ``{{ ... }}`` substitutions invites quote-handling drift.
+    # Signal names match the standalone review page so the shared
+    # render_finding macro reads $responses + $step_id on both surfaces.
     drawer_signals: dict[str, object] = {
         "prevSessionId": prev_session_id or "",
         "nextSessionId": next_session_id or "",
         "sessionId": session.session_id,
-        "stepId": current_step.step_id if current_step else "",
-        "triage": saved_triage_responses,
+        "step_id": current_step.step_id if current_step else "",
+        "responses": saved_responses,
         "openSteps": saved_open_steps,
     }
 
@@ -1114,7 +1266,7 @@ def build_drawer_context(
         "waiting_label": waiting_label,
         "notification": notification,
         "notification_body": notification_body,
-        "saved_triage_responses": saved_triage_responses,
+        "saved_responses": saved_responses,
         "saved_open_steps": saved_open_steps,
         "drawer_signals": drawer_signals,
     }
@@ -1142,8 +1294,10 @@ async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
 
         session = ctx["session"]
 
+        had_pending_question = False
         if isinstance(session, ClaudeCodeSession):
             # Attach mode — use the simpler attach template.
+            had_pending_question = session.pending_question is not None
             html = render("fragments/drawer_attach.html", **ctx)
         else:
             # Findings/questions mode.
@@ -1155,6 +1309,12 @@ async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
             mode=ElementPatchMode.INNER,
         )
         yield SSE.patch_signals({"modals": {"drawer": True}})
+
+        # Opening the drawer counts as "viewed" — clear the pending question so
+        # the attention bar entry and card attach strip drop on the next render.
+        if had_pending_question:
+            manager.mark_pending_question_answered(session_id)
+            _push_board_changed(request.app)
 
     return _stream()
 

@@ -335,9 +335,26 @@ def create_worktree(
     worktree_path = (repo_root / relative).resolve()
     full_branch = f"{branch_prefix}{branch_name}"
 
-    # If the worktree directory already exists, reuse it.
+    # Reuse existing worktree if it already exists and is a valid git checkout.
+    # If the directory exists but isn't a valid worktree (orphan from a prior
+    # failed run), prune stale records and fall through to recreate.
     if worktree_path.is_dir():
-        return worktree_path
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=worktree_path,
+            )
+            return worktree_path
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
 
     try:
         subprocess.run(

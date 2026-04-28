@@ -19,6 +19,7 @@
 #}
 {% from "fragments/_phase_strip.html" import phase_strip %}
 {% from "fragments/_drawer_helpers.html" import step_icon, queue_item %}
+{% from "fragments/_finding_macros.html" import render_finding %}
 
 {# ── Backdrop ── #}
 <div class="drawer-backdrop" data-on:click="$modals.drawer = false"></div>
@@ -130,18 +131,40 @@
     {# Current step findings or attach mode #}
     {% if current_step %}
       {% if mode == "attach" %}
-        {# ── Attach hero ── #}
+        {# Structured question from AskUserQuestion (header + options) takes
+           precedence over the legacy plain-text body so the drawer renders
+           real labelled choices instead of a JSON dump. #}
+        {% set q = notification.question if notification else None %}
         <div class="attach-hero">
           <div class="attach-hero-icon">&#9654;</div>
           <h3>Claude needs your input</h3>
-          {% if notification_body %}
+          {% if q %}
+            {% if q.header %}<div class="attach-q-header">{{ q.header }}</div>{% endif %}
+            <p class="attach-q-question">{{ q.question }}</p>
+          {% elif notification_body %}
             <p>{{ notification_body }}</p>
           {% endif %}
           <button class="attach-hero-btn"
                   data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: {{ session.terminal_session | js_str }}}}); $modals.drawer = false">Attach to Session</button>
         </div>
 
-        {% if notification_body %}
+        {% if q and q.options %}
+          <div class="attach-ctx">
+            <div class="attach-ctx-title">
+              Options{% if q.multi_select %} (select one or more){% endif %}
+            </div>
+            <ul class="attach-q-options">
+              {% for opt in q.options %}
+                <li class="attach-q-option">
+                  <div class="attach-q-option-label">{{ opt.label }}</div>
+                  {% if opt.description %}
+                    <div class="attach-q-option-desc">{{ opt.description }}</div>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% elif notification_body %}
           <div class="attach-ctx">
             <div class="attach-ctx-title">Question</div>
             <div class="attach-msg">{{ notification_body }}</div>
@@ -170,59 +193,18 @@
           </div>
         </div>
 
-        {# ── Findings area ── #}
+        {# ── Findings area ──
+           Renders via the shared render_finding macro so the drawer and the
+           standalone /<session_id> review page emit identical UI. The macro
+           reads $responses + $step_id from the drawer's data-signals envelope
+           (see build_drawer_context) and posts every change to
+           /<sid>/save-response — the drawer's "Submit & Next" footer button
+           still triggers the READY → COMPLETED transition via /submit. #}
         <div class="findings-area">
           <div class="d-ft">Findings to review ({{ current_step.findings | length }})</div>
 
           {% for finding in current_step.findings %}
-            <div class="df" id="df-{{ finding.id }}">
-              <div class="df-h">
-                {% if finding.type == "triage" and finding.severity %}
-                  {% if finding.severity.value in ("critical", "high") %}
-                    <span class="df-s df-hi">{{ finding.severity.value }}</span>
-                  {% elif finding.severity.value == "medium" %}
-                    <span class="df-s df-me">med</span>
-                  {% else %}
-                    <span class="df-s df-in">{{ finding.severity.value }}</span>
-                  {% endif %}
-                {% elif finding.type == "evaluation" %}
-                  <span class="df-s df-in">eval</span>
-                {% elif finding.type == "text" %}
-                  <span class="df-s" style="background:rgba(245,124,32,0.15);color:var(--orange)">q</span>
-                {% endif %}
-                <span class="df-t">{{ finding.title }}</span>
-              </div>
-              {% if finding.body %}
-                <div class="df-b">{{ finding.body }}</div>
-              {% endif %}
-              {% if finding.type == "triage" and finding.location %}
-                <div class="df-l">{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</div>
-              {% endif %}
-              {% if finding.type == "triage" %}
-                {# Triage buttons select an action; clicking the same button no
-                   longer toggles back to null. The user must explicitly pick
-                   another action — Submit clears the selection by submitting. #}
-                <div class="df-tr">
-                  <button class="df-tb" data-action="accept"
-                          data-on:click="$triage[{{ finding.id | js_str }}] = 'accept'"
-                          data-class:sa="$triage[{{ finding.id | js_str }}] === 'accept'">Accept</button>
-                  <button class="df-tb" data-action="drop"
-                          data-on:click="$triage[{{ finding.id | js_str }}] = 'drop'"
-                          data-class:sd="$triage[{{ finding.id | js_str }}] === 'drop'">Drop</button>
-                  <button class="df-tb" data-action="downgrade"
-                          data-on:click="$triage[{{ finding.id | js_str }}] = 'downgrade'"
-                          data-class:sdng="$triage[{{ finding.id | js_str }}] === 'downgrade'">Downgrade</button>
-                  <button class="df-tb" data-action="discuss"
-                          data-on:click="$triage[{{ finding.id | js_str }}] = 'discuss'"
-                          data-class:sdisc="$triage[{{ finding.id | js_str }}] === 'discuss'">Discuss</button>
-                </div>
-              {% elif finding.type == "text" %}
-                <div class="df-tr">
-                  <textarea class="df-answer" id="answer-{{ finding.id }}" placeholder="Your answer…" rows="2"
-                    data-finding-id="{{ finding.id }}" data-step-id="{{ current_step.step_id }}" data-session-id="{{ session.session_id }}"></textarea>
-                </div>
-              {% endif %}
-            </div>
+            {{ render_finding(finding, session.session_id) }}
           {% endfor %}
         </div>
       {% endif %}
@@ -233,7 +215,11 @@
   <div class="d-footer">
     <div class="d-fprog">
       {% if mode == "findings" and current_step %}
-        <span id="drawer-triage-count" data-text="Object.values($triage).filter(Boolean).length">0</span> / {{ current_step.findings | length }} triaged
+        {# Count only finding-id keys whose value is a triage action. The
+           $responses envelope also carries _complexity / _approach /
+           _approach_other siblings, which a plain Boolean filter would
+           overcount. #}
+        <span id="drawer-triage-count" data-text="Object.values($responses).filter(v => v === 'accept' || v === 'drop' || v === 'downgrade' || v === 'discuss').length">0</span> / {{ current_step.findings | length }} triaged
       {% elif mode == "attach" %}
         Waiting for response
       {% endif %}
@@ -244,7 +230,7 @@
       <button class="d-fsub"
         id="drawer-submit-btn"
         data-drawer-submit
-        data-on:click="@post('/' + $sessionId + '/submit', {payload: {step_id: $stepId, responses: $triage}})">Submit &amp; Next</button>
+        data-on:click="@post('/' + $sessionId + '/submit', {payload: {step_id: $step_id, responses: $responses}})">Submit &amp; Next</button>
     {% endif %}
   </div>
 
