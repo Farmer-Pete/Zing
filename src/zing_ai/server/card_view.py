@@ -47,6 +47,18 @@ _COLUMN_CLS: dict[KanbanColumn, str] = {
     "done": "col-done",
 }
 
+_COLUMN_FROM_CLS: dict[str, KanbanColumn] = {v: k for k, v in _COLUMN_CLS.items()}
+
+
+def column_from_cls(column_cls: str) -> KanbanColumn:
+    """Reverse-map a CSS column class (``col-progress``) to its column literal.
+
+    Exposed as a Jinja global so templates that already have ``column_cls``
+    in scope can call :func:`build_card_view` without threading the column
+    literal through the include chain.
+    """
+    return _COLUMN_FROM_CLS[column_cls]
+
 
 # ---------------------------------------------------------------------------
 # Sub-views

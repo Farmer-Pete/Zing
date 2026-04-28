@@ -375,3 +375,39 @@ class TestExcludedFromDoneView(unittest.TestCase):
         pr = _make_pr(author="alice", reviewers=["bob"])
         view = build_card_view(_card(prs=[pr]), "in_progress", "octocat")
         self.assertFalse(view.excluded_from_done_view)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Jinja-global plumbing
+# ---------------------------------------------------------------------------
+
+
+class TestJinjaGlobals(unittest.TestCase):
+    """``build_card_view`` and ``column_from_cls`` are reachable from templates.
+
+    The ``{% set card_view = build_card_view(...) %}`` line in
+    ``kanban_card.html`` would raise during render if either global went
+    missing. Pin the contract here.
+    """
+
+    def test_kanban_card_renders_with_card_view_global(self) -> None:
+        from zing_ai.server.templates import render
+
+        ticket = _make_issue(identifier="BAK-1")
+        card = KanbanCard(key="BAK-1", ticket=ticket)
+        html = render(
+            "fragments/kanban_card.html",
+            card=card,
+            column_cls="col-progress",
+            current_username="octocat",
+            live_sessions=set(),
+            session_phases={},
+        )
+        # Card renders without raising; the ticket id appears as expected.
+        self.assertIn("BAK-1", html)
+
+    def test_column_from_cls_round_trip(self) -> None:
+        from zing_ai.server.card_view import _COLUMN_CLS, column_from_cls
+
+        for column, cls in _COLUMN_CLS.items():
+            self.assertEqual(column_from_cls(cls), column)

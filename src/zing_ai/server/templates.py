@@ -17,6 +17,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
+from zing_ai.server.card_view import build_card_view, column_from_cls
 from zing_ai.server.command_center import _pr_needs_response
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ def _compute_asset_version() -> str:
 
 _env.globals["asset_version"] = _compute_asset_version
 _env.globals["pr_needs_response"] = _pr_needs_response
+_env.globals["build_card_view"] = build_card_view
+_env.globals["column_from_cls"] = column_from_cls
 
 
 def render(template_name: str, **context: Any) -> str:

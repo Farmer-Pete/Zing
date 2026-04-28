@@ -10,6 +10,12 @@
 {% from "fragments/_phase_strip.html" import phase_strip %}
 {% from "fragments/launch_button.html" import launch_button %}
 
+{# Stage 2: the canonical view model for this card. Computed once; subsequent
+   stages migrate inline blocks below to read from card_view fields. The
+   variable is intentionally unused at this stage so render output stays
+   byte-identical. #}
+{% set card_view = build_card_view(card, column_from_cls(column_cls), current_username) %}
+
 {# Kebab macros — the empty-string trap is documented once here. Datastar v1
    treats setting a signal to ``null`` as "delete from the proxy without firing
    watchers". The kebab close-on-outside-click watcher only fires when the
