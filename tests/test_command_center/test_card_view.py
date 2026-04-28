@@ -411,3 +411,112 @@ class TestJinjaGlobals(unittest.TestCase):
 
         for column, cls in _COLUMN_CLS.items():
             self.assertEqual(column_from_cls(cls), column)
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: rendered-HTML pins per migrated block
+# ---------------------------------------------------------------------------
+
+
+def _render_card(card: KanbanCard, column_cls: str = "col-progress") -> str:
+    from zing_ai.server.templates import render
+
+    return render(
+        "fragments/kanban_card.html",
+        card=card,
+        column_cls=column_cls,
+        current_username="octocat",
+        live_sessions=set(),
+        session_phases={},
+    )
+
+
+class TestRenderedHTML(unittest.TestCase):
+    """Pin per-block migration outcomes by asserting on rendered HTML."""
+
+    def test_changes_requested_pill_renders_outside_review_column(self) -> None:
+        pr = _make_pr(number=1, review_decision="CHANGES_REQUESTED")
+        html = _render_card(KanbanCard(key="K", prs=[pr]), column_cls="col-progress")
+        self.assertIn('<span class="strip-pill strip-pill-changes">changes requested</span>', html)
+
+    def test_approved_pill_wins_over_reviewed(self) -> None:
+        pr = _make_pr(
+            number=1,
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=[],
+            review_decision="APPROVED",
+        )
+        html = _render_card(KanbanCard(key="K", prs=[pr]))
+        self.assertIn('<span class="strip-pill strip-pill-approved">approved</span>', html)
+        self.assertNotIn("strip-pill-reviewed", html)
+
+    def test_primary_button_respond_for_unaddressed_feedback(self) -> None:
+        pr = _make_pr(
+            number=1,
+            author="octocat",
+            review_decision="CHANGES_REQUESTED",
+            reviewer_states={"alice": "CHANGES_REQUESTED"},
+            reviewers=["alice"],
+            requested_reviewers=[],
+        )
+        html = _render_card(KanbanCard(key="K", prs=[pr]))
+        self.assertIn(">Respond</span>", html)
+        self.assertNotIn(">Build Audit</span>", html)
+
+    def test_primary_button_build_audit_for_author_no_feedback(self) -> None:
+        pr = _make_pr(number=1, author="octocat")
+        html = _render_card(KanbanCard(key="K", prs=[pr]))
+        self.assertIn(">Build Audit</span>", html)
+
+    def test_no_primary_button_for_merged_pr(self) -> None:
+        pr = _make_pr(
+            number=1,
+            author="octocat",
+            state="merged",
+            merged_at=datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        html = _render_card(KanbanCard(key="K", prs=[pr]), column_cls="col-done")
+        # No Respond / Build Audit / PR Audit primary button slot for merged PRs
+        self.assertNotIn(">Respond</span>", html)
+        self.assertNotIn(">Build Audit</span>", html)
+        self.assertNotIn(">PR Audit</span>", html)
+
+    def test_card_dom_id_uses_lowercased_replaced_key(self) -> None:
+        pr = _make_pr(number=1)
+        html = _render_card(KanbanCard(key="pr-Owner/Repo-1", prs=[pr]), column_cls="col-progress")
+        self.assertIn('id="card-pr-owner-repo-1"', html)
+
+    def test_ready_to_merge_extra_class_on_done_subgroup(self) -> None:
+        pr = _make_pr(number=1, author="octocat", review_decision="APPROVED")
+        card = KanbanCard(key="K", prs=[pr], done_group="ready_to_merge")
+        html = _render_card(card, column_cls="col-done")
+        self.assertIn("card-ready-to-merge", html)
+
+    def test_ci_failure_callout_renders_failing_check_names(self) -> None:
+        pr = _make_pr(
+            number=1,
+            ci_checks=[
+                CICheck(name="lint", status="completed", conclusion="success"),
+                CICheck(name="unit-tests", status="completed", conclusion="failure"),
+            ],
+        )
+        html = _render_card(KanbanCard(key="K", prs=[pr]))
+        self.assertIn('class="ci-fail-bar"', html)
+        self.assertIn("unit-tests", html)
+        # Only failing checks appear in the callout
+        callout_idx = html.find('class="ci-fail-bar"')
+        callout_end = html.find("</div>", callout_idx)
+        self.assertNotIn("lint", html[callout_idx:callout_end])
+
+    def test_footer_note_waiting_on_others_in_review_column(self) -> None:
+        pr = _make_pr(number=1)
+        card = KanbanCard(key="K", prs=[pr], review_group="others")
+        html = _render_card(card, column_cls="col-review")
+        self.assertIn(">Waiting on others</span>", html)
+
+    def test_footer_note_in_progress_reason_passthrough(self) -> None:
+        pr = _make_pr(number=1)
+        card = KanbanCard(key="K", prs=[pr], in_progress_reason="Changes requested")
+        html = _render_card(card, column_cls="col-progress")
+        self.assertIn(">Changes requested</span>", html)

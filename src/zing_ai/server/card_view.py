@@ -107,6 +107,9 @@ class ClaudeCodeSessionView(BaseModel):
     is_alive: bool
     is_starting: bool
     status_label: str  # ``Running: <title>`` / ``Stopped: <title>`` / ``<title>``
+    status_label_class: str  # ``""`` or ``"strip-session-label-dead"``
+    dot_class: str  # ``strip-session-alive`` / ``-starting`` / ``-dead``
+    dot_title: str  # ``Running`` / ``Starting`` / ``Stopped``
     pending_question_text: str | None  # truncated to 60 chars
 
 
@@ -232,15 +235,28 @@ def _build_claude_code_view(session: ClaudeCodeSession) -> ClaudeCodeSessionView
     state = session.state
     is_alive = state == SessionState.STARTED
     is_starting = state == SessionState.STARTING
+    has_terminal = session.terminal_session is not None
 
     if is_alive:
         status_label = f"Running: {session.title}"
+        status_label_class = ""
+        dot_class = "strip-session-alive"
+        dot_title = "Running"
     elif is_starting:
         status_label = f"Starting: {session.title}"
-    elif session.terminal_session is not None:
+        status_label_class = ""
+        dot_class = "strip-session-starting"
+        dot_title = "Starting"
+    elif has_terminal:
         status_label = f"Stopped: {session.title}"
+        status_label_class = "strip-session-label-dead"
+        dot_class = "strip-session-dead"
+        dot_title = "Stopped"
     else:
         status_label = session.title
+        status_label_class = ""
+        dot_class = "strip-session-dead"
+        dot_title = "Stopped"
 
     pending = session.pending_question
     pending_text: str | None = None
@@ -253,6 +269,9 @@ def _build_claude_code_view(session: ClaudeCodeSession) -> ClaudeCodeSessionView
         is_alive=is_alive,
         is_starting=is_starting,
         status_label=status_label,
+        status_label_class=status_label_class,
+        dot_class=dot_class,
+        dot_title=dot_title,
         pending_question_text=pending_text,
     )
 
