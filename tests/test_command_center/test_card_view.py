@@ -520,3 +520,116 @@ class TestRenderedHTML(unittest.TestCase):
         card = KanbanCard(key="K", prs=[pr], in_progress_reason="Changes requested")
         html = _render_card(card, column_cls="col-progress")
         self.assertIn(">Changes requested</span>", html)
+
+
+# ---------------------------------------------------------------------------
+# Stage 6: debug-tool coverage pinned to CardView's field set
+# ---------------------------------------------------------------------------
+
+
+def _card_view_field_names() -> set[str]:
+    """Collect every field declared on a model defined in ``card_view``.
+
+    Only recurses into sub-models that were *defined in* ``card_view``
+    (StripPill, PRPrimaryButton, CICheckSummary, PRView,
+    ClaudeCodeSessionView, ZingSessionView, FooterNote, CardView).
+    Wrapped models from other modules (KanbanCard, GitHubPR, ClaudeCode
+    Session, …) carry their own field surface and are out of scope —
+    the contract this test pins is "every field added to a card_view
+    model surfaces in debug-card output".
+    """
+    import typing
+
+    from pydantic import BaseModel
+
+    from zing_ai.server import card_view as cv_module
+
+    in_scope = {
+        v for v in vars(cv_module).values() if isinstance(v, type) and issubclass(v, BaseModel)
+    }
+    seen: set[type] = set()
+    fields: set[str] = set()
+
+    def walk(cls: type) -> None:
+        if cls in seen or cls not in in_scope:
+            return
+        seen.add(cls)
+        for name, info in cls.model_fields.items():
+            fields.add(name)
+            ann = info.annotation
+            for sub in typing.get_args(ann) or (ann,):
+                if isinstance(sub, type) and issubclass(sub, BaseModel):
+                    walk(sub)
+
+    walk(cv_module.CardView)
+    return fields
+
+
+class TestDebugToolCoverage(unittest.TestCase):
+    """Every CardView field must surface in ``zing-ai debug-card`` output.
+
+    Adding a field to CardView (or any nested view) and forgetting to
+    wire it into the debug printer would normally pass CI silently —
+    this test pins the contract by walking the model schema and
+    asserting each field name appears in the formatter's output.
+    """
+
+    def _comprehensive_card_view(self):
+        """Build a CardView populated enough to exercise every nested model."""
+        from zing_ai.server.models import (
+            ClaudeCodeSession,
+            Notification,
+            WorkflowStep,
+        )
+
+        ticket = _make_issue(identifier="BAK-99")
+        pr = _make_pr(
+            number=1,
+            author="octocat",
+            review_decision="CHANGES_REQUESTED",
+            reviewer_states={"alice": "CHANGES_REQUESTED"},
+            reviewers=["alice"],
+            requested_reviewers=[],
+            ci_checks=[
+                CICheck(name="ci-fail", status="completed", conclusion="failure"),
+                CICheck(name="ci-ok", status="completed", conclusion="success"),
+            ],
+        )
+        zing_session = _make_session(
+            session_id="zs-1",
+            ticket_id="BAK-99",
+            steps=[_make_workflow_step(step_name="review", state=SessionState.STARTED)],
+        )
+        cc_session = ClaudeCodeSession(
+            session_id="cc-1",
+            title="cc",
+            ticket_id="BAK-99",
+            terminal_session="zellij-1",
+            notifications=[Notification(title="q", body="test question?")],
+        )
+        audit_step = WorkflowStep(step_name="plan-audit", sequence=0)
+        audit_step.state = SessionState.READY
+        from zing_ai.server.models import TextFinding
+
+        audit_step.findings = [TextFinding(title="finding")]
+        card = KanbanCard(
+            key="BAK-99",
+            ticket=ticket,
+            prs=[pr],
+            sessions=[zing_session, cc_session],
+            audit_steps=[audit_step],
+            in_progress_reason="Changes requested",
+        )
+        return build_card_view(card, "in_progress", "octocat")
+
+    def test_every_card_view_field_appears_in_debug_output(self) -> None:
+        from zing_ai.debug_card import _format_model
+
+        view = self._comprehensive_card_view()
+        output = "\n".join(_format_model(view))
+
+        for name in _card_view_field_names():
+            with self.subTest(field=name):
+                # Each card_view field must appear as a "name:" prefix
+                # somewhere in the printer output.
+                self.assertIn(f"{name}:", output)
