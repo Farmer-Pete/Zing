@@ -371,6 +371,29 @@ class TestColumnPriorityRule(unittest.TestCase):
         self.assertEqual(len(view.needs_review), 0)
         self.assertEqual(view.in_progress[0].in_progress_reason, "Changes requested")
 
+    def test_changes_requested_empty_states_lands_in_needs_review(self) -> None:
+        """Realistic PR 1885 scenario: empty latestReviews + re-requested reviewers.
+
+        Live GitHub returned ``reviewDecision: CHANGES_REQUESTED`` and
+        ``latestReviews: []`` because both reviewers were currently
+        re-requested.  The card must land in ``needs_review`` (waiting on
+        others), not ``in_progress``.
+        """
+        issue = _make_issue(identifier="BAK-1")
+        pr = _make_pr(
+            number=1,
+            head_ref="BAK-1/feature",
+            state="open",
+            author="octocat",
+            reviewers=[],
+            requested_reviewers=["kyle", "max"],
+            reviewer_states={},
+            review_decision="CHANGES_REQUESTED",
+        )
+        view = _agg(issues=[issue], prs=[pr])
+        self.assertEqual(len(view.in_progress), 0)
+        self.assertEqual(len(view.needs_review), 1)
+
     def test_changes_requested_rerequested_lands_in_needs_review(self) -> None:
         """reviewDecision=CHANGES_REQUESTED but the changes-requester has been
         re-requested → needs_review (waiting on others), not in_progress.
@@ -903,6 +926,27 @@ class TestPrNeedsResponse(unittest.TestCase):
             review_decision="CHANGES_REQUESTED",
         )
         self.assertTrue(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_changes_requested_empty_states_with_pending_request_returns_false(self) -> None:
+        """Realistic re-requested scenario per the actual GitHub API.
+
+        Reproduces backend-v1#1885 as observed live:
+        ``reviewDecision == 'CHANGES_REQUESTED'`` but ``latestReviews`` is
+        empty because GitHub excludes reviewers currently in
+        ``reviewRequests``.  Empty ``reviewer_states`` plus non-empty
+        ``requested_reviewers`` proves every CR-er has been re-requested,
+        so the author is waiting for the re-review.
+        """
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=[],  # latestReviews is empty
+            requested_reviewers=["kyle", "max"],  # both currently re-requested
+            reviewer_states={},
+            review_decision="CHANGES_REQUESTED",
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
 
     def test_approved_returns_false(self) -> None:
         from zing_ai.server.command_center import _pr_needs_response

@@ -205,14 +205,25 @@ def _pr_needs_response(
 
     Two signals trigger this:
 
-    1. GitHub's PR-level ``reviewDecision`` is ``CHANGES_REQUESTED`` and the
-       reviewer who requested changes has not been re-requested.  GitHub
-       does not reset ``reviewDecision`` when the author re-requests review,
-       so the raw decision alone over-counts: once all changes-requesters
-       are back in ``requested_reviewers`` the user is waiting on them, not
-       the other way around.  When ``latestReviews`` shows no explicit
-       ``CHANGES_REQUESTED`` state (later inline-comment reviews overwrote
-       it) the PR-level decision remains the only signal and is trusted.
+    1. GitHub's PR-level ``reviewDecision`` is ``CHANGES_REQUESTED`` and at
+       least one reviewer's feedback hasn't been addressed.  GitHub does
+       not reset ``reviewDecision`` when the author re-requests review, so
+       the raw decision alone over-counts.  Four sub-cases:
+
+       a. An explicit ``CHANGES_REQUESTED`` reviewer is not in
+          ``requested_reviewers`` → respond.
+       b. ``reviewer_states`` is non-empty but no explicit CR state
+          remains → the original CR-er's state was overwritten by a later
+          ``COMMENTED`` review (backend-v1#1885 case); trust the PR-level
+          decision and respond.
+       c. ``reviewer_states`` is empty AND ``requested_reviewers`` is
+          non-empty → GitHub's ``latestReviews`` excludes reviewers
+          currently in ``reviewRequests``, so this combination proves
+          every CR-er has been re-requested.  User is waiting for the
+          re-review; fall through to the COMMENTED-fallback below.
+       d. Both empty → inconsistent state from GitHub's perspective
+          (someone must have caused ``reviewDecision == CR``).  Trust
+          the PR-level decision and respond.
     2. A human reviewer left a review (any state, including ``COMMENTED``)
        and hasn't been re-requested.  See :func:`_is_human_reviewer` for
        the bot filter.
@@ -245,18 +256,31 @@ def _pr_needs_response(
         log(f"    explicit_cr: {sorted(explicit_cr)}")
         pending = explicit_cr - set(pr.requested_reviewers)
         log(f"    pending (explicit_cr - requested_reviewers): {sorted(pending)}")
-        # No explicit CR-er → states were overwritten by later COMMENTED
-        # reviews (backend-v1#1885 case). reviewDecision is the only signal.
-        if not explicit_cr:
-            log("    sub-branch: 'no explicit CR' (states overwritten) → return True")
-            return True
-        # At least one explicit CR-er has not been re-requested.
+        # (a) An explicit CR-er has not been re-requested → respond.
         if pending:
-            log("    sub-branch: 'pending explicit CR' → return True")
+            log("    sub-branch (a): pending explicit CR → return True")
             return True
-        # All explicit CR-ers re-requested; fall through so other COMMENTED
-        # human reviewers can still trigger a Respond.
-        log("    sub-branch: all explicit CR-ers re-requested → fall through")
+        # (b) reviewer_states non-empty but no CR survives → states overwritten.
+        if pr.reviewer_states and not explicit_cr:
+            log("    sub-branch (b): reviewer_states non-empty, no CR (overwritten) → return True")
+            return True
+        # (c) reviewer_states empty + requested_reviewers non-empty → GitHub
+        # excluded all CR-ers from latestReviews because they're re-requested.
+        if not pr.reviewer_states and pr.requested_reviewers:
+            log(
+                "    sub-branch (c): reviewer_states empty + requested_reviewers non-empty "
+                "(all CR-ers re-requested) → fall through"
+            )
+        # (d) Both empty: someone caused reviewDecision==CR but no info survives.
+        # Trust the PR-level decision.
+        elif not pr.reviewer_states and not pr.requested_reviewers:
+            log(
+                "    sub-branch (d): reviewer_states and requested_reviewers both empty "
+                "(inconsistent state) → return True"
+            )
+            return True
+        else:
+            log("    sub-branch: all explicit CR-ers re-requested → fall through")
 
     not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
     log(f"  fallback: not_rerequested = reviewers - requested_reviewers: {sorted(not_rerequested)}")
