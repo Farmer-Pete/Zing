@@ -1,12 +1,16 @@
 """Debug utility for Kanban card classification.
 
-Fetches a live PR (via GitHub) and/or ticket (via Linear), builds the
-same :class:`KanbanCard` the Command Center would produce, and prints
-the classification trace in a structured, machine-readable form.
+Fetches a live PR (via GitHub) and/or ticket (via Linear), runs the data
+through the same :func:`aggregate` pipeline the Command Center uses,
+constructs the canonical :class:`CardView` for the resulting card, and
+prints a structured trace with two diagnostic blocks attached:
 
-Intended for verifying changes to the classification logic in
-``command_center.py``.  The output deliberately mirrors the code's
-control flow so a reviewer can see *which branch* fired and *why*.
+* a line-by-line walk through ``_pr_needs_response`` for each PR, and
+* the first-match decision-table evaluation in ``_classify_card``.
+
+The display state itself is not duplicated here — every field a renderer
+would draw comes from ``CardView`` via Pydantic introspection, so adding
+a field there automatically surfaces it in the output.
 """
 
 from __future__ import annotations
@@ -14,23 +18,29 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime
+from typing import Any
 
 import click
+from pydantic import BaseModel
 
 from zing_ai.config import load_config
+from zing_ai.server.card_view import build_card_view
 from zing_ai.server.command_center import (
     _DONE_WINDOW,
-    _assign_done_group,
-    _assign_in_progress_reason,
-    _assign_review_group,
-    _classify_card,
     _compute_signals,
     _is_human_reviewer,
     _should_include_card,
+    aggregate,
 )
 from zing_ai.server.github_client import GitHubClient, _map_pr
 from zing_ai.server.linear_client import LinearClient
-from zing_ai.server.models_external import GitHubPR, KanbanCard, LinearIssue
+from zing_ai.server.models_external import (
+    GitHubPR,
+    KanbanCard,
+    KanbanColumn,
+    KanbanView,
+    LinearIssue,
+)
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 _PR_HASH_RE = re.compile(r"^([^/]+/[^/#]+)#(\d+)$")
@@ -141,58 +151,78 @@ async def _fetch_ticket(linear: LinearClient, identifier: str) -> LinearIssue:
     )
 
 
-def _format_ticket(t: LinearIssue) -> list[str]:
-    return [
-        f"=== TICKET {t.identifier} ===",
-        f"title: {t.title!r}",
-        f"state: {t.state!r}",
-        f"state_type: {t.state_type!r}",
-        f"priority: {t.priority}  # 0=No 1=Urgent 2=High 3=Medium 4=Low",
-        f"assignee: {t.assignee!r}",
-        f"team: {t.team!r}",
-        f"updated_at: {t.updated_at.isoformat()}",
-        f"url: {t.url}",
-        "",
-    ]
+# ---------------------------------------------------------------------------
+# Pydantic-introspection printer
+# ---------------------------------------------------------------------------
 
 
-def _format_pr(pr: GitHubPR) -> list[str]:
-    return [
-        f"=== PR {pr.repo}#{pr.number} ===",
-        f"title: {pr.title!r}",
-        f"state: {pr.state!r}",
-        f"draft: {pr.draft}",
-        f"author: {pr.author!r}",
-        f"head_ref: {pr.head_ref!r}",
-        f"base_ref: {pr.base_ref!r}",
-        f"review_decision: {pr.review_decision!r}",
-        f"requested_reviewers: {pr.requested_reviewers}",
-        f"reviewers (= reviewer_states keys): {pr.reviewers}",
-        f"reviewer_states: {pr.reviewer_states}",
-        f"ci_status: {pr.ci_status!r}",
-        f"mergeable_state: {pr.mergeable_state!r}",
-        f"updated_at: {pr.updated_at.isoformat()}",
-        f"merged_at: {pr.merged_at.isoformat() if pr.merged_at else None}",
-        f"url: {pr.url}",
-        "",
-    ]
+def _format_value(value: Any, indent: int) -> list[str]:
+    """Render *value* as one or more indented lines of the output report."""
+    pad = "  " * indent
+    if isinstance(value, BaseModel):
+        return _format_model(value, indent)
+    if isinstance(value, list):
+        if not value:
+            return [f"{pad}[]"]
+        out: list[str] = []
+        for i, item in enumerate(value):
+            if isinstance(item, BaseModel):
+                out.append(f"{pad}- [{i}]:")
+                out.extend(_format_model(item, indent + 1))
+            else:
+                out.append(f"{pad}- [{i}]: {item!r}")
+        return out
+    if isinstance(value, dict):
+        if not value:
+            return [f"{pad}{{}}"]
+        return [f"{pad}{k}: {v!r}" for k, v in value.items()]
+    if isinstance(value, datetime):
+        return [f"{pad}{value.isoformat()}"]
+    return [f"{pad}{value!r}"]
+
+
+def _format_model(model: BaseModel, indent: int = 0) -> list[str]:
+    """Walk a Pydantic model's declared fields and render each one.
+
+    Order matches the field-declaration order in the model — the same
+    order ``model.model_fields`` returns.  Keeps output stable as
+    fields are added.
+    """
+    pad = "  " * indent
+    out: list[str] = []
+    for name in type(model).model_fields:
+        value = getattr(model, name)
+        if isinstance(value, BaseModel):
+            out.append(f"{pad}{name}:")
+            out.extend(_format_model(value, indent + 1))
+        elif isinstance(value, list) and value and isinstance(value[0], BaseModel):
+            out.append(f"{pad}{name}:")
+            for i, item in enumerate(value):
+                out.append(f"{pad}  - [{i}]:")
+                out.extend(_format_model(item, indent + 2))
+        elif isinstance(value, (list, dict)):
+            out.append(f"{pad}{name}: {value!r}")
+        elif isinstance(value, datetime):
+            out.append(f"{pad}{name}: {value.isoformat()}")
+        else:
+            out.append(f"{pad}{name}: {value!r}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic traces (kept as duplication-with-tests for explanatory value)
+# ---------------------------------------------------------------------------
 
 
 def _trace_pr_needs_response(
     card: KanbanCard, pr: GitHubPR, current_username: str
 ) -> tuple[list[str], bool]:
-    """Walk the live ``_pr_needs_response`` logic step-by-step and return the result.
-
-    Mirrors ``command_center._pr_needs_response`` line-for-line so any
-    divergence between this trace and the actual function is itself a
-    bug.  Returns ``(lines, result)``.
-    """
+    """Walk the live ``_pr_needs_response`` logic step-by-step and return the result."""
     lines: list[str] = [
         f"--- TRACE: _pr_needs_response(card, pr=#{pr.number}, "
         f"current_username={current_username!r}) ---",
     ]
 
-    # Guard clause
     state_ok = pr.state == "open"
     author_ok = pr.author == current_username
     not_approved = pr.review_decision != "APPROVED"
@@ -203,7 +233,6 @@ def _trace_pr_needs_response(
         lines.append("  → guard fails → return False")
         return lines, False
 
-    # CHANGES_REQUESTED branch
     if pr.review_decision == "CHANGES_REQUESTED":
         lines.append("  branch: pr.review_decision == 'CHANGES_REQUESTED' → True")
         explicit_cr = {
@@ -223,7 +252,6 @@ def _trace_pr_needs_response(
             return lines, True
         lines.append("    sub-branch: all explicit CR-ers re-requested → fall through")
 
-    # Fallback
     not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
     lines.append(
         f"  fallback: not_rerequested = reviewers - requested_reviewers: {sorted(not_rerequested)}"
@@ -271,6 +299,20 @@ def _trace_classification(card: KanbanCard, current_username: str, now: datetime
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Pipeline glue
+# ---------------------------------------------------------------------------
+
+
+def _find_card(view: KanbanView, key: str) -> tuple[KanbanCard, KanbanColumn] | None:
+    """Locate the card by key in the aggregate result and return its column."""
+    for column in ("todo", "in_progress", "needs_review", "done"):
+        for card in getattr(view, column):
+            if card.key == key:
+                return card, column  # type: ignore[return-value]
+    return None
+
+
 async def debug_card(
     pr_arg: str | None,
     ticket_arg: str | None,
@@ -314,8 +356,33 @@ async def debug_card(
         if ticket_arg and linear is not None:
             ticket = await _fetch_ticket(linear, ticket_arg)
 
-        card_key = ticket.identifier if ticket is not None else f"{prs[0].repo}#{prs[0].number}"
-        card = KanbanCard(key=card_key, ticket=ticket, prs=prs)
+        # Run through the same aggregation pipeline the Command Center uses.
+        view = aggregate(
+            issues=[ticket] if ticket is not None else [],
+            prs=prs,
+            current_username=username,
+        )
+
+        # Locate the resulting card by its expected key.  ``aggregate`` keys
+        # ticket cards by identifier and orphan PR cards as ``pr-{repo}-{n}``.
+        if ticket is not None:
+            expected_key = ticket.identifier
+        else:
+            pr = prs[0]
+            expected_key = f"pr-{pr.repo}-{pr.number}" if pr.repo else f"pr-{pr.number}"
+
+        located = _find_card(view, expected_key)
+        if located is None:
+            # Card was filtered out by aggregate (e.g. orphan PR with no user
+            # involvement).  Build a bare card so the trace still has data.
+            fallback = KanbanCard(key=expected_key, ticket=ticket, prs=prs)
+            located = (fallback, "todo")
+            excluded_by_aggregate = True
+        else:
+            excluded_by_aggregate = False
+
+        card, column = located
+        card_view = build_card_view(card, column, username)
 
         now = datetime.now(UTC)
         cutoff = now - _DONE_WINDOW
@@ -326,13 +393,16 @@ async def debug_card(
             f"now: {now.isoformat()}",
             f"done_window_cutoff: {cutoff.isoformat()}  # now - 7 days",
             f"card.key: {card.key!r}",
+            f"excluded_by_aggregate: {excluded_by_aggregate}",
             "",
         ]
 
-        if ticket is not None:
-            out.extend(_format_ticket(ticket))
+        out.append("=== CARD VIEW (canonical render model) ===")
+        out.extend(_format_model(card_view, indent=1))
+        out.append("")
+
         for pr in prs:
-            out.extend(_format_pr(pr))
+            out.append(f"=== PR_NEEDS_RESPONSE TRACE (#{pr.number}) ===")
             trace_lines, result = _trace_pr_needs_response(card, pr, username)
             out.extend(trace_lines)
             out.append(f"  RESULT: _pr_needs_response = {result}")
@@ -342,17 +412,6 @@ async def debug_card(
         out.append("=== CARD SIGNALS ===")
         for k, v in signals.__dict__.items():
             out.append(f"  {k}: {v}")
-        out.append("")
-
-        column = _classify_card(card, username, now)
-        out.append("=== CLASSIFICATION RESULT ===")
-        out.append(f"  column: {column!r}")
-        if column == "in_progress":
-            out.append(f"  in_progress_reason: {_assign_in_progress_reason(card, username)!r}")
-        elif column == "needs_review":
-            out.append(f"  review_group: {_assign_review_group(card, username)!r}")
-        elif column == "done":
-            out.append(f"  done_group: {_assign_done_group(card, username)!r}")
         out.append("")
 
         out.extend(_trace_classification(card, username, now))
