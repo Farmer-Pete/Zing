@@ -194,7 +194,13 @@ def _is_human_reviewer(card: KanbanCard, reviewer: str) -> bool:
     return False
 
 
-def _pr_needs_response(card: KanbanCard, pr: GitHubPR, current_username: str) -> bool:
+def _pr_needs_response(
+    card: KanbanCard,
+    pr: GitHubPR,
+    current_username: str,
+    *,
+    trace: list[str] | None = None,
+) -> bool:
     """The user authored *pr* and there's reviewer feedback they haven't addressed.
 
     Two signals trigger this:
@@ -210,26 +216,55 @@ def _pr_needs_response(card: KanbanCard, pr: GitHubPR, current_username: str) ->
     2. A human reviewer left a review (any state, including ``COMMENTED``)
        and hasn't been re-requested.  See :func:`_is_human_reviewer` for
        the bot filter.
+
+    Pass ``trace`` (an empty list) to capture a line-by-line record of
+    which guards and branches fired — used by ``zing-ai debug-card``.
+    Production callers leave it as ``None`` and the trace lines are
+    discarded with no overhead.
     """
-    if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
+
+    def log(msg: str) -> None:
+        if trace is not None:
+            trace.append(msg)
+
+    state_ok = pr.state == "open"
+    author_ok = pr.author == current_username
+    not_approved = pr.review_decision != "APPROVED"
+    log(f"  guard pr.state == 'open': {state_ok}")
+    log(f"  guard pr.author == current_username: {author_ok}")
+    log(f"  guard pr.review_decision != 'APPROVED': {not_approved}")
+    if not (state_ok and author_ok and not_approved):
+        log("  → guard fails → return False")
         return False
 
     if pr.review_decision == "CHANGES_REQUESTED":
+        log("  branch: pr.review_decision == 'CHANGES_REQUESTED'")
         explicit_cr = {
             login for login, state in pr.reviewer_states.items() if state == "CHANGES_REQUESTED"
         }
+        log(f"    explicit_cr: {sorted(explicit_cr)}")
+        pending = explicit_cr - set(pr.requested_reviewers)
+        log(f"    pending (explicit_cr - requested_reviewers): {sorted(pending)}")
         # No explicit CR-er → states were overwritten by later COMMENTED
         # reviews (backend-v1#1885 case). reviewDecision is the only signal.
         if not explicit_cr:
+            log("    sub-branch: 'no explicit CR' (states overwritten) → return True")
             return True
         # At least one explicit CR-er has not been re-requested.
-        if explicit_cr - set(pr.requested_reviewers):
+        if pending:
+            log("    sub-branch: 'pending explicit CR' → return True")
             return True
         # All explicit CR-ers re-requested; fall through so other COMMENTED
         # human reviewers can still trigger a Respond.
+        log("    sub-branch: all explicit CR-ers re-requested → fall through")
 
     not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
-    return any(_is_human_reviewer(card, reviewer) for reviewer in not_rerequested)
+    log(f"  fallback: not_rerequested = reviewers - requested_reviewers: {sorted(not_rerequested)}")
+    human_results = {r: _is_human_reviewer(card, r) for r in sorted(not_rerequested)}
+    log(f"  fallback: _is_human_reviewer per reviewer: {human_results}")
+    result = any(human_results.values())
+    log(f"  → return {result}")
+    return result
 
 
 def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
@@ -412,6 +447,8 @@ def _classify_card(
     card: KanbanCard,
     current_username: str,
     now: datetime,
+    *,
+    trace: list[str] | None = None,
 ) -> str | None:
     """Return the Kanban column name for *card*.
 
@@ -431,40 +468,43 @@ def _classify_card(
     Owned + ticket state is "started"               in_progress
     Everything else                                 todo
     =============================================  ================
+
+    Pass ``trace`` (an empty list) to capture a first-match marker per
+    rule (``[FIRE]`` / ``[ ok ]`` / ``[skip]``) — used by ``zing-ai
+    debug-card``.  Production callers leave it as ``None``.
     """
     cutoff = now - _DONE_WINDOW
 
-    if not _should_include_card(card, current_username, cutoff):
-        return None
-
+    included = _should_include_card(card, current_username, cutoff)
     s = _compute_signals(card, current_username, cutoff)
 
-    # User has feedback to address — they need to act.
-    if s.has_unaddressed_feedback:
-        return "in_progress"
+    rules: list[tuple[str, bool, str | None]] = [
+        ("(filter) _should_include_card == False", not included, None),
+        ("has_unaddressed_feedback", s.has_unaddressed_feedback, "in_progress"),
+        ("has_pr_awaiting_review", s.has_pr_awaiting_review, "needs_review"),
+        ("has_approved_open_pr", s.has_approved_open_pr, "done"),
+        ("is_recently_done", s.is_recently_done, "done"),
+        (
+            "owned AND (has_active_session OR has_open_pr_no_reviewers)",
+            s.owned and (s.has_active_session or s.has_open_pr_no_reviewers),
+            "in_progress",
+        ),
+        ("owned AND ticket_started", s.owned and s.ticket_started, "in_progress"),
+        ("(default fallthrough)", True, "todo"),
+    ]
 
-    # PR is out for review — user is blocked on reviewers.
-    if s.has_pr_awaiting_review:
-        return "needs_review"
-
-    # PR approved and ready to merge — takes priority over active sessions.
-    if s.has_approved_open_pr:
-        return "done"
-
-    # Recently done (merged PR, completed ticket, submitted review) — takes
-    # priority over active sessions which may simply be stale.
-    if s.is_recently_done:
-        return "done"
-
-    # Actively working: session running or PR not yet sent for review.
-    if s.owned and (s.has_active_session or s.has_open_pr_no_reviewers):
-        return "in_progress"
-
-    # Ticket is being worked on but no PR signal drove it elsewhere.
-    if s.owned and s.ticket_started:
-        return "in_progress"
-
-    return "todo"
+    chosen: str | None = None
+    fired = False
+    for desc, val, target in rules:
+        if val and not fired:
+            if trace is not None:
+                trace.append(f"  [FIRE] {desc}  ⇒ {target if target else 'EXCLUDED'}")
+            chosen = target
+            fired = True
+        elif trace is not None:
+            marker = "[ ok ]" if val else "[skip]"
+            trace.append(f"  {marker} {desc}  ⇒ {target if target else 'EXCLUDED'}")
+    return chosen
 
 
 def _user_involved_in_done_card(card: KanbanCard, current_username: str) -> bool:

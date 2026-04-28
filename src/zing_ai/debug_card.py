@@ -3,14 +3,15 @@
 Fetches a live PR (via GitHub) and/or ticket (via Linear), runs the data
 through the same :func:`aggregate` pipeline the Command Center uses,
 constructs the canonical :class:`CardView` for the resulting card, and
-prints a structured trace with two diagnostic blocks attached:
+prints a structured trace.
 
-* a line-by-line walk through ``_pr_needs_response`` for each PR, and
-* the first-match decision-table evaluation in ``_classify_card``.
-
-The display state itself is not duplicated here — every field a renderer
-would draw comes from ``CardView`` via Pydantic introspection, so adding
-a field there automatically surfaces it in the output.
+This module is a **dumb display**: it fetches data, calls production
+functions, and prints what they return.  Display state comes from
+``CardView`` via Pydantic introspection.  Diagnostic traces
+(``_pr_needs_response``, ``_classify_card``) are emitted by the
+production functions themselves via an optional ``trace`` parameter.
+There is **no** classification, predicate, or display logic in this
+file — by design.  See CLAUDE.md "Debugging Kanban classification".
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ from zing_ai.config import load_config
 from zing_ai.server.card_view import build_card_view
 from zing_ai.server.command_center import (
     _DONE_WINDOW,
+    _classify_card,
     _compute_signals,
-    _is_human_reviewer,
-    _should_include_card,
+    _pr_needs_response,
     aggregate,
 )
 from zing_ai.server.github_client import GitHubClient, _map_pr
@@ -210,96 +211,6 @@ def _format_model(model: BaseModel, indent: int = 0) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Diagnostic traces (kept as duplication-with-tests for explanatory value)
-# ---------------------------------------------------------------------------
-
-
-def _trace_pr_needs_response(
-    card: KanbanCard, pr: GitHubPR, current_username: str
-) -> tuple[list[str], bool]:
-    """Walk the live ``_pr_needs_response`` logic step-by-step and return the result."""
-    lines: list[str] = [
-        f"--- TRACE: _pr_needs_response(card, pr=#{pr.number}, "
-        f"current_username={current_username!r}) ---",
-    ]
-
-    state_ok = pr.state == "open"
-    author_ok = pr.author == current_username
-    not_approved = pr.review_decision != "APPROVED"
-    lines.append(f"  guard pr.state == 'open': {state_ok}")
-    lines.append(f"  guard pr.author == current_username: {author_ok}")
-    lines.append(f"  guard pr.review_decision != 'APPROVED': {not_approved}")
-    if not (state_ok and author_ok and not_approved):
-        lines.append("  → guard fails → return False")
-        return lines, False
-
-    if pr.review_decision == "CHANGES_REQUESTED":
-        lines.append("  branch: pr.review_decision == 'CHANGES_REQUESTED' → True")
-        explicit_cr = {
-            login for login, state in pr.reviewer_states.items() if state == "CHANGES_REQUESTED"
-        }
-        lines.append(f"    explicit_cr: {sorted(explicit_cr)}")
-        pending = explicit_cr - set(pr.requested_reviewers)
-        lines.append(f"    pending = explicit_cr - requested_reviewers: {sorted(pending)}")
-        if not explicit_cr:
-            lines.append(
-                "    sub-branch: 'no explicit CR' (states overwritten OR all "
-                "reviewers re-requested) → return True"
-            )
-            return lines, True
-        if pending:
-            lines.append("    sub-branch: 'pending CR' → return True")
-            return lines, True
-        lines.append("    sub-branch: all explicit CR-ers re-requested → fall through")
-
-    not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
-    lines.append(
-        f"  fallback: not_rerequested = reviewers - requested_reviewers: {sorted(not_rerequested)}"
-    )
-    human_results = {r: _is_human_reviewer(card, r) for r in sorted(not_rerequested)}
-    lines.append(f"  fallback: _is_human_reviewer per reviewer: {human_results}")
-    result = any(human_results.values())
-    lines.append(f"  → return {result}")
-    return lines, result
-
-
-def _trace_classification(card: KanbanCard, current_username: str, now: datetime) -> list[str]:
-    """Print the decision-table evaluation in ``_classify_card`` order."""
-    cutoff = now - _DONE_WINDOW
-    s = _compute_signals(card, current_username, cutoff)
-    included = _should_include_card(card, current_username, cutoff)
-
-    rules: list[tuple[str, bool, str]] = [
-        ("(filter) _should_include_card == False", not included, "EXCLUDED"),
-        ("has_unaddressed_feedback", s.has_unaddressed_feedback, "in_progress"),
-        ("has_pr_awaiting_review", s.has_pr_awaiting_review, "needs_review"),
-        ("has_approved_open_pr", s.has_approved_open_pr, "done"),
-        ("is_recently_done", s.is_recently_done, "done"),
-        (
-            "owned AND (has_active_session OR has_open_pr_no_reviewers)",
-            s.owned and (s.has_active_session or s.has_open_pr_no_reviewers),
-            "in_progress",
-        ),
-        ("owned AND ticket_started", s.owned and s.ticket_started, "in_progress"),
-        ("(default fallthrough)", True, "todo"),
-    ]
-
-    lines = ["=== DECISION TABLE TRACE (first match wins) ==="]
-    fired = False
-    for desc, val, target in rules:
-        if val and not fired:
-            marker = "[FIRE]"
-            fired = True
-        elif val:
-            marker = "[ ok ]"
-        else:
-            marker = "[skip]"
-        lines.append(f"  {marker} {desc}  ⇒ {target}")
-    lines.append("")
-    return lines
-
-
-# ---------------------------------------------------------------------------
 # Pipeline glue
 # ---------------------------------------------------------------------------
 
@@ -403,8 +314,9 @@ async def debug_card(
 
         for pr in prs:
             out.append(f"=== PR_NEEDS_RESPONSE TRACE (#{pr.number}) ===")
-            trace_lines, result = _trace_pr_needs_response(card, pr, username)
-            out.extend(trace_lines)
+            pr_trace: list[str] = []
+            result = _pr_needs_response(card, pr, username, trace=pr_trace)
+            out.extend(pr_trace)
             out.append(f"  RESULT: _pr_needs_response = {result}")
             out.append("")
 
@@ -414,7 +326,11 @@ async def debug_card(
             out.append(f"  {k}: {v}")
         out.append("")
 
-        out.extend(_trace_classification(card, username, now))
+        out.append("=== DECISION TABLE TRACE (first match wins) ===")
+        classify_trace: list[str] = []
+        _classify_card(card, username, now, trace=classify_trace)
+        out.extend(classify_trace)
+        out.append("")
 
         click.echo("\n".join(out))
 
