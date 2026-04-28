@@ -177,6 +177,8 @@ class TestColumnClassification(unittest.TestCase):
         view = _agg(issues=[issue], sessions=[session])
         self.assertEqual(len(view.in_progress), 1)
         self.assertEqual(len(view.todo), 0)
+        # No PR-feedback reason for a session-driven in_progress card.
+        self.assertIsNone(view.in_progress[0].in_progress_reason)
 
     def test_in_progress_when_open_pr_no_reviewers(self) -> None:
         """An open PR with no requested_reviewers → in_progress."""
@@ -342,6 +344,109 @@ class TestColumnPriorityRule(unittest.TestCase):
         view = _agg(issues=[issue], prs=[pr])
         self.assertEqual(len(view.in_progress), 1)
         self.assertEqual(len(view.needs_review), 0)
+
+    def test_review_decision_changes_requested_overrides_latest_reviews(self) -> None:
+        """PR-level reviewDecision=CHANGES_REQUESTED → in_progress even when
+        latestReviews shows the reviewer's most recent state is COMMENTED.
+
+        Reproduces backend-v1#1885: the reviewer first submitted
+        CHANGES_REQUESTED, then later posted inline COMMENTED reviews.
+        GitHub's ``latestReviews`` keeps only the most recent review per
+        user (COMMENTED), but the PR-level ``reviewDecision`` still
+        reflects the unresolved change request.
+        """
+        issue = _make_issue(identifier="BAK-1")
+        pr = _make_pr(
+            number=1,
+            head_ref="BAK-1/feature",
+            state="open",
+            author="octocat",
+            reviewers=["kyle"],
+            requested_reviewers=["max"],
+            reviewer_states={"kyle": "COMMENTED"},
+            review_decision="CHANGES_REQUESTED",
+        )
+        view = _agg(issues=[issue], prs=[pr])
+        self.assertEqual(len(view.in_progress), 1)
+        self.assertEqual(len(view.needs_review), 0)
+        self.assertEqual(view.in_progress[0].in_progress_reason, "Changes requested")
+
+    def test_changes_requested_rerequested_lands_in_needs_review(self) -> None:
+        """reviewDecision=CHANGES_REQUESTED but the changes-requester has been
+        re-requested → needs_review (waiting on others), not in_progress.
+
+        Reproduces the case where the author addressed feedback and clicked
+        "re-request review" on the same reviewer.  GitHub does not reset
+        ``reviewDecision`` until the reviewer submits a new review, so the
+        PR-level decision remains ``CHANGES_REQUESTED`` even though the
+        author is now blocked on the reviewer.
+        """
+        issue = _make_issue(identifier="BAK-1")
+        pr = _make_pr(
+            number=1,
+            head_ref="BAK-1/feature",
+            state="open",
+            author="octocat",
+            reviewers=["kyle"],
+            requested_reviewers=["kyle"],
+            reviewer_states={"kyle": "CHANGES_REQUESTED"},
+            review_decision="CHANGES_REQUESTED",
+        )
+        view = _agg(issues=[issue], prs=[pr], current_username="octocat")
+        self.assertEqual(len(view.in_progress), 0)
+        self.assertEqual(len(view.needs_review), 1)
+
+    def test_human_comment_review_counts_as_unaddressed(self) -> None:
+        """Human reviewer's COMMENTED review (no re-request) → in_progress.
+
+        The reviewer's humanity is established via a sibling PR on the
+        same card where they appear in ``requested_reviewers``.
+        """
+        issue = _make_issue(identifier="BAK-1")
+        pr_with_comment = _make_pr(
+            number=1,
+            head_ref="BAK-1/feature",
+            state="open",
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=[],
+            reviewer_states={"alice": "COMMENTED"},
+            review_decision=None,
+        )
+        sibling_pr = _make_pr(
+            number=2,
+            head_ref="BAK-1/feature-2",
+            state="open",
+            author="octocat",
+            requested_reviewers=["alice"],
+            review_decision=None,
+        )
+        view = _agg(issues=[issue], prs=[pr_with_comment, sibling_pr])
+        self.assertEqual(len(view.in_progress), 1)
+        self.assertEqual(len(view.needs_review), 0)
+        self.assertEqual(view.in_progress[0].in_progress_reason, "Reviewer feedback")
+
+    def test_bot_comment_does_not_block_needs_review(self) -> None:
+        """A bot's COMMENTED review on a PR awaiting human review → needs_review.
+
+        Bots like Greptile/CodeRabbit only ever leave COMMENT reviews and
+        are never requested as reviewers.  Their comments must not hijack
+        the card to in_progress when a human review is still pending.
+        """
+        issue = _make_issue(identifier="BAK-1")
+        pr = _make_pr(
+            number=1,
+            head_ref="BAK-1/feature",
+            state="open",
+            author="octocat",
+            reviewers=["greptile-bot"],
+            requested_reviewers=["alice"],
+            reviewer_states={"greptile-bot": "COMMENTED"},
+            review_decision=None,
+        )
+        view = _agg(issues=[issue], prs=[pr])
+        self.assertEqual(len(view.needs_review), 1)
+        self.assertEqual(len(view.in_progress), 0)
 
     def test_done_beats_stale_session(self) -> None:
         """A merged PR moves card to done even if a session step is still STARTED."""
@@ -698,6 +803,208 @@ class TestDoneGrouping(unittest.TestCase):
         done_cards = view.done
         completed = [c for c in done_cards if c.done_group == "completed"]
         self.assertEqual(len(completed), 1)
+
+
+class TestPrNeedsResponse(unittest.TestCase):
+    """Direct unit tests for the per-PR response predicate.
+
+    The aggregation tests above cover the card-level outcomes, but the
+    template now also calls this predicate directly to choose between
+    "Respond" and "Build Audit" as the primary PR button.
+    """
+
+    def _card(self, *prs) -> KanbanCard:  # noqa: ANN001, ANN202
+        return KanbanCard(key="BAK-1", ticket=_make_issue(identifier="BAK-1"), prs=list(prs))
+
+    def test_changes_requested_by_author_returns_true(self) -> None:
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(author="octocat", review_decision="CHANGES_REQUESTED")
+        self.assertTrue(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_human_commented_review_returns_true(self) -> None:
+        """Human reviewer's COMMENTED review (no re-request) must trigger Respond."""
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr_with_comment = _make_pr(
+            number=1,
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=[],
+            reviewer_states={"alice": "COMMENTED"},
+            review_decision=None,
+        )
+        sibling = _make_pr(
+            number=2,
+            author="octocat",
+            requested_reviewers=["alice"],
+            review_decision=None,
+        )
+        card = self._card(pr_with_comment, sibling)
+        self.assertTrue(_pr_needs_response(card, pr_with_comment, "octocat"))
+
+    def test_bot_commented_review_returns_false(self) -> None:
+        """Greptile-style bot drive-by COMMENT must not trigger Respond."""
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["greptile-bot"],
+            requested_reviewers=[],
+            reviewer_states={"greptile-bot": "COMMENTED"},
+            review_decision=None,
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_rerequested_after_comment_returns_false(self) -> None:
+        """Comment was addressed and reviewer was re-requested → no longer pending."""
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=["alice"],
+            reviewer_states={"alice": "COMMENTED"},
+            review_decision=None,
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_changes_requested_rerequested_returns_false(self) -> None:
+        """CHANGES_REQUESTED reviewer was re-requested → user is now waiting.
+
+        GitHub keeps ``reviewDecision`` at ``CHANGES_REQUESTED`` even after
+        the author re-requests review — it only flips when the reviewer
+        submits a new review.  Once every explicit changes-requester is
+        back in ``requested_reviewers``, the author has done their part.
+        """
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=["alice"],
+            reviewer_states={"alice": "CHANGES_REQUESTED"},
+            review_decision="CHANGES_REQUESTED",
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_changes_requested_partial_rerequest_returns_true(self) -> None:
+        """One CR-er re-requested, another still pending → still needs response."""
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["alice", "bob"],
+            requested_reviewers=["alice"],
+            reviewer_states={
+                "alice": "CHANGES_REQUESTED",
+                "bob": "CHANGES_REQUESTED",
+            },
+            review_decision="CHANGES_REQUESTED",
+        )
+        self.assertTrue(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_approved_returns_false(self) -> None:
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["alice"],
+            reviewer_states={"alice": "APPROVED"},
+            review_decision="APPROVED",
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_non_author_returns_false(self) -> None:
+        """Predicate is from the author's POV — reviewers don't get Respond."""
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="someone-else",
+            reviewers=["octocat"],
+            reviewer_states={"octocat": "COMMENTED"},
+            review_decision=None,
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+    def test_closed_pr_returns_false(self) -> None:
+        from zing_ai.server.command_center import _pr_needs_response
+
+        pr = _make_pr(
+            author="octocat",
+            state="closed",
+            review_decision="CHANGES_REQUESTED",
+        )
+        self.assertFalse(_pr_needs_response(self._card(pr), pr, "octocat"))
+
+
+class TestKanbanCardRendering(unittest.TestCase):
+    """Template-level checks for the in-progress PR primary button.
+
+    These pin the wiring between ``_pr_needs_response`` and the
+    Respond/Build Audit branches in ``kanban_card.html``.
+    """
+
+    def _render(self, card: KanbanCard, *, current_username: str = "octocat") -> str:
+        from zing_ai.server.templates import render
+
+        return render(
+            "fragments/kanban_card.html",
+            card=card,
+            column_cls="col-progress",
+            current_username=current_username,
+            live_sessions=set(),
+            session_phases={},
+        )
+
+    def test_human_commented_review_renders_respond_button(self) -> None:
+        """In-progress own-PR with a human's COMMENTED review → Respond, not Build Audit."""
+        pr_with_comment = _make_pr(
+            number=1,
+            author="octocat",
+            reviewers=["alice"],
+            requested_reviewers=[],
+            reviewer_states={"alice": "COMMENTED"},
+            review_decision=None,
+        )
+        sibling = _make_pr(
+            number=2,
+            author="octocat",
+            requested_reviewers=["alice"],
+            review_decision=None,
+        )
+        card = KanbanCard(
+            key="BAK-1",
+            ticket=_make_issue(identifier="BAK-1"),
+            prs=[pr_with_comment, sibling],
+        )
+        html = self._render(card)
+        # The Respond skill appears (primary button + kebab Respond section).
+        self.assertIn("pr-respond", html)
+        # And the user-facing label is "Respond", not "Build Audit", on the primary slot.
+        self.assertIn(">Respond</span>", html)
+
+    def test_changes_requested_still_renders_respond(self) -> None:
+        """Existing CHANGES_REQUESTED behaviour must be preserved."""
+        pr = _make_pr(
+            number=7,
+            author="octocat",
+            review_decision="CHANGES_REQUESTED",
+        )
+        card = KanbanCard(key="BAK-1", ticket=_make_issue(identifier="BAK-1"), prs=[pr])
+        html = self._render(card)
+        self.assertIn("pr-respond", html)
+        self.assertIn(">Respond</span>", html)
+
+    def test_no_review_renders_build_audit(self) -> None:
+        """In-progress own-PR with no review activity → Build Audit primary."""
+        pr = _make_pr(number=3, author="octocat", review_decision=None)
+        card = KanbanCard(key="BAK-1", ticket=_make_issue(identifier="BAK-1"), prs=[pr])
+        html = self._render(card)
+        self.assertIn(">Build Audit</span>", html)
+        # No Respond branch when there's no review activity.
+        self.assertNotIn("pr-respond", html)
+        self.assertNotIn(">Respond</span>", html)
 
 
 if __name__ == "__main__":

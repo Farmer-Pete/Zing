@@ -243,6 +243,7 @@ class SessionManager:
             pr_number=pr_number,
             pr_repo=pr_repo,
             terminal_session=terminal_session,
+            launched_at=datetime.now() if terminal_session else None,
         )
         self._sessions[session_id] = session
         self._persist(session)

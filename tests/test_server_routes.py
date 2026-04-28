@@ -2196,8 +2196,8 @@ class TestZellijLifespan(unittest.TestCase):
         mock_mcp.streamable_http_app.return_value = MagicMock(routes=[])
         return mock_mcp
 
-    def test_create_app_with_disable_zellij(self) -> None:
-        """When disable_zellij=True, zellij_available is False and /zellij/ returns 503."""
+    def test_create_app_with_zellij_support_false(self) -> None:
+        """When zellij_support=False, zellij_available is False and /zellij/ returns 503."""
         import tempfile
         from pathlib import Path
 
@@ -2213,11 +2213,11 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=True,
+                zellij_support=False,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
-                # 503 = Zellij unavailable (correct — disable_zellij=True)
+                # 503 = Zellij unavailable (correct — zellij_support=False)
                 self.assertEqual(resp.status_code, 503)
 
     def test_zellij_startup_failure_sets_unavailable(self) -> None:
@@ -2244,7 +2244,7 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=False,
+                zellij_support=True,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
@@ -2270,7 +2270,7 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=False,
+                zellij_support=True,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")

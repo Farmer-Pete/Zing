@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Card Prototype I — Hover Toolbar</title>
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--off-white); padding: 2rem; color: var(--text-primary); }
+  h1 { font-size: 1.1rem; margin-bottom: 0.3rem; color: var(--navy); }
+  .subtitle { font-size: 0.8rem; color: var(--gray-500); margin-bottom: 1rem; }
+  .concept { font-size: 0.75rem; color: var(--gray-700); line-height: 1.6; margin-bottom: 2rem; max-width: 640px; background: #fff; padding: 1rem; border-radius: 8px; border-left: 3px solid #27ae60; }
+  .concept strong { color: var(--navy); }
+
+  .board { display: grid; grid-template-columns: repeat(2, 320px); gap: 5rem; }
+  .label { font-size: 0.6rem; color: var(--gray-500); margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  /* ── Card wrapper — provides positioning context ── */
+  .card-wrap {
+    position: relative;
+    padding-top: 36px; /* space for floating toolbar */
+  }
+
+  .card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    transition: border-color 0.2s, box-shadow 0.2s;
+    overflow: hidden;
+  }
+  .card-wrap:hover .card { border-color: var(--orange); box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
+
+  .card-header {
+    padding: 0.5rem 0.6rem;
+    background: #fffcf8;
+    border-bottom: 1px solid var(--gray-200);
+    border-top: 1px solid #f5c97a;
+    border-left: 1px solid #f5c97a;
+    border-right: 1px solid #f5c97a;
+    border-radius: 5px 5px 0 0;
+    margin: -1px -1px 0;
+  }
+  .card-header-top { display: flex; align-items: baseline; gap: 0.35rem; }
+  .card-ticket-id { font-size: 0.55rem; font-weight: 700; color: var(--orange); text-decoration: none; }
+  .card-assignee { width: 16px; height: 16px; border-radius: 50%; background: var(--navy); color: #fff; font-size: 0.4rem; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-left: auto; }
+  .card-title { font-size: 0.75rem; font-weight: 600; line-height: 1.3; margin-top: 0.15rem; }
+
+  .status-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.6rem;
+    min-height: 26px;
+  }
+  .status-strip + .status-strip { border-top: 1px solid var(--gray-100); }
+  .strip-pr { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.6rem; color: #27ae60; text-decoration: none; }
+  .strip-pr svg { width: 11px; height: 11px; }
+  .strip-author { font-size: 0.55rem; color: var(--gray-500); }
+  .strip-pill { font-size: 0.45rem; font-weight: 700; padding: 0.05rem 0.25rem; border-radius: 999px; text-transform: uppercase; }
+  .strip-pill-approved { background: #e8f5e9; color: #2e7d32; }
+  .strip-pill-changes { background: #fff3e0; color: #e65100; }
+  .strip-ci-dots { display: flex; gap: 2px; align-items: center; }
+  .strip-ci-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .strip-ci-green { background: #27ae60; }
+  .strip-ci-red { background: #e74c3c; }
+  .strip-session-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .strip-session-alive { background: #3b82f6; animation: pulse 2s infinite; }
+  .strip-session-dead { background: var(--gray-300); }
+  .strip-session-label { font-size: 0.55rem; color: var(--gray-700); }
+  .strip-session-label-dead { color: var(--gray-500); }
+  .strip-findings { font-size: 0.5rem; font-weight: 700; color: #e65100; }
+  .strip-spacer { flex: 1; }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ── THE KEY CONCEPT: floating toolbar above the card ── */
+  .hover-toolbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: var(--navy);
+    border-radius: 6px;
+    padding: 0.3rem 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    box-shadow: 0 4px 16px rgba(15,27,45,0.2);
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .card-wrap:hover .hover-toolbar {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  .toolbar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.2rem 0.45rem;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: rgba(255,255,255,0.7);
+    cursor: pointer;
+    font-size: 0.55rem;
+    font-family: inherit;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: all 0.1s;
+  }
+  .toolbar-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+  .toolbar-btn-primary { background: var(--orange); color: #fff; }
+  .toolbar-btn-primary:hover { background: #e06810; }
+  .toolbar-btn-blue { background: #3b82f6; color: #fff; }
+  .toolbar-btn-blue:hover { background: #2563eb; }
+
+  .toolbar-divider {
+    width: 1px;
+    height: 16px;
+    background: rgba(255,255,255,0.15);
+    margin: 0 0.15rem;
+  }
+
+  .toolbar-spacer { flex: 1; }
+
+  .toolbar-group-label {
+    font-size: 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(255,255,255,0.3);
+    margin-right: 0.15rem;
+  }
+
+  /* Variant: for demo, show one always visible */
+  .card-wrap.demo-hover .hover-toolbar {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+</style>
+</head>
+<body>
+
+<h1>Prototype I: Hover Toolbar</h1>
+<p class="subtitle">Floating dark toolbar appears above the card on hover</p>
+
+<div class="concept">
+  <strong>Concept:</strong> The card body is <strong>purely informational</strong> — no action buttons anywhere inside. When hovering over the card, a <strong>dark floating toolbar</strong> slides down from above the card (like VS Code's peek toolbar or GitHub's PR hover actions). Actions are grouped by type with subtle dividers.
+  <br><br>
+  <strong>Key benefit:</strong> Zero button clutter on the card. All actions in one consistent location regardless of card state. The dark navy background makes it visually distinct from card content — no confusion about what's info vs. what's actionable.
+  <br><br>
+  <strong>Trade-off:</strong> Hover-dependent UI doesn't work on touch. Toolbar can collide with cards above in tight column layouts. Need to handle the case where multiple toolbars would stack.
+</div>
+
+<div class="board">
+
+  <!-- Card 1: Complex card with PR + session (hover to see toolbar) -->
+  <div>
+    <p class="label">Hover to see toolbar</p>
+    <div class="card-wrap">
+      <div class="hover-toolbar">
+        <span class="toolbar-group-label">Code</span>
+        <button class="toolbar-btn toolbar-btn-primary">&#128269; Review</button>
+        <button class="toolbar-btn">&#9654; Start</button>
+        <button class="toolbar-btn">&#128296; Setup</button>
+        <div class="toolbar-divider"></div>
+        <span class="toolbar-group-label">Session</span>
+        <button class="toolbar-btn toolbar-btn-blue">&#9655; Attach</button>
+        <button class="toolbar-btn">&#128683; Kill</button>
+        <div class="toolbar-divider"></div>
+        <button class="toolbar-btn">&#128203;</button>
+        <button class="toolbar-btn">&#8599;</button>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-header-top">
+            <a href="#" class="card-ticket-id">ENG-1042</a>
+            <div class="card-assignee">PN</div>
+          </div>
+          <div class="card-title">Add webhook retry logic with exponential backoff</div>
+        </div>
+        <div class="status-strip">
+          <a href="#" class="strip-pr"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg> backend-v1#487</a>
+          <span class="strip-author">pnaudus</span>
+          <span class="strip-pill strip-pill-approved">approved</span>
+          <div class="strip-ci-dots">
+            <span class="strip-ci-dot strip-ci-green"></span>
+            <span class="strip-ci-dot strip-ci-green"></span>
+            <span class="strip-ci-dot strip-ci-green"></span>
+          </div>
+        </div>
+        <div class="status-strip">
+          <span class="strip-session-dot strip-session-alive"></span>
+          <span class="strip-session-label">Running: review ENG-1042</span>
+        </div>
+        <div class="status-strip">
+          <span class="strip-findings">3 findings</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Always-visible toolbar (demo) -->
+  <div>
+    <p class="label">Own PR with feedback (toolbar shown)</p>
+    <div class="card-wrap demo-hover">
+      <div class="hover-toolbar">
+        <button class="toolbar-btn toolbar-btn-primary">&#9997; Respond</button>
+        <button class="toolbar-btn">&#128269; Review</button>
+        <button class="toolbar-btn">&#9654; Start</button>
+        <div class="toolbar-divider"></div>
+        <button class="toolbar-btn">&#128260; Resume</button>
+        <div class="toolbar-divider"></div>
+        <button class="toolbar-btn">&#128296;</button>
+        <button class="toolbar-btn">&#128203;</button>
+        <button class="toolbar-btn">&#8599;</button>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-header-top">
+            <a href="#" class="card-ticket-id">BAK-305</a>
+            <div class="card-assignee">PN</div>
+          </div>
+          <div class="card-title">Fix race condition in batch processor queue drain</div>
+        </div>
+        <div class="status-strip">
+          <a href="#" class="strip-pr"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg> backend-v1#501</a>
+          <span class="strip-author">pnaudus</span>
+          <span class="strip-pill strip-pill-changes">changes requested</span>
+          <div class="strip-ci-dots">
+            <span class="strip-ci-dot strip-ci-green"></span>
+            <span class="strip-ci-dot strip-ci-red"></span>
+          </div>
+        </div>
+        <div class="status-strip">
+          <span class="strip-session-dot strip-session-dead"></span>
+          <span class="strip-session-label strip-session-label-dead">Stopped: respond BAK-305</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 3: Simple ticket -->
+  <div>
+    <p class="label">Simple ticket (hover to see)</p>
+    <div class="card-wrap">
+      <div class="hover-toolbar">
+        <button class="toolbar-btn toolbar-btn-primary">&#9654; Start</button>
+        <button class="toolbar-btn">&#128203; Plan</button>
+        <div class="toolbar-divider"></div>
+        <button class="toolbar-btn">&#128203;</button>
+        <button class="toolbar-btn">&#8599;</button>
+      </div>
+      <div class="card">
+        <div class="card-header" style="background: #f6f7f9; border-top-color: #b5baca; border-left-color: #b5baca; border-right-color: #b5baca;">
+          <div class="card-header-top">
+            <a href="#" class="card-ticket-id">FRO-892</a>
+            <div class="card-assignee">PN</div>
+          </div>
+          <div class="card-title">Migrate settings page to new design system tokens</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 4: Minimal card — just a ticket ID -->
+  <div>
+    <p class="label">Minimal card (toolbar shown)</p>
+    <div class="card-wrap demo-hover">
+      <div class="hover-toolbar">
+        <button class="toolbar-btn toolbar-btn-primary">&#9654; Start</button>
+        <button class="toolbar-btn">&#128203; Copy</button>
+        <div class="toolbar-divider"></div>
+        <button class="toolbar-btn">&#8599;</button>
+      </div>
+      <div class="card">
+        <div class="card-header" style="background: #f6f7f9; border-top-color: #b5baca; border-left-color: #b5baca; border-right-color: #b5baca;">
+          <div class="card-header-top">
+            <a href="#" class="card-ticket-id">INF-201</a>
+            <div class="card-assignee">PN</div>
+          </div>
+          <div class="card-title">Upgrade Node runtime to v22 LTS</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

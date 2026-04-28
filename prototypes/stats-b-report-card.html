@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stats Prototype B: Weekly Report Card</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --navy-light: #1a2d4a;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --red-orange: #e84430;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --green: #2e7d32;
+    --green-bg: #e8f5e9;
+    --red-bg: #ffeaea;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--off-white);
+    color: var(--text-primary);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 400px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(245,124,32,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .brand-bar {
+    background: var(--navy);
+    margin: 0 -2rem;
+    padding: 0.75rem 2rem;
+    position: relative;
+  }
+  .brand-bar h1 { color: #fff; font-size: 1.1rem; font-weight: 700; }
+  .brand-bar::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), #ffd666, var(--cyan));
+  }
+  .top-nav {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--gray-200);
+    gap: 0.25rem;
+    margin: 0 -2rem;
+    padding: 0 2rem;
+    background: var(--gray-50);
+  }
+  .top-nav a {
+    text-decoration: none;
+    color: var(--navy);
+    padding: 0.75rem 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+  }
+  .top-nav a:hover { color: var(--orange); }
+  .top-nav a.active { border-bottom-color: var(--orange); font-weight: 700; }
+
+  .main { padding: 2rem 0; position: relative; z-index: 1; }
+
+  .page-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+  .page-header h2 {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--navy);
+  }
+  .week-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .week-nav button {
+    border: 1px solid var(--gray-300);
+    background: #fff;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    color: var(--gray-700);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  .week-nav button:hover { border-color: var(--orange); color: var(--orange); }
+  .week-label { font-size: 0.875rem; font-weight: 600; color: var(--navy); }
+
+  .subtitle {
+    font-size: 0.85rem;
+    color: var(--gray-500);
+    margin-bottom: 2rem;
+  }
+
+  /* Overall score card */
+  .overall-score {
+    background: var(--navy);
+    border-radius: 16px;
+    padding: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 2.5rem;
+    margin-bottom: 2rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .overall-score::before {
+    content: '';
+    position: absolute;
+    top: -50%; right: -10%;
+    width: 300px;
+    height: 300px;
+    background: radial-gradient(circle, rgba(245,124,32,0.15) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .score-circle {
+    width: 120px;
+    height: 120px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .score-circle svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .score-circle .track { fill: none; stroke: rgba(255,255,255,0.1); stroke-width: 8; }
+  .score-circle .progress { fill: none; stroke-width: 8; stroke-linecap: round; }
+  .score-circle .grade {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: #fff;
+  }
+
+  .score-details { flex: 1; color: rgba(255,255,255,0.85); }
+  .score-details h3 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 0.25rem;
+  }
+  .score-details p {
+    font-size: 0.875rem;
+    line-height: 1.6;
+    margin-bottom: 0.75rem;
+  }
+  .score-highlights {
+    display: flex;
+    gap: 1.5rem;
+  }
+  .score-highlight {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: rgba(255,255,255,0.7);
+  }
+  .score-highlight .icon { font-size: 1rem; }
+
+  /* Category cards */
+  .categories {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .category-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+    transition: box-shadow 0.15s, transform 0.15s;
+  }
+  .category-card:hover {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+    transform: translateY(-1px);
+  }
+
+  .cat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .cat-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--navy);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .cat-grade {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: #fff;
+  }
+  .cat-grade.a { background: var(--green); }
+  .cat-grade.b { background: var(--cyan); }
+  .cat-grade.c { background: var(--amber); }
+  .cat-grade.d { background: var(--red-orange); }
+
+  .cat-metrics { display: flex; flex-direction: column; gap: 0.75rem; }
+
+  .cat-metric {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .cat-metric-label {
+    font-size: 0.8rem;
+    color: var(--gray-700);
+  }
+  .cat-metric-value {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .cat-metric-num {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+  .cat-metric-delta {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+  }
+  .cat-metric-delta.up { background: var(--green-bg); color: var(--green); }
+  .cat-metric-delta.down { background: var(--red-bg); color: var(--red-orange); }
+
+  .cat-bar {
+    margin-top: 0.75rem;
+    height: 6px;
+    background: var(--gray-100);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .cat-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+
+  /* Comparison strip */
+  .comparison-strip {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+  }
+  .comparison-strip h3 {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 1rem;
+  }
+
+  .comparison-weeks {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 0.5rem;
+  }
+  .cw-col {
+    text-align: center;
+  }
+  .cw-date {
+    font-size: 0.65rem;
+    color: var(--gray-500);
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+  }
+  .cw-grade {
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: #fff;
+    margin-bottom: 0.35rem;
+  }
+  .cw-score {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--gray-700);
+  }
+  .cw-col.current .cw-grade {
+    box-shadow: 0 0 0 3px var(--orange), 0 0 12px rgba(245,124,32,0.3);
+  }
+
+  .bg-a { background: var(--green); }
+  .bg-aminus { background: #4caf50; }
+  .bg-bplus { background: #26a69a; }
+  .bg-b { background: #2ba8b6; }
+  .bg-bminus { background: var(--cyan); }
+  .bg-c { background: var(--amber); }
+  .bg-cminus { background: #e0a020; }
+  .bg-d { background: var(--red-orange); }
+</style>
+</head>
+<body>
+  <div class="brand-bar"><h1>Zing</h1></div>
+  <nav class="top-nav">
+    <a href="#">Dashboard</a>
+    <a href="#">Command Center</a>
+    <a href="#" class="active">Stats</a>
+    <a href="#">Config</a>
+  </nav>
+
+  <div class="main">
+    <div class="page-header">
+      <h2>Weekly Report Card</h2>
+      <div class="week-nav">
+        <button>&larr;</button>
+        <span class="week-label">Apr 21 &ndash; Apr 25, 2026</span>
+        <button>&rarr;</button>
+      </div>
+    </div>
+    <p class="subtitle">How you performed this week compared to your rolling 4-week average</p>
+
+    <!-- Overall score -->
+    <div class="overall-score">
+      <div class="score-circle">
+        <svg viewBox="0 0 120 120">
+          <circle class="track" cx="60" cy="60" r="52"/>
+          <circle class="progress" cx="60" cy="60" r="52"
+            stroke="var(--orange)"
+            stroke-dasharray="327"
+            stroke-dashoffset="40"/>
+        </svg>
+        <div class="grade">A-</div>
+      </div>
+      <div class="score-details">
+        <h3>Strong week overall</h3>
+        <p>Throughput up significantly with 14 issues closed and 8 PRs merged. Cycle time improved by half a day. Review turnaround slipped slightly &mdash; worth watching next week.</p>
+        <div class="score-highlights">
+          <span class="score-highlight"><span class="icon">&#9650;</span> Best closure count in 6 weeks</span>
+          <span class="score-highlight"><span class="icon">&#9650;</span> Cycle time at personal best</span>
+          <span class="score-highlight"><span class="icon">&#9660;</span> Review turnaround slowed</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category grades -->
+    <div class="categories">
+      <div class="category-card">
+        <div class="cat-header">
+          <span class="cat-title">Throughput</span>
+          <div class="cat-grade a">A</div>
+        </div>
+        <div class="cat-metrics">
+          <div class="cat-metric">
+            <span class="cat-metric-label">Issues closed</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">14</span>
+              <span class="cat-metric-delta up">+47%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">PRs merged</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">8</span>
+              <span class="cat-metric-delta up">+33%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">Story points</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">21</span>
+              <span class="cat-metric-delta up">+5</span>
+            </span>
+          </div>
+        </div>
+        <div class="cat-bar"><div class="cat-bar-fill" style="width:92%; background: var(--green)"></div></div>
+      </div>
+
+      <div class="category-card">
+        <div class="cat-header">
+          <span class="cat-title">Speed</span>
+          <div class="cat-grade a">A</div>
+        </div>
+        <div class="cat-metrics">
+          <div class="cat-metric">
+            <span class="cat-metric-label">Cycle time (median)</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">2.1d</span>
+              <span class="cat-metric-delta up">-16%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">Time to first PR</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">0.8d</span>
+              <span class="cat-metric-delta up">-20%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">Longest open issue</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">4d</span>
+            </span>
+          </div>
+        </div>
+        <div class="cat-bar"><div class="cat-bar-fill" style="width:88%; background: var(--green)"></div></div>
+      </div>
+
+      <div class="category-card">
+        <div class="cat-header">
+          <span class="cat-title">Quality & Reviews</span>
+          <div class="cat-grade b">B</div>
+        </div>
+        <div class="cat-metrics">
+          <div class="cat-metric">
+            <span class="cat-metric-label">Reviews given</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">12</span>
+              <span class="cat-metric-delta up">+33%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">Review turnaround</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">4.2h</span>
+              <span class="cat-metric-delta down">+35%</span>
+            </span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">PR revision rounds</span>
+            <span class="cat-metric-value">
+              <span class="cat-metric-num">1.3</span>
+            </span>
+          </div>
+        </div>
+        <div class="cat-bar"><div class="cat-bar-fill" style="width:72%; background: var(--cyan)"></div></div>
+      </div>
+    </div>
+
+    <!-- Historical comparison -->
+    <div class="comparison-strip">
+      <h3>Weekly Grades &mdash; Last 8 Weeks</h3>
+      <div class="comparison-weeks">
+        <div class="cw-col">
+          <div class="cw-date">Mar 3</div>
+          <div class="cw-grade bg-bminus">B-</div>
+          <div class="cw-score">68</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Mar 10</div>
+          <div class="cw-grade bg-c">C+</div>
+          <div class="cw-score">62</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Mar 17</div>
+          <div class="cw-grade bg-b">B</div>
+          <div class="cw-score">74</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Mar 24</div>
+          <div class="cw-grade bg-cminus">C</div>
+          <div class="cw-score">58</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Mar 31</div>
+          <div class="cw-grade bg-bplus">B+</div>
+          <div class="cw-score">78</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Apr 7</div>
+          <div class="cw-grade bg-b">B</div>
+          <div class="cw-score">73</div>
+        </div>
+        <div class="cw-col">
+          <div class="cw-date">Apr 14</div>
+          <div class="cw-grade bg-bminus">B-</div>
+          <div class="cw-score">69</div>
+        </div>
+        <div class="cw-col current">
+          <div class="cw-date">Apr 21</div>
+          <div class="cw-grade bg-aminus">A-</div>
+          <div class="cw-score">87</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

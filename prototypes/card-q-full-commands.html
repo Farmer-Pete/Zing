@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Card Prototype Q — Full Zing Command Coverage</title>
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--off-white); padding: 2rem; color: var(--text-primary);
+  }
+  h1 { font-size: 1.1rem; margin-bottom: 0.3rem; color: var(--navy); }
+  .subtitle { font-size: 0.8rem; color: var(--gray-500); margin-bottom: 1rem; }
+  .concept { font-size: 0.75rem; color: var(--gray-700); line-height: 1.6; margin-bottom: 2rem; max-width: 780px; background: #fff; padding: 1rem; border-radius: 8px; border-left: 3px solid var(--orange); }
+  .concept strong { color: var(--navy); }
+  .concept em { color: var(--orange); font-style: normal; font-weight: 600; }
+  .concept code { background: var(--gray-100); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.65rem; }
+
+  /* ── Layout ── */
+  .board { display: flex; gap: 1rem; align-items: flex-start; }
+  .column { flex: 1; min-width: 280px; max-width: 320px; }
+
+  .column-header {
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; border-radius: 6px;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .column-header .count { background: var(--gray-200); color: var(--gray-700); font-size: 0.65rem; padding: 0.1rem 0.45rem; border-radius: 999px; font-weight: 600; }
+  .col-todo .column-header { background: var(--navy); color: #fff; }
+  .col-todo .column-header .count { background: rgba(255,255,255,0.2); color: #fff; }
+  .col-progress .column-header { background: #fff3e0; color: #e65100; }
+  .col-review .column-header { background: #e0f7fa; color: #00838f; }
+  .col-done .column-header { background: #e8f5e9; color: #2e7d32; }
+
+  /* ── Card ── */
+  .card {
+    background: #fff; border: 1px solid var(--gray-200); border-radius: 6px;
+    margin-bottom: 0.65rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+    position: relative; z-index: 1;
+  }
+  .card:hover { border-color: var(--orange); box-shadow: 0 4px 16px rgba(26,23,20,0.08); transform: rotate(-0.7deg) translateY(-1px); }
+  /* When a menu is open inside a card, boost that card above all others */
+  .card.menu-open { z-index: 50; }
+
+  .card-header {
+    padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--gray-200);
+    border-radius: 5px 5px 0 0; margin: -1px -1px 0;
+    border-top: 1px solid var(--gray-300); border-left: 1px solid var(--gray-300);
+    border-right: 1px solid var(--gray-300); background: var(--gray-50);
+  }
+  .col-todo .card-header { background: #f6f7f9; border-top-color: #b5baca; border-left-color: #b5baca; border-right-color: #b5baca; }
+  .col-progress .card-header { background: #fffcf8; border-top-color: #f5c97a; border-left-color: #f5c97a; border-right-color: #f5c97a; }
+  .col-review .card-header { background: #f8fdfe; border-top-color: #a8dad5; border-left-color: #a8dad5; border-right-color: #a8dad5; }
+  .col-done .card-header { background: #f8fcf8; border-top-color: #a5d6a7; border-left-color: #a5d6a7; border-right-color: #a5d6a7; }
+
+  .card-header-top { display: flex; align-items: baseline; gap: 0.35rem; }
+  a.card-ticket-id { font-size: 0.55rem; font-weight: 700; color: var(--orange); text-decoration: none; }
+  a.card-ticket-id:hover { text-decoration: underline; }
+  .card-assignee { width: 16px; height: 16px; border-radius: 50%; background: var(--navy); color: #fff; font-size: 0.4rem; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-left: auto; }
+  .card-title { font-size: 0.75rem; font-weight: 600; line-height: 1.3; margin-top: 0.15rem; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+  /* ── Status strips ── */
+  .status-strip {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem 0.5rem;
+    padding: 0.4rem 0.6rem; min-height: 28px; position: relative;
+  }
+  .status-strip + .status-strip { border-top: 1px solid var(--gray-100); }
+
+  .strip-pr { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.6rem; color: #27ae60; text-decoration: none; }
+  .strip-pr:hover { text-decoration: underline; }
+  .strip-pr svg { width: 11px; height: 11px; }
+  .strip-pr-draft { color: var(--gray-500); }
+  .strip-pr-merged { color: #7c3aed; }
+  .strip-author { font-size: 0.55rem; color: var(--gray-500); }
+  .strip-pill { font-size: 0.45rem; font-weight: 700; padding: 0.05rem 0.25rem; border-radius: 999px; text-transform: uppercase; }
+  .strip-pill-approved { background: #e8f5e9; color: #2e7d32; }
+  .strip-pill-merged { background: #ede7f6; color: #7c3aed; }
+  .strip-pill-changes { background: #fff3e0; color: #e65100; }
+  .strip-pill-reviewed { background: #fff3e0; color: #e65100; }
+  .strip-pill-draft { background: var(--gray-100); color: var(--gray-500); }
+  .strip-ci-dots { display: flex; gap: 2px; align-items: center; }
+  .strip-ci-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .strip-ci-green { background: #27ae60; }
+  .strip-ci-red { background: #e74c3c; }
+  .strip-ci-amber { background: var(--amber); }
+  .strip-spacer { flex: 1; }
+
+  .ci-fail-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; padding: 0.2rem 0.6rem; background: #fef2f2; font-size: 0.55rem; color: #991b1b; }
+  .ci-fail-link { color: #991b1b; text-decoration: none; font-weight: 600; }
+  .ci-fail-link:hover { text-decoration: underline; }
+
+  .strip-session-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .strip-session-alive { background: #3b82f6; animation: cc-pulse 2s infinite; }
+  .strip-session-dead { background: var(--gray-300); }
+  .strip-session-label { font-size: 0.55rem; color: var(--gray-700); }
+  .strip-session-label-dead { color: var(--gray-500); }
+
+  .strip-zing-session { display: flex; align-items: center; gap: 0.2rem; font-size: 0.55rem; color: var(--gray-700); text-decoration: none; }
+  .strip-zing-session:hover { text-decoration: underline; }
+  .strip-zing-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .strip-zing-amber { background: var(--amber); animation: cc-pulse 2s infinite; }
+  .strip-zing-green { background: #27ae60; }
+  .strip-zing-cyan { background: var(--cyan); }
+
+  .strip-findings { font-size: 0.5rem; font-weight: 700; color: #e65100; }
+  .strip-note { font-size: 0.5rem; color: var(--gray-500); }
+
+  @keyframes cc-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ── Per-item actions ── */
+  .strip-primary-btn {
+    font-size: 0.55rem; padding: 0.15rem 0.4rem; border-radius: 4px; border: none;
+    background: var(--orange); color: #fff; cursor: pointer; font-weight: 600;
+    font-family: inherit; white-space: nowrap; opacity: 0; transition: opacity 0.15s;
+  }
+  .card:hover .strip-primary-btn { opacity: 1; }
+  .strip-primary-btn:hover { background: #e06810; }
+  .strip-primary-btn-blue { background: #3b82f6; }
+  .strip-primary-btn-blue:hover { background: #2563eb; }
+
+  .strip-kebab {
+    width: 20px; height: 20px; border: none; background: none; cursor: pointer;
+    font-size: 0.85rem; color: var(--gray-300); display: flex; align-items: center;
+    justify-content: center; border-radius: 4px; opacity: 0; flex-shrink: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+  }
+  .card:hover .strip-kebab { opacity: 1; }
+  .strip-kebab:hover { color: var(--gray-700); background: var(--gray-100); }
+
+  /* ── Dropdown menu ── */
+  .strip-menu {
+    display: none; position: absolute; right: 0.4rem; top: 100%; z-index: 10;
+    background: #fff; border: 1px solid var(--gray-200); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.15); min-width: 210px; overflow: hidden;
+  }
+  .strip-menu.open { display: block; }
+
+  .menu-search {
+    width: 100%; padding: 0.35rem 0.6rem; border: none; border-bottom: 1px solid var(--gray-100);
+    font-size: 0.6rem; font-family: inherit; outline: none; background: var(--gray-50); color: var(--text-primary);
+  }
+  .menu-search::placeholder { color: var(--gray-300); }
+
+  .menu-items { max-height: 280px; overflow-y: auto; padding: 0.2rem 0; }
+  .menu-section-label { font-size: 0.4rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); padding: 0.3rem 0.6rem 0.1rem; }
+
+  .strip-menu-item {
+    display: flex; align-items: center; gap: 0.4rem; width: 100%;
+    padding: 0.3rem 0.6rem; border: none; background: none; cursor: pointer;
+    font-size: 0.6rem; color: var(--gray-700); font-family: inherit; text-align: left;
+  }
+  .strip-menu-item:hover { background: var(--orange); color: #fff; }
+  .strip-menu-item:hover .menu-shortcut { color: rgba(255,255,255,0.6); }
+  .strip-menu-item:hover .menu-desc { color: rgba(255,255,255,0.7); }
+  .menu-icon { font-size: 0.6rem; width: 14px; text-align: center; flex-shrink: 0; }
+  .menu-shortcut { margin-left: auto; font-size: 0.45rem; color: var(--gray-300); font-family: ui-monospace, monospace; }
+  .menu-desc { font-size: 0.45rem; color: var(--gray-500); display: block; }
+  .strip-menu-divider { height: 1px; background: var(--gray-100); margin: 0.15rem 0; }
+
+  .menu-item-default::after { content: "default"; font-size: 0.35rem; text-transform: uppercase; color: var(--orange); font-weight: 700; margin-left: 0.3rem; }
+  .strip-menu-item:hover .menu-item-default::after { color: rgba(255,255,255,0.6); }
+
+  /* ── Card footer ── */
+  .card-actions {
+    display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
+    padding: 0.3rem 0.6rem 0.45rem; border-top: 1px solid var(--gray-100);
+    position: relative;
+  }
+  .card-btn {
+    font-size: 0.55rem; padding: 0.2rem 0.45rem; border-radius: 4px;
+    border: 1px solid var(--gray-200); background: #fff; cursor: pointer;
+    color: var(--gray-700); font-family: inherit; white-space: nowrap;
+    opacity: 0.15; transition: opacity 0.15s;
+  }
+  .card:hover .card-btn { opacity: 1; }
+  .card-btn:hover { background: var(--gray-50); border-color: var(--gray-300); }
+  .card-btn-primary { background: var(--orange); color: #fff; border-color: var(--orange); opacity: 1; }
+  .card-btn-primary:hover { background: #e06810; }
+
+  .card-ready-to-merge { background: #f0fdf4; border-color: #bbf7d0; }
+  .card-ready-to-merge .card-header { background: #dcfce7; border-top-color: #4caf50; border-left-color: #4caf50; border-right-color: #4caf50; border-bottom-color: #bbf7d0; }
+
+  /* ── Config panel ── */
+  .config-panel {
+    background: #fff; border: 1px solid var(--gray-200); border-radius: 8px;
+    padding: 1rem; margin-bottom: 2rem; max-width: 780px;
+  }
+  .config-title { font-size: 0.75rem; font-weight: 700; color: var(--navy); margin-bottom: 0.5rem; }
+  .config-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.35rem; }
+  .config-label { font-size: 0.6rem; color: var(--gray-700); min-width: 150px; }
+  .config-select { font-size: 0.6rem; padding: 0.2rem 0.4rem; border: 1px solid var(--gray-200); border-radius: 4px; background: #fff; font-family: inherit; }
+  .config-hint { font-size: 0.5rem; color: var(--gray-500); margin-top: 0.4rem; line-height: 1.5; }
+
+  /* ── Command reference ── */
+  .cmd-ref { max-width: 780px; margin-bottom: 2rem; }
+  .cmd-ref h2 { font-size: 0.85rem; color: var(--navy); margin-bottom: 0.5rem; }
+  .cmd-table { width: 100%; border-collapse: collapse; font-size: 0.6rem; }
+  .cmd-table th { text-align: left; padding: 0.3rem 0.5rem; background: var(--gray-50); color: var(--gray-700); font-weight: 700; text-transform: uppercase; font-size: 0.5rem; letter-spacing: 0.04em; border-bottom: 1px solid var(--gray-200); }
+  .cmd-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--gray-100); color: var(--gray-700); }
+  .cmd-table code { background: var(--gray-100); padding: 0.05rem 0.2rem; border-radius: 3px; font-size: 0.55rem; color: var(--orange); }
+  .cmd-table .loc { color: var(--gray-500); font-size: 0.5rem; }
+</style>
+</head>
+<body>
+
+<h1>Prototype Q: Full Zing Command Coverage</h1>
+<p class="subtitle">N's configurable defaults + P's contextual awareness + every zing command mapped</p>
+
+<div class="concept">
+  <strong>What's new:</strong> Every <code>/zing</code> skill is mapped to a specific card location. PR strips offer <em>three review types</em> (code audit, PR review with line comments, visual/browser review). Ticket footers expose plan/build/audit commands contextually. The config panel includes all defaults. Search bar appears in PR kebab menus (5+ items); session kebabs stay compact.
+</div>
+
+<!-- ── Command Reference ── -->
+<div class="cmd-ref">
+  <h2>Zing Command &rarr; Card Location Map</h2>
+  <table class="cmd-table">
+    <tr><th>Command</th><th>Description</th><th>Card Location</th></tr>
+    <tr><td><code>zing:plan</code></td><td>Flesh out spec with questions</td><td class="loc">Ticket footer &mdash; To Do &amp; In Progress (no PR)</td></tr>
+    <tr><td><code>zing:plan-audit</code></td><td>Evaluate plan clarity &amp; fitness</td><td class="loc">Ticket footer &mdash; In Progress (has plan)</td></tr>
+    <tr><td><code>zing:plan-linear</code></td><td>Convert plan into Linear tickets</td><td class="loc">Ticket footer kebab &mdash; In Progress</td></tr>
+    <tr><td><code>zing:build</code></td><td>Execute plan step-by-step</td><td class="loc">Ticket footer &mdash; In Progress (has plan)</td></tr>
+    <tr><td><code>zing:build-audit</code></td><td>Code review of branch changes</td><td class="loc">PR strip kebab &mdash; In Progress (own PR)</td></tr>
+    <tr><td><code>zing:pr-audit</code></td><td>PR review with line-level comments</td><td class="loc">PR strip primary/kebab &mdash; Needs Review</td></tr>
+    <tr><td><code>zing:pr-audit-visual</code></td><td>Visual/browser testing of PR</td><td class="loc">PR strip kebab &mdash; Needs Review</td></tr>
+    <tr><td><code>zing:custom-audit</code></td><td>Audit arbitrary code by description</td><td class="loc">PR strip kebab &mdash; any PR</td></tr>
+    <tr><td><code>zing:pr-respond</code></td><td>Address PR feedback &amp; fix CI</td><td class="loc">PR strip primary &mdash; Changes Requested</td></tr>
+    <tr><td><code>zing:new</code></td><td>Start a new zing session</td><td class="loc">Global (toolbar, not card-specific)</td></tr>
+  </table>
+</div>
+
+<!-- ── Config Panel ── -->
+<div class="config-panel">
+  <div class="config-title">Default Actions (user-configurable)</div>
+  <div class="config-row">
+    <span class="config-label">PR (own, open):</span>
+    <select class="config-select"><option selected>Build Audit</option><option>PR Audit</option><option>Start locally</option><option>Copy cmd</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">PR (own, changes req.):</span>
+    <select class="config-select"><option selected>Respond</option><option>Build Audit</option><option>PR Audit</option><option>Start locally</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">PR (others, review):</span>
+    <select class="config-select"><option selected>PR Audit</option><option>PR Visual Audit</option><option>Start locally</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">Ticket (To Do):</span>
+    <select class="config-select"><option selected>Start Ticket</option><option>Plan</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">Ticket (In Progress, no PR):</span>
+    <select class="config-select"><option selected>Build</option><option>Plan</option><option>Plan Audit</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">Session (running):</span>
+    <select class="config-select"><option selected>Attach</option><option>Kill</option></select>
+  </div>
+  <div class="config-row">
+    <span class="config-label">Session (stopped):</span>
+    <select class="config-select"><option selected>Resume</option><option>Discard</option></select>
+  </div>
+  <div class="config-hint">These live in <code>~/.config/zing-ai/config.toml</code>. You can also right-click any action in a kebab menu to set it as the default.</div>
+</div>
+
+<!-- ═══ KANBAN BOARD ═══ -->
+<div class="board">
+
+  <!-- ═══ TO DO ═══ -->
+  <div class="column col-todo">
+    <div class="column-header">To Do <span class="count">2</span></div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">FRO-892</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Migrate settings page to new design system tokens</div>
+      </div>
+      <div class="card-actions">
+        <button class="card-btn card-btn-primary">Start</button>
+        <button class="card-btn">Plan</button>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <div class="menu-section-label">Zing</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#9654;</span> <span class="menu-item-default">Start Ticket</span><span class="menu-shortcut">S</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128221;</span> Plan<span class="menu-shortcut">P</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Other</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#128203;</span> Copy launch cmd<span class="menu-shortcut">C</span></button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">INF-201</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Upgrade Node runtime to v22 LTS across all backend services</div>
+      </div>
+      <div class="card-actions">
+        <button class="card-btn card-btn-primary">Start</button>
+        <button class="card-btn">Plan</button>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <div class="menu-section-label">Zing</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#9654;</span> <span class="menu-item-default">Start Ticket</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128221;</span> Plan</button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ IN PROGRESS ═══ -->
+  <div class="column col-progress">
+    <div class="column-header">In Progress <span class="count">3</span></div>
+
+    <!-- Ticket only, running session, no PR yet -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">BAK-310</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Add rate limiting middleware to public API gateway</div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-session-dot strip-session-alive"></span>
+        <span class="strip-session-label">Running: plan BAK-310</span>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn strip-primary-btn-blue">Attach</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <button class="strip-menu-item"><span class="menu-icon">&#9655;</span> <span class="menu-item-default">Attach</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128683;</span> Kill session</button>
+          </div>
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="card-btn card-btn-primary">Build</button>
+        <button class="card-btn">Plan</button>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <div class="menu-section-label">Zing</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#128296;</span> <span class="menu-item-default">Build</span><span class="menu-shortcut">B</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128221;</span> Plan<span class="menu-shortcut">P</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128269;</span> Plan Audit</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128203;</span> Plan &rarr; Linear</button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Other</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#128736;</span> Setup Env</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128203;</span> Copy launch cmd<span class="menu-shortcut">C</span></button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Own PR, changes requested, CI failing, dead session -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">BAK-305</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Fix race condition in batch processor queue drain</div>
+      </div>
+      <!-- PR strip with full review options -->
+      <div class="status-strip">
+        <a href="#" class="strip-pr">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#501
+        </a>
+        <span class="strip-author">pnaudus</span>
+        <span class="strip-pill strip-pill-changes">changes requested</span>
+        <div class="strip-ci-dots">
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-red"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn">Respond</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+          <div class="menu-items">
+            <div class="menu-section-label">Respond</div>
+            <button class="strip-menu-item" data-s="respond to feedback"><span class="menu-icon">&#9997;</span> <span class="menu-item-default">Respond</span><br><span class="menu-desc">Address review comments, fix CI, push</span><span class="menu-shortcut">R</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Review</div>
+            <button class="strip-menu-item" data-s="build audit code review"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span><span class="menu-shortcut">V</span></button>
+            <button class="strip-menu-item" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
+            <button class="strip-menu-item" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Local</div>
+            <button class="strip-menu-item" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally<span class="menu-shortcut">S</span></button>
+            <button class="strip-menu-item" data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
+            <button class="strip-menu-item" data-s="copy launch command"><span class="menu-icon">&#128203;</span> Copy launch cmd<span class="menu-shortcut">C</span></button>
+            <button class="strip-menu-item" data-s="copy respond command"><span class="menu-icon">&#128203;</span> Copy respond cmd</button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Links</div>
+            <button class="strip-menu-item" data-s="open github"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="strip-menu-item" data-s="open linear"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+      <div class="ci-fail-bar">
+        <a href="#" class="ci-fail-link">&#10005; test-integration</a>
+      </div>
+      <!-- Dead session -->
+      <div class="status-strip">
+        <span class="strip-session-dot strip-session-dead"></span>
+        <span class="strip-session-label strip-session-label-dead">Stopped: respond BAK-305</span>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn">Resume</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <button class="strip-menu-item"><span class="menu-icon">&#128260;</span> <span class="menu-item-default">Resume</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128683;</span> Discard session</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Own PR reviewed, running build session, zing session -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">ENG-1042</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Add webhook retry logic with exponential backoff</div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-pr">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#487
+        </a>
+        <span class="strip-author">pnaudus</span>
+        <span class="strip-pill strip-pill-reviewed">reviewed</span>
+        <div class="strip-ci-dots">
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-green"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn">Build Audit</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+          <div class="menu-items">
+            <div class="menu-section-label">Review</div>
+            <button class="strip-menu-item" data-s="build audit code review"><span class="menu-icon">&#128269;</span> <span class="menu-item-default">Build Audit</span><br><span class="menu-desc">Code review of branch changes</span><span class="menu-shortcut">V</span></button>
+            <button class="strip-menu-item" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> PR Audit<br><span class="menu-desc">PR review with line-level GitHub comments</span></button>
+            <button class="strip-menu-item" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Local</div>
+            <button class="strip-menu-item" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally<span class="menu-shortcut">S</span></button>
+            <button class="strip-menu-item" data-s="setup env"><span class="menu-icon">&#128736;</span> Setup env</button>
+            <button class="strip-menu-item" data-s="copy launch"><span class="menu-icon">&#128203;</span> Copy launch cmd<span class="menu-shortcut">C</span></button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item" data-s="open github"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+          </div>
+        </div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-session-dot strip-session-alive"></span>
+        <span class="strip-session-label">Running: build ENG-1042</span>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn strip-primary-btn-blue">Attach</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <button class="strip-menu-item"><span class="menu-icon">&#9655;</span> <span class="menu-item-default">Attach</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128683;</span> Kill session</button>
+          </div>
+        </div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-zing-session">
+          <span class="strip-zing-dot strip-zing-amber"></span>
+          Claude session running
+        </a>
+      </div>
+      <div class="status-strip">
+        <span class="strip-findings">5 findings</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ NEEDS REVIEW ═══ -->
+  <div class="column col-review">
+    <div class="column-header">Needs Review <span class="count">2</span></div>
+
+    <!-- Someone else's PR — all three review types available -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">FRO-910</a>
+          <div class="card-assignee">JD</div>
+        </div>
+        <div class="card-title">Add dark mode toggle to user preferences panel</div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-pr">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          frontend-v2#234
+        </a>
+        <span class="strip-author">jdoe</span>
+        <div class="strip-ci-dots">
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-green"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn">PR Audit</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <input class="menu-search" type="text" placeholder="Search actions..." oninput="filterMenu(this)">
+          <div class="menu-items">
+            <div class="menu-section-label">Review</div>
+            <button class="strip-menu-item" data-s="pr audit line comments"><span class="menu-icon">&#128220;</span> <span class="menu-item-default">PR Audit</span><br><span class="menu-desc">PR review with line-level GitHub comments</span><span class="menu-shortcut">V</span></button>
+            <button class="strip-menu-item" data-s="pr visual audit browser"><span class="menu-icon">&#128065;</span> PR Visual Audit<br><span class="menu-desc">Test deployed preview in browser</span></button>
+            <button class="strip-menu-item" data-s="build audit code"><span class="menu-icon">&#128269;</span> Build Audit<br><span class="menu-desc">Code review of branch changes</span></button>
+            <button class="strip-menu-item" data-s="custom audit"><span class="menu-icon">&#128270;</span> Custom Audit<br><span class="menu-desc">Audit specific files or directories</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Local</div>
+            <button class="strip-menu-item" data-s="start locally"><span class="menu-icon">&#9654;</span> Start locally<span class="menu-shortcut">S</span></button>
+            <button class="strip-menu-item" data-s="copy launch"><span class="menu-icon">&#128203;</span> Copy launch cmd<span class="menu-shortcut">C</span></button>
+            <div class="strip-menu-divider"></div>
+            <div class="menu-section-label">Links</div>
+            <button class="strip-menu-item" data-s="open github"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="strip-menu-item" data-s="open linear"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Another review with CI failing -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">BAK-298</a>
+          <div class="card-assignee">SK</div>
+        </div>
+        <div class="card-title">Add GraphQL subscription for real-time order updates</div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-pr">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#495
+        </a>
+        <span class="strip-author">skumar</span>
+        <div class="strip-ci-dots">
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-red"></span>
+          <span class="strip-ci-dot strip-ci-red"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <button class="strip-primary-btn">PR Audit</button>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <div class="menu-section-label">Review</div>
+            <button class="strip-menu-item"><span class="menu-icon">&#128220;</span> <span class="menu-item-default">PR Audit</span></button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128065;</span> PR Visual Audit</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128269;</span> Build Audit</button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#9654;</span> Start locally</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+      <div class="ci-fail-bar">
+        <a href="#" class="ci-fail-link">&#10005; lint</a>
+        <a href="#" class="ci-fail-link">&#10005; test-unit</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ DONE ═══ -->
+  <div class="column col-done">
+    <div class="column-header">Done <span class="count">2</span></div>
+
+    <!-- Ready to merge -->
+    <div class="card card-ready-to-merge">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">ENG-1038</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Add rate limiting middleware to public API</div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-pr">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#479
+        </a>
+        <span class="strip-author">pnaudus</span>
+        <span class="strip-pill strip-pill-approved">approved</span>
+        <div class="strip-ci-dots">
+          <span class="strip-ci-dot strip-ci-green"></span>
+          <span class="strip-ci-dot strip-ci-green"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <button class="strip-menu-item"><span class="menu-icon">&#128269;</span> Build Audit</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#9654;</span> Start locally</button>
+            <div class="strip-menu-divider"></div>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Merged -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">FRO-880</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Fix tooltip positioning on narrow viewports</div>
+      </div>
+      <div class="status-strip">
+        <a href="#" class="strip-pr strip-pr-merged">
+          <svg viewBox="0 0 16 16" fill="#7c3aed"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218zM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5zm8-9a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5z"/></svg>
+          frontend-v2#228
+        </a>
+        <span class="strip-author">pnaudus</span>
+        <span class="strip-pill strip-pill-merged">merged</span>
+        <span class="strip-spacer"></span>
+        <button class="strip-kebab" onclick="toggleMenu(this)">&vellip;</button>
+        <div class="strip-menu">
+          <div class="menu-items">
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open on GitHub</button>
+            <button class="strip-menu-item"><span class="menu-icon">&#8599;</span> Open in Linear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function toggleMenu(kebab) {
+  const menu = kebab.nextElementSibling;
+  if (!menu || !menu.classList.contains('strip-menu')) return;
+  // Close all other menus and remove menu-open from their cards
+  document.querySelectorAll('.strip-menu.open').forEach(m => {
+    if (m !== menu) { m.classList.remove('open'); m.closest('.card').classList.remove('menu-open'); }
+  });
+  menu.classList.toggle('open');
+  const card = menu.closest('.card');
+  card.classList.toggle('menu-open', menu.classList.contains('open'));
+  if (menu.classList.contains('open')) {
+    const search = menu.querySelector('.menu-search');
+    if (search) { search.value = ''; search.focus(); filterMenu(search); }
+  }
+}
+
+function filterMenu(input) {
+  const q = input.value.toLowerCase();
+  input.closest('.strip-menu').querySelectorAll('.strip-menu-item').forEach(item => {
+    const text = (item.getAttribute('data-s') || item.textContent).toLowerCase();
+    item.style.display = text.includes(q) ? '' : 'none';
+  });
+  // Also hide empty section labels
+  input.closest('.strip-menu').querySelectorAll('.menu-section-label').forEach(label => {
+    let next = label.nextElementSibling;
+    let hasVisible = false;
+    while (next && !next.classList.contains('menu-section-label') && !next.classList.contains('strip-menu-divider')) {
+      if (next.style.display !== 'none') hasVisible = true;
+      next = next.nextElementSibling;
+    }
+    label.style.display = hasVisible ? '' : 'none';
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.strip-kebab') && !e.target.closest('.strip-menu')) {
+    document.querySelectorAll('.strip-menu.open').forEach(m => { m.classList.remove('open'); m.closest('.card').classList.remove('menu-open'); });
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Timeline — Single Card View</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --navy-light: #1a2d4a;
+    --navy-mid: #243b5e;
+    --orange: #f57c20;
+    --orange-hover: #e06810;
+    --amber: #f5a623;
+    --gold: #ffd666;
+    --cyan: #3ecfe0;
+    --cyan-dim: #2ba8b6;
+    --red-orange: #e84430;
+    --green: #16a34a;
+    --bg: #f8f6f3;
+    --white: #ffffff;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text-primary); }
+
+  .brand-bar {
+    background: var(--navy); height: 56px; display: flex; align-items: center;
+    padding: 0 2rem;
+    border-bottom: 3px solid;
+    border-image: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--gold), var(--cyan)) 1;
+  }
+  .brand-bar h1 { color: var(--white); font-size: 1.25rem; font-weight: 800; }
+  .brand-bar span { color: var(--orange); }
+
+  .container { max-width: 900px; margin: 0 auto; padding: 1.5rem 2rem; }
+
+  /* Card header */
+  .card-hero {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius);
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2rem;
+    display: flex; align-items: flex-start; gap: 1rem;
+  }
+  .card-hero-body { flex: 1; }
+  .card-hero-id {
+    font-size: 0.75rem; font-weight: 700; color: var(--orange);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .card-hero-title { font-size: 1.25rem; font-weight: 800; color: var(--navy); margin-top: 0.25rem; }
+  .card-hero-meta { font-size: 0.8rem; color: var(--gray-500); margin-top: 0.5rem; display: flex; gap: 1rem; }
+  .card-hero-status {
+    padding: 0.2rem 0.75rem; border-radius: 999px; font-size: 0.7rem;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    align-self: flex-start;
+  }
+  .status-ready { background: rgba(62,207,224,0.15); color: var(--cyan-dim); }
+  .status-started { background: rgba(245,124,32,0.15); color: var(--orange); }
+  .status-completed { background: rgba(22,163,74,0.15); color: var(--green); }
+  .status-pending { background: rgba(245,166,35,0.15); color: var(--amber); }
+
+  /* Timeline rail */
+  .timeline { position: relative; padding-left: 2.5rem; }
+  .timeline::before {
+    content: ''; position: absolute; left: 15px; top: 0; bottom: 0;
+    width: 2px; background: var(--gray-200);
+  }
+
+  .tl-node { position: relative; margin-bottom: 1.5rem; }
+  .tl-node:last-child { margin-bottom: 0; }
+
+  .tl-dot {
+    position: absolute; left: -2.5rem; top: 0.35rem;
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid var(--gray-300); background: var(--white);
+    z-index: 1;
+  }
+  .tl-dot-orange { border-color: var(--orange); background: var(--orange); }
+  .tl-dot-cyan { border-color: var(--cyan); background: var(--cyan); }
+  .tl-dot-green { border-color: var(--green); background: var(--green); }
+  .tl-dot-amber { border-color: var(--amber); background: var(--amber); }
+  .tl-dot-red { border-color: var(--red-orange); background: var(--red-orange); }
+
+  /* Pulsing dot for active items */
+  .tl-dot-pulse {
+    animation: pulse-ring 2s ease-out infinite;
+  }
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgba(245,124,32,0.4); }
+    70% { box-shadow: 0 0 0 8px rgba(245,124,32,0); }
+    100% { box-shadow: 0 0 0 0 rgba(245,124,32,0); }
+  }
+
+  .tl-time {
+    font-size: 0.7rem; font-weight: 600; color: var(--gray-500);
+    text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.35rem;
+  }
+
+  /* Step card (wraps a workflow step) */
+  .step-card {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .step-header {
+    padding: 0.75rem 1rem;
+    display: flex; align-items: center; gap: 0.75rem;
+    background: var(--gray-50);
+    border-bottom: 1px solid var(--gray-200);
+    cursor: pointer;
+  }
+  .step-header:hover { background: var(--gray-100); }
+  .step-icon { font-size: 1rem; }
+  .step-name { font-size: 0.9rem; font-weight: 700; color: var(--navy); flex: 1; }
+  .step-badge {
+    padding: 0.125rem 0.5rem; border-radius: 999px; font-size: 0.65rem;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .step-body { padding: 0.75rem 1rem; }
+  .step-body.collapsed { display: none; }
+
+  /* Prompt excerpt */
+  .prompt-excerpt {
+    background: var(--navy); color: #cbd5e1; border-radius: var(--radius-sm);
+    padding: 0.75rem 1rem; font-size: 0.78rem; line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin: 0.5rem 0; position: relative; overflow: hidden;
+    max-height: 6rem;
+  }
+  .prompt-excerpt::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0;
+    height: 2rem; background: linear-gradient(transparent, var(--navy));
+  }
+  .prompt-label {
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 0.35rem;
+  }
+
+  /* Agent row */
+  .agent-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0; font-size: 0.82rem;
+  }
+  .agent-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .agent-dot-running { background: var(--orange); animation: blink 1.5s infinite; }
+  .agent-dot-done { background: var(--green); }
+  @keyframes blink { 50% { opacity: 0.4; } }
+  .agent-name { font-weight: 600; color: var(--navy); }
+  .agent-desc { color: var(--gray-500); }
+  .agent-time { margin-left: auto; font-size: 0.7rem; color: var(--gray-500); }
+
+  /* Finding summary */
+  .finding-summary {
+    display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;
+  }
+  .finding-chip {
+    padding: 0.2rem 0.5rem; border-radius: 999px; font-size: 0.7rem;
+    font-weight: 600; border: 1px solid;
+  }
+  .chip-triage { border-color: var(--amber); background: #fffbeb; color: #92400e; }
+  .chip-text { border-color: var(--cyan); background: #ecfeff; color: var(--cyan-dim); }
+  .chip-eval { border-color: var(--gray-300); background: var(--gray-50); color: var(--gray-700); }
+
+  /* User action */
+  .user-action {
+    background: linear-gradient(135deg, #fff5ee, #ffe8d4);
+    border: 1px solid #ffd9c2;
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+  }
+  .user-action-label {
+    font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--orange); margin-bottom: 0.35rem;
+    display: flex; align-items: center; gap: 0.4rem;
+  }
+  .user-action-text { font-size: 0.85rem; color: var(--navy); }
+
+  /* Waiting indicator */
+  .waiting-banner {
+    background: linear-gradient(135deg, #ecfeff, #e0f7fa);
+    border: 2px solid var(--cyan);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    display: flex; align-items: center; gap: 1rem;
+  }
+  .waiting-icon {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: var(--cyan); color: var(--white);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; font-weight: 800; flex-shrink: 0;
+    animation: pulse-ring-cyan 2s ease-out infinite;
+  }
+  @keyframes pulse-ring-cyan {
+    0% { box-shadow: 0 0 0 0 rgba(62,207,224,0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(62,207,224,0); }
+    100% { box-shadow: 0 0 0 0 rgba(62,207,224,0); }
+  }
+  .waiting-body h3 { font-size: 0.95rem; font-weight: 700; color: var(--navy); }
+  .waiting-body p { font-size: 0.8rem; color: var(--gray-700); margin-top: 0.25rem; }
+  .waiting-cta {
+    margin-left: auto; padding: 0.5rem 1.25rem; border-radius: var(--radius-sm);
+    background: var(--orange); color: var(--white); font-weight: 700;
+    font-size: 0.85rem; border: none; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(245,124,32,0.3);
+    transition: all 0.15s ease;
+  }
+  .waiting-cta:hover { background: var(--orange-hover); transform: translateY(-1px); }
+
+  /* Elapsed time line */
+  .elapsed {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.75rem; color: var(--gray-500); padding: 0.25rem 0;
+  }
+  .elapsed-bar {
+    flex: 1; height: 3px; border-radius: 2px; background: var(--gray-200);
+    position: relative; overflow: hidden;
+  }
+  .elapsed-fill {
+    height: 100%; border-radius: 2px; position: absolute; left: 0; top: 0;
+  }
+  .fill-orange { background: var(--orange); }
+  .fill-cyan { background: var(--cyan); }
+  .fill-green { background: var(--green); }
+
+  .section-gap { height: 0.75rem; }
+
+  /* Connector arrow between steps */
+  .connector {
+    display: flex; justify-content: center; padding: 0.25rem 0;
+    color: var(--gray-300); font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="brand-bar">
+  <h1><span>Zing</span> Session Timeline</h1>
+</div>
+
+<div class="container">
+
+  <!-- Card hero -->
+  <div class="card-hero">
+    <div class="card-hero-body">
+      <div class="card-hero-id">BAK-1179</div>
+      <div class="card-hero-title">Add webhook retry logic with exponential backoff</div>
+      <div class="card-hero-meta">
+        <span>Assigned: Peter N.</span>
+        <span>PR: turngate/backend#847</span>
+        <span>Session: bak-1179-a3f</span>
+      </div>
+    </div>
+    <span class="card-hero-status status-ready">Ready for Review</span>
+  </div>
+
+  <!-- Timeline -->
+  <div class="timeline">
+
+    <!-- 1. Session created -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-orange"></div>
+      <div class="tl-time">10:23 AM — Session started</div>
+      <div class="step-card">
+        <div class="step-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+          <span class="step-icon">&#128640;</span>
+          <span class="step-name">zing:new</span>
+          <span class="step-badge status-completed">completed</span>
+        </div>
+        <div class="step-body collapsed">
+          <div class="prompt-label">Prompt excerpt</div>
+          <div class="prompt-excerpt">
+Read the Linear ticket BAK-1179. Extract title, description, acceptance criteria.
+Create .zing/webhook-retry.md with YAML frontmatter.
+Call session_create(title="Add webhook retry logic with exponential backoff",
+  steps=["plan", "plan-audit", "build", "build-audit"])
+Chain to zing:plan .zing/webhook-retry.md
+          </div>
+          <div class="elapsed">
+            <span>12s</span>
+            <div class="elapsed-bar"><div class="elapsed-fill fill-green" style="width: 100%"></div></div>
+            <span>completed</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Plan step -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-green"></div>
+      <div class="tl-time">10:23 AM — Plan exploration</div>
+      <div class="step-card">
+        <div class="step-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+          <span class="step-icon">&#128269;</span>
+          <span class="step-name">zing:plan — Explore &amp; Question</span>
+          <span class="step-badge status-completed">completed</span>
+        </div>
+        <div class="step-body">
+          <div class="prompt-label">Subagents launched (3)</div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Data Model</span>
+            <span class="agent-desc">— webhook tables, retry columns, migration history</span>
+            <span class="agent-time">47s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">API Layer</span>
+            <span class="agent-desc">— webhook dispatch routes, queue integration</span>
+            <span class="agent-time">52s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Test Infra</span>
+            <span class="agent-desc">— existing webhook tests, fixtures, mocking patterns</span>
+            <span class="agent-time">38s</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="prompt-label">Findings submitted (4)</div>
+          <div class="finding-summary">
+            <span class="finding-chip chip-text">Q: Max retry count?</span>
+            <span class="finding-chip chip-text">Q: Dead letter queue?</span>
+            <span class="finding-chip chip-text">Q: Backoff ceiling?</span>
+            <span class="finding-chip chip-eval">Eval: Existing retry code found</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="elapsed">
+            <span>1m 23s</span>
+            <div class="elapsed-bar"><div class="elapsed-fill fill-green" style="width: 100%"></div></div>
+            <span>completed</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. User review of plan questions -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-cyan"></div>
+      <div class="tl-time">10:25 AM — User reviewed (waited 4m 12s)</div>
+      <div class="user-action">
+        <div class="user-action-label">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="var(--orange)"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm3.5 9H4.5a.5.5 0 010-1h7a.5.5 0 010 1z"/></svg>
+          User responded to 4 findings
+        </div>
+        <div class="user-action-text">
+          "Max 5 retries, 30s ceiling, no dead letter queue for now — just log failures to Sentry."
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Plan audit -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-green"></div>
+      <div class="tl-time">10:29 AM — Plan audit</div>
+      <div class="step-card">
+        <div class="step-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+          <span class="step-icon">&#128203;</span>
+          <span class="step-name">zing:plan-audit — Evaluate Plan</span>
+          <span class="step-badge status-completed">completed</span>
+        </div>
+        <div class="step-body collapsed">
+          <div class="prompt-label">Audit agents (2)</div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Feasibility</span>
+            <span class="agent-desc">— implementation complexity, risk assessment</span>
+            <span class="agent-time">34s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Specificity</span>
+            <span class="agent-desc">— are steps precise enough for build agents?</span>
+            <span class="agent-time">29s</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="prompt-label">Findings (3)</div>
+          <div class="finding-summary">
+            <span class="finding-chip chip-triage">Improve: Add error type enum</span>
+            <span class="finding-chip chip-triage">Accept: Backoff formula</span>
+            <span class="finding-chip chip-eval">Eval: 7/10 specificity</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="elapsed">
+            <span>58s</span>
+            <div class="elapsed-bar"><div class="elapsed-fill fill-green" style="width: 100%"></div></div>
+            <span>completed</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. User review of audit -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-cyan"></div>
+      <div class="tl-time">10:31 AM — User reviewed (waited 1m 44s)</div>
+      <div class="user-action">
+        <div class="user-action-label">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="var(--orange)"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm3.5 9H4.5a.5.5 0 010-1h7a.5.5 0 010 1z"/></svg>
+          User responded to 3 findings
+        </div>
+        <div class="user-action-text">
+          Accepted "Add error type enum." Dropped specificity eval. Approved plan overall.
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. Build step -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-green"></div>
+      <div class="tl-time">10:33 AM — Build implementation</div>
+      <div class="step-card">
+        <div class="step-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+          <span class="step-icon">&#128736;</span>
+          <span class="step-name">zing:build — Execute Plan</span>
+          <span class="step-badge status-completed">completed</span>
+        </div>
+        <div class="step-body collapsed">
+          <div class="prompt-label">Build progress</div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Step 1</span>
+            <span class="agent-desc">— Add retry_count, next_retry_at to webhook_delivery table</span>
+            <span class="agent-time">1m 12s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Step 2</span>
+            <span class="agent-desc">— Implement exponential backoff in dispatch_webhook()</span>
+            <span class="agent-time">2m 34s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Step 3</span>
+            <span class="agent-desc">— Add WebhookErrorType enum + Sentry logging</span>
+            <span class="agent-time">1m 08s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Step 4</span>
+            <span class="agent-desc">— Write tests for retry logic + backoff ceiling</span>
+            <span class="agent-time">1m 52s</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="prompt-label">Commits</div>
+          <div style="font-size: 0.8rem; font-family: monospace; color: var(--gray-700); padding: 0.25rem 0;">
+            <div>a3f12bc — Add retry columns to webhook_delivery</div>
+            <div>d7e9f01 — Implement exponential backoff in dispatch</div>
+            <div>b2c4a56 — Add WebhookErrorType + Sentry integration</div>
+            <div>e8f3d21 — Add retry unit tests</div>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="elapsed">
+            <span>6m 46s</span>
+            <div class="elapsed-bar"><div class="elapsed-fill fill-green" style="width: 100%"></div></div>
+            <span>completed</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7. Build audit — CURRENTLY WAITING -->
+    <div class="tl-node">
+      <div class="tl-dot tl-dot-cyan tl-dot-pulse"></div>
+      <div class="tl-time">10:40 AM — Build audit</div>
+      <div class="step-card">
+        <div class="step-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+          <span class="step-icon">&#128270;</span>
+          <span class="step-name">zing:build-audit — Code Review</span>
+          <span class="step-badge status-ready">ready</span>
+        </div>
+        <div class="step-body">
+          <div class="prompt-label">Review agents (2)</div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Correctness</span>
+            <span class="agent-desc">— logic errors, edge cases, type safety</span>
+            <span class="agent-time">41s</span>
+          </div>
+          <div class="agent-row">
+            <div class="agent-dot agent-dot-done"></div>
+            <span class="agent-name">Quality</span>
+            <span class="agent-desc">— code style, naming, test coverage</span>
+            <span class="agent-time">33s</span>
+          </div>
+
+          <div class="section-gap"></div>
+          <div class="prompt-label">Findings (5)</div>
+          <div class="finding-summary">
+            <span class="finding-chip chip-triage">Fix: Race condition in retry scheduler</span>
+            <span class="finding-chip chip-triage">Fix: Missing null check on webhook_url</span>
+            <span class="finding-chip chip-triage">Improve: Extract backoff calc to util</span>
+            <span class="finding-chip chip-eval">Eval: Good test coverage (87%)</span>
+            <span class="finding-chip chip-eval">Eval: Naming conventions followed</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-gap"></div>
+
+      <!-- Waiting banner -->
+      <div class="waiting-banner">
+        <div class="waiting-icon">!</div>
+        <div class="waiting-body">
+          <h3>Waiting for your review</h3>
+          <p>5 findings from build audit need your response. Claude is blocked until you review.</p>
+        </div>
+        <button class="waiting-cta">Review Now</button>
+      </div>
+    </div>
+
+  </div><!-- /timeline -->
+
+  <!-- Summary stats -->
+  <div style="margin-top: 2rem; padding: 1rem 1.25rem; background: var(--white); border: 1px solid var(--gray-200); border-radius: var(--radius);">
+    <div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 0.75rem;">Session summary</div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; text-align: center;">
+      <div>
+        <div style="font-size: 1.5rem; font-weight: 800; color: var(--navy);">17m</div>
+        <div style="font-size: 0.75rem; color: var(--gray-500);">Total elapsed</div>
+      </div>
+      <div>
+        <div style="font-size: 1.5rem; font-weight: 800; color: var(--orange);">9m 19s</div>
+        <div style="font-size: 0.75rem; color: var(--gray-500);">Claude working</div>
+      </div>
+      <div>
+        <div style="font-size: 1.5rem; font-weight: 800; color: var(--cyan);">5m 56s</div>
+        <div style="font-size: 0.75rem; color: var(--gray-500);">Waiting on you</div>
+      </div>
+      <div>
+        <div style="font-size: 1.5rem; font-weight: 800; color: var(--green);">12</div>
+        <div style="font-size: 0.75rem; color: var(--gray-500);">Findings total</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

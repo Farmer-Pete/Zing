@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stats Prototype C: Activity Heatmap & Streaks</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --red-orange: #e84430;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --green: #2e7d32;
+    --green-bg: #e8f5e9;
+    --red-bg: #ffeaea;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--off-white);
+    color: var(--text-primary);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 400px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(245,124,32,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .brand-bar {
+    background: var(--navy);
+    margin: 0 -2rem;
+    padding: 0.75rem 2rem;
+    position: relative;
+  }
+  .brand-bar h1 { color: #fff; font-size: 1.1rem; font-weight: 700; }
+  .brand-bar::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), #ffd666, var(--cyan));
+  }
+  .top-nav {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--gray-200);
+    gap: 0.25rem;
+    margin: 0 -2rem;
+    padding: 0 2rem;
+    background: var(--gray-50);
+  }
+  .top-nav a {
+    text-decoration: none;
+    color: var(--navy);
+    padding: 0.75rem 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+  }
+  .top-nav a:hover { color: var(--orange); }
+  .top-nav a.active { border-bottom-color: var(--orange); font-weight: 700; }
+
+  .main { padding: 2rem 0; position: relative; z-index: 1; }
+
+  .page-header {
+    margin-bottom: 2rem;
+  }
+  .page-header h2 {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--navy);
+    margin-bottom: 0.25rem;
+  }
+  .page-header p {
+    font-size: 0.85rem;
+    color: var(--gray-500);
+  }
+
+  /* Streak cards */
+  .streaks {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .streak-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.25rem;
+    text-align: center;
+    transition: box-shadow 0.15s;
+  }
+  .streak-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  .streak-icon {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+    line-height: 1;
+  }
+  .streak-value {
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: var(--navy);
+    line-height: 1;
+    margin-bottom: 0.25rem;
+  }
+  .streak-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--gray-500);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.35rem;
+  }
+  .streak-sub {
+    font-size: 0.7rem;
+    color: var(--gray-500);
+  }
+  .streak-sub strong { color: var(--orange); font-weight: 700; }
+
+  /* Heatmap */
+  .heatmap-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .heatmap-card h3 {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 0.25rem;
+  }
+  .heatmap-card .subtitle {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-bottom: 1rem;
+  }
+
+  .heatmap-container {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .heatmap-labels {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding-top: 22px;
+  }
+  .heatmap-labels span {
+    font-size: 0.65rem;
+    color: var(--gray-500);
+    height: 16px;
+    line-height: 16px;
+    text-align: right;
+  }
+  .heatmap-grid {
+    flex: 1;
+    overflow-x: auto;
+  }
+  .heatmap-months {
+    display: flex;
+    gap: 3px;
+    margin-bottom: 4px;
+    padding-left: 0;
+  }
+  .heatmap-months span {
+    font-size: 0.65rem;
+    color: var(--gray-500);
+    font-weight: 500;
+    min-width: calc(4 * 16px + 3 * 3px);
+  }
+  .heatmap-weeks {
+    display: flex;
+    gap: 3px;
+  }
+  .heatmap-week {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .heatmap-day {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: var(--gray-100);
+    position: relative;
+    cursor: default;
+  }
+  .heatmap-day.l1 { background: #ffecd2; }
+  .heatmap-day.l2 { background: #ffc488; }
+  .heatmap-day.l3 { background: #f5973a; }
+  .heatmap-day.l4 { background: var(--orange); }
+  .heatmap-day.l5 { background: #c45a10; }
+  .heatmap-day.today {
+    box-shadow: 0 0 0 2px var(--orange);
+  }
+  .heatmap-day.future { background: transparent; border: 1px dashed var(--gray-200); }
+
+  .heatmap-legend {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.75rem;
+    justify-content: flex-end;
+  }
+  .heatmap-legend span {
+    font-size: 0.65rem;
+    color: var(--gray-500);
+  }
+  .legend-square {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+  }
+
+  /* Dual-source breakdown */
+  .source-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .source-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+  }
+  .source-card h3 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 1rem;
+  }
+  .source-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 800;
+    color: #fff;
+  }
+  .source-icon.linear { background: #5e6ad2; }
+  .source-icon.github { background: #24292f; }
+
+  .pr-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .pr-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    background: var(--gray-50);
+    border-radius: 8px;
+    font-size: 0.8rem;
+  }
+  .pr-item-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .pr-number {
+    font-weight: 700;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+  .pr-title {
+    color: var(--gray-700);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 250px;
+  }
+  .pr-time {
+    font-size: 0.7rem;
+    color: var(--gray-500);
+    white-space: nowrap;
+  }
+
+  /* Personal records */
+  .records-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+  }
+  .records-card h3 {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 1rem;
+  }
+  .records-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+  .record {
+    text-align: center;
+    padding: 1rem;
+    background: var(--gray-50);
+    border-radius: 8px;
+    border: 1px solid var(--gray-100);
+  }
+  .record-value {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--navy);
+    margin-bottom: 0.15rem;
+  }
+  .record-label {
+    font-size: 0.7rem;
+    color: var(--gray-500);
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+  }
+  .record-when {
+    font-size: 0.65rem;
+    color: var(--amber);
+    font-weight: 600;
+  }
+  .record.new .record-value { color: var(--orange); }
+  .record.new {
+    border-color: var(--orange);
+    background: rgba(245,124,32,0.03);
+  }
+  .record.new::after {
+    content: 'NEW';
+    display: block;
+    font-size: 0.55rem;
+    font-weight: 800;
+    color: #fff;
+    background: var(--orange);
+    border-radius: 999px;
+    padding: 0.1rem 0.4rem;
+    margin-top: 0.35rem;
+    display: inline-block;
+  }
+</style>
+</head>
+<body>
+  <div class="brand-bar"><h1>Zing</h1></div>
+  <nav class="top-nav">
+    <a href="#">Dashboard</a>
+    <a href="#">Command Center</a>
+    <a href="#" class="active">Stats</a>
+    <a href="#">Config</a>
+  </nav>
+
+  <div class="main">
+    <div class="page-header">
+      <h2>Activity & Streaks</h2>
+      <p>Your engineering activity across Linear issues and GitHub pull requests</p>
+    </div>
+
+    <!-- Streak counters -->
+    <div class="streaks">
+      <div class="streak-card">
+        <div class="streak-icon">&#128293;</div>
+        <div class="streak-value">12</div>
+        <div class="streak-label">Day Streak</div>
+        <div class="streak-sub">Best: <strong>18 days</strong></div>
+      </div>
+      <div class="streak-card">
+        <div class="streak-icon">&#9889;</div>
+        <div class="streak-value">8</div>
+        <div class="streak-label">Week Streak</div>
+        <div class="streak-sub">Closed 1+ issue every week</div>
+      </div>
+      <div class="streak-card">
+        <div class="streak-icon">&#128640;</div>
+        <div class="streak-value">14</div>
+        <div class="streak-label">This Week</div>
+        <div class="streak-sub">Issues closed (best in 6 wks)</div>
+      </div>
+      <div class="streak-card">
+        <div class="streak-icon">&#11088;</div>
+        <div class="streak-value">247</div>
+        <div class="streak-label">Total (Quarter)</div>
+        <div class="streak-sub">Issues + PRs since Jan 1</div>
+      </div>
+    </div>
+
+    <!-- Heatmap -->
+    <div class="heatmap-card">
+      <h3>Activity Heatmap</h3>
+      <div class="subtitle">Each square represents a day. Darker = more activity (issues closed + PRs merged).</div>
+
+      <div class="heatmap-container">
+        <div class="heatmap-labels">
+          <span>Mon</span>
+          <span></span>
+          <span>Wed</span>
+          <span></span>
+          <span>Fri</span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="heatmap-grid">
+          <div class="heatmap-months">
+            <span>January</span>
+            <span>February</span>
+            <span>March</span>
+            <span>April</span>
+          </div>
+          <div class="heatmap-weeks" id="heatmap"></div>
+        </div>
+      </div>
+
+      <div class="heatmap-legend">
+        <span>Less</span>
+        <div class="legend-square" style="background: var(--gray-100)"></div>
+        <div class="legend-square l1" style="background: #ffecd2"></div>
+        <div class="legend-square l2" style="background: #ffc488"></div>
+        <div class="legend-square l3" style="background: #f5973a"></div>
+        <div class="legend-square l4" style="background: var(--orange)"></div>
+        <div class="legend-square l5" style="background: #c45a10"></div>
+        <span>More</span>
+      </div>
+    </div>
+
+    <!-- Source breakdown -->
+    <div class="source-split">
+      <div class="source-card">
+        <h3><span class="source-icon linear">L</span> Linear &mdash; This Week</h3>
+        <div class="pr-list">
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">ENG-342</span>
+              <span class="pr-title">Add WebSocket reconnection logic</span>
+            </div>
+            <span class="pr-time">Closed 2h ago</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">ENG-338</span>
+              <span class="pr-title">Fix race condition in batch processor</span>
+            </div>
+            <span class="pr-time">Closed yesterday</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">FRO-215</span>
+              <span class="pr-title">Command center stats prototype</span>
+            </div>
+            <span class="pr-time">Closed Mon</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">BAK-891</span>
+              <span class="pr-title">Migrate auth tokens to short-lived JWTs</span>
+            </div>
+            <span class="pr-time">Closed Mon</span>
+          </div>
+          <div class="pr-item" style="opacity:0.5;">
+            <div class="pr-item-left">
+              <span class="pr-number">+10</span>
+              <span class="pr-title">more issues closed this week</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="source-card">
+        <h3><span class="source-icon github">G</span> GitHub &mdash; This Week</h3>
+        <div class="pr-list">
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">#487</span>
+              <span class="pr-title">feat: WebSocket reconnection with backoff</span>
+            </div>
+            <span class="pr-time">Merged 3h ago</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">#485</span>
+              <span class="pr-title">fix: batch processor race condition</span>
+            </div>
+            <span class="pr-time">Merged yesterday</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">#483</span>
+              <span class="pr-title">feat: command center Kanban view</span>
+            </div>
+            <span class="pr-time">Merged Tue</span>
+          </div>
+          <div class="pr-item">
+            <div class="pr-item-left">
+              <span class="pr-number">#481</span>
+              <span class="pr-title">chore: migrate to short-lived JWTs</span>
+            </div>
+            <span class="pr-time">Merged Mon</span>
+          </div>
+          <div class="pr-item" style="opacity:0.5;">
+            <div class="pr-item-left">
+              <span class="pr-number">+4</span>
+              <span class="pr-title">more PRs merged this week</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Personal records -->
+    <div class="records-card">
+      <h3>Personal Records</h3>
+      <div class="records-grid">
+        <div class="record new">
+          <div class="record-value">14</div>
+          <div class="record-label">Most issues in a week</div>
+          <div class="record-when">This week!</div>
+        </div>
+        <div class="record">
+          <div class="record-value">18</div>
+          <div class="record-label">Longest day streak</div>
+          <div class="record-when">Mar 2 &ndash; Mar 19</div>
+        </div>
+        <div class="record">
+          <div class="record-value">1.4d</div>
+          <div class="record-label">Fastest weekly cycle time</div>
+          <div class="record-when">Week of Feb 10</div>
+        </div>
+        <div class="record">
+          <div class="record-value">12</div>
+          <div class="record-label">Most PRs merged (week)</div>
+          <div class="record-when">Week of Jan 27</div>
+        </div>
+        <div class="record">
+          <div class="record-value">0.5h</div>
+          <div class="record-label">Fastest review turnaround</div>
+          <div class="record-when">Week of Mar 17</div>
+        </div>
+        <div class="record new">
+          <div class="record-value">8</div>
+          <div class="record-label">Longest week streak</div>
+          <div class="record-when">Still going!</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Generate heatmap data
+    const heatmap = document.getElementById('heatmap');
+    const today = new Date(2026, 3, 24); // Apr 24, 2026
+    const startDate = new Date(2026, 0, 1); // Jan 1
+    // Adjust to start on a Monday
+    const dayOfWeek = startDate.getDay();
+    const start = new Date(startDate);
+    start.setDate(start.getDate() - ((dayOfWeek + 6) % 7));
+
+    const levels = [0,0,1,2,1,3,0, 0,1,0,2,3,1,0, 1,2,3,2,4,2,0, 0,1,3,4,3,5,0,
+                    2,1,0,3,2,4,0, 0,2,1,3,2,1,0, 1,3,4,2,5,3,0, 0,2,3,1,4,2,0,
+                    1,0,2,3,2,1,0, 0,3,2,4,3,5,0, 2,1,3,2,4,2,0, 0,1,2,3,1,2,0,
+                    3,2,4,5,3,4,0, 0,2,1,3,4,2,0, 1,3,2,4,3,5,0, 0,4,3,5,4,3,0];
+
+    let current = new Date(start);
+    let weekDiv = null;
+    let dayIndex = 0;
+
+    while (current <= today || (weekDiv && weekDiv.children.length < 7)) {
+      if (current.getDay() === 1 || !weekDiv) {
+        weekDiv = document.createElement('div');
+        weekDiv.className = 'heatmap-week';
+        heatmap.appendChild(weekDiv);
+      }
+
+      const day = document.createElement('div');
+      day.className = 'heatmap-day';
+
+      if (current > today) {
+        day.classList.add('future');
+      } else if (current < startDate) {
+        // before our range
+      } else {
+        const level = levels[dayIndex % levels.length] || 0;
+        if (level > 0) day.classList.add('l' + level);
+        if (current.toDateString() === today.toDateString()) day.classList.add('today');
+        dayIndex++;
+      }
+
+      weekDiv.appendChild(day);
+      current.setDate(current.getDate() + 1);
+    }
+  </script>
+</body>
+</html>

@@ -78,6 +78,27 @@ Key principles:
 
 Run Playwright tests with: `uv run pytest tests/test_ui/ -m ui`
 
+## Debugging Kanban classification
+
+The `zing-ai debug-card` CLI prints the full classification trace for a live PR and/or Linear ticket, using the same code path the Command Center runs. It fetches the data from GitHub/Linear, builds a `KanbanCard`, and prints, in order:
+
+1. The raw PR fields (`review_decision`, `requested_reviewers`, `reviewers`, `reviewer_states`, `ci_status`, `mergeable_state`, etc.) and ticket fields.
+2. A line-by-line trace of `_pr_needs_response()` for each PR — every guard, branch, and sub-branch with its inputs and the resulting boolean.
+3. The full `CardSignals` dataclass.
+4. The first-match-wins decision-table evaluation in `_classify_card()`, marked `[FIRE]` / `[ ok ]` / `[skip]`, ending with the column and any `in_progress_reason` / `review_group` / `done_group`.
+
+Usage:
+
+```bash
+zing-ai debug-card --pr <url|owner/repo#N|N> [--ticket <ID>] [--repo <owner/name>] [--user <login>]
+zing-ai debug-card --ticket BAK-1259
+zing-ai debug-card --pr 1885 --repo turngate/backend-v1 --ticket BAK-1259
+```
+
+Source: `src/zing_ai/debug_card.py`. The trace deliberately mirrors the production logic so any divergence between trace output and actual behaviour is itself a bug.
+
+**Verify, don't assume.** When investigating or fixing classification bugs (or any behaviour driven by external API data), do not reason from training-data intuitions about how GitHub/Linear shape their responses. Run `zing-ai debug-card` against a real example first to see the live data and confirm that the predicates fire the way the theory predicts. After applying a fix, run it again on the same example to verify the column actually changed. Synthetic test fixtures are easy to construct in ways that don't match real API behaviour — for instance, GitHub's `latestReviews` excludes reviewers currently in `reviewRequests`, so any fixture that puts the same user in both `reviewer_states` and `requested_reviewers` is unrealistic and will pass tests without proving the production case works. Treat unit tests as a regression net, not as proof that the fix matches reality; the debug-card output against a live PR is the proof.
+
 ## Issue tracking
 
 Issues and tickets are tracked in GitHub Issues on this repository. Use `gh issue create` to file new issues.

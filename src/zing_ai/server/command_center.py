@@ -171,33 +171,70 @@ def _has_open_pr_in_progress(card: KanbanCard, current_username: str) -> bool:
     )
 
 
-def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
-    """User authored a PR that has reviewer feedback they haven't addressed yet.
+def _is_human_reviewer(card: KanbanCard, reviewer: str) -> bool:
+    """Heuristically classify *reviewer* as human across all PRs on *card*.
 
-    A reviewer's feedback is unaddressed when they submitted a review
-    (appear in ``reviewers``) but have NOT been re-requested (not in
-    ``requested_reviewers``), and they are a human (not a bot).
+    Two signals (across any PR on the card) prove a reviewer is human:
 
-    Human vs bot detection uses ``reviewer_states``: reviewers who submitted
-    ``CHANGES_REQUESTED`` or ``APPROVED`` are definitely human.  Reviewers
-    who only ``COMMENTED`` are human if they appear in ``requested_reviewers``
-    on any PR on the card; otherwise they are assumed to be bots.
+    * They appear in ``requested_reviewers`` — bots like Greptile/CodeRabbit
+      are never explicitly requested.
+    * They submitted a review with state other than ``COMMENTED`` (e.g.
+      ``CHANGES_REQUESTED``, ``APPROVED``, ``DISMISSED``) — bots only
+      ever drop COMMENT-style drive-by reviews.
+
+    Otherwise treat as a bot so their COMMENT reviews don't pin the card
+    to in_progress.
     """
     for pr in card.prs:
-        if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
-            continue
-
-        not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
-        for reviewer in not_rerequested:
-            state = pr.reviewer_states.get(reviewer, "COMMENTED")
-            if state in ("CHANGES_REQUESTED", "APPROVED"):
-                # Definitely a human reviewer — their feedback is unaddressed.
-                return True
-            if state == "COMMENTED" and reviewer in set(pr.requested_reviewers):
-                # Comment-only review from a reviewer who was requested on this PR.
-                return True
-
+        if reviewer in pr.requested_reviewers:
+            return True
+        state = pr.reviewer_states.get(reviewer)
+        if state and state != "COMMENTED":
+            return True
     return False
+
+
+def _pr_needs_response(card: KanbanCard, pr: GitHubPR, current_username: str) -> bool:
+    """The user authored *pr* and there's reviewer feedback they haven't addressed.
+
+    Two signals trigger this:
+
+    1. GitHub's PR-level ``reviewDecision`` is ``CHANGES_REQUESTED`` and the
+       reviewer who requested changes has not been re-requested.  GitHub
+       does not reset ``reviewDecision`` when the author re-requests review,
+       so the raw decision alone over-counts: once all changes-requesters
+       are back in ``requested_reviewers`` the user is waiting on them, not
+       the other way around.  When ``latestReviews`` shows no explicit
+       ``CHANGES_REQUESTED`` state (later inline-comment reviews overwrote
+       it) the PR-level decision remains the only signal and is trusted.
+    2. A human reviewer left a review (any state, including ``COMMENTED``)
+       and hasn't been re-requested.  See :func:`_is_human_reviewer` for
+       the bot filter.
+    """
+    if pr.state != "open" or pr.author != current_username or pr.review_decision == "APPROVED":
+        return False
+
+    if pr.review_decision == "CHANGES_REQUESTED":
+        explicit_cr = {
+            login for login, state in pr.reviewer_states.items() if state == "CHANGES_REQUESTED"
+        }
+        # No explicit CR-er → states were overwritten by later COMMENTED
+        # reviews (backend-v1#1885 case). reviewDecision is the only signal.
+        if not explicit_cr:
+            return True
+        # At least one explicit CR-er has not been re-requested.
+        if explicit_cr - set(pr.requested_reviewers):
+            return True
+        # All explicit CR-ers re-requested; fall through so other COMMENTED
+        # human reviewers can still trigger a Respond.
+
+    not_rerequested = set(pr.reviewers) - set(pr.requested_reviewers)
+    return any(_is_human_reviewer(card, reviewer) for reviewer in not_rerequested)
+
+
+def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
+    """Any PR on *card* needs a response from *current_username*."""
+    return any(_pr_needs_response(card, pr, current_username) for pr in card.prs)
 
 
 def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
@@ -276,6 +313,24 @@ def _should_include_card(card: KanbanCard, current_username: str, cutoff: dateti
 
 
 # -- Review grouping ---------------------------------------------------------
+
+
+def _assign_in_progress_reason(card: KanbanCard, current_username: str) -> str | None:
+    """Return the reason text for an ``in_progress`` card, or ``None``.
+
+    Surfaced for cards that landed in ``in_progress`` because reviewer
+    feedback needs the user's attention (the "moved back from
+    needs_review" case).  Other in_progress paths (active session, PR
+    not yet sent for review, ticket_started) are not surfaced here
+    because the existing card strips already explain those cases.
+    """
+    for pr in card.prs:
+        if not _pr_needs_response(card, pr, current_username):
+            continue
+        if pr.review_decision == "CHANGES_REQUESTED":
+            return "Changes requested"
+        return "Reviewer feedback"
+    return None
 
 
 def _assign_review_group(card: KanbanCard, current_username: str) -> str:
@@ -653,7 +708,13 @@ def aggregate(
         col.sort(key=_card_most_recent_activity, reverse=True)
 
     # -----------------------------------------------------------------------
-    # 9. Assign review groups for the needs_review column
+    # 9. Assign reason text for in_progress cards (when applicable)
+    # -----------------------------------------------------------------------
+    for card in view.in_progress:
+        card.in_progress_reason = _assign_in_progress_reason(card, _username)
+
+    # -----------------------------------------------------------------------
+    # 10. Assign review groups for the needs_review column
     # -----------------------------------------------------------------------
     for card in view.needs_review:
         card.review_group = _assign_review_group(card, _username)
@@ -663,7 +724,7 @@ def aggregate(
     view.needs_review.sort(key=lambda c: _GROUP_ORDER.get(c.review_group or "", 3))
 
     # -----------------------------------------------------------------------
-    # 10. Assign done groups and sort: ready_to_merge first, then completed
+    # 11. Assign done groups and sort: ready_to_merge first, then completed
     # -----------------------------------------------------------------------
     for card in view.done:
         card.done_group = _assign_done_group(card, _username)

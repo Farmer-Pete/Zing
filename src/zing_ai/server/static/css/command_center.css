@@ -397,8 +397,9 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-radius: 50%;
     flex-shrink: 0;
 }
-.strip-session-alive { background: var(--blue); animation: cc-pulse 2s infinite; }
-.strip-session-dead  { background: var(--gray-300); }
+.strip-session-alive    { background: var(--blue); animation: cc-pulse 2s infinite; }
+.strip-session-starting { background: var(--amber); animation: cc-pulse 2s infinite; }
+.strip-session-dead     { background: var(--gray-300); }
 
 .strip-session-label {
     font-size: 0.55rem;

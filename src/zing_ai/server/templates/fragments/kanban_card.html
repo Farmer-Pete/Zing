@@ -111,11 +111,12 @@
       {# PR action buttons — per-PR primary + kebab #}
       <span class="strip-spacer"></span>
       {% set is_author = pr.author == current_username %}
+      {% set needs_response = pr_needs_response(card, pr, current_username) %}
       {% if not pr.merged_at %}
         {# Primary button — contextual label #}
         {% if column_cls == "col-review" and not is_author %}
           {{ launch_button(card, label="PR Audit", slot="pr-" ~ pr.number, skill="pr-audit", pr_number=pr.number) }}
-        {% elif pr.review_decision == "CHANGES_REQUESTED" and is_author %}
+        {% elif needs_response %}
           {{ launch_button(card, label="Respond", slot="pr-" ~ pr.number, skill="pr-respond", pr_number=pr.number) }}
         {% elif is_author %}
           {{ launch_button(card, label="Build Audit", slot="pr-" ~ pr.number, skill="build-audit", pr_number=pr.number) }}
@@ -136,7 +137,7 @@
           </div>
         {% else %}
           {# Non-merged PR: full menu with search for complex menus #}
-          {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+          {% if needs_response %}
             <input class="menu-search" type="text" placeholder="Search actions..."
                    data-bind="kebabQuery">
           {% endif %}
@@ -145,8 +146,8 @@
             <span class="menu-col-header-copy">&#128203;</span>
           </div>
           <div class="menu-items">
-            {# RESPOND section (own PR, changes requested only) #}
-            {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+            {# RESPOND section (own PR with unaddressed reviewer feedback) #}
+            {% if needs_response %}
               <div class="menu-section-label">Respond</div>
               <div class="menu-row" data-s="respond to feedback"
                    data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
@@ -246,16 +247,20 @@
 
   {# ── Claude Code sessions with inline attach/resume buttons ── #}
   {% for session in card.sessions if session.session_type == 'claude_code' %}
-    {% set is_alive = session.terminal_session and session.terminal_session in live_sessions %}
+    {% set sess_state = session.state.value %}
+    {% set is_alive = sess_state == 'started' %}
+    {% set is_starting = sess_state == 'starting' %}
     {% set sess_sig = session.signal_key %}
     {% set sess_menu_key = 'card-' ~ card.key ~ '-sess-' ~ session.session_id %}
     {% set sess_menu_id = 'kebab-menu-' ~ sess_sig ~ '-sess' %}
     {% set resume_menu_key = 'card-' ~ card.key ~ '-resume-' ~ session.session_id %}
     {% set resume_menu_id = 'kebab-menu-' ~ sess_sig ~ '-resume' %}
     <div class="status-strip">
-      <span class="strip-session-dot {% if is_alive %}strip-session-alive{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% else %}Stopped{% endif %}"></span>
+      <span class="strip-session-dot {% if is_alive %}strip-session-alive{% elif is_starting %}strip-session-starting{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% elif is_starting %}Starting{% else %}Stopped{% endif %}"></span>
       {% if is_alive %}
         <span class="strip-session-label">Running: {{ session.title }}</span>
+      {% elif is_starting %}
+        <span class="strip-session-label">Starting: {{ session.title }}</span>
       {% elif session.terminal_session %}
         <span class="strip-session-label strip-session-label-dead">Stopped: {{ session.title }}</span>
       {% else %}
@@ -282,7 +287,7 @@
           </div>
         </div>
       {% endif %}
-      {% if session.ticket_id and not is_alive %}
+      {% if session.ticket_id and sess_state == 'stopped' %}
         <button class="strip-primary-btn" id="btn-resume-{{ session.session_id | e }}"
                 data-indicator="$busyButtons.resume_{{ sess_sig }}"
                 data-attr:disabled="$busyButtons.resume_{{ sess_sig }}"
@@ -339,8 +344,10 @@
     </div>
   {% endfor %}
 
-  {# ── Findings + waiting note ── #}
-  {% if total_findings.count > 0 or (column_cls == "col-review" and card.review_group == "others") %}
+  {# ── Findings + waiting / in-progress note ── #}
+  {% set has_reason_note = (column_cls == "col-review" and card.review_group == "others")
+                           or (column_cls == "col-progress" and card.in_progress_reason) %}
+  {% if total_findings.count > 0 or has_reason_note %}
     <div class="status-strip">
       {% if total_findings.count > 0 %}
         <span class="strip-findings">{{ total_findings.count }} finding{{ 's' if total_findings.count != 1 else '' }}</span>
@@ -348,6 +355,9 @@
       {% if column_cls == "col-review" and card.review_group == "others" %}
         <span class="strip-spacer"></span>
         <span class="strip-note">Waiting on others</span>
+      {% elif column_cls == "col-progress" and card.in_progress_reason %}
+        <span class="strip-spacer"></span>
+        <span class="strip-note">{{ card.in_progress_reason }}</span>
       {% endif %}
     </div>
   {% endif %}

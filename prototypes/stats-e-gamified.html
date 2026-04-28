@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stats Prototype E: Gamified Progress</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --navy-light: #1a2d4a;
+    --navy-mid: #243b5e;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --gold: #ffd666;
+    --cyan: #3ecfe0;
+    --red-orange: #e84430;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --green: #2e7d32;
+    --green-bg: #e8f5e9;
+    --purple: #7c3aed;
+    --purple-bg: #f3e8ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--off-white);
+    color: var(--text-primary);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 400px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(245,124,32,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .brand-bar {
+    background: var(--navy);
+    margin: 0 -2rem;
+    padding: 0.75rem 2rem;
+    position: relative;
+  }
+  .brand-bar h1 { color: #fff; font-size: 1.1rem; font-weight: 700; }
+  .brand-bar::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--gold), var(--cyan));
+  }
+  .top-nav {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--gray-200);
+    gap: 0.25rem;
+    margin: 0 -2rem;
+    padding: 0 2rem;
+    background: var(--gray-50);
+  }
+  .top-nav a {
+    text-decoration: none;
+    color: var(--navy);
+    padding: 0.75rem 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+  }
+  .top-nav a:hover { color: var(--orange); }
+  .top-nav a.active { border-bottom-color: var(--orange); font-weight: 700; }
+
+  .main { padding: 2rem 0; position: relative; z-index: 1; }
+
+  /* Hero level card */
+  .level-hero {
+    background: linear-gradient(135deg, var(--navy) 0%, var(--navy-mid) 100%);
+    border-radius: 16px;
+    padding: 2rem;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 2rem;
+    align-items: center;
+    margin-bottom: 2rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .level-hero::before {
+    content: '';
+    position: absolute;
+    top: -40%; right: -5%;
+    width: 350px;
+    height: 350px;
+    background: radial-gradient(circle, rgba(245,124,32,0.12) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .level-hero::after {
+    content: '';
+    position: absolute;
+    bottom: -30%; left: 10%;
+    width: 250px;
+    height: 250px;
+    background: radial-gradient(circle, rgba(62,207,224,0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .level-badge {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--orange) 0%, var(--amber) 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 4px rgba(245,124,32,0.2), 0 0 30px rgba(245,124,32,0.15);
+    position: relative;
+    z-index: 1;
+  }
+  .level-badge .level-num {
+    font-size: 2.25rem;
+    font-weight: 800;
+    color: #fff;
+    line-height: 1;
+  }
+  .level-badge .level-label {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: rgba(255,255,255,0.8);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .level-info { position: relative; z-index: 1; }
+  .level-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: rgba(255,255,255,0.5);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.25rem;
+  }
+  .level-rank {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #fff;
+    margin-bottom: 0.5rem;
+  }
+  .xp-bar-container {
+    margin-bottom: 0.35rem;
+  }
+  .xp-bar {
+    height: 10px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 5px;
+    overflow: hidden;
+    width: 100%;
+    max-width: 400px;
+  }
+  .xp-bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    background: linear-gradient(90deg, var(--orange), var(--gold));
+    transition: width 0.8s ease;
+  }
+  .xp-text {
+    font-size: 0.75rem;
+    color: rgba(255,255,255,0.6);
+  }
+  .xp-text strong { color: var(--gold); }
+
+  .level-weekly {
+    text-align: right;
+    position: relative;
+    z-index: 1;
+  }
+  .weekly-xp {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--gold);
+    line-height: 1;
+    margin-bottom: 0.15rem;
+  }
+  .weekly-xp-label {
+    font-size: 0.7rem;
+    color: rgba(255,255,255,0.5);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.5rem;
+  }
+  .weekly-delta {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--green);
+    background: rgba(46,125,50,0.15);
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    display: inline-block;
+  }
+
+  /* XP breakdown */
+  .xp-breakdown {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .xp-source {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: box-shadow 0.15s;
+  }
+  .xp-source:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  .xp-source-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+  .xp-source-icon {
+    font-size: 1.25rem;
+  }
+  .xp-source-amount {
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: var(--navy);
+  }
+  .xp-source-amount span { color: var(--orange); font-size: 0.8rem; }
+  .xp-source-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--gray-500);
+    margin-bottom: 0.5rem;
+  }
+  .xp-source-bar {
+    height: 6px;
+    background: var(--gray-100);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 0.35rem;
+  }
+  .xp-source-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+  }
+  .xp-source-detail {
+    font-size: 0.7rem;
+    color: var(--gray-500);
+  }
+
+  /* Achievements */
+  .achievements-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .achievements-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .achievements-header h3 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--navy);
+  }
+  .achievements-count {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    font-weight: 500;
+  }
+
+  .achievements-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0.75rem;
+  }
+  .achievement {
+    text-align: center;
+    padding: 1rem 0.5rem;
+    border-radius: 10px;
+    background: var(--gray-50);
+    border: 1px solid var(--gray-100);
+    transition: transform 0.15s;
+  }
+  .achievement:hover { transform: translateY(-2px); }
+  .achievement.earned {
+    background: #fff;
+    border-color: var(--gold);
+    box-shadow: 0 0 12px rgba(255,214,102,0.15);
+  }
+  .achievement.locked {
+    opacity: 0.4;
+    filter: grayscale(1);
+  }
+  .achievement.new-badge {
+    background: rgba(245,124,32,0.04);
+    border-color: var(--orange);
+    box-shadow: 0 0 12px rgba(245,124,32,0.12);
+  }
+  .achievement-icon {
+    font-size: 1.75rem;
+    margin-bottom: 0.35rem;
+    line-height: 1;
+  }
+  .achievement-name {
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 0.15rem;
+  }
+  .achievement-desc {
+    font-size: 0.6rem;
+    color: var(--gray-500);
+    line-height: 1.3;
+  }
+  .achievement .new-tag {
+    display: inline-block;
+    font-size: 0.5rem;
+    font-weight: 800;
+    color: #fff;
+    background: var(--orange);
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    margin-top: 0.25rem;
+  }
+
+  /* Weekly quests */
+  .quests-card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .quests-card h3 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 0.25rem;
+  }
+  .quests-subtitle {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-bottom: 1rem;
+  }
+  .quest-list { display: flex; flex-direction: column; gap: 0.75rem; }
+  .quest {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 1rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-radius: 10px;
+    background: var(--gray-50);
+    border: 1px solid var(--gray-100);
+  }
+  .quest.complete {
+    background: rgba(46,125,50,0.04);
+    border-color: rgba(46,125,50,0.2);
+  }
+  .quest-check {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid var(--gray-300);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    color: transparent;
+  }
+  .quest.complete .quest-check {
+    background: var(--green);
+    border-color: var(--green);
+    color: #fff;
+  }
+  .quest-info {}
+  .quest-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--navy);
+    margin-bottom: 0.15rem;
+  }
+  .quest.complete .quest-name { text-decoration: line-through; color: var(--gray-500); }
+  .quest-progress-text {
+    font-size: 0.7rem;
+    color: var(--gray-500);
+  }
+  .quest-progress-bar {
+    height: 4px;
+    background: var(--gray-200);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 0.25rem;
+    max-width: 200px;
+  }
+  .quest-progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--orange);
+    transition: width 0.6s ease;
+  }
+  .quest.complete .quest-progress-fill { background: var(--green); }
+  .quest-reward {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--amber);
+    white-space: nowrap;
+  }
+  .quest.complete .quest-reward { color: var(--green); }
+
+  /* Leaderboard teaser */
+  .leaderboard {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    padding: 1.5rem;
+  }
+  .leaderboard h3 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 1rem;
+  }
+  .lb-row {
+    display: grid;
+    grid-template-columns: 28px auto 1fr auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--gray-100);
+  }
+  .lb-row:last-child { border-bottom: none; }
+  .lb-rank {
+    font-size: 0.8rem;
+    font-weight: 800;
+    color: var(--gray-500);
+    text-align: center;
+  }
+  .lb-rank.gold { color: var(--amber); }
+  .lb-rank.silver { color: var(--gray-500); }
+  .lb-rank.bronze { color: #cd7f32; }
+  .lb-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--gray-200);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--gray-700);
+  }
+  .lb-avatar.you {
+    background: var(--orange);
+    color: #fff;
+  }
+  .lb-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--navy);
+  }
+  .lb-name .you-tag {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--orange);
+    background: rgba(245,124,32,0.1);
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+  }
+  .lb-xp {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+  <div class="brand-bar"><h1>Zing</h1></div>
+  <nav class="top-nav">
+    <a href="#">Dashboard</a>
+    <a href="#">Command Center</a>
+    <a href="#" class="active">Stats</a>
+    <a href="#">Config</a>
+  </nav>
+
+  <div class="main">
+    <!-- Level hero -->
+    <div class="level-hero">
+      <div class="level-badge">
+        <span class="level-num">12</span>
+        <span class="level-label">Level</span>
+      </div>
+      <div class="level-info">
+        <div class="level-title">Current Rank</div>
+        <div class="level-rank">Senior Shipper</div>
+        <div class="xp-bar-container">
+          <div class="xp-bar">
+            <div class="xp-bar-fill" style="width: 68%"></div>
+          </div>
+        </div>
+        <div class="xp-text"><strong>2,720</strong> / 4,000 XP to Level 13 &middot; <em>Staff Architect</em></div>
+      </div>
+      <div class="level-weekly">
+        <div class="weekly-xp">+340</div>
+        <div class="weekly-xp-label">XP This Week</div>
+        <span class="weekly-delta">&#9650; 28% vs last week</span>
+      </div>
+    </div>
+
+    <!-- XP Sources -->
+    <div class="xp-breakdown">
+      <div class="xp-source">
+        <div class="xp-source-header">
+          <span class="xp-source-icon">&#127919;</span>
+          <span class="xp-source-amount">+140 <span>XP</span></span>
+        </div>
+        <div class="xp-source-label">Issues Closed</div>
+        <div class="xp-source-bar">
+          <div class="xp-source-bar-fill" style="width:82%; background: var(--orange)"></div>
+        </div>
+        <div class="xp-source-detail">14 issues &times; 10 XP each</div>
+      </div>
+
+      <div class="xp-source">
+        <div class="xp-source-header">
+          <span class="xp-source-icon">&#128256;</span>
+          <span class="xp-source-amount">+100 <span>XP</span></span>
+        </div>
+        <div class="xp-source-label">PRs Merged</div>
+        <div class="xp-source-bar">
+          <div class="xp-source-bar-fill" style="width:64%; background: var(--cyan)"></div>
+        </div>
+        <div class="xp-source-detail">8 PRs &times; ~12.5 XP avg</div>
+      </div>
+
+      <div class="xp-source">
+        <div class="xp-source-header">
+          <span class="xp-source-icon">&#128269;</span>
+          <span class="xp-source-amount">+60 <span>XP</span></span>
+        </div>
+        <div class="xp-source-label">Reviews Given</div>
+        <div class="xp-source-bar">
+          <div class="xp-source-bar-fill" style="width:48%; background: var(--green)"></div>
+        </div>
+        <div class="xp-source-detail">12 reviews &times; 5 XP each</div>
+      </div>
+
+      <div class="xp-source">
+        <div class="xp-source-header">
+          <span class="xp-source-icon">&#128293;</span>
+          <span class="xp-source-amount">+40 <span>XP</span></span>
+        </div>
+        <div class="xp-source-label">Streak Bonus</div>
+        <div class="xp-source-bar">
+          <div class="xp-source-bar-fill" style="width:35%; background: var(--amber)"></div>
+        </div>
+        <div class="xp-source-detail">8-week active streak</div>
+      </div>
+    </div>
+
+    <!-- Achievements -->
+    <div class="achievements-card">
+      <div class="achievements-header">
+        <h3>Achievements</h3>
+        <span class="achievements-count">14 / 24 earned</span>
+      </div>
+      <div class="achievements-grid">
+        <div class="achievement new-badge">
+          <div class="achievement-icon">&#127942;</div>
+          <div class="achievement-name">Record Breaker</div>
+          <div class="achievement-desc">Beat a personal record</div>
+          <span class="new-tag">NEW</span>
+        </div>
+        <div class="achievement earned">
+          <div class="achievement-icon">&#128293;</div>
+          <div class="achievement-name">On Fire</div>
+          <div class="achievement-desc">10+ day streak</div>
+        </div>
+        <div class="achievement earned">
+          <div class="achievement-icon">&#9889;</div>
+          <div class="achievement-name">Speed Demon</div>
+          <div class="achievement-desc">Cycle time under 2d</div>
+        </div>
+        <div class="achievement earned">
+          <div class="achievement-icon">&#128640;</div>
+          <div class="achievement-name">Prolific</div>
+          <div class="achievement-desc">10+ issues in a week</div>
+        </div>
+        <div class="achievement earned">
+          <div class="achievement-icon">&#129504;</div>
+          <div class="achievement-name">Reviewer</div>
+          <div class="achievement-desc">100 reviews given</div>
+        </div>
+        <div class="achievement locked">
+          <div class="achievement-icon">&#127775;</div>
+          <div class="achievement-name">Centurion</div>
+          <div class="achievement-desc">Close 100 issues in a quarter</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Weekly quests -->
+    <div class="quests-card">
+      <h3>Weekly Quests</h3>
+      <p class="quests-subtitle">Complete quests for bonus XP. Resets every Monday.</p>
+      <div class="quest-list">
+        <div class="quest complete">
+          <div class="quest-check">&#10003;</div>
+          <div class="quest-info">
+            <div class="quest-name">Close 10 issues</div>
+            <div class="quest-progress-text">14 / 10 completed</div>
+            <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:100%"></div></div>
+          </div>
+          <div class="quest-reward">+25 XP</div>
+        </div>
+        <div class="quest complete">
+          <div class="quest-check">&#10003;</div>
+          <div class="quest-info">
+            <div class="quest-name">Merge 5 PRs</div>
+            <div class="quest-progress-text">8 / 5 completed</div>
+            <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:100%"></div></div>
+          </div>
+          <div class="quest-reward">+20 XP</div>
+        </div>
+        <div class="quest">
+          <div class="quest-check"></div>
+          <div class="quest-info">
+            <div class="quest-name">Review 15 PRs</div>
+            <div class="quest-progress-text">12 / 15 completed</div>
+            <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:80%"></div></div>
+          </div>
+          <div class="quest-reward">+20 XP</div>
+        </div>
+        <div class="quest">
+          <div class="quest-check"></div>
+          <div class="quest-info">
+            <div class="quest-name">Keep cycle time under 2.5d</div>
+            <div class="quest-progress-text">Currently at 2.1d &mdash; on track!</div>
+            <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:60%"></div></div>
+          </div>
+          <div class="quest-reward">+15 XP</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Leaderboard -->
+    <div class="leaderboard">
+      <h3>Team Leaderboard &mdash; This Week</h3>
+      <div class="lb-row">
+        <span class="lb-rank gold">1</span>
+        <div class="lb-avatar you">PN</div>
+        <span class="lb-name">Peter Naudus <span class="you-tag">YOU</span></span>
+        <span class="lb-xp">340 XP</span>
+      </div>
+      <div class="lb-row">
+        <span class="lb-rank silver">2</span>
+        <div class="lb-avatar">SK</div>
+        <span class="lb-name">Sarah Kim</span>
+        <span class="lb-xp">295 XP</span>
+      </div>
+      <div class="lb-row">
+        <span class="lb-rank bronze">3</span>
+        <div class="lb-avatar">JR</div>
+        <span class="lb-name">James Rodriguez</span>
+        <span class="lb-xp">260 XP</span>
+      </div>
+      <div class="lb-row">
+        <span class="lb-rank">4</span>
+        <div class="lb-avatar">AL</div>
+        <span class="lb-name">Alex Lee</span>
+        <span class="lb-xp">220 XP</span>
+      </div>
+      <div class="lb-row">
+        <span class="lb-rank">5</span>
+        <div class="lb-avatar">MC</div>
+        <span class="lb-name">Maya Chen</span>
+        <span class="lb-xp">185 XP</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Card Prototype E — Refined</title>
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--off-white); padding: 2rem; color: var(--text-primary); }
+  h1 { font-size: 1.1rem; margin-bottom: 0.3rem; color: var(--navy); }
+  .subtitle { font-size: 0.8rem; color: var(--gray-500); margin-bottom: 2rem; }
+  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+  .column { background: var(--gray-50); border-radius: 8px; padding: 0.75rem; }
+  .column-header { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem; }
+  .count { background: var(--gray-200); color: var(--gray-700); font-size: 0.55rem; padding: 0.1rem 0.4rem; border-radius: 999px; }
+
+  /*
+   * CONCEPT: Hybrid of C (layered zones) and D (minimal status strip).
+   * - Soft tinted header (not full navy) with ticket ID + title
+   * - Middle: status strip with PR, CI, session indicators (D-style)
+   * - Actions slide in from the bottom on hover, pushing content up
+   *   (not overlapping like A)
+   * - Session info inline in the strip
+   */
+
+  .card {
+    background: #fff;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    transition: box-shadow 0.15s ease;
+  }
+  .card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+
+  /* Soft header — tinted but not jarring */
+  .card-header {
+    background: var(--gray-100);
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--gray-200);
+  }
+  .header-top {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+  }
+  .ticket-id {
+    font-size: 0.55rem;
+    font-weight: 700;
+    color: var(--orange);
+    text-decoration: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .ticket-id:hover { text-decoration: underline; }
+  .assignee {
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: #fff;
+    font-size: 0.4rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+  .card-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.3;
+    margin-top: 0.15rem;
+  }
+
+  /* Status strip — D-style compact row */
+  .status-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    min-height: 28px;
+  }
+
+  .strip-pr {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.6rem;
+    color: var(--gray-700);
+    text-decoration: none;
+  }
+  .strip-pr:hover { text-decoration: underline; }
+  .strip-pr svg { width: 11px; height: 11px; flex-shrink: 0; }
+
+  .strip-author {
+    font-size: 0.55rem;
+    color: var(--gray-500);
+  }
+
+  .pill {
+    font-size: 0.45rem; font-weight: 700; padding: 0.05rem 0.25rem;
+    border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .pill-approved { background: #e8f5e9; color: #2e7d32; }
+  .pill-merged { background: #ede7f6; color: #7c3aed; }
+  .pill-changes { background: #fff3e0; color: #e65100; }
+  .pill-draft { background: var(--gray-100); color: var(--gray-500); }
+
+  .ci-dots { display: flex; gap: 2px; align-items: center; }
+  .ci-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .ci-green { background: #27ae60; }
+  .ci-red { background: #e74c3c; }
+  .ci-amber { background: var(--amber); }
+
+  .strip-session {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .session-alive { background: #3b82f6; animation: pulse 2s infinite; }
+  .session-dead { background: var(--gray-300); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .strip-findings {
+    font-size: 0.5rem;
+    font-weight: 700;
+    color: #e65100;
+  }
+
+  .strip-spacer { flex: 1; }
+
+  .strip-note {
+    font-size: 0.5rem;
+    color: var(--gray-500);
+  }
+
+  /* CI failure callout — only shown when checks fail */
+  .ci-fail-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.6rem;
+    background: #fef2f2;
+    font-size: 0.55rem;
+    color: #991b1b;
+  }
+
+  .card {
+    margin-bottom: 1.8rem;
+    position: relative;
+  }
+  .card-actions {
+    display: none;
+    gap: 0.3rem;
+    padding: 0.3rem 0.6rem 0.45rem;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    background: #fff;
+    border-radius: 0 0 6px 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+  }
+  .card:hover .card-actions {
+    display: flex;
+  }
+
+  .btn {
+    font-size: 0.55rem;
+    padding: 0.2rem 0.45rem;
+    border-radius: 4px;
+    border: 1px solid var(--gray-200);
+    background: #fff;
+    cursor: pointer;
+    color: var(--gray-700);
+    transition: background 0.1s;
+  }
+  .btn:hover { background: var(--gray-50); border-color: var(--gray-300); }
+  .btn-primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .btn-primary:hover { background: #e06810; }
+
+  .card-rtm { background: #f0fdf4; }
+  .card-rtm .card-header { background: #dcfce7; border-bottom-color: #bbf7d0; }
+
+  /* Zing session indicators */
+  .zing-session {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.55rem;
+    color: var(--gray-700);
+    text-decoration: none;
+  }
+  .zing-session:hover { text-decoration: underline; }
+  .zing-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .zing-dot-amber { background: var(--amber); animation: pulse 2s infinite; }
+  .zing-dot-red { background: #e74c3c; }
+  .zing-dot-green { background: #27ae60; }
+  .zing-dot-cyan { background: var(--cyan); }
+
+  /* Multiple status strips stacked */
+  .status-strip + .status-strip {
+    border-top: 1px solid var(--gray-100);
+  }
+
+  /* Draft PR icon color */
+  .strip-pr-draft svg { fill: var(--gray-400) !important; }
+</style>
+</head>
+<body>
+<h1>Prototype E: Refined</h1>
+<p class="subtitle">Soft tinted header (not full navy). D-style status strip for metadata. Actions slide in on hover without covering content.</p>
+
+<div class="board">
+  <!-- TO DO -->
+  <div class="column">
+    <div class="column-header">To Do <span class="count">3</span></div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1200</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Phase 3: Admin, observability, and dev validation</div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-note">No PR yet</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Plan Ticket</button>
+        <button class="btn">Copy Cmd</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1224</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Phase 2: API endpoints</div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-note">No PR yet</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Plan Ticket</button>
+        <button class="btn">Copy Cmd</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1073</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Investigate: unflatteable nodes in flatten_activity_batch</div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-note">No PR yet</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Plan Ticket</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- IN PROGRESS -->
+  <div class="column">
+    <div class="column-header">In Progress <span class="count">4</span></div>
+
+    <!-- Ticket in progress, no PR yet -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1301</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Add transaction boundaries and time limits to actor mapper command</div>
+      </div>
+      <div class="status-strip">
+        <span class="strip-note">No PR yet</span>
+        <span class="strip-session session-alive" title="Session running"></span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Attach</button>
+        <button class="btn">Copy Cmd</button>
+      </div>
+    </div>
+
+    <!-- Draft PR -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1290</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Refactor webhook payload validation pipeline</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr strip-pr-draft" href="#" title="backend-v1#1875">
+          <svg viewBox="0 0 16 16" fill="var(--gray-400)"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1875
+        </a>
+        <span class="pill pill-draft">draft</span>
+        <div class="ci-dots" title="2 passing, 1 pending">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-amber"></span>
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Review PR</button>
+        <button class="btn">Respond</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1259</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Validate integration context menu actions for all integration types</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1870">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1870
+        </a>
+        <span class="pill pill-changes">changes requested</span>
+        <div class="ci-dots" title="3 passing, 1 failing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-red"></span>
+        </div>
+        <span class="strip-session session-alive" title="Session running"></span>
+      </div>
+      <div class="ci-fail-bar">
+        <span>&#10005;</span> deploy-preview
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Attach</button>
+        <button class="btn">Respond</button>
+        <button class="btn">Resume</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1215</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Replace all-time activity counts MV with partition-aware monthly table</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1843">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1843
+        </a>
+        <div class="ci-dots" title="3 passing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+        </div>
+        <span class="strip-session session-dead" title="Session stopped"></span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Resume</button>
+        <button class="btn">Respond</button>
+      </div>
+    </div>
+
+    <!-- Multiple PRs + Zing sessions -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1150</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Migrate credential broadcast to Google Workspace OAuth re-auth</div>
+      </div>
+      <!-- PR 1 -->
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1860">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1860
+        </a>
+        <span class="pill pill-changes">changes requested</span>
+        <div class="ci-dots" title="4 passing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+        </div>
+      </div>
+      <!-- PR 2 -->
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="frontend-v1#445">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          frontend-v1#445
+        </a>
+        <div class="ci-dots" title="2 passing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+        </div>
+      </div>
+      <!-- Zing sessions -->
+      <div class="status-strip">
+        <a class="zing-session" href="#" title="Zing session: running">
+          <span class="zing-dot zing-dot-amber"></span>
+          Claude session running
+        </a>
+      </div>
+      <div class="status-strip">
+        <a class="zing-session" href="#" title="Zing session: ready for review">
+          <span class="zing-dot zing-dot-cyan"></span>
+          Ready for review
+        </a>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Attach</button>
+        <button class="btn">Respond</button>
+        <button class="btn">Resume</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEEDS REVIEW -->
+  <div class="column">
+    <div class="column-header">Needs Review <span class="count">3</span></div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">FRO-2901</a>
+        </div>
+        <div class="card-title">Phase 4 &mdash; Catalogue Migration Core Types</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="frontend-v1#892">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          frontend-v1#892
+        </a>
+        <span class="strip-author">kyle-turngate</span>
+        <div class="ci-dots" title="2 passing, 1 pending">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-amber"></span>
+        </div>
+        <span class="strip-findings" title="2 audit findings">2 findings</span>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Review PR</button>
+        <button class="btn">Copy Cmd</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-804</a>
+        </div>
+        <div class="card-title">Unify DataSource serializer for GET, LIST, capability responses</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1858">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1858
+        </a>
+        <span class="strip-author">kyle-turngate</span>
+        <div class="ci-dots" title="2 passing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-primary">Review PR</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1258</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Phase 1 &mdash; Schema reset, foundation pipeline, and Tier D rollups</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1863">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1863
+        </a>
+        <div class="ci-dots" title="3 passing">
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+          <span class="ci-dot ci-green"></span>
+        </div>
+        <span class="strip-spacer"></span>
+        <span class="strip-note">Waiting on others</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- DONE -->
+  <div class="column">
+    <div class="column-header">Done <span class="count">2</span></div>
+
+    <div class="card card-rtm">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">ZING-057</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">OAuth state silently lost due to session race condition with concurrent requests</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1859">
+          <svg viewBox="0 0 16 16" fill="#27ae60"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+          backend-v1#1859
+        </a>
+        <span class="strip-author">Farmer-Pete</span>
+        <span class="pill pill-approved">approved</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="header-top">
+          <a class="ticket-id" href="#">BAK-1100</a>
+          <span class="assignee" title="Pete Naudus">PN</span>
+        </div>
+        <div class="card-title">Fix casting edge-case migrations (CITEXT duplicates)</div>
+      </div>
+      <div class="status-strip">
+        <a class="strip-pr" href="#" title="backend-v1#1855">
+          <svg viewBox="0 0 16 16" fill="#7c3aed"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218z"/></svg>
+          backend-v1#1855
+        </a>
+        <span class="strip-author">Farmer-Pete</span>
+        <span class="pill pill-merged">merged</span>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

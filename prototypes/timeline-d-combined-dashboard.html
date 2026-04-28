@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Combined Dashboard — Timelines + Attention Queue</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --navy-light: #1a2d4a;
+    --navy-mid: #243b5e;
+    --orange: #f57c20;
+    --orange-hover: #e06810;
+    --amber: #f5a623;
+    --gold: #ffd666;
+    --cyan: #3ecfe0;
+    --cyan-dim: #2ba8b6;
+    --red-orange: #e84430;
+    --green: #16a34a;
+    --bg: #f8f6f3;
+    --white: #ffffff;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text-primary); }
+
+  .brand-bar {
+    background: var(--navy); height: 56px; display: flex; align-items: center;
+    padding: 0 2rem; gap: 1rem;
+    border-bottom: 3px solid;
+    border-image: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--gold), var(--cyan)) 1;
+  }
+  .brand-bar h1 { color: var(--white); font-size: 1.25rem; font-weight: 800; }
+  .brand-bar span { color: var(--orange); }
+  .brand-bar .subtitle { color: var(--gray-500); font-size: 0.8rem; }
+
+  .container { max-width: 1300px; margin: 0 auto; padding: 1.5rem 2rem; }
+
+  /* ── Top: global swim lanes showing all sessions ── */
+  .swim-lanes {
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-radius: var(--radius); padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+  }
+  .swim-header {
+    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;
+  }
+  .swim-title {
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--gray-500);
+  }
+  .swim-legend {
+    display: flex; gap: 0.75rem; margin-left: auto; font-size: 0.65rem; color: var(--gray-500);
+  }
+  .legend-item { display: flex; align-items: center; gap: 0.25rem; }
+  .legend-swatch {
+    width: 12px; height: 8px; border-radius: 2px;
+  }
+
+  .lane {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0; border-bottom: 1px solid var(--gray-100);
+    cursor: pointer; transition: background 0.1s;
+    border-radius: 4px; padding-left: 0.35rem;
+  }
+  .lane:last-child { border-bottom: none; }
+  .lane:hover { background: var(--gray-50); }
+  .lane.lane-selected { background: #fff5ee; }
+
+  .lane-label {
+    width: 120px; min-width: 120px; font-size: 0.75rem; font-weight: 600;
+    color: var(--navy); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lane-ticket {
+    font-size: 0.6rem; font-weight: 700; color: var(--orange);
+    text-transform: uppercase; display: block;
+  }
+
+  .lane-bar-container {
+    flex: 1; display: flex; gap: 1px; height: 24px;
+    border-radius: 4px; overflow: hidden; position: relative;
+  }
+  .lane-seg {
+    height: 100%; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.55rem; font-weight: 600; color: rgba(255,255,255,0.85);
+    overflow: hidden; white-space: nowrap;
+    transition: flex 0.3s ease;
+  }
+  .seg-plan { background: var(--orange); }
+  .seg-audit { background: var(--amber); }
+  .seg-build { background: #7c3aed; }
+  .seg-review { background: var(--cyan-dim); }
+  .seg-wait { background: #e2e8f0; color: var(--gray-500); }
+  .seg-wait-active {
+    background: repeating-linear-gradient(
+      -45deg, #e2e8f0, #e2e8f0 4px, #d1d5db 4px, #d1d5db 8px
+    );
+    color: var(--gray-700);
+    animation: barberpole 1s linear infinite;
+  }
+  @keyframes barberpole {
+    to { background-position: 16px 0; }
+  }
+  .seg-user { background: var(--green); }
+
+  .lane-status {
+    width: 90px; min-width: 90px; text-align: right;
+    font-size: 0.65rem; font-weight: 600;
+  }
+  .ls-waiting { color: var(--cyan-dim); }
+  .ls-working { color: var(--orange); }
+  .ls-done { color: var(--green); }
+
+  /* ── Attention inbox + detail split ── */
+  .split-bottom {
+    display: grid; grid-template-columns: 380px 1fr; gap: 1rem;
+  }
+
+  /* Left: attention queue */
+  .attn-panel {
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  .attn-panel-header {
+    padding: 0.75rem 1rem; background: var(--gray-50);
+    border-bottom: 1px solid var(--gray-200);
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .attn-panel-title {
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--gray-500);
+  }
+  .attn-count {
+    background: var(--red-orange); color: var(--white);
+    padding: 0.08rem 0.45rem; border-radius: 999px;
+    font-size: 0.6rem; font-weight: 700;
+  }
+  .attn-list { max-height: 420px; overflow-y: auto; }
+
+  .attn-item {
+    padding: 0.65rem 1rem; border-bottom: 1px solid var(--gray-100);
+    cursor: pointer; transition: background 0.1s;
+    border-left: 3px solid transparent;
+  }
+  .attn-item:hover { background: var(--gray-50); }
+  .attn-item.selected { background: #fff5ee; border-left-color: var(--orange); }
+  .attn-item-top {
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .attn-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    background: var(--cyan);
+    animation: pulse-dot 2s ease-out infinite;
+  }
+  @keyframes pulse-dot {
+    0% { box-shadow: 0 0 0 0 rgba(62,207,224,0.4); }
+    70% { box-shadow: 0 0 0 6px rgba(62,207,224,0); }
+    100% { box-shadow: 0 0 0 0 rgba(62,207,224,0); }
+  }
+  .attn-dot-urgent { background: var(--red-orange); animation-name: pulse-urgent; }
+  @keyframes pulse-urgent {
+    0% { box-shadow: 0 0 0 0 rgba(232,68,48,0.4); }
+    70% { box-shadow: 0 0 0 6px rgba(232,68,48,0); }
+    100% { box-shadow: 0 0 0 0 rgba(232,68,48,0); }
+  }
+  .attn-id {
+    font-size: 0.65rem; font-weight: 700; color: var(--orange);
+    text-transform: uppercase;
+  }
+  .attn-wait {
+    margin-left: auto; font-size: 0.65rem; color: var(--gray-500);
+  }
+  .attn-item-title {
+    font-size: 0.82rem; font-weight: 600; color: var(--navy);
+    margin-top: 0.2rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .attn-item-detail {
+    font-size: 0.7rem; color: var(--gray-500); margin-top: 0.2rem;
+    display: flex; align-items: center; gap: 0.4rem;
+  }
+  .attn-step-pill {
+    padding: 0.08rem 0.35rem; border-radius: 4px; font-weight: 600; font-size: 0.6rem;
+  }
+  .pill-cyan { background: rgba(62,207,224,0.15); color: var(--cyan-dim); }
+  .pill-orange { background: rgba(245,124,32,0.15); color: var(--orange); }
+  .pill-red { background: rgba(232,68,48,0.15); color: var(--red-orange); }
+
+  /* Working section in attention panel */
+  .working-section {
+    border-top: 2px solid var(--gray-200); padding: 0.5rem 1rem;
+  }
+  .working-label {
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 0.35rem;
+  }
+  .working-item {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.3rem 0; font-size: 0.78rem;
+  }
+  .wi-spinner {
+    width: 10px; height: 10px; border: 2px solid var(--gray-200);
+    border-top-color: var(--orange); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .wi-id { font-weight: 700; color: var(--orange); font-size: 0.65rem; text-transform: uppercase; }
+  .wi-title { color: var(--gray-700); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .wi-step { font-size: 0.65rem; color: var(--gray-500); }
+
+  /* Right: detail panel */
+  .detail-panel {
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-radius: var(--radius); overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .detail-header {
+    padding: 1rem 1.25rem; border-bottom: 1px solid var(--gray-200);
+  }
+  .detail-ticket {
+    font-size: 0.7rem; font-weight: 700; color: var(--orange);
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .detail-title {
+    font-size: 1.15rem; font-weight: 800; color: var(--navy); margin-top: 0.2rem;
+  }
+  .detail-meta {
+    display: flex; gap: 0.75rem; margin-top: 0.5rem;
+    font-size: 0.78rem; color: var(--gray-500); align-items: center;
+  }
+  .detail-step-badge {
+    padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.7rem;
+    font-weight: 700; text-transform: uppercase;
+    background: rgba(62,207,224,0.15); color: var(--cyan-dim);
+  }
+
+  .detail-body {
+    flex: 1; overflow-y: auto; padding: 1rem 1.25rem;
+  }
+
+  /* Mini timeline in detail */
+  .detail-mini-tl {
+    display: flex; gap: 2px; height: 24px; border-radius: 4px;
+    overflow: hidden; margin-bottom: 1rem;
+  }
+  .dtl-seg {
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    font-size: 0.55rem; font-weight: 600; color: rgba(255,255,255,0.85);
+  }
+
+  /* Findings in detail */
+  .d-finding {
+    background: var(--gray-50); border: 1px solid var(--gray-200);
+    border-radius: var(--radius-sm); padding: 0.65rem 0.85rem; margin-bottom: 0.5rem;
+    transition: border-color 0.15s;
+  }
+  .d-finding:hover { border-color: var(--gray-300); }
+  .d-finding-header {
+    display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem;
+  }
+  .df-sev {
+    padding: 0.08rem 0.4rem; border-radius: 999px; font-size: 0.55rem;
+    font-weight: 700; text-transform: uppercase;
+  }
+  .df-sev-high { background: #fee2e2; color: #991b1b; }
+  .df-sev-med { background: #fef3c7; color: #92400e; }
+  .df-sev-low { background: #d1fae5; color: #065f46; }
+  .df-sev-info { background: #e0e7ff; color: #3730a3; }
+  .df-title { font-weight: 600; color: var(--navy); font-size: 0.85rem; }
+
+  .d-finding-body {
+    font-size: 0.8rem; color: var(--gray-700); line-height: 1.5;
+  }
+  .d-finding-body code {
+    background: var(--gray-100); padding: 0.08rem 0.3rem; border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem;
+  }
+
+  .d-triage {
+    display: flex; gap: 0.3rem; margin-top: 0.5rem;
+  }
+  .d-triage-btn {
+    padding: 0.25rem 0.55rem; border-radius: var(--radius-sm);
+    border: 2px solid var(--gray-200); background: var(--white);
+    font-size: 0.7rem; font-weight: 600; cursor: pointer;
+    transition: all 0.12s;
+  }
+  .d-triage-btn:hover { border-color: var(--gray-300); }
+  .d-triage-btn.sel-accept { border-color: var(--green); background: #f0fdf4; color: var(--green); }
+  .d-triage-btn.sel-drop { border-color: var(--gray-300); background: var(--gray-50); color: var(--gray-500); }
+
+  .detail-footer {
+    padding: 0.75rem 1.25rem; border-top: 1px solid var(--gray-200);
+    display: flex; align-items: center; gap: 0.75rem;
+    background: var(--gray-50);
+  }
+  .df-progress { flex: 1; font-size: 0.8rem; color: var(--gray-500); }
+  .df-progress strong { color: var(--navy); }
+  .df-skip {
+    padding: 0.5rem 0.85rem; border-radius: var(--radius-sm);
+    border: 1px solid var(--gray-200); background: var(--white);
+    color: var(--gray-500); font-size: 0.8rem; font-weight: 600; cursor: pointer;
+  }
+  .df-submit {
+    padding: 0.5rem 1.25rem; border-radius: var(--radius-sm);
+    background: var(--orange); color: var(--white); font-weight: 700;
+    font-size: 0.85rem; border: none; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(245,124,32,0.25);
+    transition: all 0.15s;
+  }
+  .df-submit:hover { background: var(--orange-hover); transform: translateY(-1px); }
+
+  /* ── Notification toast that slides in ── */
+  .toast-demo {
+    position: fixed; top: 70px; right: 2rem;
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-left: 4px solid var(--cyan);
+    border-radius: var(--radius-sm); padding: 0.75rem 1rem;
+    box-shadow: 0 4px 20px rgba(26,23,20,0.12);
+    max-width: 340px;
+    animation: slide-in 0.3s ease-out;
+    z-index: 100;
+  }
+  @keyframes slide-in {
+    from { transform: translateX(120%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+  .toast-title {
+    font-size: 0.8rem; font-weight: 700; color: var(--navy);
+    display: flex; align-items: center; gap: 0.35rem;
+  }
+  .toast-body { font-size: 0.75rem; color: var(--gray-700); margin-top: 0.25rem; }
+  .toast-action {
+    margin-top: 0.5rem; padding: 0.3rem 0.75rem; border-radius: 4px;
+    background: var(--cyan); color: var(--white); border: none;
+    font-size: 0.7rem; font-weight: 700; cursor: pointer;
+  }
+  .toast-close {
+    position: absolute; top: 0.35rem; right: 0.5rem;
+    background: none; border: none; color: var(--gray-500);
+    font-size: 0.9rem; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div class="brand-bar">
+  <h1><span>Zing</span> Dashboard</h1>
+  <span class="subtitle">Combined timeline + attention view</span>
+</div>
+
+<div class="container">
+
+  <!-- ━━━ Global swim lane timeline ━━━ -->
+  <div class="swim-lanes">
+    <div class="swim-header">
+      <span class="swim-title">All sessions &mdash; today</span>
+      <div class="swim-legend">
+        <div class="legend-item"><div class="legend-swatch" style="background: var(--orange)"></div> Plan</div>
+        <div class="legend-item"><div class="legend-swatch" style="background: var(--amber)"></div> Audit</div>
+        <div class="legend-item"><div class="legend-swatch" style="background: #7c3aed"></div> Build</div>
+        <div class="legend-item"><div class="legend-swatch" style="background: var(--cyan-dim)"></div> Review</div>
+        <div class="legend-item"><div class="legend-swatch" style="background: #e2e8f0"></div> Waiting</div>
+        <div class="legend-item"><div class="legend-swatch" style="background: var(--green)"></div> User</div>
+      </div>
+    </div>
+
+    <!-- Lane 1: completed -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">FRO-876</span>
+        Date picker fix
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 0.5" title="Plan: 30s"></div>
+        <div class="lane-seg seg-build" style="flex: 4" title="Build: 4m">build</div>
+        <div class="lane-seg seg-audit" style="flex: 1" title="Audit: 1m"></div>
+        <div class="lane-seg seg-wait" style="flex: 0.8" title="Wait: 48s"></div>
+        <div class="lane-seg seg-user" style="flex: 0.3" title="User: 18s"></div>
+      </div>
+      <span class="lane-status ls-done">&#10003; done</span>
+    </div>
+
+    <!-- Lane 2: completed -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">BAK-1165</span>
+        Rate limiting
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 1.5" title="Plan: 1m30s">plan</div>
+        <div class="lane-seg seg-wait" style="flex: 3" title="Wait: 3m"></div>
+        <div class="lane-seg seg-user" style="flex: 0.4" title="User: 24s"></div>
+        <div class="lane-seg seg-audit" style="flex: 1" title="Audit: 1m"></div>
+        <div class="lane-seg seg-wait" style="flex: 1.5" title="Wait: 1m30s"></div>
+        <div class="lane-seg seg-user" style="flex: 0.2" title="User: 12s"></div>
+        <div class="lane-seg seg-build" style="flex: 5" title="Build: 5m">build</div>
+        <div class="lane-seg seg-review" style="flex: 1.2" title="Review: 1m12s"></div>
+        <div class="lane-seg seg-wait" style="flex: 0.5" title="Wait: 30s"></div>
+        <div class="lane-seg seg-user" style="flex: 0.2" title="User: 12s"></div>
+      </div>
+      <span class="lane-status ls-done">&#10003; done</span>
+    </div>
+
+    <!-- Lane 3: WAITING (urgent) -->
+    <div class="lane lane-selected" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">BAK-1179</span>
+        Webhook retry
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 1.4" title="Plan: 1m23s">plan</div>
+        <div class="lane-seg seg-wait" style="flex: 4.2" title="Wait: 4m12s"></div>
+        <div class="lane-seg seg-user" style="flex: 0.3" title="User: 18s"></div>
+        <div class="lane-seg seg-audit" style="flex: 1" title="Audit: 58s"></div>
+        <div class="lane-seg seg-wait" style="flex: 1.7" title="Wait: 1m44s"></div>
+        <div class="lane-seg seg-user" style="flex: 0.2" title="User: 12s"></div>
+        <div class="lane-seg seg-build" style="flex: 6.8" title="Build: 6m46s">build</div>
+        <div class="lane-seg seg-review" style="flex: 1.2" title="Review: 1m14s"></div>
+        <div class="lane-seg seg-wait-active" style="flex: 12" title="WAITING: 12m">waiting 12m</div>
+      </div>
+      <span class="lane-status ls-waiting">! waiting</span>
+    </div>
+
+    <!-- Lane 4: WAITING -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">FRO-892</span>
+        Settings redesign
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 2" title="Plan: 2m">plan</div>
+        <div class="lane-seg seg-wait-active" style="flex: 3" title="WAITING: 3m">waiting 3m</div>
+      </div>
+      <span class="lane-status ls-waiting">? questions</span>
+    </div>
+
+    <!-- Lane 5: WAITING -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">PR #312</span>
+        N+1 query fix
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-review" style="flex: 3.5" title="Review: 3m30s">review</div>
+        <div class="lane-seg seg-wait-active" style="flex: 1" title="WAITING: 1m">1m</div>
+      </div>
+      <span class="lane-status ls-waiting">! review</span>
+    </div>
+
+    <!-- Lane 6: working -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">BAK-1201</span>
+        Stripe v3 migration
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 2" title="Plan: 2m">plan</div>
+        <div class="lane-seg seg-wait" style="flex: 5" title="Wait: 5m"></div>
+        <div class="lane-seg seg-user" style="flex: 0.5" title="User: 30s"></div>
+        <div class="lane-seg seg-audit" style="flex: 1.2" title="Audit: 1m12s"></div>
+        <div class="lane-seg seg-wait" style="flex: 2" title="Wait: 2m"></div>
+        <div class="lane-seg seg-user" style="flex: 0.3" title="User: 18s"></div>
+        <div class="lane-seg seg-build" style="flex: 4" title="Build: 4m (in progress)">building...</div>
+      </div>
+      <span class="lane-status ls-working">&#9881; building</span>
+    </div>
+
+    <!-- Lane 7: working -->
+    <div class="lane" onclick="selectLane(this)">
+      <div class="lane-label">
+        <span class="lane-ticket">INF-445</span>
+        Prometheus metrics
+      </div>
+      <div class="lane-bar-container">
+        <div class="lane-seg seg-plan" style="flex: 0.3" title="Plan: 18s">exploring...</div>
+      </div>
+      <span class="lane-status ls-working">&#9881; exploring</span>
+    </div>
+  </div>
+
+  <!-- ━━━ Bottom split: attention queue + detail ━━━ -->
+  <div class="split-bottom">
+
+    <!-- Attention queue -->
+    <div class="attn-panel">
+      <div class="attn-panel-header">
+        <span class="attn-panel-title">Needs attention</span>
+        <span class="attn-count">3</span>
+      </div>
+      <div class="attn-list">
+        <div class="attn-item selected" onclick="selectAttn(this)">
+          <div class="attn-item-top">
+            <div class="attn-dot attn-dot-urgent"></div>
+            <span class="attn-id">BAK-1179</span>
+            <span class="attn-wait">12m</span>
+          </div>
+          <div class="attn-item-title">Webhook retry logic</div>
+          <div class="attn-item-detail">
+            <span class="attn-step-pill pill-cyan">build-audit</span>
+            5 findings (2 high)
+          </div>
+        </div>
+        <div class="attn-item" onclick="selectAttn(this)">
+          <div class="attn-item-top">
+            <div class="attn-dot"></div>
+            <span class="attn-id">FRO-892</span>
+            <span class="attn-wait">3m</span>
+          </div>
+          <div class="attn-item-title">Settings page redesign</div>
+          <div class="attn-item-detail">
+            <span class="attn-step-pill pill-orange">plan</span>
+            6 questions to answer
+          </div>
+        </div>
+        <div class="attn-item" onclick="selectAttn(this)">
+          <div class="attn-item-top">
+            <div class="attn-dot"></div>
+            <span class="attn-id">PR #312</span>
+            <span class="attn-wait">1m</span>
+          </div>
+          <div class="attn-item-title">N+1 query in activity feed</div>
+          <div class="attn-item-detail">
+            <span class="attn-step-pill pill-red">code-review</span>
+            8 findings to review
+          </div>
+        </div>
+      </div>
+
+      <!-- Working items -->
+      <div class="working-section">
+        <div class="working-label">Claude is working (2)</div>
+        <div class="working-item">
+          <div class="wi-spinner"></div>
+          <span class="wi-id">BAK-1201</span>
+          <span class="wi-title">Stripe v3 migration</span>
+          <span class="wi-step">build 3/7</span>
+        </div>
+        <div class="working-item">
+          <div class="wi-spinner"></div>
+          <span class="wi-id">INF-445</span>
+          <span class="wi-title">Prometheus metrics</span>
+          <span class="wi-step">exploring</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail panel -->
+    <div class="detail-panel">
+      <div class="detail-header">
+        <div class="detail-ticket">BAK-1179</div>
+        <div class="detail-title">Add webhook retry logic with exponential backoff</div>
+        <div class="detail-meta">
+          <span class="detail-step-badge">build-audit</span>
+          <span>5 findings</span>
+          <span>waiting 12m</span>
+        </div>
+      </div>
+
+      <div class="detail-body">
+        <!-- Mini timeline -->
+        <div class="detail-mini-tl">
+          <div class="dtl-seg seg-plan" style="flex: 1.4">plan</div>
+          <div class="dtl-seg seg-wait" style="flex: 4.2"></div>
+          <div class="dtl-seg seg-user" style="flex: 0.3"></div>
+          <div class="dtl-seg seg-audit" style="flex: 1">audit</div>
+          <div class="dtl-seg seg-wait" style="flex: 1.7"></div>
+          <div class="dtl-seg seg-user" style="flex: 0.2"></div>
+          <div class="dtl-seg seg-build" style="flex: 6.8">build</div>
+          <div class="dtl-seg seg-review" style="flex: 1.2"></div>
+          <div class="dtl-seg seg-wait-active" style="flex: 12">now</div>
+        </div>
+
+        <!-- Findings -->
+        <div class="d-finding">
+          <div class="d-finding-header">
+            <span class="df-sev df-sev-high">high</span>
+            <span class="df-title">Race condition in retry scheduler</span>
+          </div>
+          <div class="d-finding-body">
+            <code>schedule_retry()</code> reads and increments <code>retry_count</code> without a lock. Concurrent deliveries could schedule overlapping retries.
+          </div>
+          <div class="d-triage">
+            <button class="d-triage-btn sel-accept">Accept</button>
+            <button class="d-triage-btn">Drop</button>
+            <button class="d-triage-btn">Downgrade</button>
+            <button class="d-triage-btn">Discuss</button>
+          </div>
+        </div>
+
+        <div class="d-finding">
+          <div class="d-finding-header">
+            <span class="df-sev df-sev-high">high</span>
+            <span class="df-title">Missing null check on webhook_url</span>
+          </div>
+          <div class="d-finding-body">
+            <code>dispatch_webhook()</code> passes <code>delivery.webhook_url</code> to <code>httpx.post()</code> without a None check. Deleted endpoints will crash the worker.
+          </div>
+          <div class="d-triage">
+            <button class="d-triage-btn sel-accept">Accept</button>
+            <button class="d-triage-btn">Drop</button>
+            <button class="d-triage-btn">Downgrade</button>
+            <button class="d-triage-btn">Discuss</button>
+          </div>
+        </div>
+
+        <div class="d-finding">
+          <div class="d-finding-header">
+            <span class="df-sev df-sev-med">med</span>
+            <span class="df-title">Extract backoff calc to utility</span>
+          </div>
+          <div class="d-finding-body">
+            Backoff formula <code>min(30, 2**count)</code> is inlined. Extract to <code>calculate_backoff()</code> for testability.
+          </div>
+          <div class="d-triage">
+            <button class="d-triage-btn">Accept</button>
+            <button class="d-triage-btn sel-drop">Drop</button>
+            <button class="d-triage-btn">Downgrade</button>
+            <button class="d-triage-btn">Discuss</button>
+          </div>
+        </div>
+
+        <div class="d-finding" style="border-left: 3px solid var(--amber);">
+          <div class="d-finding-header">
+            <span class="df-sev df-sev-info">eval</span>
+            <span class="df-title">Good test coverage (87%)</span>
+          </div>
+          <div class="d-finding-body">
+            Tests cover main flow, backoff ceiling, max retry. Missing: webhook_url changes between retries.
+          </div>
+        </div>
+
+        <div class="d-finding" style="border-left: 3px solid var(--amber);">
+          <div class="d-finding-header">
+            <span class="df-sev df-sev-info">eval</span>
+            <span class="df-title">Naming conventions followed</span>
+          </div>
+          <div class="d-finding-body">All new code follows project conventions. No issues.</div>
+        </div>
+      </div>
+
+      <div class="detail-footer">
+        <div class="df-progress"><strong>3/3</strong> triage findings responded</div>
+        <button class="df-skip">Skip &rarr;</button>
+        <button class="df-submit">Submit &amp; Next</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast notification demo -->
+<div class="toast-demo" id="toast-demo">
+  <button class="toast-close" onclick="this.parentElement.style.display='none'">&times;</button>
+  <div class="toast-title">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="var(--cyan)"><circle cx="8" cy="8" r="7"/></svg>
+    INF-445 ready for review
+  </div>
+  <div class="toast-body">Plan exploration complete. 4 questions need your input.</div>
+  <button class="toast-action" onclick="this.closest('.toast-demo').style.display='none'">Switch to it</button>
+</div>
+
+<script>
+function selectLane(el) {
+  document.querySelectorAll('.lane').forEach(l => l.classList.remove('lane-selected'));
+  el.classList.add('lane-selected');
+}
+function selectAttn(el) {
+  document.querySelectorAll('.attn-item').forEach(i => i.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+// Auto-hide toast after 8s
+setTimeout(() => {
+  const toast = document.getElementById('toast-demo');
+  if (toast) toast.style.display = 'none';
+}, 8000);
+</script>
+
+</body>
+</html>

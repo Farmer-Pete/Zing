@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Card Prototype H — Click to Expand</title>
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --off-white: #f8f6f3;
+    --gray-50: #faf9f7;
+    --gray-100: #f3f1ee;
+    --gray-200: #e8e5e1;
+    --gray-300: #d4d0cb;
+    --gray-500: #8a8580;
+    --gray-700: #4a4540;
+    --text-primary: #1a1714;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--off-white); padding: 2rem; color: var(--text-primary); }
+  h1 { font-size: 1.1rem; margin-bottom: 0.3rem; color: var(--navy); }
+  .subtitle { font-size: 0.8rem; color: var(--gray-500); margin-bottom: 1rem; }
+  .concept { font-size: 0.75rem; color: var(--gray-700); line-height: 1.6; margin-bottom: 2rem; max-width: 640px; background: #fff; padding: 1rem; border-radius: 8px; border-left: 3px solid #7c3aed; }
+  .concept strong { color: var(--navy); }
+
+  .board { display: grid; grid-template-columns: repeat(2, 320px); gap: 1.5rem; }
+  .label { font-size: 0.6rem; color: var(--gray-500); margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  /* ── Card ── */
+  .card {
+    background: #fff;
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    overflow: hidden;
+  }
+  .card:hover { border-color: var(--orange); box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
+  .card.expanded { cursor: default; }
+
+  .card-header {
+    padding: 0.5rem 0.6rem;
+    background: #fffcf8;
+    border-bottom: 1px solid var(--gray-200);
+    border-top: 1px solid #f5c97a;
+    border-left: 1px solid #f5c97a;
+    border-right: 1px solid #f5c97a;
+    border-radius: 5px 5px 0 0;
+    margin: -1px -1px 0;
+  }
+  .card-header-top { display: flex; align-items: baseline; gap: 0.35rem; }
+  .card-ticket-id { font-size: 0.55rem; font-weight: 700; color: var(--orange); text-decoration: none; }
+  .card-assignee { width: 16px; height: 16px; border-radius: 50%; background: var(--navy); color: #fff; font-size: 0.4rem; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-left: auto; }
+  .card-title { font-size: 0.75rem; font-weight: 600; line-height: 1.3; margin-top: 0.15rem; }
+
+  /* ── Compact summary line (visible when collapsed) ── */
+  .card-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.55rem;
+    color: var(--gray-500);
+  }
+  .card.expanded .card-summary { display: none; }
+
+  .summary-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.5rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 999px;
+    background: var(--gray-100);
+    color: var(--gray-700);
+    white-space: nowrap;
+  }
+  .summary-chip-active { background: #dbeafe; color: #1d4ed8; }
+  .summary-chip-pr { background: #e8f5e9; color: #2e7d32; }
+  .summary-chip-warn { background: #fff3e0; color: #e65100; }
+
+  .summary-dots { display: flex; gap: 2px; align-items: center; }
+  .summary-dot { width: 5px; height: 5px; border-radius: 50%; }
+
+  /* ── Expanded detail panel ── */
+  .card-detail {
+    display: none;
+    border-top: 1px solid var(--gray-100);
+  }
+  .card.expanded .card-detail { display: block; }
+
+  .detail-section {
+    padding: 0.5rem 0.6rem;
+  }
+  .detail-section + .detail-section { border-top: 1px solid var(--gray-100); }
+
+  .detail-section-title {
+    font-size: 0.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--gray-500);
+    margin-bottom: 0.4rem;
+  }
+
+  /* PR detail row */
+  .detail-pr {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.3rem;
+  }
+  .detail-pr a { font-size: 0.6rem; color: #27ae60; text-decoration: none; display: inline-flex; align-items: center; gap: 0.2rem; }
+  .detail-pr a svg { width: 11px; height: 11px; }
+  .detail-pr .strip-pill { font-size: 0.45rem; font-weight: 700; padding: 0.05rem 0.25rem; border-radius: 999px; text-transform: uppercase; }
+  .strip-pill-approved { background: #e8f5e9; color: #2e7d32; }
+  .strip-pill-changes { background: #fff3e0; color: #e65100; }
+  .strip-ci-dots { display: flex; gap: 2px; align-items: center; }
+  .strip-ci-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .strip-ci-green { background: #27ae60; }
+  .strip-ci-red { background: #e74c3c; }
+
+  /* Session detail row */
+  .detail-session {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.3rem;
+  }
+  .session-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .session-alive { background: #3b82f6; animation: pulse 2s infinite; }
+  .session-dead { background: var(--gray-300); }
+  .session-label { font-size: 0.55rem; color: var(--gray-700); }
+  .session-label-dead { color: var(--gray-500); }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Action buttons in detail panel — organized in groups */
+  .detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+
+  .detail-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 5px;
+    border: 1px solid var(--gray-200);
+    background: #fff;
+    cursor: pointer;
+    font-size: 0.6rem;
+    color: var(--gray-700);
+    font-family: inherit;
+    transition: all 0.1s;
+  }
+  .detail-btn:hover { background: var(--gray-50); border-color: var(--gray-300); }
+  .detail-btn-primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .detail-btn-primary:hover { background: #e06810; }
+  .detail-btn-blue { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+  .detail-btn-blue:hover { background: #2563eb; }
+  .detail-btn-icon { font-size: 0.65rem; }
+
+  /* Collapse button */
+  .detail-collapse {
+    display: flex;
+    justify-content: center;
+    padding: 0.25rem;
+    border-top: 1px solid var(--gray-100);
+  }
+  .collapse-btn {
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.55rem;
+    color: var(--gray-300);
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+  }
+  .collapse-btn:hover { color: var(--gray-500); background: var(--gray-50); }
+
+  /* Click hint */
+  .click-hint {
+    font-size: 0.45rem;
+    color: var(--gray-300);
+    text-align: center;
+    padding: 0.2rem;
+    transition: opacity 0.15s;
+  }
+  .card:hover .click-hint { opacity: 1; }
+  .card:not(:hover) .click-hint { opacity: 0; }
+  .card.expanded .click-hint { display: none; }
+</style>
+</head>
+<body>
+
+<h1>Prototype H: Click to Expand</h1>
+<p class="subtitle">Zero buttons when collapsed. Click card to reveal full detail panel.</p>
+
+<div class="concept">
+  <strong>Concept:</strong> The collapsed card is <strong>purely informational</strong> — it shows a compact summary line with chips (PR status, session state, CI dots) but <strong>zero action buttons</strong>. Clicking anywhere on the card expands an inline detail panel with full PR info, session details, and all actions organized by section.
+  <br><br>
+  <strong>Key benefit:</strong> The kanban board stays visually clean. Cards are compact and scan-friendly. Actions only appear when you've committed attention to a specific card.
+  <br><br>
+  <strong>Trade-off:</strong> Every action requires two interactions: click to expand, then click the action. Power users might find this slower. The expanded card takes more vertical space.
+</div>
+
+<div class="board">
+
+  <!-- Card 1: Collapsed state -->
+  <div>
+    <p class="label">Collapsed (default view)</p>
+    <div class="card" onclick="toggleCard(this)">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id" onclick="event.stopPropagation()">ENG-1042</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Add webhook retry logic with exponential backoff</div>
+      </div>
+      <div class="card-summary">
+        <span class="summary-chip summary-chip-pr">PR #487 approved</span>
+        <div class="summary-dots">
+          <span class="summary-dot strip-ci-green"></span>
+          <span class="summary-dot strip-ci-green"></span>
+          <span class="summary-dot strip-ci-green"></span>
+        </div>
+        <span class="summary-chip summary-chip-active">&#9679; session</span>
+        <span class="summary-chip summary-chip-warn">3 findings</span>
+      </div>
+      <div class="click-hint">click to expand</div>
+      <div class="card-detail">
+        <div class="detail-section">
+          <div class="detail-section-title">Pull Request</div>
+          <div class="detail-pr">
+            <a href="#" onclick="event.stopPropagation()"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg> backend-v1#487</a>
+            <span style="font-size:0.55rem;color:var(--gray-500)">pnaudus</span>
+            <span class="strip-pill strip-pill-approved">approved</span>
+            <div class="strip-ci-dots">
+              <span class="strip-ci-dot strip-ci-green"></span>
+              <span class="strip-ci-dot strip-ci-green"></span>
+              <span class="strip-ci-dot strip-ci-green"></span>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button class="detail-btn detail-btn-primary" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128269;</span> Review</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#9654;</span> Start locally</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128296;</span> Setup env</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#8599;</span> GitHub</button>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">Sessions</div>
+          <div class="detail-session">
+            <span class="session-dot session-alive"></span>
+            <span class="session-label">Running: review ENG-1042</span>
+          </div>
+          <div class="detail-actions">
+            <button class="detail-btn detail-btn-blue" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#9655;</span> Attach</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128683;</span> Kill</button>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">Audit</div>
+          <div style="font-size:0.55rem;color:#e65100;font-weight:600;margin-bottom:0.3rem;">3 findings require attention</div>
+          <div class="detail-actions">
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128203;</span> Copy launch cmd</button>
+          </div>
+        </div>
+
+        <div class="detail-collapse">
+          <button class="collapse-btn" onclick="event.stopPropagation(); toggleCard(this.closest('.card'))">&#9650; collapse</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Already expanded -->
+  <div>
+    <p class="label">Expanded (after click)</p>
+    <div class="card expanded">
+      <div class="card-header">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">BAK-305</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Fix race condition in batch processor queue drain</div>
+      </div>
+      <div class="card-summary">
+        <span class="summary-chip summary-chip-warn">PR #501 changes</span>
+        <div class="summary-dots">
+          <span class="summary-dot strip-ci-green"></span>
+          <span class="summary-dot strip-ci-red"></span>
+        </div>
+      </div>
+      <div class="card-detail">
+        <div class="detail-section">
+          <div class="detail-section-title">Pull Request</div>
+          <div class="detail-pr">
+            <a href="#"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg> backend-v1#501</a>
+            <span style="font-size:0.55rem;color:var(--gray-500)">pnaudus</span>
+            <span class="strip-pill strip-pill-changes">changes requested</span>
+            <div class="strip-ci-dots">
+              <span class="strip-ci-dot strip-ci-green"></span>
+              <span class="strip-ci-dot strip-ci-red"></span>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button class="detail-btn detail-btn-primary"><span class="detail-btn-icon">&#9997;</span> Respond</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#128269;</span> Review</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#9654;</span> Start locally</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#128296;</span> Setup env</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#128203;</span> Copy cmd</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#8599;</span> GitHub</button>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">Sessions</div>
+          <div class="detail-session">
+            <span class="session-dot session-dead"></span>
+            <span class="session-label session-label-dead">Stopped: respond BAK-305</span>
+          </div>
+          <div class="detail-actions">
+            <button class="detail-btn"><span class="detail-btn-icon">&#128260;</span> Resume</button>
+          </div>
+        </div>
+
+        <div class="detail-collapse">
+          <button class="collapse-btn" onclick="toggleCard(this.closest('.card'))">&#9650; collapse</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 3: Simple ticket (collapsed) -->
+  <div>
+    <p class="label">Simple ticket (collapsed)</p>
+    <div class="card" onclick="toggleCard(this)">
+      <div class="card-header" style="background: #f6f7f9; border-top-color: #b5baca; border-left-color: #b5baca; border-right-color: #b5baca;">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id" onclick="event.stopPropagation()">FRO-892</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Migrate settings page to new design system tokens</div>
+      </div>
+      <div class="click-hint">click to expand</div>
+      <div class="card-detail">
+        <div class="detail-section">
+          <div class="detail-actions">
+            <button class="detail-btn detail-btn-primary" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#9654;</span> Start ticket</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128203;</span> Plan ticket</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#128203;</span> Copy cmd</button>
+            <button class="detail-btn" onclick="event.stopPropagation()"><span class="detail-btn-icon">&#8599;</span> Linear</button>
+          </div>
+        </div>
+        <div class="detail-collapse">
+          <button class="collapse-btn" onclick="event.stopPropagation(); toggleCard(this.closest('.card'))">&#9650; collapse</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 4: Simple ticket expanded -->
+  <div>
+    <p class="label">Simple ticket (expanded)</p>
+    <div class="card expanded">
+      <div class="card-header" style="background: #f6f7f9; border-top-color: #b5baca; border-left-color: #b5baca; border-right-color: #b5baca;">
+        <div class="card-header-top">
+          <a href="#" class="card-ticket-id">FRO-892</a>
+          <div class="card-assignee">PN</div>
+        </div>
+        <div class="card-title">Migrate settings page to new design system tokens</div>
+      </div>
+      <div class="card-detail">
+        <div class="detail-section">
+          <div class="detail-actions">
+            <button class="detail-btn detail-btn-primary"><span class="detail-btn-icon">&#9654;</span> Start ticket</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#128203;</span> Plan ticket</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#128203;</span> Copy cmd</button>
+            <button class="detail-btn"><span class="detail-btn-icon">&#8599;</span> Linear</button>
+          </div>
+        </div>
+        <div class="detail-collapse">
+          <button class="collapse-btn" onclick="toggleCard(this.closest('.card'))">&#9650; collapse</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function toggleCard(card) {
+  card.classList.toggle('expanded');
+}
+</script>
+</body>
+</html>

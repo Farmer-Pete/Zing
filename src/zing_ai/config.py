@@ -84,6 +84,7 @@ class CommandCenterConfig(BaseModel):
     github_excluded_repos: list[str] = Field(default_factory=list)
     poll_seconds: PollSeconds = 60
     claude_flags: str = ""
+    zellij_support: bool = True
     zellij_web_port: int = 8082
 
 

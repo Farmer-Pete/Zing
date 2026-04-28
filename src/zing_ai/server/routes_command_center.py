@@ -42,6 +42,7 @@ from zing_ai.server.command_center import (
     infer_repo_for_ticket,
 )
 from zing_ai.server.models import (
+    LAUNCH_GRACE_SECONDS,
     ClaudeCodeSession,
     QuestionData,
     QuestionOption,
@@ -815,6 +816,18 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
             # Notify all SSE connections of board change.
             _push_board_changed(request.app)
+
+            # Schedule a follow-up board_changed when the launch grace window
+            # ends. The 0.5s liveness poll already pushes board_changed when
+            # zellij comes up, so the happy path flips STARTING→STARTED quickly.
+            # This timer covers the unhappy path (zellij never starts): without
+            # it the strip would sit on "Starting…" until the next external
+            # poll (~60s) finally re-rendered with the expired grace.
+            async def _grace_expiry_push() -> None:
+                await asyncio.sleep(LAUNCH_GRACE_SECONDS + 1)
+                _push_board_changed(request.app)
+
+            asyncio.create_task(_grace_expiry_push())
 
             yield _sse_toast("Launched", "ok")
             if reset_busy is not None:

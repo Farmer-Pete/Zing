@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paradigm 2: Stable Grouping + Visual Urgency</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f1b2d;
+    --orange: #f57c20;
+    --amber: #f5a623;
+    --cyan: #3ecfe0;
+    --gold: #ffd666;
+    --red-orange: #e84430;
+    --green: #27ae60;
+    --bg: #f8f6f3;
+    --white: #ffffff;
+    --gray-50: #faf9f7;
+    --gray-100: #f0eeeb;
+    --gray-200: #e2dfdb;
+    --gray-300: #c8c4bf;
+    --gray-400: #a8a29e;
+    --gray-500: #78716c;
+    --gray-600: #57534e;
+    --gray-700: #3c3836;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--navy); }
+
+  .brand-bar {
+    background: var(--navy); height: 56px; display: flex; align-items: center;
+    padding: 0 2rem;
+    border-bottom: 3px solid;
+    border-image: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--cyan)) 1;
+  }
+  .brand-bar h1 { color: var(--white); font-size: 1.25rem; font-weight: 800; }
+  .brand-bar span { color: var(--orange); }
+  .brand-bar .subtitle { color: var(--gray-400); font-size: 0.8rem; font-weight: 400; margin-left: 1rem; }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 1.5rem 2rem; }
+
+  /* Quick attention strip at very top — minimal */
+  .attention-strip {
+    display: flex; align-items: center; gap: 1.25rem;
+    padding: 0.65rem 1rem; margin-bottom: 1.5rem;
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-radius: var(--radius);
+    font-size: 0.75rem;
+  }
+  .attn-stat {
+    display: flex; align-items: center; gap: 0.4rem;
+  }
+  .attn-stat strong { font-size: 1rem; font-weight: 800; }
+  .attn-red strong { color: var(--red-orange); }
+  .attn-amber strong { color: var(--amber); }
+  .attn-cyan strong { color: var(--cyan); }
+  .attn-green strong { color: var(--green); }
+  .attn-stat span { color: var(--gray-500); }
+  .attn-sep { width: 1px; height: 24px; background: var(--gray-200); }
+
+  .controls {
+    display: flex; gap: 0.35rem; margin-left: auto; align-items: center;
+  }
+  .ctrl-label { font-size: 0.65rem; color: var(--gray-400); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .ctrl-btn {
+    font-family: inherit; font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.6rem;
+    border: 1px solid var(--gray-200); border-radius: 999px; background: var(--white);
+    color: var(--gray-600); cursor: pointer;
+  }
+  .ctrl-btn.active { background: var(--navy); color: var(--white); border-color: var(--navy); }
+
+  /* ──── Group sections ──── */
+  .group { margin-bottom: 1.75rem; }
+  .group-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.5rem 0; margin-bottom: 0.65rem;
+    border-bottom: 2px solid var(--gray-100);
+    cursor: pointer; user-select: none;
+  }
+  .group-chevron {
+    width: 0; height: 0;
+    border-left: 5px solid var(--gray-400);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    flex-shrink: 0;
+    transition: transform 0.2s;
+  }
+  .group.open .group-chevron { transform: rotate(90deg); }
+  .group-icon {
+    width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center;
+    justify-content: center; font-size: 0.8rem; flex-shrink: 0;
+    background: var(--gray-100);
+  }
+  .group-title { font-size: 0.9rem; font-weight: 700; }
+  .group-meta { font-size: 0.65rem; color: var(--gray-400); margin-left: 0.5rem; font-weight: 500; }
+  .group-counts {
+    margin-left: auto;
+    display: flex; gap: 0.4rem; align-items: center;
+  }
+  .group-attn-pill {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    font-size: 0.6rem; font-weight: 700; padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: #fff5f5; color: var(--red-orange); border: 1px solid #ffcdd2;
+  }
+  .group-attn-pill .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--red-orange); animation: pulse 2s infinite; }
+  .group-total {
+    font-size: 0.6rem; font-weight: 600; padding: 0.15rem 0.5rem;
+    border-radius: 999px; background: var(--gray-100); color: var(--gray-600);
+  }
+
+  .group-body {
+    display: flex; flex-direction: column; gap: 0.6rem;
+    max-height: 0; overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.2s ease;
+    opacity: 0;
+  }
+  .group.open .group-body { max-height: 3000px; opacity: 1; }
+
+  /* ──── Hub cards ──── */
+  .hub {
+    background: var(--white); border: 1px solid var(--gray-200);
+    border-radius: var(--radius); overflow: hidden;
+    transition: all 0.15s;
+    position: relative;
+  }
+  .hub:hover { border-color: var(--gray-300); box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+
+  /* URGENCY VISUAL TREATMENTS */
+  /* Hot — needs your input */
+  .hub.hot {
+    border-color: var(--red-orange);
+    box-shadow: 0 0 0 1px var(--red-orange), 0 4px 16px rgba(232,68,48,0.15);
+  }
+  .hub.hot::before {
+    content: '';
+    position: absolute; top: 0; left: 0; bottom: 0;
+    width: 4px;
+    background: linear-gradient(180deg, var(--red-orange), #c0392b);
+    animation: pulse 2s infinite;
+  }
+
+  /* Warm — review requested of you, audit done waiting on others */
+  .hub.warm {
+    border-left: 4px solid var(--amber);
+    box-shadow: 0 1px 4px rgba(245,166,35,0.12);
+  }
+
+  /* Active — Claude/CI doing something, no human action */
+  .hub.active {
+    border-left: 4px solid var(--cyan);
+  }
+
+  /* Cool — done or quiet */
+  .hub.cool { opacity: 0.8; }
+  .hub.cool:hover { opacity: 1; }
+
+  .hub-header {
+    padding: 0.85rem 1.25rem; display: flex; align-items: center; gap: 0.7rem;
+    cursor: pointer; user-select: none; transition: background 0.1s;
+  }
+  .hub-header:hover { background: var(--gray-50); }
+  .hub-header .chev {
+    width: 0; height: 0;
+    border-left: 5px solid var(--gray-400);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    flex-shrink: 0;
+    transition: transform 0.2s;
+  }
+  .hub.open .hub-header .chev { transform: rotate(90deg); }
+
+  .hub-id { font-size: 0.78rem; font-weight: 700; color: var(--cyan); white-space: nowrap; }
+  .hub-type-badge {
+    font-size: 0.5rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 0.1rem 0.4rem; border-radius: 3px; white-space: nowrap;
+  }
+  .type-pr { background: #e8eaf6; color: #3949ab; }
+  .type-session { background: #fce4ec; color: #c62828; }
+
+  .hub-name { font-size: 0.85rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Urgency badge replaces neutral chips when hot/warm */
+  .urgency-badge {
+    display: flex; align-items: center; gap: 0.3rem;
+    font-size: 0.62rem; font-weight: 700; padding: 0.2rem 0.55rem;
+    border-radius: 999px; white-space: nowrap;
+  }
+  .urgency-hot { background: #fff5f5; color: var(--red-orange); border: 1px solid #ffcdd2; }
+  .urgency-hot .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red-orange); animation: pulse 1.5s infinite; }
+  .urgency-warm { background: #fff8e1; color: #bf8c00; border: 1px solid #ffe082; }
+  .urgency-warm .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+  .urgency-active { background: #e0f7fa; color: #00838f; border: 1px solid #b2ebf2; }
+  .urgency-active .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); animation: pulse 2s infinite; }
+
+  .hub-chips { display: flex; gap: 0.3rem; }
+  .hub.open .hub-chips { display: none; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.2rem;
+    font-size: 0.55rem; font-weight: 600; padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-sm); background: var(--gray-50); border: 1px solid var(--gray-100);
+    color: var(--gray-500); white-space: nowrap;
+  }
+  .chip-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .hub-avatar {
+    width: 24px; height: 24px; border-radius: 50%; background: var(--navy);
+    color: var(--white); font-size: 0.5rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+
+  /* Spokes */
+  .spokes {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid transparent;
+    max-height: 0; overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.2s ease;
+    opacity: 0;
+  }
+  .hub.open .spokes { max-height: 400px; opacity: 1; border-top-color: var(--gray-100); }
+  .spoke { padding: 0.7rem 1rem; border-right: 1px solid var(--gray-100); }
+  .spoke:last-child { border-right: none; }
+  .spoke-label {
+    font-size: 0.5rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--gray-400); margin-bottom: 0.4rem;
+    display: flex; align-items: center; gap: 0.3rem;
+  }
+  .spoke-icon {
+    width: 12px; height: 12px; border-radius: 2px; display: flex; align-items: center;
+    justify-content: center; font-size: 0.4rem; font-weight: 800;
+  }
+  .icon-pr { background: #e8eaf6; color: #3949ab; }
+  .icon-session { background: #fce4ec; color: #c62828; }
+  .icon-audit { background: #fff3e0; color: #e65100; }
+  .spoke-item { display: flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0; font-size: 0.68rem; }
+  .spoke-item + .spoke-item { border-top: 1px solid var(--gray-50); }
+  .sd { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .sd-green { background: var(--green); }
+  .sd-amber { background: var(--amber); animation: pulse 2s infinite; }
+  .sd-red { background: var(--red-orange); }
+  .sd-cyan { background: var(--cyan); }
+  .sd-purple { background: #7c3aed; }
+  .spoke-text { flex: 1; color: var(--gray-600); min-width: 0; }
+  .spoke-text strong { color: var(--navy); }
+  .spoke-empty { font-size: 0.6rem; color: var(--gray-300); font-style: italic; padding: 0.25rem 0; }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+</style>
+<script>
+  document.addEventListener('click', (e) => {
+    const hub = e.target.closest('.hub-header');
+    if (hub) { hub.parentElement.classList.toggle('open'); return; }
+    const grp = e.target.closest('.group-header');
+    if (grp) { grp.parentElement.classList.toggle('open'); }
+  });
+</script>
+</head>
+<body>
+
+<div class="brand-bar">
+  <h1><span>Zing</span> Command Center</h1>
+  <span class="subtitle">Paradigm 2: Stable Grouping + Visual Urgency</span>
+</div>
+
+<div class="container">
+
+  <!-- Tiny pulse strip — at-a-glance temperature -->
+  <div class="attention-strip">
+    <div class="attn-stat attn-red"><strong>3</strong><span>need your input</span></div>
+    <div class="attn-sep"></div>
+    <div class="attn-stat attn-amber"><strong>2</strong><span>review requested</span></div>
+    <div class="attn-sep"></div>
+    <div class="attn-stat attn-cyan"><strong>3</strong><span>Claude/CI active</span></div>
+    <div class="attn-sep"></div>
+    <div class="attn-stat attn-green"><strong>2</strong><span>done this week</span></div>
+    <div class="controls">
+      <span class="ctrl-label">Group by:</span>
+      <button class="ctrl-btn active">Team</button>
+      <button class="ctrl-btn">Owner</button>
+      <button class="ctrl-btn">Project</button>
+    </div>
+  </div>
+
+  <!-- BACK END -->
+  <div class="group open">
+    <div class="group-header">
+      <span class="group-chevron"></span>
+      <div class="group-icon">&#128221;</div>
+      <span class="group-title">Back End</span>
+      <span class="group-meta">4 hubs</span>
+      <div class="group-counts">
+        <span class="group-attn-pill"><span class="dot"></span>1 hot</span>
+        <span class="group-total">4</span>
+      </div>
+    </div>
+    <div class="group-body">
+
+      <!-- HOT: BAK-1179 -->
+      <div class="hub hot open">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">BAK-1179</span>
+          <span class="hub-name">Rewrite alert query to use materialized view</span>
+          <span class="urgency-badge urgency-hot"><span class="dot"></span> Chat waiting 12m</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> PR #142</span>
+            <span class="chip"><span class="chip-dot" style="background:var(--amber)"></span> 2 sessions</span>
+            <span class="chip"><span class="chip-dot" style="background:var(--amber)"></span> Audit</span>
+          </div>
+          <div class="hub-avatar">PN</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>#142</strong> CI passing</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-red"></span><span class="spoke-text"><strong>Chat</strong> waiting 12m</span></div>
+            <div class="spoke-item"><span class="sd sd-amber"></span><span class="spoke-text"><strong>Build</strong> agents running</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div>
+            <div class="spoke-item"><span class="sd sd-amber"></span><span class="spoke-text"><strong>Build audit</strong> scanning</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WARM: BAK-1195 (review requested) -->
+      <div class="hub warm">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">BAK-1195</span>
+          <span class="hub-name">Add circuit breaker to payment gateway client</span>
+          <span class="urgency-badge urgency-warm"><span class="dot"></span> Review requested</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--cyan)"></span> PR #144</span>
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> Audit done</span>
+          </div>
+          <div class="hub-avatar">JC</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div>
+            <div class="spoke-item"><span class="sd sd-cyan"></span><span class="spoke-text"><strong>#144</strong> 0/2 reviews</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>Build</strong> done</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>Build audit</strong> all accepted</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTIVE: BAK-1203 (Claude building) -->
+      <div class="hub active">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">BAK-1203</span>
+          <span class="hub-name">Fix N+1 in notification digest endpoint</span>
+          <span class="urgency-badge urgency-active"><span class="dot"></span> Claude building</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--amber)"></span> Building</span>
+          </div>
+          <div class="hub-avatar">PN</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div><div class="spoke-empty">No PRs yet</div></div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-amber"></span><span class="spoke-text"><strong>Build</strong> writing code</span></div>
+          </div>
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div><div class="spoke-empty">No audits</div></div>
+        </div>
+      </div>
+
+      <!-- COOL: BAK-1210 (queued) -->
+      <div class="hub cool">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">BAK-1210</span>
+          <span class="hub-name">Rate-limit webhook retry queue</span>
+          <div class="hub-chips">
+            <span class="chip" style="color:var(--gray-400)">To Do</span>
+          </div>
+          <div class="hub-avatar">PN</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- FRONT END -->
+  <div class="group open">
+    <div class="group-header">
+      <span class="group-chevron"></span>
+      <div class="group-icon">&#127912;</div>
+      <span class="group-title">Front End</span>
+      <span class="group-meta">2 hubs</span>
+      <div class="group-counts">
+        <span class="group-attn-pill"><span class="dot"></span>1 hot</span>
+        <span class="group-total">2</span>
+      </div>
+    </div>
+    <div class="group-body">
+
+      <!-- HOT: FRO-892 (audit findings) -->
+      <div class="hub hot open">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">FRO-892</span>
+          <span class="hub-name">Dashboard widget shows stale data after tab switch</span>
+          <span class="urgency-badge urgency-hot"><span class="dot"></span> 4 audit findings</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> 1 session</span>
+            <span class="chip"><span class="chip-dot" style="background:var(--red-orange)"></span> Audit: 4</span>
+          </div>
+          <div class="hub-avatar">SL</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div><div class="spoke-empty">No PRs yet</div></div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>Plan</strong> completed</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div>
+            <div class="spoke-item"><span class="sd sd-red"></span><span class="spoke-text"><strong>Plan audit</strong> 4 findings</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WARM: FRO-885 (review) -->
+      <div class="hub warm">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">FRO-885</span>
+          <span class="hub-name">Virtualize alert list for 10k+ rows</span>
+          <span class="urgency-badge urgency-warm"><span class="dot"></span> Review requested</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--cyan)"></span> PR #141</span>
+          </div>
+          <div class="hub-avatar">SL</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div>
+            <div class="spoke-item"><span class="sd sd-cyan"></span><span class="spoke-text"><strong>#141</strong> 1/2 reviews</span></div>
+          </div>
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div><div class="spoke-empty">No sessions</div></div>
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div><div class="spoke-empty">No audits</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- INFRASTRUCTURE -->
+  <div class="group open">
+    <div class="group-header">
+      <span class="group-chevron"></span>
+      <div class="group-icon">&#128295;</div>
+      <span class="group-title">Infrastructure</span>
+      <span class="group-meta">1 hub</span>
+      <div class="group-counts">
+        <span class="group-total">1</span>
+      </div>
+    </div>
+    <div class="group-body">
+      <div class="hub active">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">INF-312</span>
+          <span class="hub-name">Upgrade PostgreSQL 15 &rarr; 16</span>
+          <span class="urgency-badge urgency-active"><span class="dot"></span> Awaiting merge</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> PR #148 approved</span>
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> Audit done</span>
+          </div>
+          <div class="hub-avatar">MK</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>#148</strong> approved</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>PR review</strong> done</span></div>
+          </div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div>
+            <div class="spoke-item"><span class="sd sd-green"></span><span class="spoke-text"><strong>PR audit</strong> all accepted</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- UNGROUPED (no team) -->
+  <div class="group open">
+    <div class="group-header">
+      <span class="group-chevron"></span>
+      <div class="group-icon">&#10067;</div>
+      <span class="group-title">Ungrouped</span>
+      <span class="group-meta">2 standalone items</span>
+      <div class="group-counts">
+        <span class="group-attn-pill"><span class="dot"></span>1 hot</span>
+        <span class="group-total">2</span>
+      </div>
+    </div>
+    <div class="group-body">
+
+      <div class="hub hot open">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-type-badge type-session">Zing Session</span>
+          <span class="hub-name">Investigate flaky test_webhook_retry_backoff</span>
+          <span class="urgency-badge urgency-hot"><span class="dot"></span> Question waiting 5m</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--red-orange)"></span> Waiting</span>
+          </div>
+          <div class="hub-avatar">PN</div>
+        </div>
+        <div class="spokes">
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-pr">P</span> PRs</div><div class="spoke-empty">None</div></div>
+          <div class="spoke">
+            <div class="spoke-label"><span class="spoke-icon icon-session">C</span> Sessions</div>
+            <div class="spoke-item"><span class="sd sd-red"></span><span class="spoke-text"><strong>Investigation</strong> "Real Stripe sandbox?"</span></div>
+          </div>
+          <div class="spoke"><div class="spoke-label"><span class="spoke-icon icon-audit">Z</span> Audits</div><div class="spoke-empty">None</div></div>
+        </div>
+      </div>
+
+      <div class="hub active">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-type-badge type-pr">PR</span>
+          <span class="hub-name">#150 &mdash; Fix typo in webhook error message</span>
+          <span class="urgency-badge urgency-active"><span class="dot"></span> CI running</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:var(--green)"></span> CI passing</span>
+          </div>
+          <div class="hub-avatar">JC</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ENGINEERING (done) -->
+  <div class="group">
+    <div class="group-header">
+      <span class="group-chevron"></span>
+      <div class="group-icon">&check;</div>
+      <span class="group-title">Engineering</span>
+      <span class="group-meta">1 done</span>
+      <div class="group-counts">
+        <span class="group-total">1</span>
+      </div>
+    </div>
+    <div class="group-body">
+      <div class="hub cool">
+        <div class="hub-header">
+          <span class="chev"></span>
+          <span class="hub-id">ENG-445</span>
+          <span class="hub-name">Migrate auth tokens to short-lived JWTs</span>
+          <div class="hub-chips">
+            <span class="chip"><span class="chip-dot" style="background:#7c3aed"></span> #139 merged</span>
+          </div>
+          <div class="hub-avatar">PN</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

@@ -604,6 +604,43 @@ def launch(
         sys.exit(1)
 
 
+@cli.command("debug-card")
+@click.option(
+    "--pr",
+    "pr_arg",
+    default=None,
+    help="PR URL, 'owner/repo#NUMBER', or just a number with --repo.",
+)
+@click.option("--ticket", "ticket_arg", default=None, help="Linear ticket ID, e.g. BAK-123.")
+@click.option(
+    "--repo",
+    "repo_default",
+    default=None,
+    help="Default repo for --pr when only a number is given (owner/name).",
+)
+@click.option(
+    "--user",
+    "username_override",
+    default=None,
+    help="Override the GitHub username (default: authenticated viewer).",
+)
+def debug_card_cmd(
+    pr_arg: str | None,
+    ticket_arg: str | None,
+    repo_default: str | None,
+    username_override: str | None,
+) -> None:
+    """Print the Kanban classification trace for a PR and/or ticket.
+
+    Fetches live data and runs it through the same pipeline the Command
+    Center uses, printing per-PR predicate traces, card signals, and the
+    decision-table evaluation in a structured form.
+    """
+    from zing_ai.debug_card import run
+
+    run(pr_arg, ticket_arg, repo_default, username_override)
+
+
 def _register_sim() -> None:
     """Register the sim command group eagerly (imports sim module at CLI load time)."""
     from zing_ai.sim import sim

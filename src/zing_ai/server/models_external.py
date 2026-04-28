@@ -88,6 +88,7 @@ class KanbanCard(BaseModel):
     audit_steps: list[WorkflowStep] = Field(default_factory=list)
     review_group: str | None = None  # mine_passing, mine_failing, others (needs_review only)
     done_group: str | None = None  # ready_to_merge, completed (done only)
+    in_progress_reason: str | None = None  # human-readable explanation (in_progress only)
 
     @property
     def signal_key(self) -> str:

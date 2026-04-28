@@ -157,10 +157,17 @@ class SessionState(StrEnum):
     """Possible states of a review session."""
 
     PENDING = "pending"
+    STARTING = "starting"
     STARTED = "started"
     READY = "ready"
     COMPLETED = "completed"
     STOPPED = "stopped"
+
+
+# Window in which a freshly created ClaudeCodeSession is considered "starting up"
+# rather than "stopped". Covers the gap between create_session_on_server and the
+# 0.5s zellij list-sessions poll first observing the new session name.
+LAUNCH_GRACE_SECONDS = 30
 
 
 _STATE_PRIORITY: dict[str, int] = {
@@ -392,8 +399,10 @@ class ClaudeCodeSession(SessionBase):
     pr_number: int | None = None
     pr_repo: str | None = None
     terminal_session: str | None = None
+    launched_at: datetime | None = None
     notifications: list[Notification] = Field(default_factory=list)
     _session_alive: bool = PrivateAttr(default=False)
+    _ever_seen_alive: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -412,12 +421,23 @@ class ClaudeCodeSession(SessionBase):
     def state(self) -> SessionState:
         """Return the session state.
 
-        If *terminal_session* is set and the session is not alive, return STOPPED.
-        Otherwise return STARTED.
+        STARTED when zellij currently has the session. STARTING when launched
+        recently and never observed alive yet — this covers the brief window
+        between record creation and zellij list-sessions catching up. STOPPED
+        when terminal_session is set but the session has gone away (or never
+        appeared within the grace window).
         """
-        if self.terminal_session is not None and not self._session_alive:
-            return SessionState.STOPPED
-        return SessionState.STARTED
+        if self._session_alive:
+            return SessionState.STARTED
+        if self.terminal_session is None:
+            return SessionState.STARTED
+        if (
+            not self._ever_seen_alive
+            and self.launched_at is not None
+            and (datetime.now() - self.launched_at).total_seconds() < LAUNCH_GRACE_SECONDS
+        ):
+            return SessionState.STARTING
+        return SessionState.STOPPED
 
 
 def _session_discriminator(data: Any) -> str:

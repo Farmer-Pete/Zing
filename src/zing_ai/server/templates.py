@@ -17,6 +17,8 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
+from zing_ai.server.command_center import _pr_needs_response
+
 logger = logging.getLogger(__name__)
 
 _formatter = HtmlFormatter(nowrap=True, style="monokai")
@@ -171,6 +173,7 @@ def _compute_asset_version() -> str:
 
 
 _env.globals["asset_version"] = _compute_asset_version
+_env.globals["pr_needs_response"] = _pr_needs_response
 
 
 def render(template_name: str, **context: Any) -> str:
