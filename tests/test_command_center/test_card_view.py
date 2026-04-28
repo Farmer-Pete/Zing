@@ -242,6 +242,52 @@ class TestPrimaryButton(unittest.TestCase):
         assert pr_view.primary_button is not None
         self.assertEqual(pr_view.primary_button.label, "Build Audit")
 
+    def test_approved_with_followup_commented_review_yields_respond(self) -> None:
+        """``reviewDecision == APPROVED`` + COMMENTED reviewer → Respond.
+
+        Reproduces backend-v1#1895: a reviewer approved, then left
+        follow-up comments (state in ``latestReviews`` overwritten to
+        COMMENTED).  ``_pr_needs_response`` short-circuits on APPROVED
+        and never sees the comment activity, but the author should
+        still respond to the comments rather than Build Audit.
+        """
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["kyle"],
+            requested_reviewers=["max"],
+            reviewer_states={"kyle": "COMMENTED"},
+            review_decision="APPROVED",
+        )
+        view = build_card_view(_card(prs=[pr]), "done", "octocat")
+        pr_view = view.pr_views[0]
+        # The pill correctly reads "approved" (PR-level decision wins).
+        assert pr_view.pill is not None
+        self.assertEqual(pr_view.pill.label, "approved")
+        # _pr_needs_response = False because of the APPROVED short-circuit.
+        self.assertFalse(pr_view.needs_response)
+        # But Kyle's COMMENTED state means the author should still respond.
+        assert pr_view.primary_button is not None
+        self.assertEqual(pr_view.primary_button.label, "Respond")
+        self.assertEqual(pr_view.primary_button.skill, "pr-respond")
+
+    def test_approved_with_only_approved_reviewer_keeps_build_audit(self) -> None:
+        """Pure approved PR (reviewer state APPROVED) → Build Audit.
+
+        No follow-up activity to respond to; the approval *is* the
+        response.  Author should proceed to merge / Build Audit.
+        """
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["kyle"],
+            requested_reviewers=[],
+            reviewer_states={"kyle": "APPROVED"},
+            review_decision="APPROVED",
+        )
+        view = build_card_view(_card(prs=[pr]), "done", "octocat")
+        pr_view = view.pr_views[0]
+        assert pr_view.primary_button is not None
+        self.assertEqual(pr_view.primary_button.label, "Build Audit")
+
 
 # ---------------------------------------------------------------------------
 # CI summary

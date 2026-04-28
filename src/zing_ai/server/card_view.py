@@ -182,17 +182,23 @@ def _primary_button(
     column_cls: str,
     is_author: bool,
     needs_response: bool,
-    pill: StripPill | None,
 ) -> PRPrimaryButton | None:
     """Primary-button rule.
 
-    The button matches the pill: if the strip says "reviewed" the user
-    expects the primary action to address that review activity, even
-    when ``_pr_needs_response`` returns False because of its
-    conservative bot heuristic (e.g. a single human reviewer with only
-    a COMMENTED review on a single-PR card).  Otherwise: Respond when
-    explicitly needed, Build Audit for the author, PR Audit for
-    everyone else.
+    Defaults to Respond whenever the author has *any* reviewer with a
+    non-APPROVED state that hasn't been re-requested.  Catches:
+
+    * frontend-v2#259 — single COMMENTED reviewer on a single-PR card.
+      ``_pr_needs_response`` returns False here because
+      ``_is_human_reviewer`` conservatively classifies a lone COMMENTED
+      reviewer as a bot, but the user expects Respond.
+    * backend-v1#1895 — ``reviewDecision == APPROVED`` with a reviewer
+      whose latest state is COMMENTED (they left follow-up comments
+      after their approval).  ``_pr_needs_response`` short-circuits on
+      ``APPROVED`` so it can't speak to this case.
+
+    Falls through to Build Audit only when every live reviewer is in
+    ``APPROVED`` state — i.e. the PR is genuinely awaiting merge.
     """
     if pr.merged_at is not None:
         return None
@@ -200,7 +206,11 @@ def _primary_button(
         return PRPrimaryButton(label="PR Audit", skill="pr-audit")
     if needs_response:
         return PRPrimaryButton(label="Respond", skill="pr-respond")
-    if pill is not None and pill.label == "reviewed":
+    if is_author and any(
+        state != "APPROVED"
+        for login, state in pr.reviewer_states.items()
+        if login not in pr.requested_reviewers
+    ):
         return PRPrimaryButton(label="Respond", skill="pr-respond")
     if is_author:
         return PRPrimaryButton(label="Build Audit", skill="build-audit")
@@ -236,13 +246,12 @@ def _build_pr_view(
 ) -> PRView:
     is_author = pr.author == current_username
     needs_response = _pr_needs_response(card, pr, current_username)
-    pill = _strip_pill(pr, column_cls, current_username)
     return PRView(
         pr=pr,
         is_author=is_author,
         needs_response=needs_response,
-        pill=pill,
-        primary_button=_primary_button(pr, column_cls, is_author, needs_response, pill),
+        pill=_strip_pill(pr, column_cls, current_username),
+        primary_button=_primary_button(pr, column_cls, is_author, needs_response),
         ci=_ci_summary(pr),
     )
 
