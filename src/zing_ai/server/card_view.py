@@ -178,14 +178,29 @@ def _strip_pill(pr: GitHubPR, column_cls: str, current_username: str) -> StripPi
 
 
 def _primary_button(
-    pr: GitHubPR, column_cls: str, is_author: bool, needs_response: bool
+    pr: GitHubPR,
+    column_cls: str,
+    is_author: bool,
+    needs_response: bool,
+    pill: StripPill | None,
 ) -> PRPrimaryButton | None:
-    """Primary-button rule from ``kanban_card.html`` lines 117-125."""
+    """Primary-button rule.
+
+    The button matches the pill: if the strip says "reviewed" the user
+    expects the primary action to address that review activity, even
+    when ``_pr_needs_response`` returns False because of its
+    conservative bot heuristic (e.g. a single human reviewer with only
+    a COMMENTED review on a single-PR card).  Otherwise: Respond when
+    explicitly needed, Build Audit for the author, PR Audit for
+    everyone else.
+    """
     if pr.merged_at is not None:
         return None
     if column_cls == "col-review" and not is_author:
         return PRPrimaryButton(label="PR Audit", skill="pr-audit")
     if needs_response:
+        return PRPrimaryButton(label="Respond", skill="pr-respond")
+    if pill is not None and pill.label == "reviewed":
         return PRPrimaryButton(label="Respond", skill="pr-respond")
     if is_author:
         return PRPrimaryButton(label="Build Audit", skill="build-audit")
@@ -221,12 +236,13 @@ def _build_pr_view(
 ) -> PRView:
     is_author = pr.author == current_username
     needs_response = _pr_needs_response(card, pr, current_username)
+    pill = _strip_pill(pr, column_cls, current_username)
     return PRView(
         pr=pr,
         is_author=is_author,
         needs_response=needs_response,
-        pill=_strip_pill(pr, column_cls, current_username),
-        primary_button=_primary_button(pr, column_cls, is_author, needs_response),
+        pill=pill,
+        primary_button=_primary_button(pr, column_cls, is_author, needs_response, pill),
         ci=_ci_summary(pr),
     )
 

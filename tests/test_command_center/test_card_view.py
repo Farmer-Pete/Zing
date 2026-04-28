@@ -204,6 +204,44 @@ class TestPrimaryButton(unittest.TestCase):
         self.assertEqual(btn.label, "PR Audit")
         self.assertEqual(btn.skill, "pr-audit")
 
+    def test_reviewed_pill_overrides_build_audit_with_respond(self) -> None:
+        """``pill == 'reviewed'`` → primary defaults to Respond.
+
+        Reproduces frontend-v2#259: a single human reviewer leaves a
+        COMMENTED review on a single-PR card.  ``_is_human_reviewer``
+        conservatively classifies them as a bot (no sibling PRs to
+        provide the "requested elsewhere" signal), so
+        ``_pr_needs_response`` returns False — but the pill is
+        "reviewed", so the user expects to Respond, not Build Audit.
+        """
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["raina"],
+            requested_reviewers=[],
+            reviewer_states={"raina": "COMMENTED"},
+            review_decision=None,
+        )
+        view = build_card_view(_card(prs=[pr]), "in_progress", "octocat")
+        pr_view = view.pr_views[0]
+        # The pill's "reviewed" label is what the user sees.
+        assert pr_view.pill is not None
+        self.assertEqual(pr_view.pill.label, "reviewed")
+        # ``_pr_needs_response`` (conservatively) said False — the bot heuristic.
+        self.assertFalse(pr_view.needs_response)
+        # But the primary button should still match the pill.
+        assert pr_view.primary_button is not None
+        self.assertEqual(pr_view.primary_button.label, "Respond")
+        self.assertEqual(pr_view.primary_button.skill, "pr-respond")
+
+    def test_no_pill_with_no_response_keeps_build_audit(self) -> None:
+        """Author + no review activity + no pill → Build Audit (unchanged)."""
+        pr = _make_pr(author="octocat")  # no reviewers, no decision, no pill
+        view = build_card_view(_card(prs=[pr]), "in_progress", "octocat")
+        pr_view = view.pr_views[0]
+        self.assertIsNone(pr_view.pill)
+        assert pr_view.primary_button is not None
+        self.assertEqual(pr_view.primary_button.label, "Build Audit")
+
 
 # ---------------------------------------------------------------------------
 # CI summary
