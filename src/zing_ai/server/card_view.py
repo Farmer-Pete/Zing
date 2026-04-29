@@ -197,8 +197,17 @@ def _primary_button(
       after their approval).  ``_pr_needs_response`` short-circuits on
       ``APPROVED`` so it can't speak to this case.
 
+    Also defaults to Respond when ``reviewDecision == APPROVED`` but
+    ``requested_reviewers`` is non-empty — the author has an outstanding
+    re-request (or fresh request after approval), so the PR isn't truly
+    awaiting merge yet.  GitHub's ``latestReviews`` excludes anyone in
+    ``reviewRequests``, so the re-requested reviewer's prior state isn't
+    visible; defaulting to Respond lets the author surface any pending
+    feedback rather than skipping straight to a build audit.
+
     Falls through to Build Audit only when every live reviewer is in
-    ``APPROVED`` state — i.e. the PR is genuinely awaiting merge.
+    ``APPROVED`` state and no re-requests are outstanding — i.e. the PR
+    is genuinely awaiting merge.
     """
     if pr.merged_at is not None:
         return None
@@ -211,6 +220,8 @@ def _primary_button(
         for login, state in pr.reviewer_states.items()
         if login not in pr.requested_reviewers
     ):
+        return PRPrimaryButton(label="Respond", skill="pr-respond")
+    if is_author and pr.review_decision == "APPROVED" and pr.requested_reviewers:
         return PRPrimaryButton(label="Respond", skill="pr-respond")
     if is_author:
         return PRPrimaryButton(label="Build Audit", skill="build-audit")

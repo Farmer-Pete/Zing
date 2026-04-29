@@ -288,6 +288,30 @@ class TestPrimaryButton(unittest.TestCase):
         assert pr_view.primary_button is not None
         self.assertEqual(pr_view.primary_button.label, "Build Audit")
 
+    def test_approved_with_outstanding_rerequest_yields_respond(self) -> None:
+        """``reviewDecision == APPROVED`` + non-empty ``requested_reviewers`` → Respond.
+
+        Reproduces backend-v1#1896: kyle approved, then the author
+        re-requested max (or added max as a fresh reviewer after the
+        approval).  GitHub's ``latestReviews`` excludes max, so
+        ``reviewer_states`` only shows kyle's APPROVED state and the
+        existing non-APPROVED-state rule can't fire.  The PR isn't
+        truly awaiting merge — the author has an outstanding review
+        request — so the primary should be Respond, not Build Audit.
+        """
+        pr = _make_pr(
+            author="octocat",
+            reviewers=["kyle"],
+            requested_reviewers=["max"],
+            reviewer_states={"kyle": "APPROVED"},
+            review_decision="APPROVED",
+        )
+        view = build_card_view(_card(prs=[pr]), "done", "octocat")
+        pr_view = view.pr_views[0]
+        assert pr_view.primary_button is not None
+        self.assertEqual(pr_view.primary_button.label, "Respond")
+        self.assertEqual(pr_view.primary_button.skill, "pr-respond")
+
 
 # ---------------------------------------------------------------------------
 # CI summary
