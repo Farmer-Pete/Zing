@@ -872,18 +872,28 @@ class SessionManager:
         return notification
 
     def mark_pending_question_answered(self, session_id: str) -> Notification | None:
-        """Stamp ``answered_at`` on the latest unanswered notification.
+        """Stamp ``answered_at`` on every unanswered notification in the session.
 
-        Returns the notification that was marked, or ``None`` if no session,
-        no unanswered notification, or the session is not a ClaudeCodeSession.
+        The UI only ever surfaces the latest pending question, so older
+        unanswered notifications are unreachable once a newer one arrives.
+        Opening the drawer counts as viewing the queue — clear all of them
+        in one go so they do not re-appear on each subsequent click.
+
+        Returns the most recently marked notification (matching what
+        ``pending_question`` returned before the call), or ``None`` if no
+        session, no unanswered notification, or the session is not a
+        ClaudeCodeSession.
         """
         session = self._sessions.get(session_id)
         if not isinstance(session, ClaudeCodeSession):
             return None
-        notification = session.pending_question
-        if notification is None:
+        unanswered = [n for n in session.notifications if n.answered_at is None]
+        if not unanswered:
             return None
-        notification.answered_at = datetime.now()
+        now = datetime.now()
+        for notification in unanswered:
+            notification.answered_at = now
         self._persist(session)
-        self._notify(f"notification_answered:{notification.id}", session_id)
-        return notification
+        for notification in unanswered:
+            self._notify(f"notification_answered:{notification.id}", session_id)
+        return unanswered[-1]
