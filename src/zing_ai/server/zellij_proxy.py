@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.requests import Request
 from starlette.responses import Response
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -36,20 +41,94 @@ def _get_zellij_port(request: Request) -> int:
 
 
 # ---------------------------------------------------------------------------
-# JS patch constants — extracted verbatim from the prototype
+# JS asset patches
 # ---------------------------------------------------------------------------
+#
+# Zellij ships JS we cannot otherwise modify. Each behavioral fix lives as
+# a `JsPatch` in the `JS_PATCHES` registry below. The asset proxy iterates
+# the registry on every `/assets/<file>` request, applying any patches
+# whose ``target_file`` matches.
+#
+# Failure mode is loud-but-soft: if a patch's anchor string disappears on a
+# Zellij upgrade, ``_replace_once`` logs a one-time warning and serves the
+# unpatched asset. The terminal stays usable; one feature stops working
+# until the patch is re-anchored.
+#
+# When upgrading Zellij, watch stderr / Sentry for
+# ``zellij_proxy: patch '<name>' anchor not found`` — that names the patch
+# whose anchor needs to be regenerated against the new bundle. The
+# ``prototypes/zellij-shift-click`` and ``prototypes/zellij-web`` harnesses
+# dump every Zellij asset to disk on first request, which is the easiest
+# way to grep for a new anchor.
 
-# Patch 1: Add Cmd+C and Cmd+A passthrough alongside the existing Cmd+V passthrough.
-# Also drop modifier-only key presses (Meta/Cmd alone) before they reach the kitty
-# encoder — Zellij excludes Shift/Alt/Ctrl by keyCode but misses Meta. Without this,
-# pressing Cmd by itself sends `\\x1b[77;9u` (because ev.key.charCodeAt(0) of "Meta"
-# is 77 = 'M') and the shell renders an "m"/"M" in the terminal.
-_INPUT_JS_PATCH_TARGET = """\
+# One-shot: each patch warns at most once per process so a persistent
+# upstream change doesn't flood logs.
+_patch_anchor_warned: set[str] = set()
+
+
+@dataclass(frozen=True)
+class JsPatch:
+    """A single text transformation to apply to a Zellij JS asset.
+
+    Patches are pure: ``apply(text) -> text``. They never raise; if an
+    expected anchor is missing the helper logs a warning and returns the
+    input unchanged so the unpatched asset is still served.
+    """
+
+    name: str
+    """Short id used in logs and the registry. Format ``file/feature``."""
+
+    target_file: str
+    """The asset path under ``/assets/`` this patch applies to."""
+
+    why: str
+    """One-sentence reason this patch exists."""
+
+    apply: Callable[[str], str]
+    """Pure transform from raw asset text to patched asset text."""
+
+
+def _replace_once(name: str, target: str, replacement: str) -> Callable[[str], str]:
+    """Build an ``apply`` that runs a single anchored replace, logging a
+    one-time warning when the anchor is missing."""
+
+    def _apply(text: str) -> str:
+        if target not in text:
+            if name not in _patch_anchor_warned:
+                _patch_anchor_warned.add(name)
+                _log.warning(
+                    "zellij_proxy: patch %r anchor not found in served asset; "
+                    "Zellij upstream may have changed. Serving unpatched asset.",
+                    name,
+                )
+            return text
+        return text.replace(target, replacement, 1)
+
+    return _apply
+
+
+def _append(suffix: str) -> Callable[[str], str]:
+    """Build an ``apply`` that appends ``suffix`` to the asset text. For
+    additive patches that don't anchor on existing source text."""
+
+    def _apply(text: str) -> str:
+        return text + suffix
+
+    return _apply
+
+
+# --- input.js: Cmd+C / Cmd+A passthrough + drop modifier-only keypress -----
+#
+# Zellij excludes Shift/Alt/Ctrl by keyCode but misses Meta. Without the
+# modifier-only branch, pressing Cmd alone sends ``\x1b[77;9u`` (because
+# ``ev.key.charCodeAt(0)`` of "Meta" is 77 = 'M') and the shell renders an
+# "m"/"M" in the terminal.
+_CMD_PASSTHROUGH_TARGET = """\
             if (isMac() && ev.key == "v" && ev.metaKey) {
                 // pass cmd-v onwards so that paste is interpreted by xterm.js
                 return;
             }"""
-_INPUT_JS_PATCH_REPLACEMENT = """\
+_CMD_PASSTHROUGH_REPLACEMENT = """\
             if (isMac() && ev.key == "v" && ev.metaKey) {
                 // pass cmd-v onwards so that paste is interpreted by xterm.js
                 return;
@@ -69,11 +148,17 @@ _INPUT_JS_PATCH_REPLACEMENT = """\
                 return;
             }"""
 
-# Patch 2: Add Shift+Enter → kitty-encoded \x1b[13;2u before the multi-modifier block.
-_INPUT_JS_PATCH2_TARGET = """\
+
+# --- input.js: Shift+Enter → kitty CSI \x1b[13;2u --------------------------
+#
+# xterm.js sends plain ``\r`` for Shift+Enter (1 modifier), so the shell
+# can't distinguish it from plain Enter. The kitty protocol encodes it as
+# ``\x1b[13;2u`` (key=13/CR, modifier=2/Shift), which shells like fish and
+# zsh's vi-mode can hook.
+_SHIFT_ENTER_TARGET = """\
             if (
                 (modifiers_count > 1 || ev.metaKey) &&"""
-_INPUT_JS_PATCH2_REPLACEMENT = """\
+_SHIFT_ENTER_REPLACEMENT = """\
             if (ev.key === "Enter" && ev.shiftKey && modifiers_count === 1) {
                 ev.preventDefault();
                 sendFunction("\\x1b[13;2u");
@@ -81,6 +166,115 @@ _INPUT_JS_PATCH2_REPLACEMENT = """\
             }
             if (
                 (modifiers_count > 1 || ev.metaKey) &&"""
+
+
+# --- terminal.js: Shift+Click on URL opens a new tab even in mouse mode ----
+#
+# xterm.js (Zellij's bundled version) does not honor the XTerm convention
+# of "shift suppresses mouse-reporting and lets the click reach the link
+# provider." When a program inside the pane enables xterm mouse mode
+# (Claude Code, less, vim, …), shift+click is encoded as a wire-protocol
+# mouse CSI and the link-provider's ``activate`` callback never fires —
+# even though Zellij's ``links.js`` shows a "Shift-Click: <url>" hover hint
+# that suggests it should work.
+#
+# Fix: capture-phase ``mousedown`` listener that runs *before* xterm.js's
+# own mouse handler. On shift + left-click we look up the URL at the click
+# cell, ``preventDefault + stopImmediatePropagation`` so xterm.js never
+# encodes the click, and ``window.open()`` directly.
+_SHIFT_CLICK_FIX = r"""
+;(function(){
+  // Same regex addon-web-links.js uses internally; copied to avoid
+  // depending on its private export shape.
+  const URL_RE = /(https?|HTTPS?):[/]{2}[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~\[\]`()<>]/;
+  function findUrl(term, col, row) {
+    const line = term.buffer.active.getLine(row);
+    if (!line) return null;
+    const text = line.translateToString(true);
+    const re = new RegExp(URL_RE.source, "g");
+    let m;
+    while ((m = re.exec(text))) {
+      if (col >= m.index && col < m.index + m[0].length) return m[0];
+    }
+    return null;
+  }
+  function install(term) {
+    const screen = term.element && term.element.querySelector('.xterm-screen');
+    const surface = screen || term.element;
+    if (!surface || surface.__zingShiftClickInstalled) return;
+    surface.__zingShiftClickInstalled = true;
+    surface.addEventListener("mousedown", (ev) => {
+      if (!ev.shiftKey || ev.button !== 0) return;
+      const rect = surface.getBoundingClientRect();
+      const cw = rect.width  / term.cols;
+      const ch = rect.height / term.rows;
+      const col = Math.floor((ev.clientX - rect.left) / cw);
+      const visRow = Math.floor((ev.clientY - rect.top) / ch);
+      const row = term.buffer.active.viewportY + visRow;
+      const url = findUrl(term, col, row);
+      if (!url) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      const w = window.open(url, "_blank");
+      if (w) { try { w.opener = null; } catch (e) {} }
+    }, true /* capture phase */);
+  }
+  // window.term is a debug global set by Zellij's terminal.js after
+  // initTerminal(). Poll briefly until it appears, then bail with a
+  // warning if Zellij upgraded and removed the global.
+  let attempts = 0;
+  const handle = setInterval(() => {
+    if (window.term && window.term.element) {
+      install(window.term);
+      clearInterval(handle);
+    } else if (++attempts > 100) {
+      clearInterval(handle);
+      console.warn("[zing] shift-click patch: window.term never appeared");
+    }
+  }, 50);
+})();
+"""
+
+
+JS_PATCHES: tuple[JsPatch, ...] = (
+    JsPatch(
+        name="input-js/cmd-passthrough",
+        target_file="input.js",
+        why=(
+            "Pass Cmd+C/Cmd+A through to the browser; drop bare-modifier "
+            "keypresses so Cmd alone doesn't render as 'M' in the terminal."
+        ),
+        apply=_replace_once(
+            "input-js/cmd-passthrough",
+            _CMD_PASSTHROUGH_TARGET,
+            _CMD_PASSTHROUGH_REPLACEMENT,
+        ),
+    ),
+    JsPatch(
+        name="input-js/shift-enter",
+        target_file="input.js",
+        why=(
+            "Encode Shift+Enter as the kitty CSI \\x1b[13;2u so shells can "
+            "distinguish it from plain Enter."
+        ),
+        apply=_replace_once(
+            "input-js/shift-enter",
+            _SHIFT_ENTER_TARGET,
+            _SHIFT_ENTER_REPLACEMENT,
+        ),
+    ),
+    JsPatch(
+        name="terminal-js/shift-click",
+        target_file="terminal.js",
+        why=(
+            "Open URLs on Shift+Click even when an inner program has "
+            "enabled xterm mouse-reporting (xterm.js doesn't honor the "
+            "XTerm shift-suppresses-mouse convention)."
+        ),
+        apply=_append(_SHIFT_CLICK_FIX),
+    ),
+)
 
 # Headers that must not be forwarded between proxy hops.
 _HOP_BY_HOP = frozenset({"transfer-encoding", "connection", "content-encoding", "content-length"})
@@ -208,7 +402,7 @@ def create_zellij_router() -> APIRouter:
 
     @router.get("/assets/{path:path}")
     async def proxy_assets(request: Request, path: str) -> Response:
-        """Proxy Zellij static assets, patching input.js."""
+        """Proxy Zellij static assets, applying any registered JS patches."""
         if (err := _check_available(request)) is not None:
             return err
 
@@ -218,10 +412,11 @@ def create_zellij_router() -> APIRouter:
         headers = _response_headers(resp)
 
         content = resp.content
-        if path == "input.js":
+        patches = [p for p in JS_PATCHES if p.target_file == path]
+        if patches:
             text = content.decode()
-            text = text.replace(_INPUT_JS_PATCH_TARGET, _INPUT_JS_PATCH_REPLACEMENT)
-            text = text.replace(_INPUT_JS_PATCH2_TARGET, _INPUT_JS_PATCH2_REPLACEMENT)
+            for patch in patches:
+                text = patch.apply(text)
             content = text.encode()
 
         return Response(
