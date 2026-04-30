@@ -97,25 +97,17 @@ def _notify_dashboard_connections(event: str, session_id: str | None = None) -> 
         queue.put_nowait(message)
 
 
-def finding_fragment(
-    finding: Finding,
-    session_id: str,
-    saved_responses: dict[str, str] | None = None,
-) -> str:
+def finding_fragment(finding: Finding, session_id: str) -> str:
     """Render a single finding as an HTML fragment.
 
     Args:
         finding: The finding model to render.
         session_id: The session ID for auto-save POST URLs.
-        saved_responses: Optional dict of saved response values for signal initialization.
 
     Returns:
         Rendered HTML string for the finding.
     """
-    kwargs: dict[str, object] = {"finding": finding, "session_id": session_id}
-    if saved_responses is not None:
-        kwargs["saved_responses"] = saved_responses
-    return render("fragments/finding.html", **kwargs)
+    return render("fragments/finding.html", finding=finding, session_id=session_id)
 
 
 @router.post("/{session_id}/save-response")
@@ -884,10 +876,7 @@ async def get_session_page(session_id: str, request: Request) -> HTMLResponse | 
     review_status_html = ""
     submit_html = ""
     if active_step and active_step.state.value in ("ready", "completed"):
-        rendered_findings = [
-            finding_fragment(f, session_id, saved_responses=saved_responses)
-            for f in active_step.findings
-        ]
+        rendered_findings = [finding_fragment(f, session_id) for f in active_step.findings]
         if active_step.state.value == "completed":
             review_status_html = _submitted_status_html()
             submit_html = _submitted_button_html()

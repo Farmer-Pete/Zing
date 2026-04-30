@@ -217,7 +217,6 @@ def launch(
         parse_pr_url,
         require_session_backend,
         resolve_repo_root,
-        rollback_worktree,
         run_init_script,
         sanitize_branch_name,
         validate_markdown_target,
@@ -386,31 +385,25 @@ def launch(
         ) -> None:
             """Run init script, create session, and launch (or print setup-only)."""
             session_id = str(uuid.uuid4())
-            succeeded = False
-            try:
-                run_init_script(
-                    repo_root=repo_root,
-                    script_name=git_cfg.zing_init_script,
-                    worktree_path=work_dir,
-                    branch=branch_name,
-                )
-                if pre_create_hook is not None:
-                    pre_create_hook()
-                create_session_on_server(
-                    server_url=server_url,
-                    session_id=session_id,
-                    title=title,
-                    ticket_id=ticket_id,
-                    worktree_path=str(work_dir) if work_dir else None,
-                    skill=resolved_skill,
-                    pr_number=pr_number,
-                    pr_repo=pr_repo,
-                    terminal_session=session_name,
-                )
-                succeeded = True
-            finally:
-                if not succeeded and worktree_path is not None:
-                    rollback_worktree(worktree_path)
+            run_init_script(
+                repo_root=repo_root,
+                script_name=git_cfg.zing_init_script,
+                worktree_path=work_dir,
+                branch=branch_name,
+            )
+            if pre_create_hook is not None:
+                pre_create_hook()
+            create_session_on_server(
+                server_url=server_url,
+                session_id=session_id,
+                title=title,
+                ticket_id=ticket_id,
+                worktree_path=str(work_dir) if work_dir else None,
+                skill=resolved_skill,
+                pr_number=pr_number,
+                pr_repo=pr_repo,
+                terminal_session=session_name,
+            )
 
             if setup_only:
                 click.echo(f"Environment ready: {work_dir}")
@@ -609,6 +602,43 @@ def launch(
     except LaunchError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
+
+
+@cli.command("debug-card")
+@click.option(
+    "--pr",
+    "pr_arg",
+    default=None,
+    help="PR URL, 'owner/repo#NUMBER', or just a number with --repo.",
+)
+@click.option("--ticket", "ticket_arg", default=None, help="Linear ticket ID, e.g. BAK-123.")
+@click.option(
+    "--repo",
+    "repo_default",
+    default=None,
+    help="Default repo for --pr when only a number is given (owner/name).",
+)
+@click.option(
+    "--user",
+    "username_override",
+    default=None,
+    help="Override the GitHub username (default: authenticated viewer).",
+)
+def debug_card_cmd(
+    pr_arg: str | None,
+    ticket_arg: str | None,
+    repo_default: str | None,
+    username_override: str | None,
+) -> None:
+    """Print the Kanban classification trace for a PR and/or ticket.
+
+    Fetches live data and runs it through the same pipeline the Command
+    Center uses, printing per-PR predicate traces, card signals, and the
+    decision-table evaluation in a structured form.
+    """
+    from zing_ai.debug_card import run
+
+    run(pr_arg, ticket_arg, repo_default, username_override)
 
 
 def _register_sim() -> None:

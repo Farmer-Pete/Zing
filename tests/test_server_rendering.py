@@ -109,7 +109,9 @@ class TestFindingFragment(unittest.TestCase):
         self.assertIn("drop", html)
         self.assertIn("downgrade", html)
         self.assertIn("discuss", html)
-        self.assertIn("data-class:selected=\"$responses.tri1 === 'accept'\"", html)
+        # Bracket-form access — js_str renders the finding-id as &quot;tri1&quot;
+        # inside the attribute so the JS literal survives HTML attribute parsing.
+        self.assertIn("data-class:selected=\"$responses[&quot;tri1&quot;] === 'accept'\"", html)
 
     def test_evaluation_finding_renders_tables(self) -> None:
         """Evaluation finding renders structured tables with badges."""
@@ -500,6 +502,101 @@ class TestNotificationTimeline(unittest.TestCase):
         self.assertIn("09:05", html)
         self.assertIn("notification-title", html)
         self.assertIn("Build started", html)
+
+
+class TestReviewDrawerFinding(unittest.TestCase):
+    """Tests for finding rendering inside review_drawer.html."""
+
+    def _render_drawer_with_finding(self, finding: TriageFinding) -> str:
+        from zing_ai.server.models import SessionState, WorkflowStep
+
+        step = WorkflowStep(
+            step_id="step1",
+            step_name="code-review",
+            sequence=1,
+            findings=[finding],
+            state=SessionState.READY,
+        )
+        session = ZingSession(session_id="ses1", title="PR Review", steps=[step])
+        ctx = {
+            "session": session,
+            "steps": [step],
+            "current_step": step,
+            "phase_segments": [],
+            "mode": "findings",
+            "queue_position": 1,
+            "queue_total": 1,
+            "queue_items": [],
+            "next_session_id": "",
+            "prev_session_id": "",
+            "waiting_label": "",
+            "notification": None,
+            "notification_body": "",
+            "saved_responses": {},
+            "saved_open_steps": {step.step_id: True},
+            "drawer_signals": {
+                "sessionId": "ses1",
+                "step_id": step.step_id,
+                "responses": {},
+                "openSteps": {step.step_id: True},
+            },
+        }
+        return render("fragments/review_drawer.html", **ctx)
+
+    def test_drawer_renders_markdown_in_finding_body(self) -> None:
+        """The drawer body must run markdown — raw triple backticks should not appear."""
+        finding = TriageFinding(
+            id="fid1",
+            title="duplicate logic",
+            body="Use **bold** and `inline` and:\n```ts\nconst x = 1;\n```",
+            category=Category.READABILITY,
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,
+        )
+        html = self._render_drawer_with_finding(finding)
+        self.assertIn("<strong>bold</strong>", html)
+        self.assertIn("<code>inline</code>", html)
+        # Pygments code-block wrapper must be present (markdown ran).
+        self.assertIn('class="highlight"', html)
+        # Raw triple backticks must not leak through unrendered.
+        self.assertNotIn("```ts", html)
+
+    def test_drawer_renders_suggested_approach_options(self) -> None:
+        """Triage findings with options must render the suggested-approaches block."""
+        finding = TriageFinding(
+            id="fid2",
+            title="needs refactor",
+            body="Pick an approach.",
+            category=Category.READABILITY,
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,
+            options=[
+                ChoiceOption(label="Extract helper", description="Move to a shared util"),
+                ChoiceOption(label="Inline it", description="Just inline the duplicate"),
+            ],
+        )
+        html = self._render_drawer_with_finding(finding)
+        self.assertIn("triage-options", html)
+        self.assertIn("Suggested approaches", html)
+        self.assertIn("Extract helper", html)
+        self.assertIn("Move to a shared util", html)
+        self.assertIn("Inline it", html)
+        # The "Other" fallback option is always present.
+        self.assertIn("Describe a different approach", html)
+
+    def test_drawer_skips_options_block_when_finding_has_none(self) -> None:
+        """No options → no triage-options block."""
+        finding = TriageFinding(
+            id="fid3",
+            title="no options here",
+            body="Plain triage.",
+            category=Category.READABILITY,
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,
+        )
+        html = self._render_drawer_with_finding(finding)
+        self.assertNotIn("triage-options", html)
+        self.assertNotIn("Suggested approaches", html)
 
 
 class TestRepoChooserModal(unittest.TestCase):

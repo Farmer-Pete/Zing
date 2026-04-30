@@ -533,6 +533,44 @@ class TestClaudeCodeSessionState(unittest.TestCase):
         )
         assert session.terminal_session == "zing--x"
 
+    def test_state_starting_within_grace_window(self) -> None:
+        """State is STARTING when launched recently and never observed alive."""
+        from datetime import datetime, timedelta
+
+        session = ClaudeCodeSession(
+            session_id="s7",
+            title="Test",
+            terminal_session="zing--x",
+            launched_at=datetime.now() - timedelta(seconds=2),
+        )
+        assert session.state == SessionState.STARTING
+
+    def test_state_stopped_after_grace_window(self) -> None:
+        """State is STOPPED once the grace window has expired without zellij seeing it."""
+        from datetime import datetime, timedelta
+
+        session = ClaudeCodeSession(
+            session_id="s8",
+            title="Test",
+            terminal_session="zing--x",
+            launched_at=datetime.now() - timedelta(seconds=120),
+        )
+        assert session.state == SessionState.STOPPED
+
+    def test_state_stopped_after_ever_seen_alive_then_dies(self) -> None:
+        """A session that was alive then died is STOPPED, not STARTING — even within grace."""
+        from datetime import datetime
+
+        session = ClaudeCodeSession(
+            session_id="s9",
+            title="Test",
+            terminal_session="zing--x",
+            launched_at=datetime.now(),
+        )
+        session._ever_seen_alive = True
+        session._session_alive = False
+        assert session.state == SessionState.STOPPED
+
 
 if __name__ == "__main__":
     unittest.main()

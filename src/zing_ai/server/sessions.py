@@ -24,6 +24,7 @@ from zing_ai.server.models import (
     Finding,
     LogEntry,
     Notification,
+    QuestionData,
     ReviewItem,
     ReviewResponse,
     Session,
@@ -242,6 +243,7 @@ class SessionManager:
             pr_number=pr_number,
             pr_repo=pr_repo,
             terminal_session=terminal_session,
+            launched_at=datetime.now() if terminal_session else None,
         )
         self._sessions[session_id] = session
         self._persist(session)
@@ -854,12 +856,44 @@ class SessionManager:
         return session
 
     def add_notification(
-        self, session_id: str, title: str, body: str = "", url: str | None = None
+        self,
+        session_id: str,
+        title: str,
+        body: str = "",
+        url: str | None = None,
+        question: QuestionData | None = None,
     ) -> Notification:
         """Create a notification, append it to the session, persist, and notify."""
         session = self._get_session_or_raise(session_id)
-        notification = Notification(title=title, body=body, url=url)
+        notification = Notification(title=title, body=body, url=url, question=question)
         session.notifications.append(notification)
         self._persist(session)
         self._notify(f"notification_added:{notification.id}", session_id)
         return notification
+
+    def mark_pending_question_answered(self, session_id: str) -> Notification | None:
+        """Stamp ``answered_at`` on every unanswered notification in the session.
+
+        The UI only ever surfaces the latest pending question, so older
+        unanswered notifications are unreachable once a newer one arrives.
+        Opening the drawer counts as viewing the queue — clear all of them
+        in one go so they do not re-appear on each subsequent click.
+
+        Returns the most recently marked notification (matching what
+        ``pending_question`` returned before the call), or ``None`` if no
+        session, no unanswered notification, or the session is not a
+        ClaudeCodeSession.
+        """
+        session = self._sessions.get(session_id)
+        if not isinstance(session, ClaudeCodeSession):
+            return None
+        unanswered = [n for n in session.notifications if n.answered_at is None]
+        if not unanswered:
+            return None
+        now = datetime.now()
+        for notification in unanswered:
+            notification.answered_at = now
+        self._persist(session)
+        for notification in unanswered:
+            self._notify(f"notification_answered:{notification.id}", session_id)
+        return unanswered[-1]

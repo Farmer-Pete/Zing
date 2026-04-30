@@ -1,0 +1,159 @@
+{#
+  _finding_macros.html — single render path for review findings.
+
+  Shared by the standalone review page (/<session_id>) and the command-center
+  drawer. Both surfaces must render exactly the same UI from a Finding model.
+
+  Signal contract (the caller's enclosing element MUST define these signals):
+    $responses : dict[finding_id → action] for triage, dict[finding_id → answer]
+                 for text, plus aux keys <id>_complexity, <id>_approach,
+                 <id>_approach_other.
+    $step_id   : the WorkflowStep.step_id this finding belongs to. Used in
+                 every save-response POST payload.
+
+  Save protocol: every interaction posts to /<session_id>/save-response with
+  the field that changed (action / complexity / answer / selected / other_text).
+  The server-side `_map_signals_to_responses` and `submit_responses` merge
+  fields, so per-action saves never clobber other fields.
+
+  Why bracket-form for expressions: Datastar expression parsing is forgiving
+  about hyphens in dot paths today, but bracket-form ($responses[<id>]) is
+  unambiguously safe regardless of finding.id contents.
+#}
+
+{% macro render_finding(finding, session_id) %}
+{% set fid_str = finding.id | js_str %}
+{% set approach_key = finding.id ~ '_approach' %}
+{% set approach_key_str = approach_key | js_str %}
+{% set other_key = finding.id ~ '_approach_other' %}
+{% set other_key_str = other_key | js_str %}
+{% set complexity_key = finding.id ~ '_complexity' %}
+{% set complexity_key_str = complexity_key | js_str %}
+{% if finding.type == "text" %}
+<div id="finding-{{ finding.id }}" class="finding">
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    {% if finding.context %}
+    <div class="finding-meta">{{ finding.context }}</div>
+    {% endif %}
+    <textarea data-bind="responses.{{ finding.id }}"
+              data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, answer: $responses[{{ fid_str }}]})"
+              placeholder="Type your answer..."></textarea>
+</div>
+{% elif finding.type == "triage" %}
+{# Per-element data-signals seeds complexity default. data-signals is
+   non-destructive (does not overwrite existing keys), so saved overrides on
+   the page-level signal envelope take precedence. #}
+<div id="finding-{{ finding.id }}" class="finding"
+     data-signals='{{ {"responses": {complexity_key: finding.complexity.value}} | tojson }}'>
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    {% if finding.severity or finding.confidence or finding.category %}
+    <div class="finding-meta">
+        {% if finding.location %}<code>{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</code> | {% endif %}
+        Severity: <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span> |
+        Confidence: <span class="badge">{{ finding.confidence }}</span> |
+        Category: {{ finding.category }}
+    </div>
+    {% elif finding.location %}
+    <div class="finding-meta">
+        <code>{{ finding.location.file }}{% if finding.location.line %}:{{ finding.location.line }}{% endif %}</code>
+    </div>
+    {% endif %}
+    <div class="complexity-selector" role="radiogroup" aria-label="Fix complexity">
+        <span class="complexity-label">Complexity:</span>
+        {% for cx in ("simple", "standard", "complex") %}
+        <button class="complexity-btn"
+                data-complexity="{{ cx }}"
+                data-attr:aria-pressed="$responses[{{ complexity_key_str }}] === '{{ cx }}'"
+                data-class:selected="$responses[{{ complexity_key_str }}] === '{{ cx }}'"
+                data-on:click="$responses[{{ complexity_key_str }}] = '{{ cx }}'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, complexity: '{{ cx }}'})"
+                type="button">{{ cx | capitalize }}</button>
+        {% endfor %}
+    </div>
+    <div class="action-group">
+        {% for action in ("accept", "drop", "downgrade", "discuss") %}
+        <button class="action-btn"
+                data-action="{{ action }}"
+                data-class:selected="$responses[{{ fid_str }}] === '{{ action }}'"
+                data-on:click="$responses[{{ fid_str }}] = '{{ action }}'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: '{{ action }}'})"
+                type="button">{{ action | capitalize }}</button>
+        {% endfor %}
+    </div>
+    {% if finding.options %}
+    <div class="triage-options">
+        <div class="triage-options-label">Suggested approaches:</div>
+        {% for option in finding.options %}
+        <label class="option-card">
+            <input type="radio" name="approach-{{ finding.id }}"
+                   data-bind="responses.{{ approach_key }}"
+                   value="{{ option.label }}"
+                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: 'accept', selected: $responses[{{ approach_key_str }}]})">
+            <div class="option-content">
+                <div class="option-label">{{ option.label }}</div>
+                <div class="option-description">{{ option.description }}</div>
+            </div>
+        </label>
+        {% endfor %}
+        <label class="option-card">
+            <input type="radio" name="approach-{{ finding.id }}"
+                   data-bind="responses.{{ approach_key }}"
+                   value="__other__"
+                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: 'accept', selected: $responses[{{ approach_key_str }}]})">
+            <div class="option-content">
+                <div class="option-label">Other</div>
+                <div class="option-description">Describe a different approach</div>
+            </div>
+        </label>
+        <div data-show="$responses[{{ approach_key_str }}] === '__other__'" style="margin-top: 0.5rem;">
+            <textarea data-bind="responses.{{ other_key }}"
+                      data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, selected: $responses[{{ approach_key_str }}], other_text: $responses[{{ other_key_str }}]})"
+                      placeholder="Describe your preferred approach..."></textarea>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% elif finding.type == "evaluation" %}
+<div id="finding-{{ finding.id }}" class="finding evaluation-finding">
+    <div class="finding-header">{{ finding.title }}</div>
+    {% if finding.body %}<div class="finding-body">{{ finding.body | markdown }}</div>{% endif %}
+    <table class="eval-table">
+        <thead><tr><th>Criterion</th><th>Rating</th><th>Justification</th></tr></thead>
+        <tbody>
+        {% for c in finding.criteria %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td><span class="badge badge-{{ c.rating }}">{{ c.rating }}</span></td>
+            <td>{{ c.justification }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if finding.litmus_tests %}
+    <table class="eval-table">
+        <thead><tr><th>Litmus Test</th><th>Result</th></tr></thead>
+        <tbody>
+        {% for lt in finding.litmus_tests %}
+        <tr><td>{{ lt.name }}</td><td>{{ lt.result }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if finding.warnings %}
+    <table class="eval-table">
+        <thead><tr><th>Warning Sign</th><th>Found?</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for w in finding.warnings %}
+        <tr>
+            <td>{{ w.name }}</td>
+            <td>{% if w.found %}<span class="badge badge-warn-yes">Yes</span>{% else %}No{% endif %}</td>
+            <td>{{ w.details }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    <div class="finding-meta">Informational — no response needed</div>
+</div>
+{% endif %}
+{% endmacro %}

@@ -10,6 +10,12 @@
 {% from "fragments/_phase_strip.html" import phase_strip %}
 {% from "fragments/launch_button.html" import launch_button %}
 
+{# Stage 2: the canonical view model for this card. Computed once; subsequent
+   stages migrate inline blocks below to read from card_view fields. The
+   variable is intentionally unused at this stage so render output stays
+   byte-identical. #}
+{% set card_view = build_card_view(card, column_from_cls(column_cls), current_username) %}
+
 {# Kebab macros — the empty-string trap is documented once here. Datastar v1
    treats setting a signal to ``null`` as "delete from the proxy without firing
    watchers". The kebab close-on-outside-click watcher only fires when the
@@ -26,29 +32,7 @@
      data-class:open="$openKebab === {{ menu_key | js_str }}">
 {%- endmacro -%}
 
-{% set total_findings = namespace(count=0) %}
-{% for step in card.audit_steps %}
-  {% set total_findings.count = total_findings.count + step.findings | length %}
-{% endfor %}
-
-{# ── Compute card_has_active_action:
-     True if any ZingSession has a READY step (audit findings waiting),
-     OR any ClaudeCodeSession has a pending (unanswered) question. ── #}
-{% set _active_action = namespace(found=false) %}
-{% for session in card.sessions %}
-  {% if session.session_type == 'zing' %}
-    {% for step in session.steps %}
-      {% if step.state.value == 'ready' %}
-        {% set _active_action.found = true %}
-      {% endif %}
-    {% endfor %}
-  {% elif session.session_type == 'claude_code' and session.pending_question %}
-    {% set _active_action.found = true %}
-  {% endif %}
-{% endfor %}
-{% set card_has_active_action = _active_action.found %}
-
-<div class="card {{ card_extra_cls | default('') }}" id="card-{{ card.key | lower | replace('/', '-') }}"
+<div class="card {{ card_view.extra_card_classes | join(' ') }}" id="{{ card_view.card_dom_id }}"
      data-class:menu-open="$openKebab && $openKebab.startsWith('card-{{ card.key | e }}')">
 
   {# ── Header: ticket ID + title + assignee ── #}
@@ -74,7 +58,8 @@
   </div>
 
   {# ── PR strips: one per PR, with inline action buttons ── #}
-  {% for pr in card.prs %}
+  {% for pr_view in card_view.pr_views %}
+    {% set pr = pr_view.pr %}
     {% set pr_menu_key = 'card-' ~ card.key ~ '-pr-' ~ pr.number %}
     {% set pr_menu_id = 'kebab-menu-' ~ card.signal_key ~ '-pr-' ~ pr.number %}
     <div class="status-strip">
@@ -87,14 +72,10 @@
         {% if pr.repo %}{{ pr.repo.split('/')[1] }}{% endif %}#{{ pr.number }}
       </a>
       {% if pr.author %}<span class="strip-author">{{ pr.author }}</span>{% endif %}
-      {% if pr.merged_at %}<span class="strip-pill strip-pill-merged">merged</span>
-      {% elif pr.draft %}<span class="strip-pill strip-pill-draft">draft</span>
-      {% elif pr.review_decision == "APPROVED" %}<span class="strip-pill strip-pill-approved">approved</span>
-      {% elif pr.review_decision == "CHANGES_REQUESTED" and column_cls != "col-review" %}<span class="strip-pill strip-pill-changes">changes requested</span>
-      {% elif pr.state == "open" and pr.author == current_username and column_cls != "col-review" and pr.reviewers | reject("in", pr.requested_reviewers) | list %}<span class="strip-pill strip-pill-reviewed">reviewed</span>
+      {% if pr_view.pill %}<span class="strip-pill {{ pr_view.pill.css_class }}">{{ pr_view.pill.label }}</span>
       {% endif %}
       {% if pr.ci_checks %}
-        <div class="strip-ci-dots" title="{{ pr.ci_checks | selectattr('conclusion', 'equalto', 'success') | list | length }} passing{% if pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list %}, {{ pr.ci_checks | selectattr('conclusion', 'equalto', 'failure') | list | length }} failing{% endif %}">
+        <div class="strip-ci-dots" title="{{ pr_view.ci.passing }} passing{% if pr_view.ci.failing %}, {{ pr_view.ci.failing }} failing{% endif %}">
           {% for check in pr.ci_checks %}
             {% if check.conclusion == "success" %}
               <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="strip-ci-dot strip-ci-green" title="{{ check.name }}" aria-label="{{ check.name }}: success"></a>
@@ -110,18 +91,10 @@
       {% endif %}
       {# PR action buttons — per-PR primary + kebab #}
       <span class="strip-spacer"></span>
-      {% set is_author = pr.author == current_username %}
-      {% if not pr.merged_at %}
-        {# Primary button — contextual label #}
-        {% if column_cls == "col-review" and not is_author %}
-          {{ launch_button(card, label="PR Audit", slot="pr-" ~ pr.number, skill="pr-audit", pr_number=pr.number) }}
-        {% elif pr.review_decision == "CHANGES_REQUESTED" and is_author %}
-          {{ launch_button(card, label="Respond", slot="pr-" ~ pr.number, skill="pr-respond", pr_number=pr.number) }}
-        {% elif is_author %}
-          {{ launch_button(card, label="Build Audit", slot="pr-" ~ pr.number, skill="build-audit", pr_number=pr.number) }}
-        {% else %}
-          {{ launch_button(card, label="PR Audit", slot="pr-" ~ pr.number, skill="pr-audit", pr_number=pr.number) }}
-        {% endif %}
+      {% set is_author = pr_view.is_author %}
+      {% set needs_response = pr_view.needs_response %}
+      {% if pr_view.primary_button %}
+        {{ launch_button(card, label=pr_view.primary_button.label, slot="pr-" ~ pr.number, skill=pr_view.primary_button.skill, pr_number=pr.number) }}
       {% endif %}
       {# Kebab menu — always present #}
       {{ kebab_toggle(pr_menu_key, controls_id=pr_menu_id) }}
@@ -136,7 +109,7 @@
           </div>
         {% else %}
           {# Non-merged PR: full menu with search for complex menus #}
-          {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+          {% if needs_response %}
             <input class="menu-search" type="text" placeholder="Search actions..."
                    data-bind="kebabQuery">
           {% endif %}
@@ -145,8 +118,8 @@
             <span class="menu-col-header-copy">&#128203;</span>
           </div>
           <div class="menu-items">
-            {# RESPOND section (own PR, changes requested only) #}
-            {% if is_author and pr.review_decision == "CHANGES_REQUESTED" %}
+            {# RESPOND section (own PR with unaddressed reviewer feedback) #}
+            {% if needs_response %}
               <div class="menu-section-label">Respond</div>
               <div class="menu-row" data-s="respond to feedback"
                    data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
@@ -234,10 +207,9 @@
       </div>
     </div>
     {# CI failure callout #}
-    {% set failing = pr.ci_checks | selectattr("conclusion", "equalto", "failure") | list %}
-    {% if failing %}
+    {% if pr_view.ci.failing_checks %}
       <div class="ci-fail-bar">
-        {% for check in failing %}
+        {% for check in pr_view.ci.failing_checks %}
           <a {% if check.url %}href="{{ check.url }}" target="_blank" rel="noopener"{% endif %} class="ci-fail-link">&#10005; {{ check.name }}</a>
         {% endfor %}
       </div>
@@ -245,22 +217,19 @@
   {% endfor %}
 
   {# ── Claude Code sessions with inline attach/resume buttons ── #}
-  {% for session in card.sessions if session.session_type == 'claude_code' %}
-    {% set is_alive = session.terminal_session and session.terminal_session in live_sessions %}
+  {% for cc_view in card_view.claude_code_session_views %}
+    {% set session = cc_view.session %}
+    {% set sess_state = session.state.value %}
+    {% set is_alive = cc_view.is_alive %}
+    {% set is_starting = cc_view.is_starting %}
     {% set sess_sig = session.signal_key %}
     {% set sess_menu_key = 'card-' ~ card.key ~ '-sess-' ~ session.session_id %}
     {% set sess_menu_id = 'kebab-menu-' ~ sess_sig ~ '-sess' %}
     {% set resume_menu_key = 'card-' ~ card.key ~ '-resume-' ~ session.session_id %}
     {% set resume_menu_id = 'kebab-menu-' ~ sess_sig ~ '-resume' %}
     <div class="status-strip">
-      <span class="strip-session-dot {% if is_alive %}strip-session-alive{% else %}strip-session-dead{% endif %}" title="{% if is_alive %}Running{% else %}Stopped{% endif %}"></span>
-      {% if is_alive %}
-        <span class="strip-session-label">Running: {{ session.title }}</span>
-      {% elif session.terminal_session %}
-        <span class="strip-session-label strip-session-label-dead">Stopped: {{ session.title }}</span>
-      {% else %}
-        <span class="strip-session-label">{{ session.title }}</span>
-      {% endif %}
+      <span class="strip-session-dot {{ cc_view.dot_class }}" title="{{ cc_view.dot_title }}"></span>
+      <span class="strip-session-label{% if cc_view.status_label_class %} {{ cc_view.status_label_class }}{% endif %}">{{ cc_view.status_label }}</span>
       <span class="strip-spacer"></span>
       {% if session.terminal_session and is_alive %}
         <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/attach-session', {payload: {terminal_session: {{ session.terminal_session | js_str }}}})">Attach</button>
@@ -282,7 +251,7 @@
           </div>
         </div>
       {% endif %}
-      {% if session.ticket_id and not is_alive %}
+      {% if session.ticket_id and sess_state == 'stopped' %}
         <button class="strip-primary-btn" id="btn-resume-{{ session.session_id | e }}"
                 data-indicator="$busyButtons.resume_{{ sess_sig }}"
                 data-attr:disabled="$busyButtons.resume_{{ sess_sig }}"
@@ -315,17 +284,12 @@
   {% endfor %}
 
   {# ── Zing sessions ── #}
-  {% for session in card.sessions if session.session_type == 'zing' %}
-    {% set state_val = session.state.value %}
+  {% for zing_view in card_view.zing_session_views %}
+    {% set session = zing_view.session %}
     <div class="status-strip">
       <a href="/{{ session.session_id }}" target="_blank" rel="noopener" class="strip-zing-session">
-        <span class="strip-zing-dot {% if state_val == 'started' %}strip-zing-amber{% elif state_val == 'pending' %}strip-zing-red{% elif state_val == 'completed' %}strip-zing-green{% else %}strip-zing-cyan{% endif %}"></span>
-        {% if state_val == 'started' %}Claude session running
-        {% elif state_val == 'pending' %}Waiting to start
-        {% elif state_val == 'ready' %}Ready for review
-        {% elif state_val == 'completed' %}Session completed
-        {% else %}{{ state_val }}
-        {% endif %}
+        <span class="strip-zing-dot {{ zing_view.dot_class }}"></span>
+        {{ zing_view.state_label }}
       </a>
     </div>
   {% endfor %}
@@ -339,15 +303,15 @@
     </div>
   {% endfor %}
 
-  {# ── Findings + waiting note ── #}
-  {% if total_findings.count > 0 or (column_cls == "col-review" and card.review_group == "others") %}
+  {# ── Findings + waiting / in-progress note ── #}
+  {% if card_view.total_findings > 0 or card_view.footer_note %}
     <div class="status-strip">
-      {% if total_findings.count > 0 %}
-        <span class="strip-findings">{{ total_findings.count }} finding{{ 's' if total_findings.count != 1 else '' }}</span>
+      {% if card_view.total_findings > 0 %}
+        <span class="strip-findings">{{ card_view.total_findings }} finding{{ 's' if card_view.total_findings != 1 else '' }}</span>
       {% endif %}
-      {% if column_cls == "col-review" and card.review_group == "others" %}
+      {% if card_view.footer_note %}
         <span class="strip-spacer"></span>
-        <span class="strip-note">Waiting on others</span>
+        <span class="strip-note">{{ card_view.footer_note.text }}</span>
       {% endif %}
     </div>
   {% endif %}
@@ -459,7 +423,7 @@
   {% endif %}
 
   {# ── Session history strip: shown when there are sessions but NO active action ── #}
-  {% if card.sessions and not card_has_active_action %}
+  {% if card.sessions and not card_view.has_active_action %}
     {# Find the first ZingSession (for phases) or fall back to any session ── #}
     {% set _zing_sessions = card.sessions | selectattr("session_type", "equalto", "zing") | list %}
     {% if _zing_sessions %}

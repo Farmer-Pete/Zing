@@ -118,16 +118,23 @@ def install_claude(target_dir: Path | None = None, config: Config | None = None)
     install_claude_hooks()
 
 
+_HOOK_SCRIPTS = ("notify-zing.sh", "notify-zing-idle.sh")
+
+
 def install_claude_hooks(hooks_dir: Path | None = None, settings_path: Path | None = None) -> None:
-    """Install the notify-zing.sh hook and register it in Claude Code settings.
+    """Install Zing hook scripts and register them in Claude Code settings.
 
-    Creates ``~/.claude/hooks/`` if it doesn't exist, copies the bundled
-    ``notify-zing.sh`` script into it (making it executable), and merges the
-    ``PreToolUse`` hook entry for ``AskUserQuestion`` into
-    ``~/.claude/settings.json``.
+    Creates ``~/.claude/hooks/`` if it doesn't exist, copies the bundled hook
+    scripts into it (making them executable), and merges two hook entries
+    into ``~/.claude/settings.json``:
 
-    The operation is idempotent — running it again will not duplicate the hook
-    entry in settings.json.
+    * ``PreToolUse`` matcher ``AskUserQuestion`` → ``notify-zing.sh`` (forwards
+      structured questions to the Command Center drawer).
+    * ``Notification`` (no matcher) → ``notify-zing-idle.sh`` (forwards idle /
+      attention-needed events to the Command Center as plain notifications).
+
+    The operation is idempotent — running it again will not duplicate hook
+    entries in settings.json.
 
     Parameters
     ----------
@@ -146,26 +153,25 @@ def install_claude_hooks(hooks_dir: Path | None = None, settings_path: Path | No
     # -- 1. Ensure hooks directory exists -------------------------------------
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- 2. Copy notify-zing.sh -----------------------------------------------
-    src_hook = importlib.resources.files("zing_ai").joinpath("hooks").joinpath("notify-zing.sh")
-    dst_hook = hooks_dir / "notify-zing.sh"
-    dst_hook.write_bytes(src_hook.read_bytes())
-    # Make it executable (owner, group, others)
-    current_mode = dst_hook.stat().st_mode
-    dst_hook.chmod(current_mode | 0o111)
-    logger.debug("Installed hook script: %s", dst_hook)
+    # -- 2. Copy hook scripts -------------------------------------------------
+    for script_name in _HOOK_SCRIPTS:
+        src_hook = importlib.resources.files("zing_ai").joinpath("hooks").joinpath(script_name)
+        dst_hook = hooks_dir / script_name
+        dst_hook.write_bytes(src_hook.read_bytes())
+        current_mode = dst_hook.stat().st_mode
+        dst_hook.chmod(current_mode | 0o111)
+        logger.debug("Installed hook script: %s", dst_hook)
 
-    # -- 3. Merge PreToolUse entry into settings.json -------------------------
-    _merge_pretooluse_hook(settings_path)
+    # -- 3. Merge hook entries into settings.json -----------------------------
+    _merge_claude_hooks(settings_path)
 
 
-def _merge_pretooluse_hook(settings_path: Path) -> None:
-    """Merge the AskUserQuestion PreToolUse hook entry into settings.json.
+def _merge_claude_hooks(settings_path: Path) -> None:
+    """Merge Zing's hook entries into Claude Code's settings.json.
 
-    Reads the existing settings file (or starts with an empty dict), checks
-    whether a ``PreToolUse`` entry with ``matcher: "AskUserQuestion"`` already
-    exists, and only appends it if missing.  Existing hooks are always
-    preserved.
+    Registers a ``PreToolUse`` entry for ``AskUserQuestion`` and a top-level
+    ``Notification`` entry for idle events. Existing hooks are preserved and
+    duplicates are skipped, so this is safe to call repeatedly.
     """
     settings: dict = {}
     if settings_path.exists():
@@ -176,32 +182,66 @@ def _merge_pretooluse_hook(settings_path: Path) -> None:
             settings = {}
 
     hooks_section = settings.setdefault("hooks", {})
+    changed = False
+
+    # PreToolUse matcher "AskUserQuestion" → notify-zing.sh
     pretooluse_list = hooks_section.setdefault("PreToolUse", [])
-
-    # Check for an existing entry with matcher "AskUserQuestion".
     matcher = "AskUserQuestion"
-    for entry in pretooluse_list:
-        if isinstance(entry, dict) and entry.get("matcher") == matcher:
-            logger.debug("PreToolUse hook for %r already registered — skipping", matcher)
-            return
+    if not _has_matcher_entry(pretooluse_list, matcher):
+        pretooluse_list.append(
+            {
+                "matcher": matcher,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "~/.claude/hooks/notify-zing.sh",
+                        "timeout": 5,
+                    }
+                ],
+            }
+        )
+        changed = True
+        logger.debug("Registered PreToolUse hook for %r", matcher)
 
-    # Append the new entry.
-    pretooluse_list.append(
-        {
-            "matcher": matcher,
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "~/.claude/hooks/notify-zing.sh",
-                    "timeout": 5,
-                }
-            ],
-        }
-    )
+    # Notification (no matcher) → notify-zing-idle.sh
+    notification_list = hooks_section.setdefault("Notification", [])
+    idle_command = "~/.claude/hooks/notify-zing-idle.sh"
+    if not _has_command_entry(notification_list, idle_command):
+        notification_list.append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": idle_command,
+                        "timeout": 5,
+                    }
+                ],
+            }
+        )
+        changed = True
+        logger.debug("Registered Notification hook for %s", idle_command)
+
+    if not changed:
+        return
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    logger.debug("Registered PreToolUse hook for %r in %s", matcher, settings_path)
+
+
+def _has_matcher_entry(entries: list, matcher: str) -> bool:
+    """Return True if *entries* already contains a hook with the given matcher."""
+    return any(isinstance(e, dict) and e.get("matcher") == matcher for e in entries)
+
+
+def _has_command_entry(entries: list, command: str) -> bool:
+    """Return True if *entries* already contains a hook running *command*."""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks", []) or []:
+            if isinstance(hook, dict) and hook.get("command") == command:
+                return True
+    return False
 
 
 def install_opencode(target_dir: Path | None = None, config: Config | None = None) -> None:

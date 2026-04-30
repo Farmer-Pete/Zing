@@ -9,11 +9,13 @@ import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from zing_ai.server import zellij_proxy
 from zing_ai.server.zellij_proxy import (
-    _INPUT_JS_PATCH2_REPLACEMENT,
-    _INPUT_JS_PATCH2_TARGET,
-    _INPUT_JS_PATCH_REPLACEMENT,
-    _INPUT_JS_PATCH_TARGET,
+    _CMD_PASSTHROUGH_REPLACEMENT,
+    _CMD_PASSTHROUGH_TARGET,
+    _SHIFT_ENTER_REPLACEMENT,
+    _SHIFT_ENTER_TARGET,
+    JS_PATCHES,
     create_zellij_router,
 )
 
@@ -74,13 +76,12 @@ class TestProxyAssets(unittest.TestCase):
     """Tests for the /assets/{path} route."""
 
     def test_proxy_assets_patches_input_js(self):
-        """GET /assets/input.js should have Cmd+C/A and Shift+Enter patches applied."""
-        # Build fake input.js that contains both patch targets
+        """GET /assets/input.js applies Cmd+C/A, modifier-only drop, and Shift+Enter patches."""
         original_js = (
             "some js before\n"
-            + _INPUT_JS_PATCH_TARGET
+            + _CMD_PASSTHROUGH_TARGET
             + "\nsome js between\n"
-            + _INPUT_JS_PATCH2_TARGET
+            + _SHIFT_ENTER_TARGET
             + "\nsome js after"
         )
         app = _make_app(response_content=original_js.encode())
@@ -89,14 +90,71 @@ class TestProxyAssets(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.text
 
-        # Patch 1 replacement should be present
         self.assertIn("pass cmd-c onwards so that copy is interpreted by the browser", body)
         self.assertIn("pass cmd-a onwards so that select all works", body)
-        # Patch 2 replacement should be present
+        # Modifier-only key drop (regression: pressing Cmd alone used to type "m").
+        self.assertIn('ev.key == "Meta"', body)
         self.assertIn('sendFunction("\\x1b[13;2u")', body)
-        # The full replacement strings should be present verbatim in the output.
-        self.assertIn(_INPUT_JS_PATCH_REPLACEMENT, body)
-        self.assertIn(_INPUT_JS_PATCH2_REPLACEMENT, body)
+        self.assertIn(_CMD_PASSTHROUGH_REPLACEMENT, body)
+        self.assertIn(_SHIFT_ENTER_REPLACEMENT, body)
+
+    def test_proxy_assets_appends_shift_click_to_terminal_js(self):
+        """GET /assets/terminal.js appends the shift-click handler closure."""
+        original_js = b"// pretend this is Zellij's terminal.js\nexport function initTerminal(){}\n"
+        app = _make_app(response_content=original_js)
+        client = TestClient(app)
+        resp = client.get("/assets/terminal.js")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.text
+        # Original content preserved verbatim at the start.
+        self.assertTrue(body.startswith(original_js.decode()))
+        # The append payload (a recognisable, distinctive substring) is present.
+        self.assertIn("__zingShiftClickInstalled", body)
+        self.assertIn("URL_RE", body)
+
+    def test_proxy_assets_input_js_anchor_missing_logs_warning_and_serves_unpatched(self):
+        """When upstream Zellij changes and an anchor disappears, the patch
+        no-ops, logs a one-time warning, and serves the original asset."""
+        # input.js without either anchor — simulates a Zellij upgrade.
+        original_js = b"// brand new input.js with completely refactored handlers\n"
+        # Reset the warned-once cache so this test is deterministic.
+        zellij_proxy._patch_anchor_warned.clear()
+        app = _make_app(response_content=original_js)
+        client = TestClient(app)
+
+        with self.assertLogs("zing_ai.server.zellij_proxy", level="WARNING") as captured:
+            resp = client.get("/assets/input.js")
+            # Hit it again — log should NOT fire a second time per patch.
+            client.get("/assets/input.js")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content, original_js)
+        # Two patches anchor in input.js → exactly two warnings on the first
+        # request, none on the second.
+        anchor_warnings = [m for m in captured.output if "anchor not found" in m]
+        self.assertEqual(len(anchor_warnings), 2)
+        self.assertTrue(any("input-js/cmd-passthrough" in m for m in anchor_warnings))
+        self.assertTrue(any("input-js/shift-enter" in m for m in anchor_warnings))
+
+    def test_js_patches_registry_well_formed(self):
+        """Every JsPatch has a unique name and a non-empty why."""
+        names = [p.name for p in JS_PATCHES]
+        self.assertEqual(len(names), len(set(names)), "patch names must be unique")
+        for patch in JS_PATCHES:
+            self.assertTrue(patch.why.strip(), f"{patch.name} missing why")
+            self.assertTrue(patch.target_file, f"{patch.name} missing target_file")
+
+    def test_proxy_assets_passes_through_links_js(self):
+        """GET /assets/links.js is not in the registry — Zellij's stock handler runs."""
+        original_js = (
+            b"const newWindow = window.open(uri, '_blank');\n"
+            b"if (newWindow) newWindow.opener = null;\n"
+        )
+        app = _make_app(response_content=original_js)
+        client = TestClient(app)
+        resp = client.get("/assets/links.js")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content, original_js)
 
     def test_proxy_assets_passes_through_other_files(self):
         """GET /assets/styles.css should return content unchanged."""

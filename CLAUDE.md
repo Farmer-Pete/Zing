@@ -78,6 +78,36 @@ Key principles:
 
 Run Playwright tests with: `uv run pytest tests/test_ui/ -m ui`
 
+## Debugging Kanban classification
+
+The `zing-ai debug-card` CLI fetches a live PR and/or Linear ticket, runs the data through the same `aggregate()` pipeline the Command Center uses, builds the canonical `CardView`, and prints a structured trace. Output sections in order:
+
+1. **`=== INPUT ===`** — current username, current time, done-window cutoff, the resolved `card.key` (matches the production format, e.g. `pr-{repo}-{number}` for orphan-PR cards), and `excluded_by_aggregate` (true iff the production board would drop this card via the `_user_involved_in_done_card` filter).
+2. **`=== CARD VIEW (canonical render model) ===`** — the full `CardView` Pydantic model dumped via field introspection. This is the *exact same model* `kanban_card.html` reads from. Every field a renderer would draw appears here: the underlying `card` (ticket, PRs, sessions, audit_steps, review_group, done_group, in_progress_reason), the column and its CSS class, per-PR views (pill label/class, primary button label/skill, CI bucket counts and failing-checks list, `is_author`, `needs_response`), per-session views (status label, dot class, pending question text), `total_findings`, `has_active_action`, `footer_note`, `card_dom_id`, `extra_card_classes`, `excluded_from_done_view`. The printer walks `model_fields` recursively, so adding a field anywhere under `CardView` surfaces automatically — no debug-tool change needed.
+3. **`=== PR_NEEDS_RESPONSE TRACE ===`** (one per PR) — line-by-line walk through `_pr_needs_response()`: every guard, branch, sub-branch with its inputs and the boolean it returned.
+4. **`=== CARD SIGNALS ===`** — every field of the `CardSignals` dataclass that drives `_classify_card`.
+5. **`=== DECISION TABLE TRACE ===`** — first-match-wins evaluation in `_classify_card()` order, marked `[FIRE]` / `[ ok ]` / `[skip]`.
+
+Usage:
+
+```bash
+zing-ai debug-card --pr <url|owner/repo#N|N> [--ticket <ID>] [--repo <owner/name>] [--user <login>]
+zing-ai debug-card --ticket BAK-1259
+zing-ai debug-card --pr 1885 --repo turngate/backend-v1 --ticket BAK-1259
+```
+
+Source: `src/zing_ai/debug_card.py`. The architectural rule: **`CardView` (`src/zing_ai/server/card_view.py`) is the single source of truth** for everything a card renderer draws. The Jinja fragment (`templates/fragments/kanban_card.html`) reads from it, the debug tool prints it via Pydantic introspection, and `tests/test_command_center/test_card_view.py::TestDebugToolCoverage` pins the contract that every `card_view.py` field surfaces in the debug output. To add something to a card: add a field to the appropriate `CardView` sub-view, populate it in `build_card_view()`, and consume it from the template — the debug tool will pick it up automatically.
+
+**`debug_card.py` must be a dumb display.** It fetches data, calls production functions, and prints what it gets back. It does **not** duplicate classification, predicate, or display logic. Concretely:
+
+- Display state → produced by `build_card_view()` in `card_view.py`, printed via Pydantic introspection.
+- Predicate behaviour (e.g. `_pr_needs_response`) → emitted by the predicate itself via an optional `trace: list[str] | None` parameter, printed verbatim.
+- Decision-table walk in `_classify_card` → emitted by `_classify_card` itself via the same trace parameter.
+
+If a change in `command_center.py` (or any production module) requires a paired edit in `debug_card.py` to keep the output correct, **that's a design failure** — the trace logic should live alongside the production logic that drives it, with the trace recorded as a side-effect of the same control flow. Re-implementing the predicate in the debug tool to "explain" it is the failure mode this architecture exists to prevent. Fix the duplication at the source instead of editing the two files in lock-step.
+
+**Verify, don't assume.** When investigating or fixing classification bugs (or any behaviour driven by external API data), do not reason from training-data intuitions about how GitHub/Linear shape their responses. Run `zing-ai debug-card` against a real example first to see the live data and confirm that the predicates fire the way the theory predicts. After applying a fix, run it again on the same example to verify the column actually changed. Synthetic test fixtures are easy to construct in ways that don't match real API behaviour — for instance, GitHub's `latestReviews` excludes reviewers currently in `reviewRequests`, so any fixture that puts the same user in both `reviewer_states` and `requested_reviewers` is unrealistic and will pass tests without proving the production case works. Treat unit tests as a regression net, not as proof that the fix matches reality; the debug-card output against a live PR is the proof.
+
 ## Issue tracking
 
 Issues and tickets are tracked in GitHub Issues on this repository. Use `gh issue create` to file new issues.

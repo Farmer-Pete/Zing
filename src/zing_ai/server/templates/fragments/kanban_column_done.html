@@ -28,7 +28,7 @@
           <span class="review-group-count">{{ ready_to_merge | length }}</span>
         </summary>
         {% for card in ready_to_merge %}
-          {% with column_cls=column_cls, card_extra_cls="card-ready-to-merge" %}
+          {% with column_cls=column_cls %}
             {% include "fragments/kanban_card.html" %}
           {% endwith %}
         {% endfor %}

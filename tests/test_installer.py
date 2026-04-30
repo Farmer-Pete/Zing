@@ -702,3 +702,100 @@ def test_install_claude_calls_install_hooks(tmp_path: Path) -> None:
         install_claude(target_dir=target)
 
     mock_hooks.assert_called_once()
+
+
+def test_idle_hook_script_is_installed(tmp_path: Path) -> None:
+    """install_claude_hooks() copies notify-zing-idle.sh to the hooks directory."""
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    assert (hooks_dir / "notify-zing-idle.sh").is_file(), "notify-zing-idle.sh not installed"
+
+
+def test_idle_hook_script_is_executable(tmp_path: Path) -> None:
+    """notify-zing-idle.sh must be executable after install."""
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    hook = hooks_dir / "notify-zing-idle.sh"
+    mode = hook.stat().st_mode
+    assert mode & 0o100, "notify-zing-idle.sh is not owner-executable"
+
+
+def test_settings_notification_entry_added(tmp_path: Path) -> None:
+    """install_claude_hooks() adds a Notification hook running notify-zing-idle.sh."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    notification_list = settings.get("hooks", {}).get("Notification", [])
+    commands = [
+        h.get("command")
+        for entry in notification_list
+        if isinstance(entry, dict)
+        for h in (entry.get("hooks") or [])
+        if isinstance(h, dict)
+    ]
+    assert "~/.claude/hooks/notify-zing-idle.sh" in commands, (
+        f"Notification hook for idle script not found; got {commands}"
+    )
+
+
+def test_settings_notification_idempotent(tmp_path: Path) -> None:
+    """Running install_claude_hooks() twice does not duplicate the Notification entry."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    notification_list = settings.get("hooks", {}).get("Notification", [])
+    matching = [
+        entry
+        for entry in notification_list
+        if isinstance(entry, dict)
+        and any(
+            isinstance(h, dict) and h.get("command") == "~/.claude/hooks/notify-zing-idle.sh"
+            for h in (entry.get("hooks") or [])
+        )
+    ]
+    assert len(matching) == 1, f"Expected 1 idle Notification entry, found {len(matching)}"
+
+
+def test_settings_existing_notification_preserved(tmp_path: Path) -> None:
+    """Pre-existing Notification entries are not overwritten."""
+    import json
+
+    hooks_dir = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+
+    existing = {
+        "hooks": {
+            "Notification": [
+                {"hooks": [{"type": "command", "command": "echo other"}]},
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(existing), encoding="utf-8")
+
+    install_claude_hooks(hooks_dir=hooks_dir, settings_path=settings_path)
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    notification_list = settings.get("hooks", {}).get("Notification", [])
+    commands = [
+        h.get("command")
+        for entry in notification_list
+        if isinstance(entry, dict)
+        for h in (entry.get("hooks") or [])
+        if isinstance(h, dict)
+    ]
+    assert "echo other" in commands, "Pre-existing Notification hook was removed"
+    assert "~/.claude/hooks/notify-zing-idle.sh" in commands, "Idle hook was not added"

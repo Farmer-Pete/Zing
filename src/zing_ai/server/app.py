@@ -43,6 +43,28 @@ logger = logging.getLogger("zing_ai.server")
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 
+def sync_session_liveness(sm: SessionManager, live: set[str]) -> bool:
+    """Sync `_session_alive` on each tracked ClaudeCodeSession against `live`.
+
+    Returns True if any session's liveness flipped — callers use this to push
+    a board_changed so the kanban reflects the change without waiting on the
+    next external poll cycle. Also stamps `_ever_seen_alive` on first observed
+    aliveness so a brief liveness blip surfaces correctly as STOPPED rather
+    than lingering in STARTING.
+    """
+    liveness_changed = False
+    for session in sm.list_sessions():
+        if not (isinstance(session, ClaudeCodeSession) and session.terminal_session):
+            continue
+        now_alive = session.terminal_session in live
+        if now_alive != session._session_alive:
+            liveness_changed = True
+        session._session_alive = now_alive
+        if now_alive:
+            session._ever_seen_alive = True
+    return liveness_changed
+
+
 class MCPDebugMiddleware:
     """Log request/response details for /mcp requests."""
 
@@ -215,7 +237,7 @@ def create_app(
     external_cache: ExternalCache | None = None,
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
-    disable_zellij: bool = False,
+    zellij_support: bool | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -227,7 +249,8 @@ def create_app(
         port: The port the server will listen on, used for MCP tool URL construction.
         external_cache: Optional ExternalCache instance for testing (injects pre-populated state).
         cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
-        disable_zellij: If True, skip Zellij web server startup (useful in tests).
+        zellij_support: Override for Zellij web server startup. If None (default), reads
+            ``command_center.zellij_support`` from config. Pass True/False to force.
     """
     sm = session_manager or SessionManager()
 
@@ -309,13 +332,16 @@ def create_app(
         # Zellij web server startup (soft — never crashes the server)
         # ------------------------------------------------------------------
         config = load_config()
+        zellij_enabled = (
+            zellij_support if zellij_support is not None else config.command_center.zellij_support
+        )
 
         fastapi_app.state.zellij_available = False
         fastapi_app.state.zellij_http_client = None
         fastapi_app.state.zellij_session_cookie = None
         fastapi_app.state.zellij_web_port = config.command_center.zellij_web_port
 
-        if not disable_zellij:
+        if zellij_enabled:
             ensure_zellij_config()
             await _start_zellij(fastapi_app, config.command_center.zellij_web_port)
 
@@ -328,18 +354,13 @@ def create_app(
             fastapi_app.state.poller = poller
             poller_task = asyncio.create_task(poller.run())
 
-            def _sync_session_alive(live: set[str]) -> None:
-                """Set _session_alive on each ClaudeCodeSession based on live session names."""
-                for session in sm.list_sessions():
-                    if isinstance(session, ClaudeCodeSession) and session.terminal_session:
-                        session._session_alive = session.terminal_session in live
-
             async def _poll_sessions() -> None:
                 while True:
                     try:
                         live = await asyncio.to_thread(get_live_sessions)
                         fastapi_app.state.live_sessions = live
-                        _sync_session_alive(live)
+                        if sync_session_liveness(sm, live):
+                            _notify_cc_connections("board_changed")
                     except Exception:
                         logger.exception("Session polling failed, keeping stale state")
                     await asyncio.sleep(0.5)
@@ -364,7 +385,7 @@ def create_app(
             zellij_client = getattr(fastapi_app.state, "zellij_http_client", None)
             if zellij_client is not None:
                 await zellij_client.aclose()
-            if not disable_zellij:
+            if zellij_enabled:
                 with contextlib.suppress(FileNotFoundError, OSError):
                     subprocess.run(["zellij", "web", "--stop"], check=False)
 

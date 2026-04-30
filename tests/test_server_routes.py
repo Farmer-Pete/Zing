@@ -980,6 +980,66 @@ class TestNotificationRouting(ServerTestBase):
                 _sse_queues.pop(session_id, None)
 
 
+class TestSessionQuestionParser(unittest.TestCase):
+    """Tests for _parse_question_payload — turns hook payloads into QuestionData."""
+
+    def test_structured_question_preserves_header_and_options(self) -> None:
+        from zing_ai.server.routes_command_center import _parse_question_payload
+
+        text, data = _parse_question_payload(
+            {
+                "question": "How should Claude submit this review?",
+                "header": "Review event",
+                "multiSelect": False,
+                "options": [
+                    {"label": "COMMENT", "description": "All findings medium/low"},
+                    {"label": "APPROVE", "description": "Approve the PR"},
+                ],
+            }
+        )
+        self.assertEqual(text, "How should Claude submit this review?")
+        self.assertIsNotNone(data)
+        assert data is not None
+        self.assertEqual(data.header, "Review event")
+        self.assertFalse(data.multi_select)
+        self.assertEqual(len(data.options), 2)
+        self.assertEqual(data.options[0].label, "COMMENT")
+        self.assertEqual(data.options[1].description, "Approve the PR")
+
+    def test_plain_string_payload_is_legacy_text_only(self) -> None:
+        from zing_ai.server.routes_command_center import _parse_question_payload
+
+        text, data = _parse_question_payload("Just a question?")
+        self.assertEqual(text, "Just a question?")
+        self.assertIsNone(data)
+
+    def test_drops_options_without_a_label(self) -> None:
+        from zing_ai.server.routes_command_center import _parse_question_payload
+
+        text, data = _parse_question_payload(
+            {
+                "question": "q",
+                "options": [
+                    {"label": "ok", "description": "fine"},
+                    {"description": "no label"},
+                    "not a dict",
+                ],
+            }
+        )
+        self.assertEqual(text, "q")
+        assert data is not None
+        self.assertEqual(len(data.options), 1)
+        self.assertEqual(data.options[0].label, "ok")
+
+    def test_returns_empty_for_missing_or_malformed_payload(self) -> None:
+        from zing_ai.server.routes_command_center import _parse_question_payload
+
+        for bad in (None, "", {}, {"header": "no question"}, 42):
+            text, data = _parse_question_payload(bad)
+            self.assertEqual(text, "")
+            self.assertIsNone(data, f"expected None data for {bad!r}, got {data!r}")
+
+
 class TestNotificationSSEOutput(ServerTestBase):
     """Tests that SSE generators yield correct directives for notification events.
 
@@ -1624,8 +1684,8 @@ class TestLaunchBackground(unittest.TestCase):
         # inspecting mock_exec was called (success path reached).
         self.assertTrue(mock_exec.called)
 
-    def test_launch_background_rollback_on_error(self) -> None:
-        """Rollback is called when exec_or_detach raises after worktree creation."""
+    def test_launch_background_no_rollback_on_error(self) -> None:
+        """When exec_or_detach raises, the worktree is left intact (next attempt will reuse it)."""
         from pathlib import Path
         from unittest.mock import patch
 
@@ -1675,7 +1735,147 @@ class TestLaunchBackground(unittest.TestCase):
             any("cc-toast-err" in e and "zellij session already exists" in e for e in events),
             f"Expected LaunchError toast in events: {events}",
         )
-        mock_rollback.assert_called_once_with(worktree_path)
+        # Rollback must NOT run on launch failure — the worktree stays so the next
+        # attempt can reuse it.
+        mock_rollback.assert_not_called()
+
+    def test_launch_background_orphan_zellij_session_pruned(self) -> None:
+        """Live Zellij session with no in-app record → kill it, then proceed normally."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from zing_ai.config import Config, GitConfig
+
+        self._set_kanban_card("BAK-6", "acme/repo", "feature/bak-6", 254)
+
+        # Pre-seed live_sessions with the orphan name. session_manager is empty,
+        # so the reconciliation logic should classify it as orphaned.
+        self.fastapi_app.state.live_sessions = {"zing--pr-254"}
+
+        config = Config(git=GitConfig(code_dir="/tmp/code"))
+        repo_path = Path("/tmp/code/repo")
+        worktree_path = Path("/tmp/code/repo-feature-bak-6")
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.find_repo_path",
+                return_value=repo_path,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.checkout_pr_branch",
+                return_value=worktree_path,
+            ),
+            patch("zing_ai.server.routes_command_center.create_session_on_server"),
+            patch(
+                "zing_ai.server.routes_command_center.build_claude_args",
+                return_value=["claude", "/zing:pr-audit"],
+            ),
+            patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
+            patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run,
+            self.client.stream(
+                "POST",
+                "/command-center/launch-background",
+                json={"card_key": "BAK-6"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # zellij delete-session --force was invoked for the orphaned name.
+        # (kill-session would leave the record as EXITED and re-trip the
+        # downstream collision check.)
+        prune_calls = [
+            c
+            for c in mock_run.call_args_list
+            if c.args and c.args[0] == ["zellij", "delete-session", "--force", "zing--pr-254"]
+        ]
+        self.assertEqual(
+            len(prune_calls),
+            1,
+            f"Expected one zellij delete-session --force call, got {mock_run.call_args_list}",
+        )
+
+        # Launch proceeded after the prune.
+        mock_exec.assert_called_once()
+        self.assertTrue(
+            any("cc-toast-ok" in e and "Launched" in e for e in events),
+            f"Expected success toast in events: {events}",
+        )
+
+        # Cache was cleared so a re-trip won't see the stale entry.
+        self.assertNotIn("zing--pr-254", self.fastapi_app.state.live_sessions)
+
+    def test_launch_background_live_tracked_attaches(self) -> None:
+        """Live Zellij session with a tracked in-app record → redirect to attach, no relaunch."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from zing_ai.config import Config, GitConfig
+
+        self._set_kanban_card("BAK-7", "acme/repo", "feature/bak-7", 255)
+
+        # Seed an in-app session that claims the same terminal_session name.
+        self.manager.create_claude_code_session(
+            session_id="cc-existing",
+            title="existing",
+            ticket_id="BAK-7",
+            terminal_session="zing--pr-255",
+        )
+        self.fastapi_app.state.live_sessions = {"zing--pr-255"}
+
+        config = Config(git=GitConfig(code_dir="/tmp/code"))
+        repo_path = Path("/tmp/code/repo")
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.find_repo_path",
+                return_value=repo_path,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.checkout_pr_branch",
+            ) as mock_checkout,
+            patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
+            patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run,
+            self.client.stream(
+                "POST",
+                "/command-center/launch-background",
+                json={"card_key": "BAK-7"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # No worktree work, no exec, no prune — we just route the user to attach.
+        mock_checkout.assert_not_called()
+        mock_exec.assert_not_called()
+        self.assertFalse(
+            any(
+                c.args and c.args[0][:2] == ["zellij", "delete-session"]
+                for c in mock_run.call_args_list
+            ),
+            f"Did not expect a delete-session call, got {mock_run.call_args_list}",
+        )
+
+        # Attach signal was patched (terminalUrl + modals.terminal).
+        self.assertTrue(
+            any("/zellij/zing--pr-255" in e and "terminalUrl" in e for e in events),
+            f"Expected terminalUrl signal patch in events: {events}",
+        )
+        self.assertTrue(
+            any("cc-toast-info" in e and "already running" in e for e in events),
+            f"Expected 'already running' info toast in events: {events}",
+        )
+
+        # launching_set was released even though we returned early.
+        self.assertNotIn("BAK-7", self.fastapi_app.state.launching_set)
 
 
 # ---------------------------------------------------------------------------
@@ -1996,8 +2196,8 @@ class TestZellijLifespan(unittest.TestCase):
         mock_mcp.streamable_http_app.return_value = MagicMock(routes=[])
         return mock_mcp
 
-    def test_create_app_with_disable_zellij(self) -> None:
-        """When disable_zellij=True, zellij_available is False and /zellij/ returns 503."""
+    def test_create_app_with_zellij_support_false(self) -> None:
+        """When zellij_support=False, zellij_available is False and /zellij/ returns 503."""
         import tempfile
         from pathlib import Path
 
@@ -2013,11 +2213,11 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=True,
+                zellij_support=False,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
-                # 503 = Zellij unavailable (correct — disable_zellij=True)
+                # 503 = Zellij unavailable (correct — zellij_support=False)
                 self.assertEqual(resp.status_code, 503)
 
     def test_zellij_startup_failure_sets_unavailable(self) -> None:
@@ -2044,7 +2244,7 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=False,
+                zellij_support=True,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
@@ -2070,7 +2270,7 @@ class TestZellijLifespan(unittest.TestCase):
             app = create_app(
                 session_manager=manager,
                 disable_polling=True,
-                disable_zellij=False,
+                zellij_support=True,
             )
             with TestClient(app) as client:
                 resp = client.get("/zellij/")
@@ -2340,3 +2540,90 @@ class TestStartTicket(unittest.TestCase):
         toasts = _extract_toasts(events)
         self.assertTrue(any("Ticket started" in t["text"] for t in toasts))
         self.assertTrue(any("cc-toast-ok" in t["class"].split() for t in toasts))
+
+
+class TestSessionIdleEndpoint(ServerTestBase):
+    """Tests for POST /command-center/session-idle (Notification hook)."""
+
+    def _create_cc(self, session_id: str, terminal_session: str | None = None) -> None:
+        payload: dict = {"session_id": session_id, "title": "CC"}
+        if terminal_session is not None:
+            payload["terminal_session"] = terminal_session
+        self.client.post("/api/sessions/claude-code", json=payload)
+
+    def test_idle_appends_notification(self) -> None:
+        """Idle hook adds a plain notification (no question payload)."""
+        self._create_cc("cc-idle-1")
+        resp = self.client.post(
+            "/command-center/session-idle",
+            json={
+                "session_id": "cc-idle-1",
+                "title": "Claude is waiting",
+                "body": "Waiting on user input",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ok")
+
+        session = self.manager.get_session("cc-idle-1")
+        assert session is not None
+        self.assertEqual(len(session.notifications), 1)
+        notif = session.notifications[0]
+        self.assertEqual(notif.title, "Claude is waiting")
+        self.assertEqual(notif.body, "Waiting on user input")
+        self.assertIsNone(notif.question)
+
+    def test_idle_falls_back_to_terminal_session(self) -> None:
+        """When session_id is unknown, fall back to matching terminal_session."""
+        self._create_cc("cc-idle-2", terminal_session="zing-idle-2")
+        resp = self.client.post(
+            "/command-center/session-idle",
+            json={
+                "session_id": "zing-idle-2",
+                "title": "Claude is waiting",
+                "body": "idle",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("cc-idle-2")
+        assert session is not None
+        self.assertEqual(len(session.notifications), 1)
+
+    def test_idle_unknown_session_ignored(self) -> None:
+        """Unknown session_id returns ignored without raising."""
+        resp = self.client.post(
+            "/command-center/session-idle",
+            json={"session_id": "does-not-exist", "title": "x", "body": "y"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ignored")
+
+    def test_idle_missing_session_id_ignored(self) -> None:
+        """Payload without session_id is ignored."""
+        resp = self.client.post(
+            "/command-center/session-idle",
+            json={"title": "x", "body": "y"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ignored")
+
+    def test_idle_invalid_json_returns_400(self) -> None:
+        """Malformed JSON returns 400."""
+        resp = self.client.post(
+            "/command-center/session-idle",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_idle_default_title_when_omitted(self) -> None:
+        """Missing title falls back to a default."""
+        self._create_cc("cc-idle-3")
+        resp = self.client.post(
+            "/command-center/session-idle",
+            json={"session_id": "cc-idle-3"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        session = self.manager.get_session("cc-idle-3")
+        assert session is not None
+        self.assertEqual(session.notifications[0].title, "Claude is waiting")

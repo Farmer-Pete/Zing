@@ -1373,6 +1373,79 @@ class TestClaudeCodeSession(unittest.TestCase):
         ]
         assert len(matching) == 1
 
+    def test_mark_pending_question_answered_clears_attention(self) -> None:
+        """Stamping answered_at clears pending_question and fires a listener event."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-ans", title="Answer Test")
+        notif = self.manager.add_notification("cc-ans", "Input needed", body="Q?")
+        events: list[tuple[str, str]] = []
+        self.manager.add_listener(lambda et, sid: events.append((et, sid)))
+
+        marked = self.manager.mark_pending_question_answered("cc-ans")
+
+        assert marked is not None
+        assert marked.id == notif.id
+        session = self.manager.get_session("cc-ans")
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.pending_question is None
+        assert session.notifications[0].answered_at is not None
+        assert (f"notification_answered:{notif.id}", "cc-ans") in events
+
+    def test_mark_pending_question_answered_persists(self) -> None:
+        """answered_at survives a manager restart."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-ans-p", title="Persist")
+        self.manager.add_notification("cc-ans-p", "Input needed")
+        self.manager.mark_pending_question_answered("cc-ans-p")
+
+        manager2 = SessionManager(data_dir=self.data_dir)
+        loaded = manager2.get_session("cc-ans-p")
+        assert isinstance(loaded, ClaudeCodeSession)
+        assert loaded.pending_question is None
+        assert loaded.notifications[0].answered_at is not None
+
+    def test_mark_pending_question_answered_clears_stacked_notifications(self) -> None:
+        """All unanswered notifications are cleared in one call.
+
+        Regression: when Claude sent multiple idle prompts before the user
+        opened the drawer, only the latest was marked answered. The older
+        ones became invisible (the UI only shows the latest pending
+        question) but kept the attention bar entry alive, requiring N
+        clicks to clear N stacked notifications.
+        """
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-stack", title="Stack Test")
+        n1 = self.manager.add_notification("cc-stack", "Q1", body="first?")
+        n2 = self.manager.add_notification("cc-stack", "Q2", body="second?")
+        n3 = self.manager.add_notification("cc-stack", "Q3", body="third?")
+        events: list[tuple[str, str]] = []
+        self.manager.add_listener(lambda et, sid: events.append((et, sid)))
+
+        marked = self.manager.mark_pending_question_answered("cc-stack")
+
+        assert marked is not None
+        assert marked.id == n3.id
+        session = self.manager.get_session("cc-stack")
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.pending_question is None
+        assert all(n.answered_at is not None for n in session.notifications)
+        for notif in (n1, n2, n3):
+            assert (f"notification_answered:{notif.id}", "cc-stack") in events
+
+    def test_mark_pending_question_answered_no_notification_returns_none(self) -> None:
+        """No-op when the session has no unanswered notification."""
+        self.manager.create_claude_code_session(session_id="cc-empty", title="Empty")
+        assert self.manager.mark_pending_question_answered("cc-empty") is None
+
+    def test_mark_pending_question_answered_zing_session_returns_none(self) -> None:
+        """ZingSessions are not affected — only ClaudeCodeSession is touched."""
+        self.manager.create_session("zs1", "Zing")
+        assert self.manager.mark_pending_question_answered("zs1") is None
+        assert self.manager.mark_pending_question_answered("missing") is None
+
 
 if __name__ == "__main__":
     unittest.main()

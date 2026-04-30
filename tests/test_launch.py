@@ -200,6 +200,54 @@ class TestCreateWorktree(TestCase):
         expected = (repo_root / "../myproject-bak-42-fix").resolve()
         self.assertEqual(result, expected)
 
+    def test_reuses_existing_valid_worktree(self) -> None:
+        """If the worktree dir exists and is a valid git checkout, return it without recreating."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            worktree_path = (repo_root / "../repo-feat").resolve()
+            worktree_path.mkdir()
+
+            with patch("zing_ai.launch.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock()  # rev-parse succeeds
+                result = create_worktree(repo_root, "feat", "../{repo}-{branch}", "")
+
+            self.assertEqual(result, worktree_path)
+            # Only rev-parse should run — no `git worktree add`.
+            for call in mock_run.call_args_list:
+                cmd = call[0][0]
+                self.assertNotIn("add", cmd, f"unexpected add call: {cmd}")
+
+    def test_repairs_orphan_directory(self) -> None:
+        """If the worktree dir exists but isn't a valid git checkout, prune stale records first."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            worktree_path = (repo_root / "../repo-feat").resolve()
+            worktree_path.mkdir()
+
+            calls: list[list[str]] = []
+            rev_parse_error = subprocess.CalledProcessError(128, "git", stderr="not a working tree")
+
+            def _side_effect(cmd: list[str], **kwargs: object) -> MagicMock:
+                calls.append(cmd)
+                if "rev-parse" in cmd:
+                    raise rev_parse_error
+                return MagicMock()
+
+            with patch("zing_ai.launch.subprocess.run", side_effect=_side_effect):
+                create_worktree(repo_root, "feat", "../{repo}-{branch}", "")
+
+            self.assertTrue(any("prune" in c for c in calls), f"expected prune in {calls}")
+            self.assertTrue(any("add" in c for c in calls), f"expected add in {calls}")
+            prune_idx = next(i for i, c in enumerate(calls) if "prune" in c)
+            add_idx = next(i for i, c in enumerate(calls) if "add" in c)
+            self.assertLess(prune_idx, add_idx, "prune should run before add in repair flow")
+
 
 # ---------------------------------------------------------------------------
 # checkout_pr_branch
