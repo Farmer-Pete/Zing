@@ -350,11 +350,15 @@ async def get_command_center(request: Request) -> HTMLResponse:
 @datastar_response
 async def command_center_events(request: Request):  # noqa: ANN201
     """SSE endpoint that pushes Command Center updates to the browser."""
+    # Register the queue synchronously, before returning the generator.
+    # Otherwise the response headers flush (and any waiter on `expect_response`
+    # unblocks) before the inner generator's first iteration runs, leaving a
+    # window where `cc_queues` is empty even though the SSE stream is "open".
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    request.app.state.cc_queues.append(queue)
 
     async def _generate():  # noqa: ANN202
         """Yield SSE events for board changes and poll status."""
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
-        request.app.state.cc_queues.append(queue)
         try:
             while True:
                 try:
