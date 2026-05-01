@@ -330,6 +330,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
     sessions = request.app.state.session_manager.list_sessions()
     tray_data = _build_tray_data(view, sessions, live_sessions)
     attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    queue_count = len(attention_items)
     session_phases = {}
     for s in sessions:
         if hasattr(s, "steps"):
@@ -346,6 +347,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             view=view,
             current_path="/command-center",
             current_view="board",
+            queue_count=queue_count,
             last_polled_at=cache.last_polled_at,
             last_polled_label=_format_last_polled(cache.last_polled_at),
             last_error=cache.last_error,

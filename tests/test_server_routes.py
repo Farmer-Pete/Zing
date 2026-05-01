@@ -2836,9 +2836,65 @@ class TestFlowPage(ServerTestBase):
 
     def test_command_center_passes_current_view_board(self) -> None:
         """GET /command-center passes current_view='board' (renders 200)."""
-        # Board-side toggle inclusion is handled in Step 8; verify route is healthy.
         resp = self.client.get("/command-center")
         self.assertEqual(resp.status_code, 200)
+
+    def test_command_center_renders_flow_board_toggle(self) -> None:
+        """GET /command-center includes the Flow/Board toggle with active board class."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn('href="/command-center"', resp.text)
+        self.assertIn('href="/command-center/flow"', resp.text)
+        self.assertIn('class="toggle-badge"', resp.text)
+        self.assertIn("active board", resp.text)
+
+    def test_command_center_toggle_badge_reflects_queue_count(self) -> None:
+        """GET /command-center badge shows the correct attention queue count."""
+        # Create two sessions with READY findings so queue_count == 2.
+        for i in range(2):
+            session = self.manager.create_session(
+                session_id=f"badge-test-{i}",
+                title=f"Badge Session {i}",
+                steps=["review"],
+            )
+            step_id = session.steps[0].step_id
+            self.manager.start_step(session.session_id, step_id)
+            self.manager.add_finding(
+                session.session_id,
+                step_id,
+                {"type": "text", "title": f"Finding {i}"},
+            )
+            self.manager.start_agent(session.session_id, step_id, f"agent-badge-{i}")
+            self.manager.stop_agent(session.session_id, step_id, f"agent-badge-{i}")
+            self.manager.mark_step_ready(session.session_id, step_id)
+
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        # The badge should contain "2" — the count of attention items.
+        self.assertIn(">2<", resp.text)
+
+    def test_command_center_has_cmd_b_keybind(self) -> None:
+        """GET /command-center ⌘B keybind navigates to /command-center/flow."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("data-on:keydown__window", resp.text)
+        self.assertIn("/command-center/flow", resp.text)
+
+    def test_flow_page_has_cmd_b_keybind_to_board(self) -> None:
+        """GET /command-center/flow ⌘B keybind still navigates to /command-center (Board)."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # The flow page uses an inline keydown handler with metaKey + 'b'
+        self.assertIn("evt.metaKey && evt.key === 'b'", resp.text)
+        self.assertIn("window.location = '/command-center'", resp.text)
+
+    def test_flow_page_renders_flow_board_toggle_active(self) -> None:
+        """GET /command-center/flow toggle shows the Flow side as active."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn("active flow", resp.text)
 
 
 class _FlowTestBase(unittest.TestCase):

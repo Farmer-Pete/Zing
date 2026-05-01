@@ -2,6 +2,8 @@
 
 {% block title %}Command Center{% endblock %}
 
+{% block topnav_extra %}{% include 'fragments/_flow_board_toggle.html' %}{% endblock %}
+
 {% block content %}
 <div class="cc-page"
      data-signals='{{ initial_signals | tojson }}'
@@ -10,7 +12,7 @@
         the request body, so transmitting the entire $busyButtons envelope
         (one entry per session per action) was wasting kilobytes per request. #}
      data-init="@get('/command-center/events', {filterSignals: {include: /^$/}})"
-     data-on:keydown__window="evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
+     data-on:keydown__window="evt.metaKey && evt.key === 'b' ? (window.location = '/command-center/flow') : evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
      data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')"
      {# Logical-AND form (not `if (…) …`). Datastar wraps the body in
         `new Function('return ' + expr)`, which makes `if` an unexpected token
