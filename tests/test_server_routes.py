@@ -2685,3 +2685,62 @@ class TestSessionIdleEndpoint(ServerTestBase):
         session = self.manager.get_session("cc-idle-3")
         assert session is not None
         self.assertEqual(session.notifications[0].title, "Claude is waiting")
+
+
+class TestFlowPage(ServerTestBase):
+    """Tests for GET /command-center/flow."""
+
+    def _make_findings_session(self) -> str:
+        """Create a ZingSession with a READY findings step; return step title."""
+        session = self.manager.create_session(
+            session_id="flow-test-session",
+            title="Flow Test Title",
+            steps=["review"],
+        )
+        step_id = session.steps[0].step_id
+        self.manager.start_step("flow-test-session", step_id)
+        self.manager.add_finding(
+            "flow-test-session",
+            step_id,
+            {"type": "text", "title": "What changed?"},
+        )
+        self.manager.start_agent("flow-test-session", step_id, "agent-1")
+        self.manager.stop_agent("flow-test-session", step_id, "agent-1")
+        self.manager.mark_step_ready("flow-test-session", step_id)
+        return "Flow Test Title"
+
+    def test_flow_page_renders_with_queue(self) -> None:
+        """GET /command-center/flow with a READY item shows the item and flow-body."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('<main id="flow-body"', resp.text)
+        self.assertIn("Findings:", resp.text)
+
+    def test_flow_page_empty_queue(self) -> None:
+        """GET /command-center/flow with no attention items shows the empty state."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("All clear", resp.text)
+        self.assertIn("No attention items", resp.text)
+
+    def test_command_center_does_not_redirect(self) -> None:
+        """GET /command-center returns 200, not a redirect."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_flow_page_attach_mode_renders_terminal_iframe(self) -> None:
+        """GET /command-center/flow for an attach item shows the terminal iframe."""
+        session = self.manager.create_claude_code_session(
+            session_id="cc-flow-attach",
+            title="CC Flow Attach",
+            terminal_session="zing-flow-test",
+        )
+        self.manager.add_notification(
+            session_id=session.session_id,
+            title="Claude is waiting",
+            body="Needs input",
+        )
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('<iframe src="/zellij/zing-flow-test"', resp.text)

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Flow — Command Center{% endblock %}
+
+{% block topnav_extra %}
+{# TODO(Step 3): replace placeholder with _flow_board_toggle.html include #}
+<div class="cc-toggle">Flow</div>
+{% endblock %}
+
+{% block content %}
+<div class="flow-page"
+     data-signals="{paletteOpen: false, paletteQuery: '', pendingAdvance: false}"
+     data-on:keydown__window__key.j__cmd="@post('/command-center/flow/advance', {payload: {direction: 'next'}})"
+     data-on:keydown__window__key.j__cmd.shift="@post('/command-center/flow/advance', {payload: {direction: 'prev'}})"
+     data-on:keydown__window__key.k__cmd="$paletteOpen = !$paletteOpen"
+     data-on:keydown__window__key.b__cmd="window.location = '/command-center'"
+     data-on:keydown__window__key.p__cmd="@post('/command-center/flow/pin')"
+     data-on:keydown__window__key.escape="$paletteOpen = false"
+     data-init="@get('/command-center/flow/events', {filterSignals: {include: /^$/}})">
+  {# flow_progress_strip.html, flow_toolbar.html, flow_palette.html added in Step 3/6 #}
+  <main id="flow-body" class="flow-body">
+    {% if active is none %}
+      <div class="flow-body-empty"><h2>All clear</h2><p>No attention items.</p></div>
+    {% elif active.action_type == 'attach' %}
+      <div class="flow-body-attach"><iframe src="/zellij/{{ active_session.terminal_session }}" class="flow-attach-frame"></iframe></div>
+    {% elif active.action_type == 'findings' %}
+      <div class="flow-body-findings" data-signals='{"responses": {{ initial_responses|tojson }}, "step_id": "{{ active.step_id }}"}'>
+        {# placeholder body — Step 4 builds the proper fragment with finding rendering #}
+        <p>Findings: {{ active_findings|length }} items</p>
+      </div>
+    {% elif active.action_type == 'questions' %}
+      <div class="flow-body-question" data-signals='{"responses": {{ initial_responses|tojson }}, "step_id": "{{ active.step_id }}"}'>
+        <p>Question item: {{ active.title }}</p>
+      </div>
+    {% endif %}
+  </main>
+  {# flow_progress_strip.html, flow_toolbar.html, flow_palette.html added in Step 3/6 #}
+</div>
+{% endblock %}

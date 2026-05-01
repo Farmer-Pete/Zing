@@ -71,6 +71,7 @@
         <a href="/command-center"{% if current_path == "/command-center" %} class="active"{% endif %}>Command Center</a>
         <a href="/config"{% if current_path == "/config" %} class="active"{% endif %}>Config</a>
         <a href="/install"{% if current_path == "/install" %} class="active"{% endif %}>Install</a>
+        {% block topnav_extra %}{% endblock %}
     </nav>
     <main class="main-content">
         {% block content %}{% endblock %}

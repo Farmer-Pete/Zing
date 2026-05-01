@@ -41,6 +41,7 @@ from zing_ai.server.command_center import (
     generate_standup,
     infer_repo_for_ticket,
 )
+from zing_ai.server.flow import FlowCursor, build_flow_context, resolve_active_item
 from zing_ai.server.models import (
     LAUNCH_GRACE_SECONDS,
     ClaudeCodeSession,
@@ -344,6 +345,18 @@ async def get_command_center(request: Request) -> HTMLResponse:
             **tray_data,
         )
     )
+
+
+@router.get("/command-center/flow", response_class=HTMLResponse)
+async def get_flow(request: Request) -> HTMLResponse:
+    """Return the Flow Mode HTML page."""
+    manager = request.app.state.session_manager
+    sessions = manager.list_sessions()
+    queue = build_attention_queue(sessions, datetime.now(UTC))
+    cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
+    active = resolve_active_item(queue, cursor)
+    ctx = build_flow_context(manager, queue, active)
+    return HTMLResponse(render("flow.html", current_path="/command-center/flow", **ctx))
 
 
 @router.get("/command-center/events")
