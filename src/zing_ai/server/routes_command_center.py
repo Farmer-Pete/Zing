@@ -35,7 +35,7 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,  # used by /cleanup-worktree (explicit user action)
 )
-from zing_ai.server.attention import AttentionItem, build_attention_queue
+from zing_ai.server.attention import build_attention_queue
 from zing_ai.server.command_center import (
     aggregate,
     build_session_phases,
@@ -55,8 +55,6 @@ from zing_ai.server.models import (
     ClaudeCodeSession,
     QuestionData,
     QuestionOption,
-    Session,
-    ZingSession,
 )
 from zing_ai.server.models_external import KanbanView
 from zing_ai.server.signals import to_signal_key as _to_signal_key
@@ -229,18 +227,6 @@ def render_board_fragment(app: FastAPI) -> str:
     )
 
 
-def render_attention_bar_fragment(app: FastAPI, sessions: list[Session] | None = None) -> str:
-    """Render the attention bar fragment. Used by SSE board_changed events."""
-    resolved: list[Session] = (
-        sessions if sessions is not None else app.state.session_manager.list_sessions()
-    )
-    attention_items = build_attention_queue(resolved, datetime.now(UTC))
-    return render(
-        "fragments/attention_bar.html",
-        attention_items=attention_items,
-    )
-
-
 def _render_tray_fragment(app: FastAPI) -> str:
     """Render the management tray. Used by SSE board_changed events."""
     view = _build_view(app)
@@ -290,14 +276,11 @@ def _build_initial_signals(
         # Polling status (also patched via SSE).
         "lastPolledLabel": last_polled_label or "",
         "lastError": last_error or "",
-        # Attention bar open/closed.
-        "attnBarOpen": True,
         # Per-button busy/disabled flags (see helper above).
         "busyButtons": busy_buttons,
-        # Modal open/closed flags. Six modals share this dict so a single
+        # Modal open/closed flags. Five modals share this dict so a single
         # data-on-signal-patch-filter on .cc-page can react to any change.
         "modals": {
-            "drawer": False,
             "mgmt": False,
             "standup": False,
             "terminal": False,
@@ -313,7 +296,7 @@ def _build_initial_signals(
         # Standup modal state.
         "standupTab": "rendered",
         "standupMarkdown": "",
-        # Terminal modal — URL signal patched by /attach-session.
+        # Terminal modal — URL signal patched by /flow/launch-popup-open.
         "terminalUrl": "",
         # Launch popup — session name, URL, and title patched by /flow/launch-popup-open.
         "launchPopupSession": "",
@@ -544,52 +527,6 @@ async def get_standup(request: Request):  # noqa: ANN201
                 "standupMarkdown": markdown,
             }
         )
-
-    return _stream()
-
-
-# ---------------------------------------------------------------------------
-# Zellij session attach (browser proxy)
-# ---------------------------------------------------------------------------
-
-
-@router.post("/command-center/attach-session")
-@datastar_response
-async def attach_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    """Attach to a zellij session via the browser proxy."""
-
-    async def _stream():  # noqa: ANN202
-        if not getattr(request.app.state, "zellij_available", False):
-            logger.warning(
-                "attach-session: zellij unavailable",
-                extra={"event": "cc_attach_unavailable"},
-            )
-            yield _sse_toast("Zellij is not available", "err")
-            return
-        terminal_session = payload.get("terminal_session")
-        if not terminal_session:
-            logger.warning(
-                "attach-session: missing terminal_session",
-                extra={"event": "cc_attach_invalid"},
-            )
-            yield _sse_toast("terminal_session is required", "err")
-            return
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
-            logger.warning(
-                "attach-session: invalid session name %s",
-                terminal_session,
-                extra={"event": "cc_attach_invalid"},
-            )
-            yield _sse_toast("invalid session name", "err")
-            return
-        url_for_zellij_session = f"/zellij/{terminal_session}"
-        yield SSE.patch_signals(
-            {
-                "terminalUrl": url_for_zellij_session,
-                "modals": {"terminal": True},
-            }
-        )
-        yield _sse_toast("Terminal opened", "ok")
 
     return _stream()
 
@@ -1217,243 +1154,6 @@ def _parse_question_payload(raw: object) -> tuple[str, QuestionData | None]:
         multi_select=bool(raw.get("multiSelect")),
         options=options,
     )
-
-
-# ---------------------------------------------------------------------------
-# Review drawer
-# ---------------------------------------------------------------------------
-
-
-def _format_wait_label(seconds: int) -> str:
-    """Return a compact wait-time string: '42s', '5m', '2h'."""
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    return f"{seconds // 3600}h"
-
-
-def build_drawer_context(
-    session_id: str,
-    manager: object,
-    attention_queue: list[AttentionItem],
-) -> dict:
-    """Build template context for the review drawer.
-
-    Args:
-        session_id: The session to open in the drawer.
-        manager: The session manager (app.state.session_manager).
-        attention_queue: Current attention queue from build_attention_queue().
-
-    Returns:
-        A dict with keys: session, steps, current_step, mode, queue_position,
-        queue_total, queue_items, next_session_id, prev_session_id,
-        waiting_label, notification_body, notification.
-    """
-    session = manager.get_session(session_id)  # type: ignore[union-attr]
-    if session is None:
-        return {}
-
-    # Find this session in the attention queue to determine position.
-    queue_index = next(
-        (i for i, item in enumerate(attention_queue) if item.session_id == session_id),
-        None,
-    )
-
-    queue_total = len(attention_queue)
-    queue_position = (queue_index + 1) if queue_index is not None else 1
-
-    # Items after this one in the queue.
-    queue_items = attention_queue[queue_index + 1 :] if queue_index is not None else []
-
-    next_session_id: str | None = queue_items[0].session_id if queue_items else None
-    prev_session_id: str | None = (
-        attention_queue[queue_index - 1].session_id
-        if (queue_index is not None and queue_index > 0)
-        else None
-    )
-
-    # Determine mode.
-    current_attention = attention_queue[queue_index] if queue_index is not None else None
-    mode = current_attention.action_type if current_attention else "findings"
-
-    # Normalise: "questions" maps to "findings" for template mode.
-    if mode == "questions":
-        mode = "findings"
-
-    # Wait label.
-    waiting_label = ""
-    if current_attention:
-        waiting_label = _format_wait_label(current_attention.wait_seconds)
-
-    # Steps and current step for ZingSession.
-    steps: list = []
-    current_step = None
-    notification = None
-    notification_body = ""
-
-    phase_segments: list[dict] = []
-    if isinstance(session, ZingSession):
-        steps = list(session.steps)
-        # Current step = last READY step.
-        current_step = next((s for s in reversed(steps) if s.state.value == "ready"), None)
-        phase_segments = build_session_phases(session)
-    elif isinstance(session, ClaudeCodeSession):
-        notification = session.pending_question
-        notification_body = notification.body if notification else ""
-
-    # Build the responses signal dict for the drawer. Mirrors the standalone
-    # review page's saved_responses builder (see routes.get_session_page) so
-    # the shared render_finding macro sees the same envelope shape on both
-    # surfaces. Keys mirror what _map_signals_to_responses reads back on save:
-    #   <finding_id>                 → triage action / text answer
-    #   <finding_id>_approach        → selected suggested-approach label
-    #   <finding_id>_approach_other  → free-text "Other" approach
-    #   <finding_id>_complexity      → complexity override
-    # Storage pairs findings and responses by list index, which is fragile if
-    # findings are inserted, deleted, or reordered mid-step. The envelope is
-    # intentionally finding_id-keyed so it is robust to ordering drift; the
-    # index lookup below is only used to fetch the matching UserResponse.
-    saved_responses: dict[str, str] = {}
-    if current_step is not None:
-        responses = current_step.responses or []
-        same_length = len(responses) == len(current_step.findings)
-        for idx, finding in enumerate(current_step.findings):
-            if not (same_length and idx < len(responses)):
-                continue
-            resp = responses[idx]
-            if finding.type == "triage":
-                if resp.action is not None:
-                    saved_responses[finding.id] = resp.action.value
-                if resp.selected is not None:
-                    saved_responses[f"{finding.id}_approach"] = resp.selected
-                    if resp.other_text is not None:
-                        saved_responses[f"{finding.id}_approach_other"] = resp.other_text
-                if resp.complexity is not None:
-                    saved_responses[f"{finding.id}_complexity"] = resp.complexity.value
-            elif finding.type == "text" and resp.answer is not None:
-                saved_responses[finding.id] = resp.answer
-
-    # Build the openSteps signal dict for the step-section accordion.
-    # Default: all past steps closed; current step open (if present).
-    saved_open_steps: dict[str, bool] = {}
-    if current_step is not None:
-        saved_open_steps[current_step.step_id] = True
-
-    # Build the drawer's data-signals envelope server-side as a single dict so
-    # we can render it via | tojson once on the template. Hand-building the
-    # JSON with raw ``{{ ... }}`` substitutions invites quote-handling drift.
-    # Signal names match the standalone review page so the shared
-    # render_finding macro reads $responses + $step_id on both surfaces.
-    drawer_signals: dict[str, object] = {
-        "prevSessionId": prev_session_id or "",
-        "nextSessionId": next_session_id or "",
-        "sessionId": session.session_id,
-        "step_id": current_step.step_id if current_step else "",
-        "responses": saved_responses,
-        "openSteps": saved_open_steps,
-    }
-
-    return {
-        "session": session,
-        "steps": steps,
-        "current_step": current_step,
-        "phase_segments": phase_segments,
-        "mode": mode,
-        "queue_position": queue_position,
-        "queue_total": max(queue_total, 1),
-        "queue_items": queue_items,
-        "next_session_id": next_session_id,
-        "prev_session_id": prev_session_id,
-        "waiting_label": waiting_label,
-        "notification": notification,
-        "notification_body": notification_body,
-        "saved_responses": saved_responses,
-        "saved_open_steps": saved_open_steps,
-        "drawer_signals": drawer_signals,
-    }
-
-
-@router.post("/command-center/drawer/{session_id}")
-@datastar_response
-async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
-    """Return the drawer HTML fragment for a session via SSE.
-
-    Patches the fragment into #review-drawer-container and opens the drawer
-    by setting modals.drawer = true in the Datastar signals.
-    """
-
-    async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        sessions = manager.list_sessions()
-        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
-
-        ctx = build_drawer_context(session_id, manager, attention_queue)
-        if not ctx:
-            logger.warning("Drawer requested for unknown session: %s", session_id)
-            yield _sse_toast("Session not found", "err")
-            return
-
-        session = ctx["session"]
-
-        had_pending_question = False
-        if isinstance(session, ClaudeCodeSession):
-            # Attach mode — use the simpler attach template.
-            had_pending_question = session.pending_question is not None
-            html = render("fragments/drawer_attach.html", **ctx)
-        else:
-            # Findings/questions mode.
-            html = render("fragments/review_drawer.html", **ctx)
-
-        yield SSE.patch_elements(
-            html,
-            selector="#review-drawer-container",
-            mode=ElementPatchMode.INNER,
-        )
-        yield SSE.patch_signals({"modals": {"drawer": True}})
-
-        # Opening the drawer counts as "viewed" — clear the pending question so
-        # the attention bar entry and card attach strip drop on the next render.
-        if had_pending_question:
-            manager.mark_pending_question_answered(session_id)
-            _push_board_changed(request.app)
-
-    return _stream()
-
-
-@router.post(
-    "/command-center/drawer/{session_id}/step/{step_id}",
-)
-@datastar_response
-async def get_drawer_step(session_id: str, step_id: str, request: Request):  # noqa: ANN201
-    """Return a single step-history fragment for the drawer via SSE.
-
-    Patches the step section into #review-drawer-container and opens the drawer.
-    """
-
-    async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        session = manager.get_session(session_id)
-        if session is None or not isinstance(session, ZingSession):
-            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-            yield _sse_toast("Session not found", "err")
-            return
-
-        step = next((s for s in session.steps if s.step_id == step_id), None)
-        if step is None:
-            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-            yield _sse_toast("Step not found", "err")
-            return
-
-        html = render("fragments/drawer_step_history.html", step=step, session=session)
-        yield SSE.patch_elements(
-            html,
-            selector="#review-drawer-container",
-            mode=ElementPatchMode.INNER,
-        )
-        yield SSE.patch_signals({"modals": {"drawer": True}})
-
-    return _stream()
 
 
 @router.post("/command-center/flow/advance")

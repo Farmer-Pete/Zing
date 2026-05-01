@@ -8,7 +8,6 @@ import json
 import logging
 import pathlib
 from collections import defaultdict
-from datetime import UTC, datetime
 from itertools import zip_longest
 from typing import Any
 
@@ -19,7 +18,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from zing_ai.server.attention import build_attention_queue
 from zing_ai.server.html_fragments import (
     build_notification_script as _build_notification_script,
 )
@@ -42,7 +40,6 @@ from zing_ai.server.html_fragments import (
     submitted_status_html as _submitted_status_html,
 )
 from zing_ai.server.models import (
-    ClaudeCodeSession,
     Complexity,
     Finding,
     ResponseAction,
@@ -290,47 +287,10 @@ async def post_submit(session_id: str, request: Request):  # noqa: ANN201
     )
 
     def _sse_patches():  # noqa: ANN202
-        # Always patch the legacy review-page elements so the standalone
+        # Patch the review-page elements so the standalone
         # review page (/{session_id}) still shows "Review submitted" state.
         yield SSE.patch_elements(_submitted_status_html())
         yield SSE.patch_elements(_submitted_button_html())
-
-        # Recompute the attention queue inside the generator so the next-drawer
-        # fragment renders against a fresh snapshot — concurrent SSE events
-        # firing between the submit() and the consumer reading the response
-        # could otherwise leave prev/next pointers referencing ids that no
-        # longer match the rest of the page.
-        sessions = manager.list_sessions()
-        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
-        next_item = next(
-            (item for item in attention_queue if item.session_id != session_id),
-            None,
-        )
-
-        # Command-center drawer path: load next session or close drawer.
-        if next_item is not None:
-            # Lazy import avoids a module-level circular dependency.
-            from zing_ai.server.routes_command_center import (  # noqa: PLC0415
-                build_drawer_context,
-            )
-
-            ctx = build_drawer_context(next_item.session_id, manager, attention_queue)
-            if ctx:
-                next_session = ctx["session"]
-                if isinstance(next_session, ClaudeCodeSession):
-                    next_html = render("fragments/drawer_attach.html", **ctx)
-                else:
-                    next_html = render("fragments/review_drawer.html", **ctx)
-                yield SSE.patch_elements(
-                    next_html,
-                    selector="#review-drawer-container",
-                    mode=ElementPatchMode.INNER,
-                )
-                # Drawer stays open (modals.drawer was already true).
-                return
-
-        # No next session — close the drawer.
-        yield SSE.patch_signals({"modals": {"drawer": False}})
         yield _sse_toast("All caught up!", "ok")
 
     return _sse_patches()

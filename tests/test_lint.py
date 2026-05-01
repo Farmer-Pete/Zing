@@ -62,11 +62,7 @@ _FRAGMENTS_TO_LINT = [
     "fragments/kanban_column.html",
     "fragments/kanban_column_done.html",
     "fragments/kanban_column_review.html",
-    "fragments/review_drawer.html",
-    "fragments/drawer_attach.html",
-    "fragments/drawer_step_history.html",
     "fragments/launch_button.html",
-    "fragments/attention_bar.html",
     "fragments/management_tray.html",
     "command_center.html",
 ]
