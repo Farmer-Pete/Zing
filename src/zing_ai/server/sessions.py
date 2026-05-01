@@ -897,3 +897,17 @@ class SessionManager:
         for notification in unanswered:
             self._notify(f"notification_answered:{notification.id}", session_id)
         return unanswered[-1]
+
+    def set_pinned(self, session_id: str, pinned: bool) -> None:
+        """Set the pinned flag on a ClaudeCodeSession.
+
+        Validates the session exists and is a ClaudeCodeSession, then
+        persists and notifies via session_updated (already routed to
+        board_changed in _CC_BOARD_EVENTS).
+        """
+        session = self._sessions.get(session_id)
+        if not isinstance(session, ClaudeCodeSession):
+            raise ValueError(f"Session {session_id!r} is not a ClaudeCodeSession")
+        session.pinned = pinned
+        self._persist(session)
+        self._notify("session_updated", session_id)

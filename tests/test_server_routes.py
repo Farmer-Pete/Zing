@@ -980,6 +980,64 @@ class TestNotificationRouting(ServerTestBase):
                 _sse_queues.pop(session_id, None)
 
 
+class TestNotificationAnsweredWiring(unittest.TestCase):
+    """notification_answered:* event routes to board_changed on cc_queues."""
+
+    def test_mark_pending_question_answered_triggers_board_changed(self) -> None:
+        """mark_pending_question_answered fires notification_answered:*
+        which should push board_changed onto all connected cc_queues.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            data_dir = Path(tmp.name)
+            manager = SessionManager(data_dir=data_dir)
+
+            # Pre-inject a cc_queue so we can inspect events.
+            cc_queue: asyncio.Queue[str] = asyncio.Queue()
+            cc_queues: list[asyncio.Queue[str]] = [cc_queue]
+
+            create_app(
+                session_manager=manager,
+                cc_queues=cc_queues,
+                disable_polling=True,
+            )
+
+            # Create a ClaudeCodeSession with a pending notification.
+            session = manager.create_claude_code_session(
+                session_id="notif-ans-test",
+                title="Notif Answered Test",
+            )
+            manager.add_notification(
+                session_id=session.session_id,
+                title="Question?",
+                body="What now?",
+            )
+            # Drain the board_changed emitted by notification_added:*.
+            while not cc_queue.empty():
+                cc_queue.get_nowait()
+
+            # Now answer the notification.
+            manager.mark_pending_question_answered(session.session_id)
+
+            # The queue should contain a board_changed event.
+            events: list[str] = []
+            while not cc_queue.empty():
+                events.append(cc_queue.get_nowait())
+            self.assertIn(
+                "board_changed",
+                events,
+                f"Expected 'board_changed' in cc_queue after notification answered; got {events}",
+            )
+        finally:
+            tmp.cleanup()
+
+
 class TestSessionQuestionParser(unittest.TestCase):
     """Tests for _parse_question_payload — turns hook payloads into QuestionData."""
 

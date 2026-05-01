@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
-from zing_ai.server.attention import build_attention_queue
+from zing_ai.server.attention import AttentionItem, build_attention_queue
 from zing_ai.server.models import (
     ClaudeCodeSession,
     Notification,
@@ -279,6 +279,159 @@ class TestCompletedSessions(unittest.TestCase):
         now = datetime(2026, 1, 1, 12, 0, 0)
         items = build_attention_queue([], now)
         assert items == []
+
+
+class TestNewFields(unittest.TestCase):
+    """New AttentionItem fields: auto_dismiss, step_id, created_at, is_new."""
+
+    # ------------------------------------------------------------------
+    # stopped session is excluded
+    # ------------------------------------------------------------------
+
+    def test_stopped_pinned_session_excluded(self) -> None:
+        """ClaudeCodeSession with state=STOPPED is not surfaced in the queue."""
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(
+            body="Hello?",
+            created_at=datetime(2026, 1, 1, 12, 0, 0),
+        )
+        # Create a session that will appear STOPPED:
+        # terminal_session set, launched_at well outside grace window, pinned=True.
+        session = ClaudeCodeSession(
+            session_id="cc-stopped",
+            title="Stopped Session",
+            terminal_session="old-session",
+            launched_at=datetime(2025, 1, 1, 0, 0, 0),  # very old
+            pinned=True,
+            notifications=[notif],
+        )
+        # _session_alive defaults to False; _ever_seen_alive defaults to False;
+        # launched_at is far in the past → state == STOPPED.
+        assert session.state == SessionState.STOPPED
+
+        items = build_attention_queue([session], now)
+        assert items == []
+
+    # ------------------------------------------------------------------
+    # auto_dismiss set correctly
+    # ------------------------------------------------------------------
+
+    def test_auto_dismiss_false_for_pinned_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = ClaudeCodeSession(
+            session_id="cc-pinned",
+            title="Pinned",
+            pinned=True,
+            notifications=[notif],
+        )
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].auto_dismiss is False
+
+    def test_auto_dismiss_true_for_unpinned_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_claude_session(notifications=[notif])
+        # pinned defaults to False
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].auto_dismiss is True
+
+    def test_auto_dismiss_false_for_findings(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("build-audit", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].auto_dismiss is False
+
+    def test_auto_dismiss_false_for_questions(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("plan", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].auto_dismiss is False
+
+    # ------------------------------------------------------------------
+    # step_id set for findings/questions, None for attach
+    # ------------------------------------------------------------------
+
+    def test_step_id_set_for_findings(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("build-audit", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id == step.step_id
+
+    def test_step_id_set_for_questions(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("plan", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id == step.step_id
+
+    def test_step_id_none_for_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_claude_session(notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id is None
+
+    # ------------------------------------------------------------------
+    # created_at populated
+    # ------------------------------------------------------------------
+
+    def test_created_at_set_for_findings(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        created = datetime(2026, 1, 1, 12, 0, 0)
+        step = _make_step("build-audit", SessionState.READY, created)
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].created_at is not None
+
+    def test_created_at_set_for_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif_time = datetime(2026, 1, 1, 12, 0, 0)
+        notif = _make_notification(created_at=notif_time)
+        session = _make_claude_session(notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert items[0].created_at is not None
+
+    # ------------------------------------------------------------------
+    # is_new property
+    # ------------------------------------------------------------------
+
+    def test_is_new_true_for_recent_item(self) -> None:
+        item = AttentionItem(
+            action_type="findings",
+            session_id="s",
+            ticket_id=None,
+            title="T",
+            description="d",
+            step_name="build-audit",
+            finding_count=0,
+            wait_seconds=0,
+            card_key="s",
+            created_at=datetime.now(UTC),  # just now
+        )
+        assert item.is_new is True
+
+    def test_is_new_false_for_old_item(self) -> None:
+        item = AttentionItem(
+            action_type="findings",
+            session_id="s",
+            ticket_id=None,
+            title="T",
+            description="d",
+            step_name="build-audit",
+            finding_count=0,
+            wait_seconds=0,
+            card_key="s",
+            created_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        assert item.is_new is False
 
 
 if __name__ == "__main__":
