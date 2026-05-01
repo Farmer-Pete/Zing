@@ -181,6 +181,19 @@ def build_flow_context(
                         elif finding.type == "text" and resp.answer is not None:
                             initial_responses[finding.id] = resp.answer
 
+    # Compute the ticket_id of the next item in the queue (wraps around).
+    # Used by the toolbar's "Next ▸ <ticket>" button.
+    next_ticket_id: str | None = None
+    if active and queue:
+        try:
+            idx = queue.index(active)
+        except ValueError:
+            idx = -1
+        if idx >= 0:
+            next_idx = (idx + 1) % len(queue)
+            if next_idx != idx and queue[next_idx].ticket_id:
+                next_ticket_id = queue[next_idx].ticket_id
+
     return {
         "queue": queue,
         "active": active,
@@ -189,4 +202,5 @@ def build_flow_context(
         "active_session": active_session,
         "active_findings": active_findings,
         "initial_responses": initial_responses,
+        "next_ticket_id": next_ticket_id,
     }

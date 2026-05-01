@@ -1,0 +1,11 @@
+<div class="cc-toggle">
+  <a href="/command-center"
+     class="cc-toggle-btn{% if current_view == 'board' %} active board{% endif %}">
+    <span class="cc-toggle-label">Board</span>
+  </a>
+  <a href="/command-center/flow"
+     class="cc-toggle-btn{% if current_view == 'flow' %} active flow{% endif %}">
+    <span class="cc-toggle-label">Flow</span>
+    <span class="toggle-badge" id="flow-toggle-badge">{{ queue_count }}</span>
+  </a>
+</div>

@@ -324,3 +324,104 @@ class TestBuildFlowContext(unittest.TestCase):
         mgr = _make_manager_for_session(zing_session)
         ctx = build_flow_context(mgr, [item], item)
         self.assertEqual(ctx["initial_responses"], {finding.id: "my answer"})
+
+    def test_next_ticket_id_resolved_from_queue(self) -> None:
+        """next_ticket_id is the ticket_id of the item after active (wraps)."""
+        from zing_ai.server.sessions import SessionManager
+
+        mgr = MagicMock(spec=SessionManager)
+        mgr.get_session.return_value = None
+
+        # Build two items; second has a ticket_id.
+        item_a = AttentionItem(
+            action_type="findings",
+            session_id="sess-a",
+            ticket_id="BAK-111",
+            title="First",
+            description="",
+            step_name="build-audit",
+            finding_count=1,
+            wait_seconds=0,
+            card_key="sess-a",
+            auto_dismiss=False,
+            step_id="st-a",
+            created_at=datetime.now(UTC),
+        )
+        item_b = AttentionItem(
+            action_type="findings",
+            session_id="sess-b",
+            ticket_id="BAK-222",
+            title="Second",
+            description="",
+            step_name="build-audit",
+            finding_count=1,
+            wait_seconds=0,
+            card_key="sess-b",
+            auto_dismiss=False,
+            step_id="st-b",
+            created_at=datetime.now(UTC),
+        )
+        ctx = build_flow_context(mgr, [item_a, item_b], item_a)
+        self.assertEqual(ctx["next_ticket_id"], "BAK-222")
+
+    def test_next_ticket_id_none_when_single_item(self) -> None:
+        """next_ticket_id is None when there is only one item in the queue."""
+        from zing_ai.server.sessions import SessionManager
+
+        mgr = MagicMock(spec=SessionManager)
+        mgr.get_session.return_value = None
+
+        item = AttentionItem(
+            action_type="findings",
+            session_id="sess-x",
+            ticket_id="BAK-999",
+            title="Only",
+            description="",
+            step_name="build-audit",
+            finding_count=1,
+            wait_seconds=0,
+            card_key="sess-x",
+            auto_dismiss=False,
+            step_id="st-x",
+            created_at=datetime.now(UTC),
+        )
+        ctx = build_flow_context(mgr, [item], item)
+        self.assertIsNone(ctx["next_ticket_id"])
+
+    def test_next_ticket_id_none_when_next_has_no_ticket(self) -> None:
+        """next_ticket_id is None when the next queue item has no ticket_id."""
+        from zing_ai.server.sessions import SessionManager
+
+        mgr = MagicMock(spec=SessionManager)
+        mgr.get_session.return_value = None
+
+        item_a = AttentionItem(
+            action_type="findings",
+            session_id="sess-a2",
+            ticket_id="BAK-100",
+            title="First",
+            description="",
+            step_name="build-audit",
+            finding_count=1,
+            wait_seconds=0,
+            card_key="sess-a2",
+            auto_dismiss=False,
+            step_id="st-a2",
+            created_at=datetime.now(UTC),
+        )
+        item_b = AttentionItem(
+            action_type="findings",
+            session_id="sess-b2",
+            ticket_id=None,
+            title="Second no ticket",
+            description="",
+            step_name="build-audit",
+            finding_count=1,
+            wait_seconds=0,
+            card_key="sess-b2",
+            auto_dismiss=False,
+            step_id="st-b2",
+            created_at=datetime.now(UTC),
+        )
+        ctx = build_flow_context(mgr, [item_a, item_b], item_a)
+        self.assertIsNone(ctx["next_ticket_id"])

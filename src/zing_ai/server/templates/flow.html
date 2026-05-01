@@ -3,8 +3,7 @@
 {% block title %}Flow — Command Center{% endblock %}
 
 {% block topnav_extra %}
-{# TODO(Step 3): replace placeholder with _flow_board_toggle.html include #}
-<div class="cc-toggle">Flow</div>
+{% include 'fragments/_flow_board_toggle.html' %}
 {% endblock %}
 
 {% block content %}
@@ -17,7 +16,7 @@
      data-on:keydown__window__key.p__cmd="@post('/command-center/flow/pin')"
      data-on:keydown__window__key.escape="$paletteOpen = false"
      data-init="@get('/command-center/flow/events', {filterSignals: {include: /^$/}})">
-  {# flow_progress_strip.html, flow_toolbar.html, flow_palette.html added in Step 3/6 #}
+  {% include 'fragments/flow_progress_strip.html' %}
   <main id="flow-body" class="flow-body">
     {% if active is none %}
       <div class="flow-body-empty"><h2>All clear</h2><p>No attention items.</p></div>
@@ -34,6 +33,7 @@
       </div>
     {% endif %}
   </main>
-  {# flow_progress_strip.html, flow_toolbar.html, flow_palette.html added in Step 3/6 #}
+  {% include 'fragments/flow_toolbar.html' %}
+  {# TODO(Step 6): add flow_palette.html include here #}
 </div>
 {% endblock %}

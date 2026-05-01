@@ -2744,3 +2744,34 @@ class TestFlowPage(ServerTestBase):
         resp = self.client.get("/command-center/flow")
         self.assertEqual(resp.status_code, 200)
         self.assertIn('<iframe src="/zellij/zing-flow-test"', resp.text)
+
+    def test_flow_page_renders_progress_strip(self) -> None:
+        """GET /command-center/flow renders the progress strip header."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('id="flow-strip"', resp.text)
+        self.assertIn('class="flow-strip-z"', resp.text)
+
+    def test_flow_page_renders_toolbar(self) -> None:
+        """GET /command-center/flow renders the bottom toolbar."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="flow-toolbar"', resp.text)
+        self.assertIn("← Board", resp.text)
+        self.assertIn("Prev", resp.text)
+        self.assertIn("Next", resp.text)
+
+    def test_flow_page_renders_board_toggle(self) -> None:
+        """GET /command-center/flow renders the Flow/Board toggle with active flow class."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn("active flow", resp.text)
+
+    def test_command_center_passes_current_view_board(self) -> None:
+        """GET /command-center passes current_view='board' (renders 200)."""
+        # Board-side toggle inclusion is handled in Step 8; verify route is healthy.
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)

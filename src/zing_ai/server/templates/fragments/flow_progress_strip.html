@@ -1,0 +1,36 @@
+<header id="flow-strip" class="flow-strip">
+  <div class="flow-strip-left">
+    <div class="flow-strip-z">Z</div>
+    {% if active %}
+      <div class="flow-strip-ticket">
+        {% if active.action_type == 'attach' and active_session and active_session.pinned %}
+          <span class="flow-strip-pin-glyph" title="Pinned">📌</span>
+        {% endif %}
+        {% if active.ticket_id %}<span class="flow-strip-ticket-id">{{ active.ticket_id }}</span>{% endif %}
+        <span class="flow-strip-title">{{ active.title }}</span>
+        {% if active.step_name %}<span class="flow-strip-step-pill">{{ active.step_name }}</span>{% endif %}
+      </div>
+    {% endif %}
+  </div>
+  <div class="flow-strip-dots">
+    {% for item in queue %}
+      <span class="flow-strip-dot
+                   {% if active and item.session_id == active.session_id and item.step_id == active.step_id %}dot-active{% endif %}
+                   {% if item.action_type == 'attach' %}{% if item.session_id and item.auto_dismiss == false %}dot-pinned{% endif %}{% endif %}
+                   {% if item.is_new %}dot-pulse{% endif %}"
+            title="{{ item.title }}"></span>
+    {% endfor %}
+  </div>
+  <div class="flow-strip-right">
+    <span class="keycap">⌘K</span><span class="keycap-label">Switch · {{ queue_count }} queued</span>
+    <span class="keycap">⌘J</span><span class="keycap">⌘⇧J</span>
+    {% if active and active.action_type == 'attach' %}
+      <button type="button"
+              class="flow-strip-pin"
+              title="Keeps this terminal in the queue when you switch away. Other items stay until resolved."
+              data-on:click="@post('/command-center/flow/pin')">
+        <span class="keycap">⌘P</span> Pin
+      </button>
+    {% endif %}
+  </div>
+</header>

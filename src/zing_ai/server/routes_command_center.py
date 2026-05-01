@@ -333,6 +333,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
             "command_center.html",
             view=view,
             current_path="/command-center",
+            current_view="board",
             last_polled_at=cache.last_polled_at,
             last_polled_label=_format_last_polled(cache.last_polled_at),
             last_error=cache.last_error,
@@ -356,7 +357,9 @@ async def get_flow(request: Request) -> HTMLResponse:
     cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
     active = resolve_active_item(queue, cursor)
     ctx = build_flow_context(manager, queue, active)
-    return HTMLResponse(render("flow.html", current_path="/command-center/flow", **ctx))
+    return HTMLResponse(
+        render("flow.html", current_path="/command-center/flow", current_view="flow", **ctx)
+    )
 
 
 @router.get("/command-center/events")

@@ -1,0 +1,22 @@
+<footer class="flow-toolbar">
+  <div class="flow-toolbar-left">
+    <a href="/command-center" class="flow-toolbar-btn flow-toolbar-board">← Board</a>
+  </div>
+  <div class="flow-toolbar-center">
+    {% if active %}
+      Item {{ active_position }} of {{ queue_count }}
+      {% if active.step_name %} · {{ active.step_name }}{% endif %}
+      {% if active.ticket_id %} · {{ active.ticket_id }}{% endif %}
+    {% else %}
+      All clear
+    {% endif %}
+  </div>
+  <div class="flow-toolbar-right">
+    <button type="button" class="flow-toolbar-btn"
+            data-on:click="@post('/command-center/flow/advance', {payload: {direction: 'prev'}})">Prev</button>
+    <button type="button" class="flow-toolbar-btn flow-toolbar-next"
+            data-on:click="@post('/command-center/flow/advance', {payload: {direction: 'next'}})">
+      Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% endif %}
+    </button>
+  </div>
+</footer>
