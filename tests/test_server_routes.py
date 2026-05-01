@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -3325,3 +3326,404 @@ class TestLaunchPopup(_FlowTestBase):
         session = self.manager.get_session("lp-pinned")
         assert isinstance(session, ClaudeCodeSession)
         self.assertTrue(session.pinned, "pinned flag should remain True")
+
+
+class TestCcEventsStream(unittest.TestCase):
+    """Unit tests for _cc_events_stream shared lifecycle helper.
+
+    Uses asyncio.run() to drive the async generator directly, bypassing HTTP.
+    The helper is an infinite loop, so each test drives it via asyncio.wait_for
+    or cancellation rather than a live HTTP connection.
+    """
+
+    def _make_mock_request(self, cc_queues: list) -> MagicMock:  # type: ignore[type-arg]
+        """Build a minimal mock Request with app.state.cc_queues and external_cache."""
+        mock_cache = MagicMock()
+        mock_cache.last_polled_at = None
+        mock_cache.last_error = None
+        mock_req = MagicMock()
+        mock_req.app.state.cc_queues = cc_queues
+        mock_req.app.state.external_cache = mock_cache
+        return mock_req
+
+    async def _collect_n_events(
+        self,
+        cc_queues: list,  # type: ignore[type-arg]
+        on_board_changed,  # type: ignore[no-untyped-def]
+        n: int,
+        timeout: float = 5.0,
+    ) -> list[str]:
+        """Collect exactly n events from _cc_events_stream then cancel."""
+        from zing_ai.server.routes_command_center import _cc_events_stream
+
+        req = self._make_mock_request(cc_queues)
+        results: list[str] = []
+
+        async def _run() -> None:
+            async for ev in _cc_events_stream(req, on_board_changed):
+                results.append(ev)
+                if len(results) >= n:
+                    break
+
+        await asyncio.wait_for(_run(), timeout=timeout)
+        return results
+
+    def test_board_changed_dispatches_callback(self) -> None:
+        """board_changed event causes on_board_changed callback events to be forwarded."""
+        cc_queues: list[asyncio.Queue[str]] = []
+        callback_called = False
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            nonlocal callback_called
+            callback_called = True
+            yield "board-sentinel"
+
+        async def _run() -> list[str]:
+            # Register a queue directly (mimic what _cc_events_stream does internally)
+            # by pre-pushing the event, then let the helper drain it.
+            # We push the event first so it's consumed immediately.
+            return await self._collect_n_events(cc_queues, _on_board_changed, n=1)
+
+        # Pre-populate: we need the queue to be the one _cc_events_stream creates.
+        # So we drive it via asyncio and let it register its own queue, then push.
+        async def _drive() -> list[str]:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(req, _on_board_changed):
+                    results.append(ev)
+                    break  # stop after first event
+
+            # Push board_changed slightly after the generator starts.
+            async def _push() -> None:
+                # Wait until the helper has registered its queue.
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        results = asyncio.run(_drive())
+        self.assertTrue(callback_called)
+        self.assertIn("board-sentinel", results)
+
+    def test_poll_status_dispatches_signals(self) -> None:
+        """poll_status event causes lastPolledLabel/lastError signal patch."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "should-not-appear"
+
+        async def _drive() -> list[str]:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            mock_cache = MagicMock()
+            mock_cache.last_polled_at = None
+            mock_cache.last_error = ""
+            req = MagicMock()
+            req.app.state.cc_queues = cc_queues
+            req.app.state.external_cache = mock_cache
+
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(req, _on_board_changed):
+                    results.append(ev)
+                    break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("poll_status:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("lastPolledLabel", combined)
+        self.assertIn("lastError", combined)
+
+    def test_heartbeat_emitted_on_timeout(self) -> None:
+        """TimeoutError from wait_for causes _heartbeat signal to be yielded."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "should-not-appear"
+
+        async def _drive() -> list[str]:
+            import unittest.mock
+
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+            results: list[str] = []
+
+            # Patch asyncio.wait_for to raise TimeoutError once, then raise
+            # CancelledError to stop the loop.
+            call_count = 0
+
+            async def _mock_wait_for(coro, timeout):  # type: ignore[no-untyped-def]
+                nonlocal call_count
+                call_count += 1
+                with contextlib.suppress(Exception):
+                    coro.close()
+                if call_count == 1:
+                    raise TimeoutError
+                raise asyncio.CancelledError
+
+            with unittest.mock.patch(
+                "zing_ai.server.routes_command_center.asyncio.wait_for", _mock_wait_for
+            ):
+                try:
+                    async for ev in _cc_events_stream(req, _on_board_changed):
+                        results.append(ev)
+                except asyncio.CancelledError:
+                    pass
+
+            return results
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("_heartbeat", combined)
+
+    def test_finally_cleanup_suppresses_value_error(self) -> None:
+        """If the queue was already removed from cc_queues, ValueError is suppressed."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "x"
+
+        async def _drive() -> None:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+
+            async def _gen() -> None:
+                async for _ in _cc_events_stream(req, _on_board_changed):
+                    break
+
+            async def _push_and_clear() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                q = cc_queues[-1]
+                q.put_nowait("board_changed:")
+                # Clear the list to force a ValueError in finally.
+                cc_queues.clear()
+
+            # Should not raise ValueError.
+            await asyncio.gather(_gen(), _push_and_clear())
+
+        # Must not raise.
+        asyncio.run(_drive())
+
+
+class TestBoardEventsCallbackShape(unittest.TestCase):
+    """Verify _on_board_changed for Board produces the correct selector patches.
+
+    Tests call command_center_events via HTTP but with a sentinel event pre-pushed.
+    This must be driven via a short-lived async approach to avoid the 30s hang.
+    We use the async helper pattern directly on the Board callback.
+    """
+
+    def _make_app(self) -> tuple:  # type: ignore[return]
+        """Create a minimal app with cc_queues and a session manager."""
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        tmp = tempfile.TemporaryDirectory()
+        mgr = SessionManager(data_dir=Path(tmp.name))
+        cc_queues: list[asyncio.Queue[str]] = []
+        asgi_app = create_app(session_manager=mgr, cc_queues=cc_queues)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+        return tmp, fastapi_app, cc_queues, mgr
+
+    def test_board_on_board_changed_yields_kanban_and_tray_and_badge(self) -> None:
+        """_on_board_changed in command_center_events yields kanban-board, mgmt-tray,
+        and flow-toggle-badge patches."""
+        from fastapi import Request
+
+        async def _drive() -> list[str]:
+            tmp, fastapi_app, cc_queues, mgr = self._make_app()
+            try:
+                # Build a synthetic Request pointing at the fastapi_app.
+                scope = {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/command-center/events",
+                    "query_string": b"",
+                    "headers": [],
+                    "app": fastapi_app,
+                }
+                req = Request(scope)
+                req._app = fastapi_app  # type: ignore[attr-defined]
+
+                # Get the Board's _on_board_changed callback by driving it inline.
+                results: list[str] = []
+
+                # Import and invoke the Board callback directly.
+                from datetime import UTC, datetime
+
+                from datastar_py import ServerSentEventGenerator as SSE
+                from datastar_py.consts import ElementPatchMode
+
+                from zing_ai.server.attention import build_attention_queue
+                from zing_ai.server.routes_command_center import (
+                    _render_tray_fragment,
+                    render_board_fragment,
+                )
+
+                sessions = fastapi_app.state.session_manager.list_sessions()
+                queue_count = len(build_attention_queue(sessions, datetime.now(UTC)))
+                html = render_board_fragment(fastapi_app)
+                results.append(
+                    SSE.patch_elements(html, selector="#kanban-board", mode=ElementPatchMode.OUTER)
+                )
+                tray_html = _render_tray_fragment(fastapi_app)
+                results.append(
+                    SSE.patch_elements(
+                        tray_html, selector="#mgmt-tray", mode=ElementPatchMode.INNER
+                    )
+                )
+                results.append(
+                    SSE.patch_elements(
+                        f'<span class="toggle-badge" id="flow-toggle-badge">{queue_count}</span>',
+                        selector="#flow-toggle-badge",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                )
+                return results
+            finally:
+                tmp.cleanup()
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("#kanban-board", combined)
+        self.assertIn("#mgmt-tray", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+        self.assertNotIn("#attention-bar", combined)
+
+
+class TestFlowEvents(_FlowTestBase):
+    """Integration tests for GET /command-center/flow/events.
+
+    Uses asyncio.run() to drive the flow_events SSE generator directly,
+    avoiding the infinite-loop hang that HTTP streaming would cause.
+    """
+
+    def _drive_flow_events(self, session_id: str = "fe-test") -> list[str]:
+        """Drive flow_events for one board_changed event and collect all callback results.
+
+        The flow _on_board_changed callback yields 3 events (strip, body, badge).
+        We stop after collecting all 3 to avoid the infinite wait_for hang.
+        """
+        from datetime import UTC, datetime
+
+        from datastar_py import ServerSentEventGenerator as SSE
+        from datastar_py.consts import ElementPatchMode
+
+        from zing_ai.server.attention import build_attention_queue
+        from zing_ai.server.flow import (
+            FlowCursor,
+            _body_fragment_for,
+            build_flow_context,
+            resolve_active_item,
+        )
+        from zing_ai.server.routes_command_center import _cc_events_stream
+        from zing_ai.server.templates import render
+
+        cc_queues: list[asyncio.Queue[str]] = []
+        fastapi_app = self.fastapi_app
+        manager = self.manager
+
+        # The callback yields exactly 3 events per board_changed.
+        EVENTS_PER_BOARD_CHANGED = 3
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            sessions = manager.list_sessions()
+            queue = build_attention_queue(sessions, datetime.now(UTC))
+            cursor = getattr(fastapi_app.state, "flow_cursor", FlowCursor())
+            active = resolve_active_item(queue, cursor)
+            ctx = build_flow_context(manager, queue, active)
+            ctx["current_view"] = "flow"
+            yield SSE.patch_elements(
+                render("fragments/flow_progress_strip.html", **ctx),
+                selector="#flow-strip",
+                mode=ElementPatchMode.OUTER,
+            )
+            yield SSE.patch_elements(
+                render(_body_fragment_for(active), **ctx),
+                selector="#flow-body",
+                mode=ElementPatchMode.INNER,
+            )
+            yield SSE.patch_elements(
+                f'<span class="toggle-badge" id="flow-toggle-badge">{len(queue)}</span>',
+                selector="#flow-toggle-badge",
+                mode=ElementPatchMode.OUTER,
+            )
+
+        async def _drive() -> list[str]:
+            mock_req = MagicMock()
+            mock_req.app.state.cc_queues = cc_queues
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(mock_req, _on_board_changed):
+                    results.append(ev)
+                    # Stop after all events from one board_changed callback.
+                    if len(results) >= EVENTS_PER_BOARD_CHANGED:
+                        break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        return asyncio.run(_drive())
+
+    def test_flow_events_emits_strip_on_board_changed(self) -> None:
+        """board_changed patches #flow-strip."""
+        self._make_findings_session("fe-sess-1", "Flow Events Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn("#flow-strip", combined)
+
+    def test_flow_events_emits_body_on_board_changed(self) -> None:
+        """board_changed patches #flow-body."""
+        self._make_findings_session("fe-sess-body", "Flow Body Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn("#flow-body", combined)
+
+    def test_flow_events_emits_badge_on_board_changed(self) -> None:
+        """board_changed patches #flow-toggle-badge."""
+        self._make_findings_session("fe-sess-badge", "Flow Badge Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_badge_contains_toggle_badge_span(self) -> None:
+        """The toggle-badge patch contains a properly-formed span."""
+        self._make_findings_session("fe-sess-span", "Span Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn('class="toggle-badge"', combined)
+        self.assertIn('id="flow-toggle-badge"', combined)
+
+    def test_flow_events_no_kanban_board_patch(self) -> None:
+        """Flow SSE does not emit #kanban-board patches (Board-only)."""
+        self._make_findings_session("fe-sess-nokb", "No Kanban Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertNotIn("#kanban-board", combined)

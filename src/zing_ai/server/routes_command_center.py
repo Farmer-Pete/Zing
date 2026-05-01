@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import uuid
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -376,63 +377,117 @@ async def get_flow(request: Request) -> HTMLResponse:
     )
 
 
+async def _cc_events_stream(
+    request: Request,
+    on_board_changed: Callable[[Request], AsyncIterator[Any]],
+) -> AsyncIterator[Any]:
+    """Shared connection lifecycle for Command Center SSE handlers.
+
+    Owns: cc_queues registration, 30s heartbeat, event dispatch via callback,
+    contextlib.suppress(ValueError) cleanup in finally.
+
+    The queue is registered synchronously (before the generator body runs) so
+    the response headers flush before the first iteration, avoiding a race where
+    cc_queues is empty even though the SSE stream appears open.
+    """
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    request.app.state.cc_queues.append(q)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=30.0)
+            except TimeoutError:
+                yield SSE.patch_signals({"_heartbeat": True})
+                continue
+            kind, _, _target = event.partition(":")
+            if kind == "board_changed":
+                async for ev in on_board_changed(request):
+                    yield ev
+            elif kind == "poll_status":
+                cache = request.app.state.external_cache
+                yield SSE.patch_signals(
+                    {
+                        "lastPolledLabel": _format_last_polled(cache.last_polled_at),
+                        "lastError": cache.last_error or "",
+                    }
+                )
+    finally:
+        # Suppress ValueError in case the queue was already cleared (tests
+        # or admin endpoints may reset cc_queues); letting it raise here
+        # would mask the real cancellation reason in logs.
+        with contextlib.suppress(ValueError):
+            request.app.state.cc_queues.remove(q)
+
+
 @router.get("/command-center/events")
 @datastar_response
 async def command_center_events(request: Request):  # noqa: ANN201
     """SSE endpoint that pushes Command Center updates to the browser."""
-    # Register the queue synchronously, before returning the generator.
-    # Otherwise the response headers flush (and any waiter on `expect_response`
-    # unblocks) before the inner generator's first iteration runs, leaving a
-    # window where `cc_queues` is empty even though the SSE stream is "open".
-    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
-    request.app.state.cc_queues.append(queue)
 
-    async def _generate():  # noqa: ANN202
-        """Yield SSE events for board changes and poll status."""
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except TimeoutError:
-                    yield SSE.patch_signals({"_heartbeat": True})
-                    continue
-                kind, _, _target = event.partition(":")
-                if kind == "board_changed":
-                    sessions = request.app.state.session_manager.list_sessions()
-                    html = render_board_fragment(request.app)
-                    yield SSE.patch_elements(
-                        html,
-                        selector="#kanban-board",
-                        mode=ElementPatchMode.OUTER,
-                    )
-                    attn_html = render_attention_bar_fragment(request.app, sessions=sessions)
-                    yield SSE.patch_elements(
-                        attn_html,
-                        selector="#attention-bar",
-                        mode=ElementPatchMode.OUTER,
-                    )
-                    tray_html = _render_tray_fragment(request.app)
-                    yield SSE.patch_elements(
-                        tray_html,
-                        selector="#mgmt-tray",
-                        mode=ElementPatchMode.INNER,
-                    )
-                elif kind == "poll_status":
-                    cache = request.app.state.external_cache
-                    yield SSE.patch_signals(
-                        {
-                            "lastPolledLabel": _format_last_polled(cache.last_polled_at),
-                            "lastError": cache.last_error or "",
-                        }
-                    )
-        finally:
-            # Suppress ValueError in case the queue was already cleared (tests
-            # or admin endpoints may reset cc_queues); letting it raise here
-            # would mask the real cancellation reason in logs.
-            with contextlib.suppress(ValueError):
-                request.app.state.cc_queues.remove(queue)
+    async def _on_board_changed(req: Request):  # noqa: ANN202
+        sessions = req.app.state.session_manager.list_sessions()
+        queue_count = len(build_attention_queue(sessions, datetime.now(UTC)))
+        html = render_board_fragment(req.app)
+        yield SSE.patch_elements(
+            html,
+            selector="#kanban-board",
+            mode=ElementPatchMode.OUTER,
+        )
+        tray_html = _render_tray_fragment(req.app)
+        yield SSE.patch_elements(
+            tray_html,
+            selector="#mgmt-tray",
+            mode=ElementPatchMode.INNER,
+        )
+        # Update the Flow toggle badge (visible on the Board page too).
+        yield SSE.patch_elements(
+            f'<span class="toggle-badge" id="flow-toggle-badge">{queue_count}</span>',
+            selector="#flow-toggle-badge",
+            mode=ElementPatchMode.OUTER,
+        )
 
-    return _generate()
+    async def _stream():  # noqa: ANN202
+        async for ev in _cc_events_stream(request, _on_board_changed):
+            yield ev
+
+    return _stream()
+
+
+@router.get("/command-center/flow/events")
+@datastar_response
+async def flow_events(request: Request):  # noqa: ANN201
+    """SSE endpoint that pushes Flow Mode updates to the browser."""
+
+    async def _on_board_changed(req: Request):  # noqa: ANN202
+        manager = req.app.state.session_manager
+        sessions = manager.list_sessions()
+        queue = build_attention_queue(sessions, datetime.now(UTC))
+        cursor = getattr(req.app.state, "flow_cursor", FlowCursor())
+        active = resolve_active_item(queue, cursor)
+        ctx = build_flow_context(manager, queue, active)
+        ctx["current_view"] = "flow"
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        yield SSE.patch_elements(
+            render(_body_fragment_for(active), **ctx),
+            selector="#flow-body",
+            mode=ElementPatchMode.INNER,
+        )
+        # Update the Flow toggle badge count.
+        yield SSE.patch_elements(
+            f'<span class="toggle-badge" id="flow-toggle-badge">{len(queue)}</span>',
+            selector="#flow-toggle-badge",
+            mode=ElementPatchMode.OUTER,
+        )
+
+    async def _stream():  # noqa: ANN202
+        async for ev in _cc_events_stream(request, _on_board_changed):
+            yield ev
+
+    return _stream()
 
 
 @router.post("/command-center/refresh")
