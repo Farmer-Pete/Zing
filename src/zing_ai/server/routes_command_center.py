@@ -41,7 +41,14 @@ from zing_ai.server.command_center import (
     generate_standup,
     infer_repo_for_ticket,
 )
-from zing_ai.server.flow import FlowCursor, build_flow_context, resolve_active_item
+from zing_ai.server.flow import (
+    FlowCursor,
+    _body_fragment_for,
+    advance_cursor,
+    auto_dismiss_unpinned,
+    build_flow_context,
+    resolve_active_item,
+)
 from zing_ai.server.models import (
     LAUNCH_GRACE_SECONDS,
     ClaudeCodeSession,
@@ -1383,5 +1390,96 @@ async def get_drawer_step(session_id: str, step_id: str, request: Request):  # n
             mode=ElementPatchMode.INNER,
         )
         yield SSE.patch_signals({"modals": {"drawer": True}})
+
+    return _stream()
+
+
+@router.post("/command-center/flow/advance")
+@datastar_response
+async def post_flow_advance(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        sessions = manager.list_sessions()
+        queue = build_attention_queue(sessions, datetime.now(UTC))
+        cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
+        prev_active = resolve_active_item(queue, cursor)
+        direction = payload.get("direction", "next")
+        # Auto-dismiss the leaving item if it's an unpinned attach.
+        filtered_queue = auto_dismiss_unpinned(queue, prev_active) if prev_active else queue
+        new_cursor = advance_cursor(filtered_queue, cursor, direction)
+        request.app.state.flow_cursor = new_cursor
+        new_active = resolve_active_item(filtered_queue, new_cursor)
+        ctx = build_flow_context(manager, filtered_queue, new_active)
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        yield SSE.patch_elements(
+            render(_body_fragment_for(new_active), **ctx),
+            selector="#flow-body",
+            mode=ElementPatchMode.INNER,
+        )
+
+    return _stream()
+
+
+@router.post("/command-center/flow/select")
+@datastar_response
+async def post_flow_select(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        sessions = manager.list_sessions()
+        queue = build_attention_queue(sessions, datetime.now(UTC))
+        session_id = str(payload.get("session_id") or "")
+        step_id = payload.get("step_id") or None
+        if isinstance(step_id, str) and step_id == "":
+            step_id = None
+        request.app.state.flow_cursor = FlowCursor(session_id=session_id, step_id=step_id)
+        cursor = request.app.state.flow_cursor
+        active = resolve_active_item(queue, cursor)
+        ctx = build_flow_context(manager, queue, active)
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        yield SSE.patch_elements(
+            render(_body_fragment_for(active), **ctx),
+            selector="#flow-body",
+            mode=ElementPatchMode.INNER,
+        )
+
+    return _stream()
+
+
+@router.post("/command-center/flow/pin")
+@datastar_response
+async def post_flow_pin(request: Request):  # noqa: ANN201
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        sessions = manager.list_sessions()
+        queue = build_attention_queue(sessions, datetime.now(UTC))
+        cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
+        active = resolve_active_item(queue, cursor)
+        if active is None or active.action_type != "attach":
+            yield _sse_toast("Pin only available for terminal sessions", "err")
+            return
+        session = manager.get_session(active.session_id)
+        if not isinstance(session, ClaudeCodeSession):
+            yield _sse_toast("Session not found", "err")
+            return
+        new_pinned = not session.pinned
+        manager.set_pinned(active.session_id, new_pinned)
+        # Re-fetch queue to reflect new pin state
+        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+        active = resolve_active_item(queue, cursor)
+        ctx = build_flow_context(manager, queue, active)
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        yield _sse_toast("Pinned" if new_pinned else "Unpinned", "ok")
 
     return _stream()
