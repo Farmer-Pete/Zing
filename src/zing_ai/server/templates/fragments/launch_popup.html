@@ -1,0 +1,39 @@
+{# ── Launch Popup ────────────────────────────────────────────────────────────
+   Live terminal iframe (same Zellij proxy as the terminal modal) plus a
+   primary "Send to Flow ▸" button.  The iframe lifecycle is owned by the
+   openLaunchPopup / closeLaunchPopup functions in cc-modals.js, which mirror
+   the openTerminal / close-terminal pattern.
+
+   Signals consumed (all pre-declared in _build_initial_signals):
+     $modals.launchPopup   — boolean; true = visible
+     $launchPopupSession   — terminal session name (e.g. "zing-abc123")
+     $launchPopupUrl       — /zellij/<session> iframe src
+     $launchPopupTitle     — human-readable session title
+── #}
+<div id="launch-popup-modal" class="terminal-modal" style="display:none;"
+     data-on-signal-patch-filter="{include: /^modals\.launchPopup$/}"
+     data-on-signal-patch="$modals.launchPopup === false && document.dispatchEvent(new CustomEvent('close-launch-popup'))">
+  <div class="terminal-modal-bar">
+    <span class="terminal-modal-title" id="launch-popup-title" data-text="$launchPopupTitle"></span>
+    <button class="terminal-modal-close" id="launch-popup-close" aria-label="Close"
+            data-on:click="$modals.launchPopup = false; $launchPopupUrl = ''">&times;</button>
+  </div>
+  {# iframe body — cc-modals.js inserts/removes the <iframe> here #}
+  <div id="launch-popup-body" class="launch-popup-body"></div>
+  <div class="launch-popup-footer">
+    <button type="button" class="launch-popup-btn launch-popup-btn-close"
+            data-on:click="$modals.launchPopup = false; $launchPopupUrl = ''">Close</button>
+    <button type="button" class="launch-popup-btn launch-popup-btn-send"
+            data-on:click="@post('/command-center/flow/launch-popup-send', {payload: {terminal_session: $launchPopupSession}})">
+      Send to Flow &#9654;
+    </button>
+  </div>
+</div>
+<div id="launch-popup-backdrop" class="terminal-modal-backdrop" style="display:none;"
+     data-show="$modals.launchPopup"></div>
+{# Signal-patch watcher: fires when $launchPopupUrl is patched by /flow/launch-popup-open.
+   Dispatches 'open-launch-popup' — the only entry point from Datastar signals. #}
+<div id="launch-popup-launcher"
+     style="display:none"
+     data-on-signal-patch-filter="{include: /^launchPopupUrl$/}"
+     data-on-signal-patch="dispatchOpenLaunchPopup($launchPopupUrl)"></div>

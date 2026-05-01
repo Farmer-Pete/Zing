@@ -120,9 +120,11 @@
          data-on-signal-patch-filter="{include: /^terminalUrl$/}"
          data-on-signal-patch="dispatchOpenTerminal($terminalUrl)"></div>
 
-    {# cc-modals.js handles iframe lifecycle for the terminal modal and the
-       ClipboardItem write for standup copy — both kept because they're
-       browser-API only. All other JS has been replaced by Datastar attributes. #}
+{% include "fragments/launch_popup.html" %}
+
+    {# cc-modals.js handles iframe lifecycle for the terminal modal and launch
+       popup, and the ClipboardItem write for standup copy — all browser-API
+       only. All other JS has been replaced by Datastar attributes. #}
     <script src="/static/js/cc-modals.js?v={{ asset_version() }}" defer></script>
 
 </div>

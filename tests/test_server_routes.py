@@ -3117,3 +3117,155 @@ class TestFlowSelect(_FlowTestBase):
         cursor = self.fastapi_app.state.flow_cursor
         self.assertEqual(cursor.session_id, "sel-attach")
         self.assertIsNone(cursor.step_id)
+
+
+# ---------------------------------------------------------------------------
+# TestLaunchPopup — /flow/launch-popup-open + /flow/launch-popup-send
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchPopup(_FlowTestBase):
+    """Tests for the launch popup open/send endpoints."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Enable Zellij so launch-popup-open doesn't early-exit.
+        self.fastapi_app.state.zellij_available = True
+
+    # ── /flow/launch-popup-open ────────────────────────────────────────────
+
+    def test_launch_popup_open_patches_signals(self) -> None:
+        """Valid terminal_session patches launchPopupUrl + modals.launchPopup."""
+        self._make_attach_session("lp-open", pinned=False)
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "zing-lp-open"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        sig_events = [e for e in events if "datastar-patch-signals" in e]
+        self.assertTrue(sig_events, "expected at least one signal patch")
+        joined = "\n".join(sig_events)
+        self.assertIn("launchPopupUrl", joined)
+        self.assertIn("/zellij/zing-lp-open", joined)
+        self.assertIn("launchPopup", joined)
+        self.assertIn("launchPopupSession", joined)
+        self.assertIn("zing-lp-open", joined)
+
+    def test_launch_popup_open_missing_terminal_session_emits_error_toast(self) -> None:
+        """Missing terminal_session yields a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_open_invalid_name_emits_error_toast(self) -> None:
+        """Names with invalid characters yield a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "bad name!"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_open_zellij_unavailable_emits_error_toast(self) -> None:
+        """Zellij unavailable yields a cc-toast-err."""
+        self.fastapi_app.state.zellij_available = False
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "my-session"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    # ── /flow/launch-popup-send ────────────────────────────────────────────
+
+    def test_launch_popup_send_to_flow_pins_and_redirects(self) -> None:
+        """Valid terminal_session pins the session and redirects to /command-center/flow."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self._make_attach_session("lp-send", pinned=False)
+        session_before = self.manager.get_session("lp-send")
+        assert isinstance(session_before, ClaudeCodeSession)
+        self.assertFalse(session_before.pinned)
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "zing-lp-send"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # Session is now pinned.
+        session_after = self.manager.get_session("lp-send")
+        assert isinstance(session_after, ClaudeCodeSession)
+        self.assertTrue(session_after.pinned)
+
+        # Flow cursor points at this session.
+        cursor = self.fastapi_app.state.flow_cursor
+        self.assertEqual(cursor.session_id, "lp-send")
+        self.assertIsNone(cursor.step_id)
+
+        # SSE response closes the popup and redirects to /command-center/flow.
+        combined = "\n".join(events)
+        self.assertIn("launchPopup", combined)
+        # SSE.redirect emits an execute_script with window.location.
+        self.assertIn("/command-center/flow", combined)
+
+    def test_launch_popup_send_unknown_terminal_returns_toast(self) -> None:
+        """Unknown terminal_session yields a cc-toast-err; no session is pinned."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "does-not-exist"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+        # No flow cursor was set.
+        cursor = getattr(self.fastapi_app.state, "flow_cursor", None)
+        self.assertIsNone(cursor)
+
+    def test_launch_popup_send_missing_terminal_session_returns_toast(self) -> None:
+        """Empty terminal_session yields a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": ""},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_send_idempotent_already_pinned(self) -> None:
+        """Sending a session that is already pinned keeps it pinned (no toggle)."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self._make_attach_session("lp-pinned", pinned=True)
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "zing-lp-pinned"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+
+        session = self.manager.get_session("lp-pinned")
+        assert isinstance(session, ClaudeCodeSession)
+        self.assertTrue(session.pinned, "pinned flag should remain True")

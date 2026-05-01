@@ -293,7 +293,7 @@ def _build_initial_signals(
         "attnBarOpen": True,
         # Per-button busy/disabled flags (see helper above).
         "busyButtons": busy_buttons,
-        # Modal open/closed flags. Five modals share this dict so a single
+        # Modal open/closed flags. Six modals share this dict so a single
         # data-on-signal-patch-filter on .cc-page can react to any change.
         "modals": {
             "drawer": False,
@@ -301,6 +301,7 @@ def _build_initial_signals(
             "standup": False,
             "terminal": False,
             "repoChooser": False,
+            "launchPopup": False,
         },
         # Currently-open kebab key (empty string = none open). Empty string
         # rather than null because Datastar deletes null'd keys from the proxy
@@ -313,6 +314,10 @@ def _build_initial_signals(
         "standupMarkdown": "",
         # Terminal modal — URL signal patched by /attach-session.
         "terminalUrl": "",
+        # Launch popup — session name, URL, and title patched by /flow/launch-popup-open.
+        "launchPopupSession": "",
+        "launchPopupUrl": "",
+        "launchPopupTitle": "",
     }
 
 
@@ -1481,5 +1486,71 @@ async def post_flow_pin(request: Request):  # noqa: ANN201
             mode=ElementPatchMode.OUTER,
         )
         yield _sse_toast("Pinned" if new_pinned else "Unpinned", "ok")
+
+    return _stream()
+
+
+@router.post("/command-center/flow/launch-popup-open")
+@datastar_response
+async def post_flow_launch_popup_open(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Open the launch popup for a terminal session."""
+
+    async def _stream():  # noqa: ANN202
+        if not getattr(request.app.state, "zellij_available", False):
+            yield _sse_toast("Zellij is not available", "err")
+            return
+        terminal_session = str(payload.get("terminal_session") or "").strip()
+        if not terminal_session:
+            yield _sse_toast("terminal_session is required", "err")
+            return
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+            yield _sse_toast("invalid session name", "err")
+            return
+        url = f"/zellij/{terminal_session}"
+        # Derive a human-readable title from the matching ClaudeCodeSession, if found.
+        manager = request.app.state.session_manager
+        title = terminal_session
+        for s in manager.list_sessions():
+            if isinstance(s, ClaudeCodeSession) and s.terminal_session == terminal_session:
+                title = s.title or terminal_session
+                break
+        yield SSE.patch_signals(
+            {
+                "launchPopupSession": terminal_session,
+                "launchPopupUrl": url,
+                "launchPopupTitle": title,
+                "modals": {"launchPopup": True},
+            }
+        )
+
+    return _stream()
+
+
+@router.post("/command-center/flow/launch-popup-send")
+@datastar_response
+async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Pin the session and redirect to Flow mode."""
+
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        terminal_session = str(payload.get("terminal_session") or "").strip()
+        if not terminal_session:
+            yield _sse_toast("Missing terminal session", "err")
+            return
+        sessions = manager.list_sessions()
+        match: ClaudeCodeSession | None = None
+        for session in sessions:
+            if isinstance(session, ClaudeCodeSession) and (
+                session.terminal_session == terminal_session
+            ):
+                match = session
+                break
+        if match is None:
+            yield _sse_toast("Session not found", "err")
+            return
+        manager.set_pinned(match.session_id, True)
+        request.app.state.flow_cursor = FlowCursor(session_id=match.session_id, step_id=None)
+        yield SSE.patch_signals({"modals": {"launchPopup": False}})
+        yield SSE.redirect("/command-center/flow")
 
     return _stream()

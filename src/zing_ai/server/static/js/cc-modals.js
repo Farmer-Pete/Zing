@@ -111,6 +111,49 @@ function mountModal(opts) {
     });
 })();
 
+// Launch popup — live terminal iframe with a Send-to-Flow footer button.
+// Mirrors the terminal modal IIFE pattern: mountModal owns backdrop/ESC/close
+// lifecycle; dispatchOpenLaunchPopup is the single Datastar-to-JS entry point.
+(function() {
+    var modal = document.getElementById('launch-popup-modal');
+    var body = document.getElementById('launch-popup-body');
+    var iframe = null;
+
+    var ctl = mountModal({
+        modal: modal,
+        backdrop: document.getElementById('launch-popup-backdrop'),
+        onClose: function () {
+            if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
+            iframe = null;
+        },
+    });
+
+    window.openLaunchPopup = function(url) {
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.id = 'launch-popup-iframe';
+            iframe.className = 'terminal-modal-iframe';
+            body.appendChild(iframe);
+        }
+        iframe.src = url;
+        ctl.open();
+    };
+
+    window.dispatchOpenLaunchPopup = function(url) {
+        if (!url) return;
+        document.dispatchEvent(new CustomEvent('open-launch-popup', {detail: {url: url}, bubbles: true}));
+    };
+
+    document.addEventListener('open-launch-popup', function(e) {
+        var url = e.detail && e.detail.url;
+        if (url) window.openLaunchPopup(url);
+    });
+
+    document.addEventListener('close-launch-popup', function() {
+        ctl.close();
+    });
+})();
+
 // Standup copy: dispatched by the Copy button via dispatchCopyStandup($standupHtml, $standupMarkdown).
 document.addEventListener('copy-standup', function(e) {
     var html = e.detail && e.detail.html;
