@@ -1,6 +1,17 @@
 // Named dispatch functions (Decision #17): Datastar signal watchers call these
 // instead of inlining new CustomEvent(...) expressions in templates.
 
+/**
+ * Pure substring fuzzy-match helper for the Flow palette.
+ * Returns true if the trimmed lowercase query is empty or is a substring of the haystack.
+ * No DOM mutation; safely callable from data-show in a hot loop.
+ */
+window.flowPaletteMatch = function (query, haystack) {
+  var q = (query || '').trim().toLowerCase();
+  if (q === '') return true;
+  return (haystack || '').toLowerCase().includes(q);
+};
+
 window.dispatchOpenTerminal = function(url) {
     if (!url) return;
     document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));

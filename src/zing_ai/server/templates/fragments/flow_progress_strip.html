@@ -22,7 +22,9 @@
     {% endfor %}
   </div>
   <div class="flow-strip-right">
-    <span class="keycap">⌘K</span><span class="keycap-label">Switch · {{ queue_count }} queued</span>
+    <button type="button" class="keycap-btn" id="flow-palette-open-btn"
+            data-on:click="$paletteOpen = true"
+            title="Switch to item (⌘K)"><span class="keycap">⌘K</span><span class="keycap-label">Switch · {{ queue_count }} queued</span></button>
     <span class="keycap">⌘J</span><span class="keycap">⌘⇧J</span>
     {% if active and active.action_type == 'attach' %}
       <button type="button"

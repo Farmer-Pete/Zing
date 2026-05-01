@@ -2527,3 +2527,132 @@ body.drawer-open .mgmt-fab {
 .qa-review { background: rgba(62, 207, 224, 0.12); color: var(--cyan-dim); }
 .qa-attach { background: rgba(59, 130, 246, 0.12); color: var(--blue); }
 .qa-answer { background: rgba(245, 124, 32, 0.12); color: var(--orange); }
+
+/* Strip keycap button — makes ⌘K hint clickable (opens palette; also works on mobile) */
+.keycap-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+/* ──────────────────────────────────────────────
+   FLOW MODE — ⌘K PALETTE
+────────────────────────────────────────────── */
+
+.flow-palette-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 10vh;
+}
+
+.flow-palette {
+    width: 520px;
+    max-width: calc(100vw - 2rem);
+    background: var(--navy-light);
+    border: 1px solid var(--navy-mid);
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.flow-palette-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.85rem 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--navy-mid);
+    color: #fff;
+    font-size: 1rem;
+    outline: none;
+}
+
+.flow-palette-search::placeholder {
+    color: var(--gray-500);
+}
+
+.flow-palette-search:focus {
+    border-bottom-color: var(--orange);
+}
+
+.flow-palette-list {
+    max-height: 480px;
+    overflow-y: auto;
+}
+
+.flow-palette-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.65rem 1rem;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    transition: background 0.1s ease;
+}
+
+.flow-palette-row:hover {
+    background: var(--navy-mid);
+}
+
+.flow-palette-row:last-child {
+    border-bottom: none;
+}
+
+.flow-palette-icon {
+    flex-shrink: 0;
+    width: 1.25rem;
+    text-align: center;
+    color: var(--orange);
+    font-size: 0.8rem;
+}
+
+.flow-palette-ticket {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--orange);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    min-width: 4rem;
+}
+
+.flow-palette-title {
+    flex: 1;
+    color: #fff;
+    font-size: 0.875rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.flow-palette-type-chip {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(62, 207, 224, 0.12);
+    color: var(--cyan-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.flow-palette-footer {
+    padding: 0.5rem 1rem;
+    font-size: 0.7rem;
+    color: var(--gray-500);
+    border-top: 1px solid var(--navy-mid);
+    text-align: center;
+}

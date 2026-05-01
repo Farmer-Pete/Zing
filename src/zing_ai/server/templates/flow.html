@@ -9,12 +9,7 @@
 {% block content %}
 <div class="flow-page"
      data-signals="{paletteOpen: false, paletteQuery: '', pendingAdvance: false}"
-     data-on:keydown__window__key.j__cmd="@post('/command-center/flow/advance', {payload: {direction: 'next'}})"
-     data-on:keydown__window__key.j__cmd.shift="@post('/command-center/flow/advance', {payload: {direction: 'prev'}})"
-     data-on:keydown__window__key.k__cmd="$paletteOpen = !$paletteOpen"
-     data-on:keydown__window__key.b__cmd="window.location = '/command-center'"
-     data-on:keydown__window__key.p__cmd="@post('/command-center/flow/pin')"
-     data-on:keydown__window__key.escape="$paletteOpen = false"
+     data-on:keydown__window="evt.key === 'Escape' ? ($paletteOpen = false) : evt.metaKey && evt.key === 'j' && !evt.shiftKey ? @post('/command-center/flow/advance', {payload: {direction: 'next'}}) : evt.metaKey && evt.key === 'j' && evt.shiftKey ? @post('/command-center/flow/advance', {payload: {direction: 'prev'}}) : evt.metaKey && evt.key === 'k' ? ($paletteOpen = !$paletteOpen) : evt.metaKey && evt.key === 'b' ? (window.location = '/command-center') : evt.metaKey && evt.key === 'p' ? @post('/command-center/flow/pin') : void 0"
      data-init="@get('/command-center/flow/events', {filterSignals: {include: /^$/}})">
   {% include 'fragments/flow_progress_strip.html' %}
   <main id="flow-body" class="flow-body">
@@ -29,6 +24,8 @@
     {% endif %}
   </main>
   {% include 'fragments/flow_toolbar.html' %}
-  {# TODO(Step 6): add flow_palette.html include here #}
+  {% include 'fragments/flow_palette.html' %}
+  {# cc-modals.js defines window.flowPaletteMatch (and other browser-API helpers). #}
+  <script src="/static/js/cc-modals.js?v={{ asset_version() }}" defer></script>
 </div>
 {% endblock %}
