@@ -1,0 +1,13 @@
+<div class="flow-body-findings"
+     data-signals='{
+       "responses": {{ initial_responses|tojson }},
+       "step_id": "{{ active.step_id }}"
+     }'>
+  <div class="findings-stack">
+    {% for finding in active_findings %}
+      {% with session_id=active.session_id %}
+        {% include 'fragments/finding.html' %}
+      {% endwith %}
+    {% endfor %}
+  </div>
+</div>

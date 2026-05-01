@@ -2715,7 +2715,7 @@ class TestFlowPage(ServerTestBase):
         resp = self.client.get("/command-center/flow")
         self.assertEqual(resp.status_code, 200)
         self.assertIn('<main id="flow-body"', resp.text)
-        self.assertIn("Findings:", resp.text)
+        self.assertIn('class="flow-body-findings"', resp.text)
 
     def test_flow_page_empty_queue(self) -> None:
         """GET /command-center/flow with no attention items shows the empty state."""
@@ -2769,6 +2769,34 @@ class TestFlowPage(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('class="cc-toggle"', resp.text)
         self.assertIn("active flow", resp.text)
+
+    def test_flow_page_findings_includes_finding_macro_signals(self) -> None:
+        """GET /command-center/flow for findings mode includes data-signals with
+        responses+step_id and renders the finding element from the macro."""
+        session = self.manager.create_session(
+            session_id="flow-signals-test",
+            title="Signals Test",
+            steps=["review"],
+        )
+        step_id = session.steps[0].step_id
+        self.manager.start_step("flow-signals-test", step_id)
+        self.manager.add_finding(
+            "flow-signals-test",
+            step_id,
+            {"type": "text", "title": "Signal test finding"},
+        )
+        self.manager.start_agent("flow-signals-test", step_id, "agent-sig")
+        self.manager.stop_agent("flow-signals-test", step_id, "agent-sig")
+        self.manager.mark_step_ready("flow-signals-test", step_id)
+
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # Signal envelope must be present on the findings wrapper
+        self.assertIn("data-signals=", resp.text)
+        self.assertIn('"responses"', resp.text)
+        self.assertIn('"step_id"', resp.text)
+        # The render_finding macro renders id="finding-<id>" for each finding
+        self.assertIn('id="finding-', resp.text)
 
     def test_command_center_passes_current_view_board(self) -> None:
         """GET /command-center passes current_view='board' (renders 200)."""

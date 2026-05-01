@@ -1,0 +1,7 @@
+<div class="flow-body-attach">
+  {% if active_session and active_session.terminal_session %}
+    <iframe src="/zellij/{{ active_session.terminal_session }}" class="flow-attach-frame"></iframe>
+  {% else %}
+    <div class="flow-attach-error">Terminal session not available.</div>
+  {% endif %}
+</div>
