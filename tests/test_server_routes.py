@@ -2815,6 +2815,59 @@ class TestFlowPage(ServerTestBase):
         self.assertIn('class="cc-toggle"', resp.text)
         self.assertIn("active flow", resp.text)
 
+    @property
+    def _fastapi_app(self):  # noqa: ANN201
+        """Unwrap middleware stack to reach the FastAPI app for state assertions."""
+        return self.client.app.app.routes[-1].app  # type: ignore[attr-defined]
+
+    def test_flow_page_query_params_set_cursor(self) -> None:
+        """GET /flow?session_id=foo&step_id=bar sets flow_cursor on app state."""
+        from zing_ai.server.flow import FlowCursor
+
+        resp = self.client.get("/command-center/flow?session_id=foo&step_id=bar")
+        self.assertEqual(resp.status_code, 200)
+        cursor: FlowCursor = self._fastapi_app.state.flow_cursor
+        self.assertEqual(cursor.session_id, "foo")
+        self.assertEqual(cursor.step_id, "bar")
+
+    def test_flow_page_query_params_session_id_only(self) -> None:
+        """GET /flow?session_id=foo (no step_id) sets cursor with step_id=None."""
+        from zing_ai.server.flow import FlowCursor
+
+        resp = self.client.get("/command-center/flow?session_id=foo")
+        self.assertEqual(resp.status_code, 200)
+        cursor: FlowCursor = self._fastapi_app.state.flow_cursor
+        self.assertEqual(cursor.session_id, "foo")
+        self.assertIsNone(cursor.step_id)
+
+    def test_kanban_card_attach_button_links_to_flow(self) -> None:
+        """kanban_card.html renders Attach button as <a href> to /command-center/flow."""
+        from zing_ai.server.models import ClaudeCodeSession, Notification
+        from zing_ai.server.models_external import KanbanCard
+        from zing_ai.server.templates import render
+
+        notification = Notification(title="Claude is waiting", body="Needs input")
+        session = ClaudeCodeSession(
+            session_id="cc-attach-nav",
+            title="Attach Nav Test",
+            notifications=[notification],
+        )
+        card = KanbanCard(
+            key="BAK-TEST",
+            ticket=None,
+            prs=[],
+            sessions=[session],
+        )
+        html = render(
+            "fragments/kanban_card.html",
+            card=card,
+            column_cls="col-todo",
+            current_username="testuser",
+            live_sessions=set(),
+            session_phases={},
+        )
+        self.assertIn('href="/command-center/flow?session_id=cc-attach-nav"', html)
+
 
 class _FlowTestBase(unittest.TestCase):
     """Shared setUp/tearDown for Flow endpoint tests.

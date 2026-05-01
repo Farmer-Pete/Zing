@@ -347,11 +347,25 @@ async def get_command_center(request: Request) -> HTMLResponse:
 
 
 @router.get("/command-center/flow", response_class=HTMLResponse)
-async def get_flow(request: Request) -> HTMLResponse:
-    """Return the Flow Mode HTML page."""
+async def get_flow(  # noqa: ANN201
+    request: Request,
+    session_id: str | None = None,
+    step_id: str | None = None,
+):
+    """Return the Flow Mode HTML page.
+
+    Query params ``session_id`` and ``step_id`` override the persisted cursor,
+    enabling Board-to-Flow navigation via plain ``<a href>`` links.
+    """
     manager = request.app.state.session_manager
     sessions = manager.list_sessions()
     queue = build_attention_queue(sessions, datetime.now(UTC))
+    # Query params override the persisted cursor (used by Board → Flow navigation).
+    if session_id:
+        request.app.state.flow_cursor = FlowCursor(
+            session_id=session_id,
+            step_id=step_id or None,
+        )
     cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
     active = resolve_active_item(queue, cursor)
     ctx = build_flow_context(manager, queue, active)

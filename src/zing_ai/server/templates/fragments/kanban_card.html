@@ -299,7 +299,7 @@
     <div class="card-attach-strip">
       <span class="card-attach-dot"></span>
       <span class="card-attach-text">{{ session.pending_question.body | truncate(60) }}</span>
-      <button class="card-attach-btn" data-on:click="@post('/command-center/flow/select', {payload: {session_id: '{{ session.session_id }}', step_id: ''}})">Attach</button>
+      <a class="card-attach-btn" href="/command-center/flow?session_id={{ session.session_id }}">Attach</a>
     </div>
   {% endfor %}
 
@@ -431,7 +431,7 @@
       {# Compute elapsed: difference between now (via created_at of last step, or session) and session start ── #}
       {% set _state_val = _sess.state.value %}
       {% set _status_label = "done" if _state_val == "completed" else ("stopped" if _state_val == "stopped" else _state_val) %}
-      <div class="card-session-strip" data-on:click="@post('/command-center/flow/select', {payload: {session_id: '{{ _sess.session_id }}', step_id: ''}})" style="cursor:pointer">
+      <a class="card-session-strip" href="/command-center/flow?session_id={{ _sess.session_id }}" style="display:block">
         <div class="card-session-phases">
           {% if session_phases and _sess.session_id in session_phases and session_phases[_sess.session_id] %}
             {{ phase_strip(session_phases[_sess.session_id], prefix="css") }}
@@ -441,17 +441,17 @@
         </div>
         <span class="card-session-label">{{ _status_label }}</span>
         <span class="card-session-view">View session &rarr;</span>
-      </div>
+      </a>
     {% elif card.sessions %}
       {# ClaudeCodeSession with history but no active action ── #}
       {% set _sess = card.sessions[0] %}
-      <div class="card-session-strip" data-on:click="@post('/command-center/flow/select', {payload: {session_id: '{{ _sess.session_id }}', step_id: ''}})" style="cursor:pointer">
+      <a class="card-session-strip" href="/command-center/flow?session_id={{ _sess.session_id }}" style="display:block">
         <div class="card-session-phases">
           <div class="css-seg css-b" style="flex:1"></div>
         </div>
         <span class="card-session-label">session</span>
         <span class="card-session-view">View session &rarr;</span>
-      </div>
+      </a>
     {% endif %}
   {% endif %}
 
