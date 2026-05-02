@@ -1,8 +1,4 @@
-<div class="flow-body-question"
-     data-signals='{
-       "responses": {{ initial_responses|tojson }},
-       "step_id": "{{ active.step_id }}"
-     }'>
+<div class="flow-body-question">
   <div class="question-card">
     {% for finding in active_findings %}
       {% with session_id=active.session_id %}
