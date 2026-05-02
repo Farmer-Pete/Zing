@@ -43,7 +43,6 @@ from zing_ai.server.command_center import (
     infer_repo_for_ticket,
 )
 from zing_ai.server.flow import (
-    _body_fragment_for,
     build_flow_context,
     resolve_active_item,
 )
@@ -406,6 +405,14 @@ async def _cc_events_stream(
             request.app.state.cc_queues.remove(q)
 
 
+def _badge_patch(count: int):  # noqa: ANN201
+    return SSE.patch_elements(
+        f'<span class="toggle-badge" id="flow-toggle-badge">{count}</span>',
+        selector="#flow-toggle-badge",
+        mode=ElementPatchMode.OUTER,
+    )
+
+
 @router.get("/command-center/events")
 @datastar_response
 async def command_center_events(request: Request):  # noqa: ANN201
@@ -427,11 +434,7 @@ async def command_center_events(request: Request):  # noqa: ANN201
             mode=ElementPatchMode.INNER,
         )
         # Update the Flow toggle badge (visible on the Board page too).
-        yield SSE.patch_elements(
-            f'<span class="toggle-badge" id="flow-toggle-badge">{queue_count}</span>',
-            selector="#flow-toggle-badge",
-            mode=ElementPatchMode.OUTER,
-        )
+        yield _badge_patch(queue_count)
 
     async def _stream():  # noqa: ANN202
         async for ev in _cc_events_stream(request, _on_board_changed):
@@ -449,7 +452,6 @@ async def flow_events(request: Request):  # noqa: ANN201
         manager = req.app.state.session_manager
         sessions = manager.list_sessions()
         queue = build_attention_queue(sessions, datetime.now(UTC))
-        # No cursor in SSE context — Step 10 will add body-patch removal.
         active = resolve_active_item(queue, session_id=None, step_id=None)
         ctx = build_flow_context(manager, queue, active)
         ctx["current_view"] = "flow"
@@ -458,17 +460,8 @@ async def flow_events(request: Request):  # noqa: ANN201
             selector="#flow-strip",
             mode=ElementPatchMode.OUTER,
         )
-        yield SSE.patch_elements(
-            render(_body_fragment_for(active), **ctx),
-            selector="#flow-body",
-            mode=ElementPatchMode.INNER,
-        )
         # Update the Flow toggle badge count.
-        yield SSE.patch_elements(
-            f'<span class="toggle-badge" id="flow-toggle-badge">{len(queue)}</span>',
-            selector="#flow-toggle-badge",
-            mode=ElementPatchMode.OUTER,
-        )
+        yield _badge_patch(len(queue))
 
     async def _stream():  # noqa: ANN202
         async for ev in _cc_events_stream(request, _on_board_changed):

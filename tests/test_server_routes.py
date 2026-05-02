@@ -3441,8 +3441,8 @@ class TestFlowEvents(_FlowTestBase):
     def _drive_flow_events(self, session_id: str = "fe-test") -> list[str]:
         """Drive flow_events for one board_changed event and collect all callback results.
 
-        The flow _on_board_changed callback yields 3 events (strip, body, badge).
-        We stop after collecting all 3 to avoid the infinite wait_for hang.
+        The flow _on_board_changed callback yields 2 events (strip, badge).
+        We stop after collecting all 2 to avoid the infinite wait_for hang.
         """
         from datetime import UTC, datetime
 
@@ -3451,18 +3451,17 @@ class TestFlowEvents(_FlowTestBase):
 
         from zing_ai.server.attention import build_attention_queue
         from zing_ai.server.flow import (
-            _body_fragment_for,
             build_flow_context,
             resolve_active_item,
         )
-        from zing_ai.server.routes_command_center import _cc_events_stream
+        from zing_ai.server.routes_command_center import _badge_patch, _cc_events_stream
         from zing_ai.server.templates import render
 
         cc_queues: list[asyncio.Queue[str]] = []
         manager = self.manager
 
-        # The callback yields exactly 3 events per board_changed.
-        EVENTS_PER_BOARD_CHANGED = 3
+        # The callback yields exactly 2 events per board_changed.
+        EVENTS_PER_BOARD_CHANGED = 2
 
         async def _on_board_changed(req):  # type: ignore[no-untyped-def]
             sessions = manager.list_sessions()
@@ -3475,16 +3474,7 @@ class TestFlowEvents(_FlowTestBase):
                 selector="#flow-strip",
                 mode=ElementPatchMode.OUTER,
             )
-            yield SSE.patch_elements(
-                render(_body_fragment_for(active), **ctx),
-                selector="#flow-body",
-                mode=ElementPatchMode.INNER,
-            )
-            yield SSE.patch_elements(
-                f'<span class="toggle-badge" id="flow-toggle-badge">{len(queue)}</span>',
-                selector="#flow-toggle-badge",
-                mode=ElementPatchMode.OUTER,
-            )
+            yield _badge_patch(len(queue))
 
         async def _drive() -> list[str]:
             mock_req = MagicMock()
@@ -3514,13 +3504,6 @@ class TestFlowEvents(_FlowTestBase):
         results = self._drive_flow_events()
         combined = "\n".join(results)
         self.assertIn("#flow-strip", combined)
-
-    def test_flow_events_emits_body_on_board_changed(self) -> None:
-        """board_changed patches #flow-body."""
-        self._make_findings_session("fe-sess-body", "Flow Body Test")
-        results = self._drive_flow_events()
-        combined = "\n".join(results)
-        self.assertIn("#flow-body", combined)
 
     def test_flow_events_emits_badge_on_board_changed(self) -> None:
         """board_changed patches #flow-toggle-badge."""
