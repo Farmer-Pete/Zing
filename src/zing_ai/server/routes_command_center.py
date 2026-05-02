@@ -35,7 +35,7 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,  # used by /cleanup-worktree (explicit user action)
 )
-from zing_ai.server.attention import build_attention_queue
+from zing_ai.server.attention import AttentionItem, build_attention_queue
 from zing_ai.server.command_center import (
     aggregate,
     build_session_phases,
@@ -53,6 +53,7 @@ from zing_ai.server.models import (
     QuestionOption,
 )
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.routes import _map_signals_to_responses
 from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
@@ -1244,5 +1245,135 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
         yield SSE.execute_script(
             f"window.location = '/command-center/flow?session_id={sid}&step_id={sid}'"
         )
+
+    return _stream()
+
+
+def _next_in_queue(
+    queue: list[AttentionItem],
+    current_session_id: str,
+    direction: str,
+) -> AttentionItem | None:
+    """Return the next or previous item in the queue with wrap-around.
+
+    Args:
+        queue: Ordered list of AttentionItems from build_attention_queue.
+        current_session_id: The session_id of the currently-displayed item.
+        direction: ``"next"`` to advance forward, ``"prev"`` to go backward.
+
+    Returns:
+        The adjacent AttentionItem (with wrap-around), ``queue[0]`` if
+        ``current_session_id`` is not found in the queue, or ``None`` if the
+        queue is empty.
+    """
+    if not queue:
+        return None
+    for i, item in enumerate(queue):
+        if item.session_id == current_session_id:
+            if direction == "prev":
+                return queue[(i - 1) % len(queue)]
+            return queue[(i + 1) % len(queue)]
+    # current_session_id not in queue — fall back to first item.
+    return queue[0]
+
+
+@router.post("/command-center/flow/next")
+@datastar_response
+async def flow_next(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Save responses (if any), navigate to the next queue item."""
+
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        session_id = payload.get("session_id") or ""
+        step_id = payload.get("step_id") or ""
+        responses = payload.get("responses") or {}
+        # Persist responses if this is a findings/questions item.
+        if step_id and responses:
+            try:
+                _, step = manager.get_step_by_id(step_id)
+                mapped = _map_signals_to_responses(step.findings, responses)
+                manager.submit_responses(session_id, step_id, mapped)
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "flow_next save failed",
+                    extra={
+                        "event": "flow_next_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    },
+                )
+                yield _sse_toast(f"Save failed: {exc}", "err")
+                return
+        # Compute next queue item.
+        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+        next_item = _next_in_queue(queue, session_id, direction="next")
+        if next_item is None:
+            url = "/command-center/flow"
+        else:
+            url = (
+                f"/command-center/flow"
+                f"?session_id={next_item.session_id}"
+                f"&step_id={next_item.step_id or ''}"
+            )
+        logger.info(
+            "flow_next",
+            extra={
+                "event": "flow_next",
+                "session_id": session_id,
+                "next_session_id": next_item.session_id if next_item else None,
+            },
+        )
+        yield SSE.execute_script(f"window.location = {url!r}")
+
+    return _stream()
+
+
+@router.post("/command-center/flow/prev")
+@datastar_response
+async def flow_prev(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Save responses (if any), navigate to the previous queue item."""
+
+    async def _stream():  # noqa: ANN202
+        manager = request.app.state.session_manager
+        session_id = payload.get("session_id") or ""
+        step_id = payload.get("step_id") or ""
+        responses = payload.get("responses") or {}
+        # Persist responses if this is a findings/questions item.
+        if step_id and responses:
+            try:
+                _, step = manager.get_step_by_id(step_id)
+                mapped = _map_signals_to_responses(step.findings, responses)
+                manager.submit_responses(session_id, step_id, mapped)
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "flow_prev save failed",
+                    extra={
+                        "event": "flow_prev_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    },
+                )
+                yield _sse_toast(f"Save failed: {exc}", "err")
+                return
+        # Compute previous queue item.
+        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+        prev_item = _next_in_queue(queue, session_id, direction="prev")
+        if prev_item is None:
+            url = "/command-center/flow"
+        else:
+            url = (
+                f"/command-center/flow"
+                f"?session_id={prev_item.session_id}"
+                f"&step_id={prev_item.step_id or ''}"
+            )
+        logger.info(
+            "flow_prev",
+            extra={
+                "event": "flow_prev",
+                "session_id": session_id,
+                "prev_session_id": prev_item.session_id if prev_item else None,
+            },
+        )
+        yield SSE.execute_script(f"window.location = {url!r}")
 
     return _stream()

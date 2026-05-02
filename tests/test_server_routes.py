@@ -3526,3 +3526,228 @@ class TestFlowEvents(_FlowTestBase):
         results = self._drive_flow_events()
         combined = "\n".join(results)
         self.assertNotIn("#kanban-board", combined)
+
+
+class TestFlowNext(_FlowTestBase):
+    """Tests for POST /command-center/flow/next."""
+
+    def _parse_execute_script(self, events: list[str]) -> list[str]:
+        """Extract execute_script content from SSE events.
+
+        SSE.execute_script emits a patch_elements event containing a
+        ``<script data-effect="el.remove()">...</script>`` element.
+        Extract any data: elements lines that contain window.location.
+        """
+        scripts = []
+        for event in events:
+            for line in event.splitlines():
+                if line.startswith("data: elements ") and "window.location" in line:
+                    scripts.append(line[len("data: elements ") :])
+        return scripts
+
+    def test_happy_path_navigates_to_next_item(self) -> None:
+        """Happy path: valid session+step+responses yields execute_script with next URL."""
+        step_id_a = self._make_findings_session("fn-sess-a", "Session A")
+        self._make_findings_session("fn-sess-b", "Session B")
+
+        # Get the finding id from session A to build a valid responses dict.
+        session_a = self.manager.get_session("fn-sess-a")
+        finding_id = session_a.steps[0].findings[0].id  # type: ignore[union-attr]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "fn-sess-a",
+                "step_id": step_id_a,
+                "responses": {finding_id: "some answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertTrue(scripts, "Expected at least one executeScript event")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        # Should navigate to session B (the next item in the queue).
+        self.assertIn("fn-sess-b", combined)
+
+    def test_empty_queue_navigates_to_flow_root(self) -> None:
+        """Empty queue: navigates to /command-center/flow with no query string."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={"session_id": "no-session", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript even for empty queue")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        # No query string when queue is empty.
+        self.assertNotIn("session_id=", combined)
+
+    def test_save_failure_yields_toast_no_execute_script(self) -> None:
+        """Bad step_id raises KeyError → toast emitted, no executeScript."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "some-sess",
+                "step_id": "nonexistent-step-id",
+                "responses": {"finding-1": "answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertFalse(scripts, "No executeScript expected on save failure")
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Save failed" in t["text"] for t in toasts))
+
+    def test_attach_mode_skips_save_and_navigates(self) -> None:
+        """No step_id + no responses: skips save branch, still navigates."""
+        self._make_attach_session("fn-attach-sess", "Attach Session")
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={"session_id": "fn-attach-sess", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript for attach-mode nav")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+
+    def test_wrap_around_last_to_first(self) -> None:
+        """Posting from the last queue item wraps around to queue[0]."""
+        self._make_findings_session("fn-wrap-a", "Wrap A")
+        self._make_findings_session("fn-wrap-b", "Wrap B")
+
+        # Get the queue to identify which is last.
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2, "Expected at least 2 queue items")
+        last_item = queue[-1]
+        first_item = queue[0]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": last_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        combined = " ".join(scripts)
+        self.assertIn(first_item.session_id, combined)
+
+
+class TestFlowPrev(_FlowTestBase):
+    """Tests for POST /command-center/flow/prev."""
+
+    def _parse_execute_script(self, events: list[str]) -> list[str]:
+        """Extract execute_script content from SSE events.
+
+        SSE.execute_script emits a patch_elements event containing a
+        ``<script data-effect="el.remove()">...</script>`` element.
+        Extract any data: elements lines that contain window.location.
+        """
+        scripts = []
+        for event in events:
+            for line in event.splitlines():
+                if line.startswith("data: elements ") and "window.location" in line:
+                    scripts.append(line[len("data: elements ") :])
+        return scripts
+
+    def test_happy_path_navigates_to_prev_item(self) -> None:
+        """Happy path: posting from second item navigates to first."""
+        self._make_findings_session("fp-sess-a", "Session A Prev")
+        self._make_findings_session("fp-sess-b", "Session B Prev")
+
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2)
+        second_item = queue[1]
+        first_item = queue[0]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={
+                "session_id": second_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript for prev nav")
+        combined = " ".join(scripts)
+        self.assertIn(first_item.session_id, combined)
+
+    def test_wrap_around_first_to_last(self) -> None:
+        """Posting from the first queue item wraps around to the last."""
+        self._make_findings_session("fp-wrap-a", "Wrap Prev A")
+        self._make_findings_session("fp-wrap-b", "Wrap Prev B")
+
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2)
+        first_item = queue[0]
+        last_item = queue[-1]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={
+                "session_id": first_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        combined = " ".join(scripts)
+        self.assertIn(last_item.session_id, combined)
+
+    def test_empty_queue_navigates_to_flow_root(self) -> None:
+        """Empty queue: prev also navigates to /command-center/flow with no query string."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={"session_id": "no-session-prev", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = self._parse_execute_script(events)
+        self.assertTrue(scripts)
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        self.assertNotIn("session_id=", combined)
