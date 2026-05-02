@@ -15,13 +15,17 @@
        "paletteOpen": false,
        "paletteQuery": ""
      }'
-     data-on:keydown__window="evt.key === 'Escape' && ($paletteOpen = false)"
-     data-on:keydown__window="evt.metaKey && evt.key === 'j' && !evt.shiftKey && (@post('/command-center/flow/next', {payload: {session_id: $activeSessionId, step_id: $step_id, responses: $responses}}), evt.preventDefault())"
-     data-on:keydown__window="evt.metaKey && evt.shiftKey && evt.key === 'J' && (@post('/command-center/flow/prev', {payload: {session_id: $activeSessionId}}), evt.preventDefault())"
-     data-on:keydown__window="evt.metaKey && evt.key === 'k' && ($paletteOpen = !$paletteOpen, evt.preventDefault())"
-     data-on:keydown__window="evt.metaKey && evt.key === 'b' && (window.location = '/command-center')"
-     data-on:keydown__window="evt.metaKey && evt.key === 'p' && (@post('/command-center/flow/pin', {payload: {session_id: $activeSessionId}}), evt.preventDefault())"
+     data-on:keydown__window="(evt.key === 'Escape' && ($paletteOpen = false)) || (evt.metaKey && evt.key === 'j' && !evt.shiftKey && (document.getElementById('flow-action-next').click(), evt.preventDefault())) || (evt.metaKey && evt.shiftKey && evt.key === 'J' && (document.getElementById('flow-action-prev').click(), evt.preventDefault())) || (evt.metaKey && evt.key === 'k' && ($paletteOpen = !$paletteOpen, evt.preventDefault())) || (evt.metaKey && evt.key === 'b' && (window.location = '/command-center')) || (evt.metaKey && evt.key === 'p' && (document.getElementById('flow-action-pin').click(), evt.preventDefault()))"
      data-init="@get('/command-center/flow/events', {filterSignals: {include: /^$/}})">
+  {# Canonical action buttons. The visible Prev/Next/Pin/Submit&Next buttons in the toolbar
+     and progress strip, plus the ⌘J / ⌘⇧J / ⌘P keybinds, all programmatically click these so
+     the payload lives in exactly one place. #}
+  <button id="flow-action-next" type="button" hidden
+          data-on:click="@post('/command-center/flow/next', {payload: {session_id: $activeSessionId, step_id: $step_id, responses: $responses}})">Next</button>
+  <button id="flow-action-prev" type="button" hidden
+          data-on:click="@post('/command-center/flow/prev', {payload: {session_id: $activeSessionId}})">Prev</button>
+  <button id="flow-action-pin" type="button" hidden
+          data-on:click="@post('/command-center/flow/pin', {payload: {session_id: $activeSessionId}})">Pin</button>
   {% include 'fragments/flow_progress_strip.html' %}
   <main id="flow-body" class="flow-body">
     {% if active is none %}

@@ -31,7 +31,7 @@
       <button type="button"
               class="flow-strip-pin"
               title="Keeps this terminal in the queue when you switch away. Other items stay until resolved."
-              data-on:click="@post('/command-center/flow/pin')">
+              data-on:click="document.getElementById('flow-action-pin').click()">
         <span class="keycap">⌘P</span> Pin
       </button>
     {% endif %}
