@@ -405,6 +405,7 @@ def create_app(
     # Reuse the same list object the session-event listener closed over; both
     # the SSE route and the listener mutate it as clients connect/disconnect.
     fastapi_app.state.cc_queues = cc_queues_list
+    fastapi_app.state.notify_cc = _notify_cc_connections
     # Expose the legacy module-level SSE/dashboard queue stores via app.state
     # so new code can DI-read them (matching the cc_queues pattern). Same
     # list/dict object — transitional step toward a full migration off the

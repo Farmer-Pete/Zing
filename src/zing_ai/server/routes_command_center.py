@@ -855,7 +855,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             logger.info("Background session launched: %s (session: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
-            _push_board_changed(request.app)
+            request.app.state.notify_cc("board_changed")
 
             # Schedule a follow-up board_changed when the launch grace window
             # ends. The 0.5s liveness poll already pushes board_changed when
@@ -865,7 +865,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             # poll (~60s) finally re-rendered with the expired grace.
             async def _grace_expiry_push() -> None:
                 await asyncio.sleep(LAUNCH_GRACE_SECONDS + 1)
-                _push_board_changed(request.app)
+                request.app.state.notify_cc("board_changed")
 
             asyncio.create_task(_grace_expiry_push())
 
@@ -887,12 +887,6 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 # ---------------------------------------------------------------------------
 # Session management actions
 # ---------------------------------------------------------------------------
-
-
-def _push_board_changed(app: FastAPI) -> None:
-    """Push a board_changed event to all SSE queues."""
-    for q in app.state.cc_queues:
-        q.put_nowait("board_changed")
 
 
 @router.post("/command-center/start-ticket")
@@ -939,11 +933,11 @@ async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN2
             async def _bg_poll() -> None:
                 with contextlib.suppress(Exception):
                     await poller._poll_once()  # noqa: SLF001
-                _push_board_changed(request.app)
+                request.app.state.notify_cc("board_changed")
 
             asyncio.create_task(_bg_poll())
         else:
-            _push_board_changed(request.app)
+            request.app.state.notify_cc("board_changed")
 
         yield _sse_toast("Ticket started", "ok")
 
@@ -993,7 +987,7 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
                 extra={"event": "cc_kill_no_zellij", "session_id": session_id},
             )
         manager.cleanup_session(session_id)
-        _push_board_changed(request.app)
+        request.app.state.notify_cc("board_changed")
         yield _sse_toast("Session killed", "ok")
 
     return _stream()
@@ -1048,7 +1042,7 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
             yield _sse_toast(str(exc), "err")
             return
         manager.cleanup_session(session_id)
-        _push_board_changed(request.app)
+        request.app.state.notify_cc("board_changed")
         yield _sse_toast("Worktree cleaned up", "ok")
 
     return _stream()
