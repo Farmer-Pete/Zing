@@ -1,4 +1,4 @@
-"""Tests for flow.py: FlowCursor, cursor helpers, queue filters, context builder."""
+"""Tests for flow.py: queue helpers and context builder."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from unittest.mock import MagicMock
 
 from zing_ai.server.attention import AttentionItem
 from zing_ai.server.flow import (
-    FlowCursor,
     _body_fragment_for,
-    advance_cursor,
     build_flow_context,
     resolve_active_item,
 )
@@ -45,35 +43,6 @@ def _make_item(
 
 
 # ---------------------------------------------------------------------------
-# FlowCursor
-# ---------------------------------------------------------------------------
-
-
-class TestFlowCursor(unittest.TestCase):
-    """FlowCursor is a frozen dataclass."""
-
-    def test_default_empty_cursor(self) -> None:
-        cursor = FlowCursor()
-        self.assertIsNone(cursor.session_id)
-        self.assertIsNone(cursor.step_id)
-
-    def test_equality_same_values(self) -> None:
-        a = FlowCursor(session_id="s1", step_id="st1")
-        b = FlowCursor(session_id="s1", step_id="st1")
-        self.assertEqual(a, b)
-
-    def test_inequality_different_step_id(self) -> None:
-        a = FlowCursor(session_id="s1", step_id="st1")
-        b = FlowCursor(session_id="s1", step_id="st2")
-        self.assertNotEqual(a, b)
-
-    def test_immutability_raises_typeerror(self) -> None:
-        cursor = FlowCursor(session_id="s1")
-        with self.assertRaises((TypeError, AttributeError)):
-            cursor.session_id = "s2"  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
 # resolve_active_item
 # ---------------------------------------------------------------------------
 
@@ -82,12 +51,12 @@ class TestResolveActiveItem(unittest.TestCase):
     """resolve_active_item returns the correct item."""
 
     def test_empty_queue_returns_none(self) -> None:
-        result = resolve_active_item([], FlowCursor())
+        result = resolve_active_item([], session_id=None, step_id=None)
         self.assertIsNone(result)
 
     def test_unset_cursor_returns_topmost(self) -> None:
         items = [_make_item(session_id="a"), _make_item(session_id="b")]
-        result = resolve_active_item(items, FlowCursor())
+        result = resolve_active_item(items, session_id=None, step_id=None)
         self.assertIs(result, items[0])
 
     def test_cursor_matches_returns_that_item(self) -> None:
@@ -95,69 +64,22 @@ class TestResolveActiveItem(unittest.TestCase):
             _make_item(session_id="a", step_id="st-a"),
             _make_item(session_id="b", step_id="st-b"),
         ]
-        cursor = FlowCursor(session_id="b", step_id="st-b")
-        result = resolve_active_item(items, cursor)
+        result = resolve_active_item(items, session_id="b", step_id="st-b")
         self.assertIs(result, items[1])
 
     def test_cursor_matches_session_only(self) -> None:
-        """When cursor.step_id is None, match on session_id alone."""
+        """When step_id is None, match on session_id alone."""
         items = [
             _make_item(session_id="a", step_id="st-a"),
             _make_item(session_id="b", step_id="st-b"),
         ]
-        cursor = FlowCursor(session_id="b", step_id=None)
-        result = resolve_active_item(items, cursor)
+        result = resolve_active_item(items, session_id="b", step_id=None)
         self.assertIs(result, items[1])
 
     def test_stale_cursor_returns_topmost(self) -> None:
         items = [_make_item(session_id="a"), _make_item(session_id="b")]
-        cursor = FlowCursor(session_id="gone")
-        result = resolve_active_item(items, cursor)
+        result = resolve_active_item(items, session_id="gone", step_id=None)
         self.assertIs(result, items[0])
-
-
-# ---------------------------------------------------------------------------
-# advance_cursor
-# ---------------------------------------------------------------------------
-
-
-class TestAdvanceCursor(unittest.TestCase):
-    """advance_cursor wraps correctly in both directions."""
-
-    def _queue(self) -> list[AttentionItem]:
-        return [
-            _make_item(session_id="a", step_id="s-a"),
-            _make_item(session_id="b", step_id="s-b"),
-            _make_item(session_id="c", step_id="s-c"),
-        ]
-
-    def test_forward(self) -> None:
-        q = self._queue()
-        cursor = FlowCursor(session_id="a", step_id="s-a")
-        result = advance_cursor(q, cursor, "next")
-        self.assertEqual(result, FlowCursor(session_id="b", step_id="s-b"))
-
-    def test_backward(self) -> None:
-        q = self._queue()
-        cursor = FlowCursor(session_id="c", step_id="s-c")
-        result = advance_cursor(q, cursor, "prev")
-        self.assertEqual(result, FlowCursor(session_id="b", step_id="s-b"))
-
-    def test_wrap_at_end(self) -> None:
-        q = self._queue()
-        cursor = FlowCursor(session_id="c", step_id="s-c")
-        result = advance_cursor(q, cursor, "next")
-        self.assertEqual(result, FlowCursor(session_id="a", step_id="s-a"))
-
-    def test_wrap_at_start(self) -> None:
-        q = self._queue()
-        cursor = FlowCursor(session_id="a", step_id="s-a")
-        result = advance_cursor(q, cursor, "prev")
-        self.assertEqual(result, FlowCursor(session_id="c", step_id="s-c"))
-
-    def test_empty_queue_returns_empty_cursor(self) -> None:
-        result = advance_cursor([], FlowCursor(), "next")
-        self.assertEqual(result, FlowCursor())
 
 
 # ---------------------------------------------------------------------------

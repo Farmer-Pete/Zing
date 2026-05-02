@@ -1,73 +1,40 @@
-"""Flow mode helpers: cursor management, queue filtering, and context building."""
+"""Flow mode helpers: queue filtering and context building."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from zing_ai.server.attention import AttentionItem
 from zing_ai.server.models import ClaudeCodeSession, ZingSession
 from zing_ai.server.sessions import SessionManager
-
-
-@dataclass(frozen=True)
-class FlowCursor:
-    """Immutable cursor pointing at the active Flow item.
-
-    Stored on ``app.state.flow_cursor``. Resets on server restart.
-    """
-
-    session_id: str | None = None
-    step_id: str | None = None
-
 
 # ---------------------------------------------------------------------------
 # Queue helpers
 # ---------------------------------------------------------------------------
 
 
-def resolve_active_item(queue: list[AttentionItem], cursor: FlowCursor) -> AttentionItem | None:
-    """Return the item the cursor points at, or the topmost item.
+def resolve_active_item(
+    queue: list[AttentionItem],
+    session_id: str | None,
+    step_id: str | None,
+) -> AttentionItem | None:
+    """Return the item matching session_id/step_id, or the topmost item.
 
     If the queue is empty, returns ``None``.
-    If the cursor is unset (session_id is None), returns the topmost item.
-    If cursor.session_id matches an item (and cursor.step_id matches when
-    non-None), returns that item. Otherwise falls back to the topmost item.
+    If session_id is None, returns the topmost item.
+    If session_id matches an item (and step_id matches when non-None),
+    returns that item. Otherwise falls back to the topmost item.
     """
     if not queue:
         return None
-    if cursor.session_id is None:
+    if session_id is None:
         return queue[0]
     for item in queue:
-        if item.session_id == cursor.session_id and (
-            cursor.step_id is None or item.step_id == cursor.step_id
-        ):
+        if item.session_id == session_id and (step_id is None or item.step_id == step_id):
             return item
-    # Cursor is stale — fall back to topmost.
+    # session_id is stale — fall back to topmost.
     return queue[0]
-
-
-def advance_cursor(
-    queue: list[AttentionItem],
-    cursor: FlowCursor,
-    direction: Literal["next", "prev"],
-) -> FlowCursor:
-    """Return a new FlowCursor pointing at the next or previous item.
-
-    Wraps at the ends of the queue. If the cursor doesn't match any item,
-    treats the topmost item as current.
-    """
-    if not queue:
-        return FlowCursor()
-    current = resolve_active_item(queue, cursor)
-    try:
-        idx = queue.index(current)  # type: ignore[arg-type]
-    except ValueError:
-        idx = 0
-    new_idx = (idx + 1) % len(queue) if direction == "next" else (idx - 1) % len(queue)
-    new_item = queue[new_idx]
-    return FlowCursor(session_id=new_item.session_id, step_id=new_item.step_id)
 
 
 # ---------------------------------------------------------------------------

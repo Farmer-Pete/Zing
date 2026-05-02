@@ -43,7 +43,6 @@ from zing_ai.server.command_center import (
     infer_repo_for_ticket,
 )
 from zing_ai.server.flow import (
-    FlowCursor,
     _body_fragment_for,
     build_flow_context,
     resolve_active_item,
@@ -352,20 +351,13 @@ async def get_flow(  # noqa: ANN201
 ):
     """Return the Flow Mode HTML page.
 
-    Query params ``session_id`` and ``step_id`` override the persisted cursor,
-    enabling Board-to-Flow navigation via plain ``<a href>`` links.
+    Query params ``session_id`` and ``step_id`` select the active item
+    directly — the URL is the only cursor.
     """
     manager = request.app.state.session_manager
     sessions = manager.list_sessions()
     queue = build_attention_queue(sessions, datetime.now(UTC))
-    # Query params override the persisted cursor (used by Board → Flow navigation).
-    if session_id:
-        request.app.state.flow_cursor = FlowCursor(
-            session_id=session_id,
-            step_id=step_id or None,
-        )
-    cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
-    active = resolve_active_item(queue, cursor)
+    active = resolve_active_item(queue, session_id, step_id)
     ctx = build_flow_context(manager, queue, active)
     return HTMLResponse(
         render("flow.html", current_path="/command-center/flow", current_view="flow", **ctx)
@@ -457,8 +449,8 @@ async def flow_events(request: Request):  # noqa: ANN201
         manager = req.app.state.session_manager
         sessions = manager.list_sessions()
         queue = build_attention_queue(sessions, datetime.now(UTC))
-        cursor = getattr(req.app.state, "flow_cursor", FlowCursor())
-        active = resolve_active_item(queue, cursor)
+        # No cursor in SSE context — Step 10 will add body-patch removal.
+        active = resolve_active_item(queue, session_id=None, step_id=None)
         ctx = build_flow_context(manager, queue, active)
         ctx["current_view"] = "flow"
         yield SSE.patch_elements(
@@ -1169,8 +1161,7 @@ async def post_flow_pin(request: Request):  # noqa: ANN201
         manager = request.app.state.session_manager
         sessions = manager.list_sessions()
         queue = build_attention_queue(sessions, datetime.now(UTC))
-        cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
-        active = resolve_active_item(queue, cursor)
+        active = resolve_active_item(queue, session_id=None, step_id=None)
         if active is None or active.action_type != "attach":
             yield _sse_toast("Pin only available for terminal sessions", "err")
             return
@@ -1186,7 +1177,7 @@ async def post_flow_pin(request: Request):  # noqa: ANN201
             return
         # Re-fetch queue to reflect new pin state
         queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
-        active = resolve_active_item(queue, cursor)
+        active = resolve_active_item(queue, session_id=None, step_id=None)
         ctx = build_flow_context(manager, queue, active)
         yield SSE.patch_elements(
             render("fragments/flow_progress_strip.html", **ctx),
@@ -1257,8 +1248,7 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
             yield _sse_toast("Session not found", "err")
             return
         manager.set_pinned(match.session_id, True)
-        request.app.state.flow_cursor = FlowCursor(session_id=match.session_id, step_id=None)
         yield SSE.patch_signals({"modals": {"launchPopup": False}})
-        yield SSE.redirect("/command-center/flow")
+        yield SSE.redirect(f"/command-center/flow?session_id={match.session_id}")
 
     return _stream()

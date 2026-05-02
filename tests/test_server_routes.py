@@ -2821,24 +2821,23 @@ class TestFlowPage(ServerTestBase):
         return self.client.app.app.routes[-1].app  # type: ignore[attr-defined]
 
     def test_flow_page_query_params_set_cursor(self) -> None:
-        """GET /flow?session_id=foo&step_id=bar sets flow_cursor on app state."""
-        from zing_ai.server.flow import FlowCursor
-
-        resp = self.client.get("/command-center/flow?session_id=foo&step_id=bar")
+        """GET /flow?session_id=X&step_id=Y activates the matching item in the HTML."""
+        self._make_findings_session()
+        session = self.manager.get_session("flow-test-session")
+        assert isinstance(session, ZingSession)
+        step_id = session.steps[0].step_id
+        resp = self.client.get(
+            f"/command-center/flow?session_id=flow-test-session&step_id={step_id}"
+        )
         self.assertEqual(resp.status_code, 200)
-        cursor: FlowCursor = self._fastapi_app.state.flow_cursor
-        self.assertEqual(cursor.session_id, "foo")
-        self.assertEqual(cursor.step_id, "bar")
+        self.assertIn("Flow Test Title", resp.text)
 
     def test_flow_page_query_params_session_id_only(self) -> None:
-        """GET /flow?session_id=foo (no step_id) sets cursor with step_id=None."""
-        from zing_ai.server.flow import FlowCursor
-
-        resp = self.client.get("/command-center/flow?session_id=foo")
+        """GET /flow?session_id=X (no step_id) activates the matching item in the HTML."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow?session_id=flow-test-session")
         self.assertEqual(resp.status_code, 200)
-        cursor: FlowCursor = self._fastapi_app.state.flow_cursor
-        self.assertEqual(cursor.session_id, "foo")
-        self.assertIsNone(cursor.step_id)
+        self.assertIn("Flow Test Title", resp.text)
 
     def test_kanban_card_attach_button_links_to_flow(self) -> None:
         """kanban_card.html renders Attach button as <a href> to /command-center/flow."""
@@ -2941,11 +2940,9 @@ class TestFlowPin(_FlowTestBase):
 
     def test_pin_toggles_session_state(self) -> None:
         """POSTing /flow/pin twice flips pinned True → False."""
-        from zing_ai.server.flow import FlowCursor
         from zing_ai.server.models import ClaudeCodeSession
 
         self._make_attach_session("pin-toggle", pinned=False)
-        self.fastapi_app.state.flow_cursor = FlowCursor(session_id="pin-toggle", step_id=None)
 
         # First POST — should pin.
         with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
@@ -2973,11 +2970,8 @@ class TestFlowPin(_FlowTestBase):
         self.assertTrue(any("Unpinned" in t["text"] for t in toasts))
 
     def test_pin_only_for_attach_items(self) -> None:
-        """POSTing /flow/pin while cursor is on a findings step emits an error toast."""
-        from zing_ai.server.flow import FlowCursor
-
-        step_id = self._make_findings_session("findings-pin", "Findings Pin")
-        self.fastapi_app.state.flow_cursor = FlowCursor(session_id="findings-pin", step_id=step_id)
+        """POSTing /flow/pin while topmost item is a findings step emits an error toast."""
+        self._make_findings_session("findings-pin", "Findings Pin")
 
         with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
             self.assertEqual(resp.status_code, 200)
@@ -3086,19 +3080,14 @@ class TestLaunchPopup(_FlowTestBase):
         assert isinstance(session_after, ClaudeCodeSession)
         self.assertTrue(session_after.pinned)
 
-        # Flow cursor points at this session.
-        cursor = self.fastapi_app.state.flow_cursor
-        self.assertEqual(cursor.session_id, "lp-send")
-        self.assertIsNone(cursor.step_id)
-
-        # SSE response closes the popup and redirects to /command-center/flow.
+        # SSE response closes the popup and redirects to Flow with session_id.
         combined = "\n".join(events)
         self.assertIn("launchPopup", combined)
-        # SSE.redirect emits an execute_script with window.location.
         self.assertIn("/command-center/flow", combined)
+        self.assertIn("lp-send", combined)
 
     def test_launch_popup_send_unknown_terminal_returns_toast(self) -> None:
-        """Unknown terminal_session yields a cc-toast-err; no session is pinned."""
+        """Unknown terminal_session yields a cc-toast-err; no redirect is emitted."""
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-send",
@@ -3108,9 +3097,6 @@ class TestLaunchPopup(_FlowTestBase):
         toasts = _extract_toasts(events)
         self.assertEqual(len(toasts), 1)
         self.assertIn("cc-toast-err", toasts[0]["class"].split())
-        # No flow cursor was set.
-        cursor = getattr(self.fastapi_app.state, "flow_cursor", None)
-        self.assertIsNone(cursor)
 
     def test_launch_popup_send_missing_terminal_session_returns_toast(self) -> None:
         """Empty terminal_session yields a cc-toast-err."""
@@ -3446,7 +3432,6 @@ class TestFlowEvents(_FlowTestBase):
 
         from zing_ai.server.attention import build_attention_queue
         from zing_ai.server.flow import (
-            FlowCursor,
             _body_fragment_for,
             build_flow_context,
             resolve_active_item,
@@ -3455,7 +3440,6 @@ class TestFlowEvents(_FlowTestBase):
         from zing_ai.server.templates import render
 
         cc_queues: list[asyncio.Queue[str]] = []
-        fastapi_app = self.fastapi_app
         manager = self.manager
 
         # The callback yields exactly 3 events per board_changed.
@@ -3464,8 +3448,7 @@ class TestFlowEvents(_FlowTestBase):
         async def _on_board_changed(req):  # type: ignore[no-untyped-def]
             sessions = manager.list_sessions()
             queue = build_attention_queue(sessions, datetime.now(UTC))
-            cursor = getattr(fastapi_app.state, "flow_cursor", FlowCursor())
-            active = resolve_active_item(queue, cursor)
+            active = resolve_active_item(queue, session_id=None, step_id=None)
             ctx = build_flow_context(manager, queue, active)
             ctx["current_view"] = "flow"
             yield SSE.patch_elements(
