@@ -359,6 +359,15 @@ async def get_flow(  # noqa: ANN201
     queue = build_attention_queue(sessions, datetime.now(UTC))
     active = resolve_active_item(queue, session_id, step_id)
     ctx = build_flow_context(manager, queue, active)
+    logger.info(
+        "flow_page_rendered",
+        extra={
+            "event": "flow_page_rendered",
+            "session_id": session_id,
+            "step_id": step_id,
+            "queue_size": len(queue),
+        },
+    )
     return HTMLResponse(
         render("flow.html", current_path="/command-center/flow", current_view="flow", **ctx)
     )
@@ -465,6 +474,13 @@ async def flow_events(request: Request):  # noqa: ANN201
         yield _badge_patch(len(queue))
 
     async def _stream():  # noqa: ANN202
+        logger.info(
+            "flow_events_subscribed",
+            extra={
+                "event": "flow_events_subscribed",
+                "client_addr": str(request.client),
+            },
+        )
         async for ev in _cc_events_stream(request, _on_board_changed):
             yield ev
 
@@ -1165,8 +1181,24 @@ async def post_flow_pin(payload: dict[str, Any], request: Request):  # noqa: ANN
         try:
             manager.set_pinned(session_id, new_pinned)
         except (KeyError, ValueError) as exc:
+            logger.warning(
+                "flow_pin_failed",
+                extra={
+                    "event": "flow_pin_failed",
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
             yield _sse_toast(str(exc), "err")
             return
+        logger.info(
+            "flow_pin_toggled",
+            extra={
+                "event": "flow_pin_toggled",
+                "session_id": session_id,
+                "pinned": new_pinned,
+            },
+        )
         # Re-fetch queue to reflect new pin state
         queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
         active = resolve_active_item(queue, session_id=session_id, step_id=None)
@@ -1237,9 +1269,25 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
                 match = session
                 break
         if match is None:
+            logger.warning(
+                "flow_launch_popup_sent_failed",
+                extra={
+                    "event": "flow_launch_popup_sent_failed",
+                    "terminal_session": terminal_session,
+                    "error": "session not found",
+                },
+            )
             yield _sse_toast("Session not found", "err")
             return
         manager.set_pinned(match.session_id, True)
+        logger.info(
+            "flow_launch_popup_sent",
+            extra={
+                "event": "flow_launch_popup_sent",
+                "session_id": match.session_id,
+                "terminal_session": terminal_session,
+            },
+        )
         yield SSE.patch_signals({"modals": {"launchPopup": False}})
         sid = match.session_id
         yield SSE.execute_script(
