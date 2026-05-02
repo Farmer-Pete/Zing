@@ -27,7 +27,7 @@ class TestAppLifespan(unittest.TestCase):
 
     def test_lifespan_starts_and_stops_poller_cleanly(self) -> None:
         """Entering and exiting the lifespan context must not raise."""
-        app = create_app(session_manager=self.manager)
+        app = create_app(session_manager=self.manager, zellij_support=False)
         with TestClient(app):
             # Lifespan has entered: poller is running as a background task.
             pass
@@ -41,7 +41,7 @@ class TestAppLifespan(unittest.TestCase):
         # We need access to the inner fastapi_app, not the Starlette wrapper.
         # TestClient entering the lifespan is not needed for this check because
         # state is set in create_app() body, before the lifespan runs.
-        app = _create_app(session_manager=self.manager)
+        app = _create_app(session_manager=self.manager, zellij_support=False)
 
         # Unwrap MCPDebugMiddleware → Starlette → find FastAPI mount
         starlette_app = app.app  # type: ignore[attr-defined]
@@ -61,7 +61,7 @@ class TestAppLifespan(unittest.TestCase):
         """
         from zing_ai.server.routes import _dashboard_queues, _sse_queues
 
-        app = create_app(session_manager=self.manager)
+        app = create_app(session_manager=self.manager, zellij_support=False)
         starlette_app = app.app  # type: ignore[attr-defined]
         fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
 
@@ -79,7 +79,7 @@ class TestAppLifespan(unittest.TestCase):
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
         cc_queues.append(queue)
 
-        app = create_app(session_manager=self.manager, cc_queues=cc_queues)
+        app = create_app(session_manager=self.manager, cc_queues=cc_queues, zellij_support=False)
         assert app is not None  # smoke check; listener attached in create_app
 
         # Trigger a session creation — fires session_created.

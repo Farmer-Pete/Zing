@@ -238,6 +238,7 @@ def create_app(
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
     zellij_support: bool | None = None,
+    disable_mcp_session: bool = False,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -373,6 +374,13 @@ def create_app(
             fastapi_app.state.live_sessions = set()
 
         try:
+            if disable_mcp_session:
+                # Tests that don't exercise the MCP HTTP path opt out so the
+                # FastMCP module-level singleton's StreamableHTTPSessionManager
+                # (which can only be .run() once per process) stays available
+                # for tests that DO need it.
+                yield
+                return
             async with mcp_server.session_manager.run():
                 yield
         finally:

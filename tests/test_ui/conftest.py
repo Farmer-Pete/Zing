@@ -51,6 +51,8 @@ def ui_server() -> Generator[_ServerInfo]:
         external_cache=external_cache,
         cc_queues=cc_queues,
         disable_polling=True,
+        zellij_support=False,
+        disable_mcp_session=True,
     )
 
     # Navigate the ASGI middleware chain to the inner FastAPI app so tests can
