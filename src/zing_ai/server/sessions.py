@@ -30,7 +30,7 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -914,7 +914,7 @@ class SessionManager:
         unanswered = [n for n in session.notifications if n.answered_at is None]
         if not unanswered:
             return None
-        now = datetime.now()
+        now = datetime.now(UTC)
         for notification in unanswered:
             notification.answered_at = now
         self._persist(session)
