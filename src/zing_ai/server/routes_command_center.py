@@ -1240,7 +1240,11 @@ async def post_flow_pin(request: Request):  # noqa: ANN201
             yield _sse_toast("Session not found", "err")
             return
         new_pinned = not session.pinned
-        manager.set_pinned(active.session_id, new_pinned)
+        try:
+            manager.set_pinned(active.session_id, new_pinned)
+        except (KeyError, ValueError) as exc:
+            yield _sse_toast(str(exc), "err")
+            return
         # Re-fetch queue to reflect new pin state
         queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
         active = resolve_active_item(queue, cursor)

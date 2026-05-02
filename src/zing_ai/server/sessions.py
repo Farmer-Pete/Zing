@@ -1,6 +1,25 @@
 """Session management for the Zing batch review server.
 
 Manages review sessions with in-memory caching backed by JSON file persistence.
+
+Error-handling convention (Decision 29)
+----------------------------------------
+Every public method on SessionManager follows a four-rule contract:
+
+1. **Missing session** — the ``session_id`` does not exist in the store:
+   ``raise KeyError(session_id)``.
+
+2. **Wrong type or wrong state** — the session exists but is the wrong
+   subclass (e.g. not a ``ClaudeCodeSession``) or is in a state that
+   makes the operation invalid (e.g. pinning a non-CC session):
+   ``raise ValueError(...)``.
+
+3. **Idempotent no-op** — the operation is already in the requested
+   state (e.g. answering a question when there are none pending):
+   ``return None`` silently.
+
+4. **Teardown / cleanup** — ``cleanup_session`` is always a silent no-op,
+   even when the session does not exist, so callers never need to guard it.
 """
 
 from __future__ import annotations
@@ -880,13 +899,18 @@ class SessionManager:
         in one go so they do not re-appear on each subsequent click.
 
         Returns the most recently marked notification (matching what
-        ``pending_question`` returned before the call), or ``None`` if no
-        session, no unanswered notification, or the session is not a
-        ClaudeCodeSession.
+        ``pending_question`` returned before the call), or ``None`` if there
+        are no unanswered notifications.
+
+        Raises:
+            KeyError: if ``session_id`` does not exist.
+            ValueError: if the session is not a ClaudeCodeSession.
         """
         session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
         if not isinstance(session, ClaudeCodeSession):
-            return None
+            raise ValueError(f"Session {session_id!r} is not a ClaudeCodeSession")
         unanswered = [n for n in session.notifications if n.answered_at is None]
         if not unanswered:
             return None
@@ -904,8 +928,14 @@ class SessionManager:
         Validates the session exists and is a ClaudeCodeSession, then
         persists and notifies via session_updated (already routed to
         board_changed in _CC_BOARD_EVENTS).
+
+        Raises:
+            KeyError: if ``session_id`` does not exist.
+            ValueError: if the session is not a ClaudeCodeSession.
         """
         session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
         if not isinstance(session, ClaudeCodeSession):
             raise ValueError(f"Session {session_id!r} is not a ClaudeCodeSession")
         session.pinned = pinned

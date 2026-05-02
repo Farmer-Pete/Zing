@@ -1441,10 +1441,48 @@ class TestClaudeCodeSession(unittest.TestCase):
         assert self.manager.mark_pending_question_answered("cc-empty") is None
 
     def test_mark_pending_question_answered_zing_session_returns_none(self) -> None:
-        """ZingSessions are not affected — only ClaudeCodeSession is touched."""
+        """ZingSessions raise ValueError; missing sessions raise KeyError."""
         self.manager.create_session("zs1", "Zing")
-        assert self.manager.mark_pending_question_answered("zs1") is None
-        assert self.manager.mark_pending_question_answered("missing") is None
+        with self.assertRaises(ValueError):
+            self.manager.mark_pending_question_answered("zs1")
+        with self.assertRaises(KeyError):
+            self.manager.mark_pending_question_answered("missing")
+
+    def test_set_pinned_missing_session_raises_key_error(self) -> None:
+        """set_pinned raises KeyError when the session does not exist."""
+        with self.assertRaises(KeyError):
+            self.manager.set_pinned("nonexistent", True)
+
+    def test_set_pinned_wrong_type_raises_value_error(self) -> None:
+        """set_pinned raises ValueError when the session is not a ClaudeCodeSession."""
+        self.manager.create_session("zing-1", "Zing Session")
+        with self.assertRaises(ValueError):
+            self.manager.set_pinned("zing-1", True)
+
+    def test_set_pinned_works_on_claude_code_session(self) -> None:
+        """set_pinned sets the pinned flag on a ClaudeCodeSession."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self.manager.create_claude_code_session(session_id="cc-pin", title="Pin Test")
+        self.manager.set_pinned("cc-pin", True)
+        session = self.manager.get_session("cc-pin")
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.pinned is True
+        self.manager.set_pinned("cc-pin", False)
+        session = self.manager.get_session("cc-pin")
+        assert isinstance(session, ClaudeCodeSession)
+        assert session.pinned is False
+
+    def test_mark_pending_question_answered_missing_session_raises_key_error(self) -> None:
+        """mark_pending_question_answered raises KeyError for a missing session."""
+        with self.assertRaises(KeyError):
+            self.manager.mark_pending_question_answered("no-such-session")
+
+    def test_mark_pending_question_answered_wrong_type_raises_value_error(self) -> None:
+        """mark_pending_question_answered raises ValueError for a non-ClaudeCodeSession."""
+        self.manager.create_session("zing-2", "Zing Session")
+        with self.assertRaises(ValueError):
+            self.manager.mark_pending_question_answered("zing-2")
 
 
 if __name__ == "__main__":
