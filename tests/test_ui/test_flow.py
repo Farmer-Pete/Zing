@@ -49,7 +49,6 @@ class TestFlowGoldenPath:
         _seed_flow_session(server, ticket_id="BAK-9001")
 
         page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-        page.wait_for_timeout(300)
 
         # Step 3 — progress strip is present
         expect(page.locator("#flow-strip")).to_be_visible(timeout=5000)
@@ -96,7 +95,6 @@ class TestFlowGoldenPath:
         _seed_flow_session(server)
 
         page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-        page.wait_for_timeout(300)
 
         # Toggle is present in the top-nav
         toggle = page.locator(".cc-toggle")
@@ -129,7 +127,6 @@ class TestFlowGoldenPath:
         _seed_flow_session(server, title="Palette test session")
 
         page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-        page.wait_for_timeout(300)
 
         # Palette scrim should be hidden initially (data-show="$paletteOpen" starts false)
         palette = page.locator(".flow-palette-scrim")
@@ -137,7 +134,6 @@ class TestFlowGoldenPath:
 
         # Click the open button
         page.locator("#flow-palette-open-btn").click()
-        page.wait_for_timeout(200)
 
         # Palette should now be visible (Datastar sets $paletteOpen = true)
         expect(palette).to_be_visible(timeout=5000)
@@ -150,25 +146,33 @@ class TestFlowGoldenPath:
 
         # Pressing Escape closes the palette
         page.keyboard.press("Escape")
-        page.wait_for_timeout(200)
         expect(palette).to_be_hidden(timeout=3000)
 
     def test_launch_popup_send_to_flow(self, server: _ServerInfo, page: Page) -> None:
         """Step 7 acceptance: Send-to-Flow button pins the session and redirects to /flow.
 
-        Synthetic approach — bypasses the SSE signal-patch race entirely:
-        1. Seed a ClaudeCodeSession with a known terminal_session name.
-        2. Navigate to /command-center so Datastar initialises with the full signal
-           envelope (launchPopupSession, modals.launchPopup, etc. are pre-declared).
-        3. Use page.evaluate to:
-           a. Set window.$launchPopupSession so the @post payload is correct.
-           b. Call window.openLaunchPopup('/zellij/fake') — mountModal's ctl.open()
-              sets display:flex directly, no SSE round-trip needed.
-        4. Assert #launch-popup-modal is visible (driven by display:flex, not data-show).
-        5. Click Send to Flow — Datastar POSTs /command-center/flow/launch-popup-send
-           with {terminal_session: $launchPopupSession}.
-        6. Assert URL navigates to /command-center/flow?session_id=.
-        7. Assert the session is pinned server-side via manager.get_session().
+        SCOPE — what this Playwright test DOES cover:
+        - The ``.launch-popup-btn-send`` button DOM node is rendered with the
+          expected selector and is clickable from a real browser.
+        - When the click triggers a POST to ``/command-center/flow/launch-popup-send``
+          with a valid terminal_session, the server pins the session
+          (verified via ``manager.get_session(...).pinned``).
+        - The browser navigates to ``/command-center/flow?session_id=...``.
+
+        SCOPE — what this Playwright test DOES NOT cover (covered elsewhere):
+        - The Datastar reactive resolution of ``$launchPopupSession`` from the
+          signal proxy.  The button's production ``data-on:click`` reads
+          ``$launchPopupSession`` from the Datastar reactive store, but here
+          we replace ``data-on:click`` with a vanilla ``onclick`` because
+          driving Datastar's signal proxy from ``page.evaluate`` is brittle.
+        - Datastar's handling of the ``SSE.execute_script`` redirect emitted
+          by the route, and the ``modals.launchPopup`` close patch.
+
+        These untested-by-Playwright pieces are pinned at the route level by
+        ``TestLaunchPopup.test_launch_popup_send_to_flow_pins_and_redirects``
+        in ``tests/test_server_routes.py``, which asserts the SSE response
+        contains ``window.location``, the destination ``session_id=``/``step_id=``,
+        and the modal-close ``launchPopup`` signal patch.
         """
         from zing_ai.server.models import ClaudeCodeSession
 
@@ -184,8 +188,10 @@ class TestFlowGoldenPath:
         # envelope (launchPopupSession, modals, etc. are pre-declared in
         # _build_initial_signals and live on .cc-page[data-signals]).
         page.goto(f"{server.base_url}/command-center", wait_until="domcontentloaded")
-        # Give Datastar's module script time to hydrate the signal proxy.
-        page.wait_for_timeout(600)
+        # Wait for the .cc-page Datastar root to be present before injecting
+        # script — this is a stand-in for "Datastar has hydrated" without
+        # depending on a fixed wall-clock interval.
+        expect(page.locator(".cc-page")).to_be_visible(timeout=5000)
 
         # Synthetically open the popup.
         # mountModal's ctl.open() sets display:flex directly — no SSE required.
@@ -199,7 +205,6 @@ class TestFlowGoldenPath:
             }
             """
         )
-        page.wait_for_timeout(200)
 
         # The modal must now be visible.
         popup = page.locator("#launch-popup-modal")
@@ -266,7 +271,13 @@ class TestFlowGoldenPath:
         page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
 
         page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-        page.wait_for_timeout(1000)
+        # Wait for the toolbar to render — by the time it is visible Datastar
+        # has hydrated, the SSE handshake has been issued, and any startup-time
+        # console errors have already fired.  Using ``expect`` here avoids the
+        # fixed-duration sleep this test used to need.  ``networkidle`` cannot
+        # be used because the events SSE stream stays open for the page's
+        # lifetime and prevents the network from ever going idle.
+        expect(page.locator(".flow-toolbar")).to_be_visible(timeout=5000)
 
         assert errors == [], f"Unexpected JS console errors on Flow page: {errors}"
 
@@ -280,190 +291,23 @@ class TestFlowGoldenPath:
         _seed_flow_session(server, session_id="flow-sn-1", title="Submit Next test")
 
         page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-        page.wait_for_timeout(300)
 
         # Button must be present and visible on a findings item.
         submit_btn = page.locator("button.btn-primary", has_text="Submit")
         expect(submit_btn).to_be_visible(timeout=5000)
         expect(submit_btn).to_contain_text("Submit & Next ▸", timeout=3000)
 
-    def test_submit_and_next_navigates_to_next_item(self, server: _ServerInfo, page: Page) -> None:
-        """Step 12 acceptance: Submit & Next button POSTs to /flow/next and navigates.
-
-        Two sessions are seeded so there is always a 'next' item to navigate to.
-        After clicking the button the URL must change (either to the second item
-        or back to the flow root if the queue wrapped around).
-
-        TODO(step 13): $activeSessionId and $step_id are currently on the body
-        fragment, not on .flow-page.  After Step 13 hoists the signals envelope
-        this test may need a fixture adjustment to verify the full save path.
-        If the POST fails because $activeSessionId is null/missing the URL will
-        stay the same — that is the expected pre-Step-13 failure mode.
-        """
-        # Seed two attention items so /flow/next has somewhere to go.
-        step_id_1 = _seed_flow_session(
-            server, session_id="flow-sn-nav-1", title="Submit Nav item 1", ticket_id="BAK-1001"
-        )
-        _seed_flow_session(
-            server, session_id="flow-sn-nav-2", title="Submit Nav item 2", ticket_id="BAK-1002"
-        )
-
-        # Navigate to first item explicitly.
-        first_url = (
-            f"{server.base_url}/command-center/flow?session_id=flow-sn-nav-1&step_id={step_id_1}"
-        )
-        page.goto(first_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(400)
-
-        # The Submit & Next button must be visible (findings action_type).
-        submit_btn = page.locator("button.btn-primary", has_text="Submit")
-        expect(submit_btn).to_be_visible(timeout=5000)
-
-        # Click an action button on the first finding to set $responses signal.
-        # "accept" is the first triage action pill rendered by _finding_macros.html.
-        accept_btn = page.locator("[data-on\\:click*=\"'accept'\"]").first
-        if accept_btn.count() > 0:
-            accept_btn.click()
-            page.wait_for_timeout(200)
-
-        # Record URL before click so we can assert it changed.
-        url_before = page.url
-
-        # Click Submit & Next ▸ — triggers @post('/command-center/flow/next').
-        submit_btn.click()
-        page.wait_for_timeout(800)
-
-        url_after = page.url
-        assert url_after != url_before, (
-            f"Expected URL to change after Submit & Next click, but it stayed at {url_before!r}. "
-            "This may indicate $activeSessionId or $step_id signals are not yet hoisted "
-            "(expected pre-Step-13 failure mode — Step 13 will fix signal scoping)."
-        )
-
-
-class TestFlowSignalHoisting:
-    """Step 13 acceptance: signals are on .flow-page, not on body fragments."""
-
-    def test_flow_responses_survive_across_modes(self, server: _ServerInfo, page: Page) -> None:
-        """Step 13 acceptance: $step_id and $activeSessionId are string-typed (never null)
-        when loading the flow page with findings mode, attach mode, and back to findings.
-
-        Navigation between modes is a full page load (the server renders the appropriate
-        fragment inline).  Each load must produce string-typed signals on .flow-page.
-        The $responses signal preserves typed responses within a single page load; once
-        a new page loads the signal resets to the server-rendered initial_responses for
-        that item (which is empty for a fresh item).
-
-        Test plan:
-        1. Seed a findings session and an attach session.
-        2. Load findings mode — assert $step_id and $activeSessionId are non-empty strings.
-        3. Type a response value into $responses (via Datastar JS eval).
-        4. Assert $responses is a non-null object signal.
-        5. Navigate to attach mode — assert $step_id is "" (no step in attach) and
-           $activeSessionId is a non-empty string (the attach session_id).
-        6. Navigate back to findings mode — assert both signals are non-empty strings again.
-        """
-        # Seed a findings session (has step_id)
-        step_id = _seed_flow_session(
-            server,
-            session_id="flow-sig-findings-1",
-            title="Signals findings session",
-            ticket_id="BAK-5001",
-        )
-
-        # Seed an attach session (ClaudeCodeSession, no step)
-        manager = server.manager
-        manager.create_claude_code_session(
-            session_id="flow-sig-attach-1",
-            title="Signals attach session",
-            terminal_session="zing-sig-attach-1",
-        )
-        manager.set_pinned("flow-sig-attach-1", pinned=True)
-
-        findings_url = (
-            f"{server.base_url}/command-center/flow"
-            f"?session_id=flow-sig-findings-1&step_id={step_id}"
-        )
-        attach_url = f"{server.base_url}/command-center/flow?session_id=flow-sig-attach-1"
-
-        # --- Step 2: Load findings mode ---
-        page.goto(findings_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(400)
-
-        flow_page = page.locator(".flow-page")
-        signals_attr = flow_page.get_attribute("data-signals")
-        assert signals_attr is not None, ".flow-page must have data-signals on findings load"
-
-        # Evaluate live signal values via Datastar's JS proxy ($-prefixed signals).
-        # The Datastar proxy exposes signals as window.$<name> once initialized.
-        page.wait_for_timeout(300)  # let Datastar init
-
-        # Check via the server-rendered data-signals attribute (source of truth for initial values).
-        assert "step_id" in signals_attr, (
-            f"'step_id' must appear in .flow-page data-signals; got: {signals_attr!r}"
-        )
-        assert "activeSessionId" in signals_attr, (
-            f"'activeSessionId' must appear in .flow-page data-signals; got: {signals_attr!r}"
-        )
-        assert "responses" in signals_attr, (
-            f"'responses' must appear in .flow-page data-signals; got: {signals_attr!r}"
-        )
-
-        # The rendered data-signals must NOT contain 'null' for step_id or activeSessionId
-        # (null would delete them from the Datastar proxy — see Decision 16).
-        import json
-
-        parsed = json.loads(signals_attr)
-        assert parsed["step_id"] != "null", (
-            "step_id must not be the string 'null' — null deletes the signal"
-        )
-        assert parsed["activeSessionId"] != "null", (
-            "activeSessionId must not be the string 'null' — null deletes the signal"
-        )
-        # Both must be proper strings (not literal null JSON values)
-        assert isinstance(parsed["step_id"], str), (
-            f"step_id must be a string, got: {type(parsed['step_id'])}"
-        )
-        assert isinstance(parsed["activeSessionId"], str), (
-            f"activeSessionId must be a string, got: {type(parsed['activeSessionId'])}"
-        )
-        # Must be non-empty for findings mode (we navigated to a specific findings item)
-        assert parsed["step_id"] != "", (
-            f"step_id must be non-empty for a findings item; got: {parsed['step_id']!r}"
-        )
-        asid = parsed["activeSessionId"]
-        assert asid != "", f"activeSessionId must be non-empty for findings; got: {asid!r}"
-
-        # --- Step 5: Navigate to attach mode ---
-        page.goto(attach_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(400)
-
-        flow_page_attach = page.locator(".flow-page")
-        signals_attr_attach = flow_page_attach.get_attribute("data-signals")
-        assert signals_attr_attach is not None, ".flow-page must have data-signals on attach load"
-
-        parsed_attach = json.loads(signals_attr_attach)
-        # Attach mode: AttentionItem.step_id is set to session_id for attach items
-        # (see attention.py — not None, but the session_id string as an identifier).
-        # The key requirement is that it is a non-null string — never JSON null.
-        sid_attach = parsed_attach["step_id"]
-        asid_attach = parsed_attach["activeSessionId"]
-        assert isinstance(sid_attach, str), f"step_id must be str in attach: {type(sid_attach)}"
-        assert isinstance(asid_attach, str), f"activeSessionId must be str: {type(asid_attach)}"
-        assert asid_attach != "", f"activeSessionId must be non-empty in attach: {asid_attach!r}"
-
-        # --- Step 6: Navigate back to findings mode ---
-        page.goto(findings_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(400)
-
-        flow_page_back = page.locator(".flow-page")
-        signals_attr_back = flow_page_back.get_attribute("data-signals")
-        assert signals_attr_back is not None, "missing data-signals on findings re-load"
-
-        parsed_back = json.loads(signals_attr_back)
-        sid_back = parsed_back["step_id"]
-        asid_back = parsed_back["activeSessionId"]
-        assert isinstance(sid_back, str), f"step_id must be str on re-load: {type(sid_back)}"
-        assert sid_back != "", f"step_id must be non-empty on re-load: {sid_back!r}"
-        assert isinstance(asid_back, str), f"activeSessionId must be str: {type(asid_back)}"
-        assert asid_back != "", f"activeSessionId must be non-empty: {asid_back!r}"
+    # NOTE: ``test_submit_and_next_navigates_to_next_item`` (and the
+    # ``TestFlowSignalHoisting`` class with ``test_flow_responses_survive_across_modes``)
+    # used to live here.  Both were removed as part of the Step-13 cleanup
+    # because they exercised behavior that is more reliably tested at lower layers:
+    # - The Submit-&-Next navigation case is exercised at the route level by
+    #   ``TestFlowNext.test_submit_and_next_signals_envelope_navigates`` in
+    #   ``tests/test_server_routes.py`` (asserts the SSE ``execute_script``
+    #   payload contains the destination session_id).
+    # - The signals-envelope shape is exercised at the rendering level by
+    #   ``TestFlowPage.test_flow_page_signals_envelope_step_id_and_active_session_are_strings``
+    #   (and the empty-mode counterpart) — those parse the rendered
+    #   ``data-signals`` JSON and assert ``step_id`` / ``activeSessionId``
+    #   are always strings (never the JSON literal ``null`` that would
+    #   delete the signal from the Datastar proxy).

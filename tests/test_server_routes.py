@@ -38,6 +38,21 @@ def _parse_sse(response) -> list[str]:
     return events
 
 
+def _parse_execute_script(events: list[str]) -> list[str]:
+    """Extract execute_script content from SSE events.
+
+    SSE.execute_script emits a patch_elements event containing a
+    ``<script data-effect="el.remove()">...</script>`` element.
+    Returns any data: elements lines that contain window.location.
+    """
+    scripts = []
+    for event in events:
+        for line in event.splitlines():
+            if line.startswith("data: elements ") and "window.location" in line:
+                scripts.append(line[len("data: elements ") :])
+    return scripts
+
+
 class TestRemovedEndpoints(ServerTestBase):
     """Tests that removed REST endpoints return 404."""
 
@@ -2830,6 +2845,84 @@ class TestFlowPage(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Flow Test Title", resp.text)
 
+    def test_flow_page_signals_envelope_step_id_and_active_session_are_strings(self) -> None:
+        """Step 13 acceptance: ``step_id`` and ``activeSessionId`` rendered into
+        ``.flow-page[data-signals]`` are always JSON strings (never the literal
+        ``null``).  Setting a Datastar signal to ``null`` deletes it from the
+        proxy without firing reactivity (see Decision 16), so ``tojson(None)``
+        in the template would silently break Submit & Next.
+
+        This is the route-level replacement for the Playwright
+        ``test_flow_responses_survive_across_modes`` test which only inspected
+        the static ``data-signals`` attribute and could not exercise the live
+        Datastar proxy reliably.
+        """
+        import json
+        import re
+
+        # Findings mode: a session with a READY findings step.
+        self._make_findings_session()
+        session = self.manager.get_session("flow-test-session")
+        assert isinstance(session, ZingSession)
+        step_id = session.steps[0].step_id
+
+        # Attach mode: a ClaudeCodeSession with a pending notification.
+        self.manager.create_claude_code_session(
+            session_id="cc-flow-attach-signals",
+            title="Attach Signals",
+            terminal_session="zing-flow-attach-signals",
+        )
+        self.manager.add_notification(
+            session_id="cc-flow-attach-signals",
+            title="Claude is waiting",
+            body="Needs input",
+        )
+
+        signal_re = re.compile(r"<div class=\"flow-page\"\s+data-signals='([^']+)'", re.DOTALL)
+
+        def _signals_for(url: str) -> dict[str, object]:
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, 200)
+            match = signal_re.search(resp.text)
+            self.assertIsNotNone(match, f".flow-page data-signals not found in {url!r}")
+            return json.loads(match.group(1))  # type: ignore[union-attr]
+
+        # ── Findings mode ─────────────────────────────────────────────────
+        findings = _signals_for(
+            f"/command-center/flow?session_id=flow-test-session&step_id={step_id}"
+        )
+        self.assertIsInstance(findings["step_id"], str)
+        self.assertIsInstance(findings["activeSessionId"], str)
+        self.assertNotEqual(findings["step_id"], "")
+        self.assertNotEqual(findings["activeSessionId"], "")
+
+        # ── Attach mode ───────────────────────────────────────────────────
+        attach = _signals_for("/command-center/flow?session_id=cc-flow-attach-signals")
+        self.assertIsInstance(attach["step_id"], str)
+        self.assertIsInstance(attach["activeSessionId"], str)
+        self.assertNotEqual(attach["activeSessionId"], "")
+
+    def test_flow_page_signals_envelope_empty_mode_uses_empty_strings(self) -> None:
+        """Step 13 acceptance for the empty-queue branch: with no attention
+        items the ``step_id`` and ``activeSessionId`` signals must still be
+        empty *strings*, not the JSON literal ``null`` (which would delete
+        them from the Datastar proxy without firing reactivity).
+        """
+        import json
+        import re
+
+        signal_re = re.compile(r"<div class=\"flow-page\"\s+data-signals='([^']+)'", re.DOTALL)
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        match = signal_re.search(resp.text)
+        self.assertIsNotNone(match)
+        signals = json.loads(match.group(1))  # type: ignore[union-attr]
+
+        self.assertIsInstance(signals["step_id"], str)
+        self.assertIsInstance(signals["activeSessionId"], str)
+        self.assertEqual(signals["step_id"], "")
+        self.assertEqual(signals["activeSessionId"], "")
+
     def test_kanban_card_attach_button_links_to_flow(self) -> None:
         """kanban_card.html renders Attach button as <a href> to /command-center/flow."""
         from zing_ai.server.models import ClaudeCodeSession, Notification
@@ -3611,20 +3704,6 @@ class TestFlowEvents(_FlowTestBase):
 class TestFlowNext(_FlowTestBase):
     """Tests for POST /command-center/flow/next."""
 
-    def _parse_execute_script(self, events: list[str]) -> list[str]:
-        """Extract execute_script content from SSE events.
-
-        SSE.execute_script emits a patch_elements event containing a
-        ``<script data-effect="el.remove()">...</script>`` element.
-        Extract any data: elements lines that contain window.location.
-        """
-        scripts = []
-        for event in events:
-            for line in event.splitlines():
-                if line.startswith("data: elements ") and "window.location" in line:
-                    scripts.append(line[len("data: elements ") :])
-        return scripts
-
     def test_happy_path_navigates_to_next_item(self) -> None:
         """Happy path: valid session+step+responses yields execute_script with next URL."""
         step_id_a = self._make_findings_session("fn-sess-a", "Session A")
@@ -3646,7 +3725,7 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertTrue(scripts, "Expected at least one executeScript event")
         combined = " ".join(scripts)
         self.assertIn("/command-center/flow", combined)
@@ -3663,7 +3742,7 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertTrue(scripts, "Expected executeScript even for empty queue")
         combined = " ".join(scripts)
         self.assertIn("/command-center/flow", combined)
@@ -3684,7 +3763,7 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertFalse(scripts, "No executeScript expected on save failure")
         toasts = _extract_toasts(events)
         self.assertTrue(any("Save failed" in t["text"] for t in toasts))
@@ -3701,10 +3780,56 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertTrue(scripts, "Expected executeScript for attach-mode nav")
         combined = " ".join(scripts)
         self.assertIn("/command-center/flow", combined)
+
+    def test_submit_and_next_signals_envelope_navigates(self) -> None:
+        """Post-Step-13 acceptance: /flow/next accepts the full hoisted-signals
+        envelope (session_id, step_id, responses) and emits SSE.execute_script
+        with a window.location pointing at the next queue item's session_id.
+
+        This is the route-level replacement for the Playwright
+        ``test_submit_and_next_navigates_to_next_item`` test which only
+        asserted ``page.url != initial_url``.  Here we pin down that the
+        SSE payload is an execute_script with a window.location to the next
+        session_id, so the user-visible navigation is provably correct.
+        """
+        step_id_first = self._make_findings_session("fn-env-first", "Envelope first")
+        self._make_findings_session("fn-env-second", "Envelope second")
+
+        # Build a real responses dict so the save branch runs.
+        sess = self.manager.get_session("fn-env-first")
+        finding_id = sess.steps[0].findings[0].id  # type: ignore[union-attr]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "fn-env-first",
+                "step_id": step_id_first,
+                "responses": {finding_id: "envelope answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # An SSE execute_script must be present with a window.location redirect.
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected SSE execute_script after Submit & Next")
+        combined = " ".join(scripts)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+        # Destination URL must contain the next session_id, not the source one.
+        self.assertIn("session_id=fn-env-second", combined)
+        self.assertNotIn("session_id=fn-env-first", combined)
+
+        # Server-side: the typed response must have been persisted.
+        sess_after = self.manager.get_session("fn-env-first")
+        step_after = sess_after.steps[0]  # type: ignore[union-attr]
+        self.assertIsNotNone(step_after.responses)
+        self.assertEqual(step_after.responses[0].answer, "envelope answer")  # type: ignore[index]
 
     def test_wrap_around_last_to_first(self) -> None:
         """Posting from the last queue item wraps around to queue[0]."""
@@ -3733,27 +3858,13 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         combined = " ".join(scripts)
         self.assertIn(first_item.session_id, combined)
 
 
 class TestFlowPrev(_FlowTestBase):
     """Tests for POST /command-center/flow/prev."""
-
-    def _parse_execute_script(self, events: list[str]) -> list[str]:
-        """Extract execute_script content from SSE events.
-
-        SSE.execute_script emits a patch_elements event containing a
-        ``<script data-effect="el.remove()">...</script>`` element.
-        Extract any data: elements lines that contain window.location.
-        """
-        scripts = []
-        for event in events:
-            for line in event.splitlines():
-                if line.startswith("data: elements ") and "window.location" in line:
-                    scripts.append(line[len("data: elements ") :])
-        return scripts
 
     def test_happy_path_navigates_to_prev_item(self) -> None:
         """Happy path: posting from second item navigates to first."""
@@ -3781,7 +3892,7 @@ class TestFlowPrev(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertTrue(scripts, "Expected executeScript for prev nav")
         combined = " ".join(scripts)
         self.assertIn(first_item.session_id, combined)
@@ -3812,7 +3923,7 @@ class TestFlowPrev(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         combined = " ".join(scripts)
         self.assertIn(last_item.session_id, combined)
 
@@ -3826,7 +3937,7 @@ class TestFlowPrev(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        scripts = self._parse_execute_script(events)
+        scripts = _parse_execute_script(events)
         self.assertTrue(scripts)
         combined = " ".join(scripts)
         self.assertIn("/command-center/flow", combined)
