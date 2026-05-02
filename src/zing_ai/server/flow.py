@@ -36,6 +36,42 @@ def resolve_active_item(
     return queue[0]
 
 
+def next_in_queue(
+    queue: list[AttentionItem],
+    current_session_id: str,
+    direction: str,
+) -> AttentionItem | None:
+    """Return the next or previous item in the queue with wrap-around.
+
+    Args:
+        queue: Ordered list of AttentionItems from build_attention_queue.
+        current_session_id: The session_id of the currently-displayed item.
+        direction: ``"next"`` to advance forward, ``"prev"`` to go backward.
+
+    Returns:
+        The adjacent AttentionItem (with wrap-around), ``queue[0]`` if
+        ``current_session_id`` is not found in the queue, or ``None`` if the
+        queue is empty.
+
+    Note:
+        The fallback when ``current_session_id`` is missing from the queue is
+        intentionally asymmetric: both ``"next"`` and ``"prev"`` return
+        ``queue[0]`` regardless of direction. This is defensible UX — the
+        topmost item is the most-urgent, and the user may have arrived at a
+        dead URL (the session was completed/dismissed since the page loaded),
+        so dropping them at the top of the queue is the most useful default.
+    """
+    if not queue:
+        return None
+    for i, item in enumerate(queue):
+        if item.session_id == current_session_id:
+            if direction == "prev":
+                return queue[(i - 1) % len(queue)]
+            return queue[(i + 1) % len(queue)]
+    # current_session_id not in queue — fall back to first item (see Note above).
+    return queue[0]
+
+
 # ---------------------------------------------------------------------------
 # Fragment dispatch
 # ---------------------------------------------------------------------------

@@ -35,7 +35,7 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,  # used by /cleanup-worktree (explicit user action)
 )
-from zing_ai.server.attention import AttentionItem, build_attention_queue
+from zing_ai.server.attention import build_attention_queue
 from zing_ai.server.command_center import (
     aggregate,
     build_session_phases,
@@ -44,6 +44,7 @@ from zing_ai.server.command_center import (
 )
 from zing_ai.server.flow import (
     build_flow_context,
+    next_in_queue,
     resolve_active_item,
 )
 from zing_ai.server.models import (
@@ -1290,39 +1291,75 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
         )
         yield SSE.patch_signals({"modals": {"launchPopup": False}})
         sid = match.session_id
-        yield SSE.execute_script(
-            f"window.location = '/command-center/flow?session_id={sid}&step_id={sid}'"
-        )
+        # step_id mirrors session_id for attach items (Decision 10).
+        url = f"/command-center/flow?session_id={sid}&step_id={sid}"
+        yield SSE.execute_script(f"window.location = {url!r}")
 
     return _stream()
 
 
-def _next_in_queue(
-    queue: list[AttentionItem],
-    current_session_id: str,
+async def _flow_save_and_navigate(  # noqa: ANN201
+    request: Request,
+    payload: dict[str, Any],
     direction: str,
-) -> AttentionItem | None:
-    """Return the next or previous item in the queue with wrap-around.
+):
+    """Shared body for /flow/next and /flow/prev.
 
-    Args:
-        queue: Ordered list of AttentionItems from build_attention_queue.
-        current_session_id: The session_id of the currently-displayed item.
-        direction: ``"next"`` to advance forward, ``"prev"`` to go backward.
+    Both endpoints share the same logic — payload parsing, save-with-error-
+    handling, queue rebuild, URL construction, and ``SSE.execute_script``
+    emission — and differ only in the direction string passed to
+    :func:`next_in_queue` and the structured-log field names. This async
+    generator yields the SSE events; the route handler simply awaits it.
 
-    Returns:
-        The adjacent AttentionItem (with wrap-around), ``queue[0]`` if
-        ``current_session_id`` is not found in the queue, or ``None`` if the
-        queue is empty.
+    The save guard is ``if step_id:`` (no ``and responses``):
+    ``_map_signals_to_responses`` defaults triage findings to
+    ``ResponseAction.DISCUSS`` and text findings to ``None``, so calling
+    ``submit_responses`` with an empty dict is a valid "submit with all
+    defaults" flow. Submit & Next on un-typed findings should submit, not
+    silently skip.
     """
-    if not queue:
-        return None
-    for i, item in enumerate(queue):
-        if item.session_id == current_session_id:
-            if direction == "prev":
-                return queue[(i - 1) % len(queue)]
-            return queue[(i + 1) % len(queue)]
-    # current_session_id not in queue — fall back to first item.
-    return queue[0]
+    manager = request.app.state.session_manager
+    session_id = payload.get("session_id") or ""
+    step_id = payload.get("step_id") or ""
+    responses = payload.get("responses") or {}
+    # Persist responses if this is a findings/questions item. Empty responses
+    # are still a valid submission — the response mapper supplies defaults.
+    if step_id:
+        try:
+            _, step = manager.get_step_by_id(step_id)
+            mapped = _map_signals_to_responses(step.findings, responses)
+            manager.submit_responses(session_id, step_id, mapped)
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                f"flow_{direction}_save_failed",
+                extra={
+                    "event": f"flow_{direction}_save_failed",
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
+            yield _sse_toast(f"Save failed: {exc}", "err")
+            return
+    # Compute the adjacent queue item.
+    queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+    target_item = next_in_queue(queue, session_id, direction=direction)
+    if target_item is None:
+        url = "/command-center/flow"
+    else:
+        url = (
+            f"/command-center/flow"
+            f"?session_id={target_item.session_id}"
+            f"&step_id={target_item.step_id or ''}"
+        )
+    logger.info(
+        f"flow_{direction}",
+        extra={
+            "event": f"flow_{direction}",
+            "session_id": session_id,
+            f"{direction}_session_id": target_item.session_id if target_item else None,
+        },
+    )
+    yield SSE.execute_script(f"window.location = {url!r}")
 
 
 @router.post("/command-center/flow/next")
@@ -1331,47 +1368,8 @@ async def flow_next(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Save responses (if any), navigate to the next queue item."""
 
     async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        session_id = payload.get("session_id") or ""
-        step_id = payload.get("step_id") or ""
-        responses = payload.get("responses") or {}
-        # Persist responses if this is a findings/questions item.
-        if step_id and responses:
-            try:
-                _, step = manager.get_step_by_id(step_id)
-                mapped = _map_signals_to_responses(step.findings, responses)
-                manager.submit_responses(session_id, step_id, mapped)
-            except (KeyError, ValueError) as exc:
-                logger.warning(
-                    "flow_next save failed",
-                    extra={
-                        "event": "flow_next_failed",
-                        "session_id": session_id,
-                        "error": str(exc),
-                    },
-                )
-                yield _sse_toast(f"Save failed: {exc}", "err")
-                return
-        # Compute next queue item.
-        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
-        next_item = _next_in_queue(queue, session_id, direction="next")
-        if next_item is None:
-            url = "/command-center/flow"
-        else:
-            url = (
-                f"/command-center/flow"
-                f"?session_id={next_item.session_id}"
-                f"&step_id={next_item.step_id or ''}"
-            )
-        logger.info(
-            "flow_next",
-            extra={
-                "event": "flow_next",
-                "session_id": session_id,
-                "next_session_id": next_item.session_id if next_item else None,
-            },
-        )
-        yield SSE.execute_script(f"window.location = {url!r}")
+        async for ev in _flow_save_and_navigate(request, payload, direction="next"):
+            yield ev
 
     return _stream()
 
@@ -1382,46 +1380,7 @@ async def flow_prev(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Save responses (if any), navigate to the previous queue item."""
 
     async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        session_id = payload.get("session_id") or ""
-        step_id = payload.get("step_id") or ""
-        responses = payload.get("responses") or {}
-        # Persist responses if this is a findings/questions item.
-        if step_id and responses:
-            try:
-                _, step = manager.get_step_by_id(step_id)
-                mapped = _map_signals_to_responses(step.findings, responses)
-                manager.submit_responses(session_id, step_id, mapped)
-            except (KeyError, ValueError) as exc:
-                logger.warning(
-                    "flow_prev save failed",
-                    extra={
-                        "event": "flow_prev_failed",
-                        "session_id": session_id,
-                        "error": str(exc),
-                    },
-                )
-                yield _sse_toast(f"Save failed: {exc}", "err")
-                return
-        # Compute previous queue item.
-        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
-        prev_item = _next_in_queue(queue, session_id, direction="prev")
-        if prev_item is None:
-            url = "/command-center/flow"
-        else:
-            url = (
-                f"/command-center/flow"
-                f"?session_id={prev_item.session_id}"
-                f"&step_id={prev_item.step_id or ''}"
-            )
-        logger.info(
-            "flow_prev",
-            extra={
-                "event": "flow_prev",
-                "session_id": session_id,
-                "prev_session_id": prev_item.session_id if prev_item else None,
-            },
-        )
-        yield SSE.execute_script(f"window.location = {url!r}")
+        async for ev in _flow_save_and_navigate(request, payload, direction="prev"):
+            yield ev
 
     return _stream()
