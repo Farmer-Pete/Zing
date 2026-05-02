@@ -17,7 +17,6 @@
       <span class="flow-strip-dot
                    {% if active and item.session_id == active.session_id and item.step_id == active.step_id %}dot-active{% endif %}
                    {% if item.pinned %}dot-pinned{% endif %}
-                   {% if item.session_id in recent_items %}dot-pulse{% endif %}
                    {% if item.has_urgency %}{% else %}dot-parked{% endif %}"
             title="{{ item.title }}"></span>
     {% endfor %}
