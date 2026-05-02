@@ -65,6 +65,16 @@ _FRAGMENTS_TO_LINT = [
     "fragments/launch_button.html",
     "fragments/management_tray.html",
     "command_center.html",
+    "fragments/flow_body_attach.html",
+    "fragments/flow_body_empty.html",
+    "fragments/flow_body_findings.html",
+    "fragments/flow_body_question.html",
+    "fragments/flow_palette.html",
+    "fragments/flow_progress_strip.html",
+    "fragments/flow_toolbar.html",
+    "fragments/_flow_board_toggle.html",
+    "fragments/launch_popup.html",
+    "flow.html",
 ]
 
 
