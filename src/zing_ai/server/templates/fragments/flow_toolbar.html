@@ -12,6 +12,12 @@
     {% endif %}
   </div>
   <div class="flow-toolbar-right">
+    {% if active and active.action_type in ('findings', 'questions') %}
+    <button type="button" class="btn-primary"
+            data-on:click="@post('/command-center/flow/next', {payload: {session_id: $activeSessionId, step_id: $step_id, responses: $responses}})">
+      Submit &amp; Next ▸
+    </button>
+    {% endif %}
     <button type="button" class="flow-toolbar-btn"
             data-on:click="@post('/command-center/flow/advance', {payload: {direction: 'prev'}})">Prev</button>
     <button type="button" class="flow-toolbar-btn flow-toolbar-next"

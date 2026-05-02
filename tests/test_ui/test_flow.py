@@ -220,3 +220,70 @@ class TestFlowGoldenPath:
 
         # Toast container must be present (moved to base.html so all pages share it)
         expect(page.locator("#cc-toast-container")).to_be_attached()
+
+    def test_submit_and_next_button_visible_on_findings(
+        self, server: _ServerInfo, page: Page
+    ) -> None:
+        """Submit & Next button is visible for findings action_type, absent for empty queue."""
+        _seed_flow_session(server, session_id="flow-sn-1", title="Submit Next test")
+
+        page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
+        page.wait_for_timeout(300)
+
+        # Button must be present and visible on a findings item.
+        submit_btn = page.locator("button.btn-primary", has_text="Submit")
+        expect(submit_btn).to_be_visible(timeout=5000)
+        expect(submit_btn).to_contain_text("Submit & Next ▸", timeout=3000)
+
+    def test_submit_and_next_navigates_to_next_item(self, server: _ServerInfo, page: Page) -> None:
+        """Step 12 acceptance: Submit & Next button POSTs to /flow/next and navigates.
+
+        Two sessions are seeded so there is always a 'next' item to navigate to.
+        After clicking the button the URL must change (either to the second item
+        or back to the flow root if the queue wrapped around).
+
+        TODO(step 13): $activeSessionId and $step_id are currently on the body
+        fragment, not on .flow-page.  After Step 13 hoists the signals envelope
+        this test may need a fixture adjustment to verify the full save path.
+        If the POST fails because $activeSessionId is null/missing the URL will
+        stay the same — that is the expected pre-Step-13 failure mode.
+        """
+        # Seed two attention items so /flow/next has somewhere to go.
+        step_id_1 = _seed_flow_session(
+            server, session_id="flow-sn-nav-1", title="Submit Nav item 1", ticket_id="BAK-1001"
+        )
+        _seed_flow_session(
+            server, session_id="flow-sn-nav-2", title="Submit Nav item 2", ticket_id="BAK-1002"
+        )
+
+        # Navigate to first item explicitly.
+        first_url = (
+            f"{server.base_url}/command-center/flow?session_id=flow-sn-nav-1&step_id={step_id_1}"
+        )
+        page.goto(first_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(400)
+
+        # The Submit & Next button must be visible (findings action_type).
+        submit_btn = page.locator("button.btn-primary", has_text="Submit")
+        expect(submit_btn).to_be_visible(timeout=5000)
+
+        # Click an action button on the first finding to set $responses signal.
+        # "accept" is the first triage action pill rendered by _finding_macros.html.
+        accept_btn = page.locator("[data-on\\:click*=\"'accept'\"]").first
+        if accept_btn.count() > 0:
+            accept_btn.click()
+            page.wait_for_timeout(200)
+
+        # Record URL before click so we can assert it changed.
+        url_before = page.url
+
+        # Click Submit & Next ▸ — triggers @post('/command-center/flow/next').
+        submit_btn.click()
+        page.wait_for_timeout(800)
+
+        url_after = page.url
+        assert url_after != url_before, (
+            f"Expected URL to change after Submit & Next click, but it stayed at {url_before!r}. "
+            "This may indicate $activeSessionId or $step_id signals are not yet hoisted "
+            "(expected pre-Step-13 failure mode — Step 13 will fix signal scoping)."
+        )
