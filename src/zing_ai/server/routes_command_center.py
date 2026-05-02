@@ -457,12 +457,39 @@ async def command_center_events(request: Request):  # noqa: ANN201
 @router.get("/command-center/flow/events")
 @datastar_response
 async def flow_events(request: Request):  # noqa: ANN201
-    """SSE endpoint that pushes Flow Mode updates to the browser."""
+    """SSE endpoint that pushes Flow Mode updates to the browser.
+
+    The query param ``session_id`` is the session the page is currently
+    viewing. When ``board_changed`` rebuilds the queue and that session is
+    no longer present (it was killed, resolved, or aged out), we yield an
+    ``execute_script`` redirect to ``/command-center/flow`` so the body
+    isn't left showing stale content. The destination handles both the
+    "queue head" and "queue empty" cases via ``resolve_active_item``'s
+    fallback. The redirect causes a full page reload, which closes this
+    stream — that's correct.
+    """
+    subscribed_session_id = request.query_params.get("session_id") or ""
 
     async def _on_board_changed(req: Request):  # noqa: ANN202
         manager = req.app.state.session_manager
         sessions = manager.list_sessions()
         queue = build_attention_queue(sessions, datetime.now(UTC))
+        # Stale-active redirect: page is viewing a specific session that is
+        # no longer in the queue. Send the navigation script and skip the
+        # strip/badge patches — the reload supersedes them.
+        if subscribed_session_id and not any(
+            item.session_id == subscribed_session_id for item in queue
+        ):
+            logger.info(
+                "flow_events_stale_redirect",
+                extra={
+                    "event": "flow_events_stale_redirect",
+                    "subscribed_session_id": subscribed_session_id,
+                    "queue_len": len(queue),
+                },
+            )
+            yield SSE.execute_script("window.location = '/command-center/flow'")
+            return
         active = resolve_active_item(queue, session_id=None, step_id=None)
         ctx = build_flow_context(manager, queue, active)
         ctx["current_view"] = "flow"
@@ -480,6 +507,7 @@ async def flow_events(request: Request):  # noqa: ANN201
             extra={
                 "event": "flow_events_subscribed",
                 "client_addr": str(request.client),
+                "subscribed_session_id": subscribed_session_id,
             },
         )
         async for ev in _cc_events_stream(request, _on_board_changed):

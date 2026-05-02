@@ -3518,6 +3518,95 @@ class TestFlowEvents(_FlowTestBase):
         combined = "\n".join(results)
         self.assertNotIn("#kanban-board", combined)
 
+    def _drive_flow_events_route(self, subscribed_session_id: str) -> list[str]:
+        """Drive the production ``flow_events`` route with a fake ``?session_id=...``.
+
+        Unlike :meth:`_drive_flow_events`, this exercises the real handler so
+        the stale-active redirect logic (which reads ``request.query_params``)
+        is covered. Stops after the first board_changed event so we can also
+        capture the single-event redirect path.
+        """
+        from zing_ai.server.routes_command_center import flow_events
+
+        cc_queues: list[asyncio.Queue[str]] = []
+        manager = self.manager
+        # Provide both the new sub-app's state and a reasonable mock — the
+        # handler reads request.app.state.session_manager and cc_queues.
+        # Limit collected events to one (redirect path emits exactly 1; the
+        # normal path emits 2 — strip + badge — so we capture both via 2).
+        MAX_EVENTS = 2
+
+        async def _drive() -> list[str]:
+            mock_req = MagicMock()
+            mock_req.app.state.cc_queues = cc_queues
+            mock_req.app.state.session_manager = manager
+            mock_req.query_params = {"session_id": subscribed_session_id}
+            mock_req.client = ("127.0.0.1", 0)
+            results: list[str] = []
+
+            response = await flow_events(mock_req)
+
+            async def _gen() -> None:
+                async for ev in response.body_iterator:  # type: ignore[attr-defined]
+                    if isinstance(ev, str):
+                        results.append(ev)
+                    elif isinstance(ev, (bytes, bytearray)):
+                        results.append(bytes(ev).decode())
+                    else:  # memoryview
+                        results.append(bytes(ev).decode())
+                    if len(results) >= MAX_EVENTS:
+                        break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        return asyncio.run(_drive())
+
+    def test_flow_events_redirects_when_subscribed_session_leaves_queue(self) -> None:
+        """When ?session_id=X and X is gone from the queue, yield a redirect script."""
+        # Create a session OTHER than the one we're "viewing" so the queue
+        # is non-empty but does not contain the subscribed id.
+        self._make_findings_session("fe-other", "Other Session")
+        results = self._drive_flow_events_route(subscribed_session_id="fe-stale-gone")
+        combined = "\n".join(results)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+        # Redirect path skips the strip/badge patches.
+        self.assertNotIn("#flow-strip", combined)
+        self.assertNotIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_redirects_when_queue_empty_and_session_subscribed(self) -> None:
+        """Empty queue with a subscribed session_id also redirects (stale)."""
+        results = self._drive_flow_events_route(subscribed_session_id="fe-stale-empty")
+        combined = "\n".join(results)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+
+    def test_flow_events_no_redirect_when_subscribed_session_in_queue(self) -> None:
+        """When the subscribed session is still in the queue, normal patches fire."""
+        self._make_findings_session("fe-still-here", "Still Here")
+        results = self._drive_flow_events_route(subscribed_session_id="fe-still-here")
+        combined = "\n".join(results)
+        # No redirect.
+        self.assertNotIn("window.location", combined)
+        # Normal strip + badge patches fire.
+        self.assertIn("#flow-strip", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_no_redirect_when_no_session_id_subscribed(self) -> None:
+        """Empty ?session_id= preserves existing behavior (no redirect)."""
+        # Even with an empty queue, no session_id means no redirect.
+        results = self._drive_flow_events_route(subscribed_session_id="")
+        combined = "\n".join(results)
+        self.assertNotIn("window.location", combined)
+        self.assertIn("#flow-strip", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+
 
 class TestFlowNext(_FlowTestBase):
     """Tests for POST /command-center/flow/next."""
