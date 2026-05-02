@@ -22,9 +22,6 @@
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
-    {# Toast container for transient notifications #}
-    <div id="cc-toast-container"></div>
-
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
         <button class="cc-refresh-btn" id="cc-standup-btn"

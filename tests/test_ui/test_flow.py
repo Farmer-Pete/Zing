@@ -217,3 +217,6 @@ class TestFlowGoldenPath:
         page.wait_for_timeout(1000)
 
         assert errors == [], f"Unexpected JS console errors on Flow page: {errors}"
+
+        # Toast container must be present (moved to base.html so all pages share it)
+        expect(page.locator("#cc-toast-container")).to_be_attached()
