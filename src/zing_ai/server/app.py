@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -238,6 +239,7 @@ def create_app(
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
     zellij_support: bool | None = None,
+    mcp_server_instance: FastMCP | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -251,8 +253,13 @@ def create_app(
         cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
         zellij_support: Override for Zellij web server startup. If None (default), reads
             ``command_center.zellij_support`` from config. Pass True/False to force.
+        mcp_server_instance: Optional FastMCP instance. Defaults to the module-level singleton
+            (loaded with all registered tools). Tests that call ``create_app`` more than once
+            per process must pass a fresh ``FastMCP(...)`` instance because each
+            ``StreamableHTTPSessionManager`` can only be ``.run()`` once.
     """
     sm = session_manager or SessionManager()
+    mcp = mcp_server_instance if mcp_server_instance is not None else mcp_server
 
     # Initialise cc_queues up-front so the session-event listener can close
     # over it. We also assign it to fastapi_app.state below for the SSE route
@@ -308,6 +315,9 @@ def create_app(
             notif_id = event_type.split(":", 1)[1]
             _notify_sse_connections(session_id, f"notification:{notif_id}")
             _notify_dashboard_connections(f"notification:{notif_id}", session_id=session_id)
+            _notify_cc_connections("board_changed")
+            return
+        elif event_type.startswith("notification_answered:"):
             _notify_cc_connections("board_changed")
             return
         if event_type in sse_events:
@@ -370,7 +380,7 @@ def create_app(
             fastapi_app.state.live_sessions = set()
 
         try:
-            async with mcp_server.session_manager.run():
+            async with mcp.session_manager.run():
                 yield
         finally:
             if poller_task is not None:
@@ -389,7 +399,7 @@ def create_app(
                 with contextlib.suppress(FileNotFoundError, OSError):
                     subprocess.run(["zellij", "web", "--stop"], check=False)
 
-    mcp_starlette = mcp_server.streamable_http_app()
+    mcp_starlette = mcp.streamable_http_app()
 
     external_cache = external_cache or ExternalCache()
 
@@ -402,6 +412,7 @@ def create_app(
     # Reuse the same list object the session-event listener closed over; both
     # the SSE route and the listener mutate it as clients connect/disconnect.
     fastapi_app.state.cc_queues = cc_queues_list
+    fastapi_app.state.notify_cc = _notify_cc_connections
     # Expose the legacy module-level SSE/dashboard queue stores via app.state
     # so new code can DI-read them (matching the cc_queues pattern). Same
     # list/dict object — transitional step toward a full migration off the

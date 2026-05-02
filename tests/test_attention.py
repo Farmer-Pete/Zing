@@ -50,12 +50,14 @@ def _make_claude_session(
     title: str = "Claude Session",
     ticket_id: str | None = None,
     notifications: list[Notification] | None = None,
+    pinned: bool = False,
 ) -> ClaudeCodeSession:
     return ClaudeCodeSession(
         session_id=session_id,
         title=title,
         ticket_id=ticket_id,
         notifications=notifications or [],
+        pinned=pinned,
     )
 
 
@@ -279,6 +281,162 @@ class TestCompletedSessions(unittest.TestCase):
         now = datetime(2026, 1, 1, 12, 0, 0)
         items = build_attention_queue([], now)
         assert items == []
+
+
+class TestNewFields(unittest.TestCase):
+    """AttentionItem fields: step_id, created_at, stopped session exclusion."""
+
+    # ------------------------------------------------------------------
+    # stopped session is excluded
+    # ------------------------------------------------------------------
+
+    def test_stopped_pinned_session_excluded(self) -> None:
+        """ClaudeCodeSession with state=STOPPED is not surfaced in the queue."""
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(
+            body="Hello?",
+            created_at=datetime(2026, 1, 1, 12, 0, 0),
+        )
+        # Create a session that will appear STOPPED:
+        # terminal_session set, launched_at well outside grace window, pinned=True.
+        session = ClaudeCodeSession(
+            session_id="cc-stopped",
+            title="Stopped Session",
+            terminal_session="old-session",
+            launched_at=datetime(2025, 1, 1, 0, 0, 0),  # very old
+            pinned=True,
+            notifications=[notif],
+        )
+        # _session_alive defaults to False; _ever_seen_alive defaults to False;
+        # launched_at is far in the past → state == STOPPED.
+        assert session.state == SessionState.STOPPED
+
+        items = build_attention_queue([session], now)
+        assert items == []
+
+    # ------------------------------------------------------------------
+    # step_id set for findings/questions, equals session_id for attach
+    # ------------------------------------------------------------------
+
+    def test_step_id_set_for_findings(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("build-audit", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id == step.step_id
+
+    def test_step_id_set_for_questions(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        step = _make_step("plan", SessionState.READY, datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id == step.step_id
+
+    def test_step_id_equals_session_id_for_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_claude_session(session_id="cc-1", notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert items[0].step_id == "cc-1"
+
+    # ------------------------------------------------------------------
+    # created_at populated
+    # ------------------------------------------------------------------
+
+    def test_created_at_set_for_findings(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        created = datetime(2026, 1, 1, 12, 0, 0)
+        step = _make_step("build-audit", SessionState.READY, created)
+        session = _make_zing_session(steps=[step])
+        items = build_attention_queue([session], now)
+        assert items[0].created_at is not None
+
+    def test_created_at_set_for_attach(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif_time = datetime(2026, 1, 1, 12, 0, 0)
+        notif = _make_notification(created_at=notif_time)
+        session = _make_claude_session(notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert items[0].created_at is not None
+
+
+class TestPinnedHasUrgency(unittest.TestCase):
+    """AttentionItem pinned and has_urgency fields are populated correctly."""
+
+    def test_pinned_with_question_has_urgency(self) -> None:
+        """Pinned session with pending question → pinned=True, has_urgency=True."""
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_claude_session(session_id="cc-p", pinned=True, notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].pinned is True
+        assert items[0].has_urgency is True
+
+    def test_pinned_no_question_has_no_urgency(self) -> None:
+        """Pinned + no pending question → pinned=True, has_urgency=False, wait_seconds=0."""
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        session = _make_claude_session(session_id="cc-q", pinned=True, notifications=[])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].pinned is True
+        assert items[0].has_urgency is False
+        assert items[0].wait_seconds == 0
+
+    def test_unpinned_with_question_has_urgency(self) -> None:
+        """Unpinned session with pending question → pinned=False, has_urgency=True."""
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        notif = _make_notification(created_at=datetime(2026, 1, 1, 12, 0, 0))
+        session = _make_claude_session(session_id="cc-u", pinned=False, notifications=[notif])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        assert items[0].pinned is False
+        assert items[0].has_urgency is True
+
+
+class TestQueueSortPinsFirst(unittest.TestCase):
+    """Queue sorts: pinned items first, then by wait_seconds descending."""
+
+    def test_queue_sort_pins_first(self) -> None:
+        now = datetime(2026, 1, 1, 12, 30, 0)
+
+        # Unpinned attach with large wait (20 min)
+        notif_old = _make_notification(created_at=datetime(2026, 1, 1, 12, 10, 0))
+        session_unpinned = _make_claude_session(
+            session_id="cc-unpinned", pinned=False, notifications=[notif_old]
+        )
+
+        # Pinned attach with small wait (5 min)
+        notif_new = _make_notification(created_at=datetime(2026, 1, 1, 12, 25, 0))
+        session_pinned = _make_claude_session(
+            session_id="cc-pinned", pinned=True, notifications=[notif_new]
+        )
+
+        items = build_attention_queue([session_unpinned, session_pinned], now)
+
+        assert len(items) == 2
+        # Pinned comes first despite shorter wait
+        assert items[0].session_id == "cc-pinned"
+        assert items[0].pinned is True
+        assert items[1].session_id == "cc-unpinned"
+        assert items[1].pinned is False
+
+
+class TestPinnedSessionNoQuestion(unittest.TestCase):
+    """Pinned session with no pending question emits an attach item."""
+
+    def test_pinned_session_with_no_question_emits_attach_item(self) -> None:
+        now = datetime(2026, 1, 1, 12, 10, 0)
+        session = _make_claude_session(session_id="cc-pinned-nq", pinned=True, notifications=[])
+        items = build_attention_queue([session], now)
+        assert len(items) == 1
+        item = items[0]
+        assert item.action_type == "attach"
+        assert item.session_id == "cc-pinned-nq"
+        assert item.pinned is True
+        assert item.has_urgency is False
+        assert item.wait_seconds == 0
+        assert item.step_id == "cc-pinned-nq"
 
 
 if __name__ == "__main__":

@@ -1,0 +1,24 @@
+<div data-show="$paletteOpen" class="flow-palette-scrim"
+     data-on:click="$paletteOpen = false">
+  <div class="flow-palette" data-on:click.stop>
+    <input class="flow-palette-search"
+           data-bind="paletteQuery"
+           placeholder="Switch to attention item…"
+           aria-label="Switch to attention item"
+           autofocus>
+    <div class="flow-palette-list">
+      {% for item in queue %}
+        <a class="flow-palette-row"
+           href="/command-center/flow?session_id={{ item.session_id }}{% if item.step_id %}&step_id={{ item.step_id }}{% endif %}"
+           data-show='window.flowPaletteMatch($paletteQuery, {{ ((item.title or "") ~ " " ~ (item.ticket_id or ""))|tojson }})'>
+          <span class="flow-palette-icon">
+            {% if item.action_type == 'attach' %}⌨{% elif item.action_type == 'questions' %}?{% else %}●{% endif %}
+          </span>
+          {% if item.ticket_id %}<span class="flow-palette-ticket">{{ item.ticket_id }}</span>{% endif %}
+          <span class="flow-palette-title">{{ item.title }}</span>
+          <span class="flow-palette-type-chip">{{ item.action_type }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+</div>

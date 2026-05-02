@@ -400,6 +400,7 @@ class ClaudeCodeSession(SessionBase):
     pr_repo: str | None = None
     terminal_session: str | None = None
     launched_at: datetime | None = None
+    pinned: bool = False
     notifications: list[Notification] = Field(default_factory=list)
     _session_alive: bool = PrivateAttr(default=False)
     _ever_seen_alive: bool = PrivateAttr(default=False)

@@ -1,6 +1,17 @@
 // Named dispatch functions (Decision #17): Datastar signal watchers call these
 // instead of inlining new CustomEvent(...) expressions in templates.
 
+/**
+ * Pure substring fuzzy-match helper for the Flow palette.
+ * Returns true if the trimmed lowercase query is empty or is a substring of the haystack.
+ * No DOM mutation; safely callable from data-show in a hot loop.
+ */
+window.flowPaletteMatch = function (query, haystack) {
+  var q = (query || '').trim().toLowerCase();
+  if (q === '') return true;
+  return (haystack || '').toLowerCase().includes(q);
+};
+
 window.dispatchOpenTerminal = function(url) {
     if (!url) return;
     document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));
@@ -96,6 +107,49 @@ function mountModal(opts) {
     // $modals.terminal flips to false. Route through ctl.close() so the IIFE's
     // iframe ref is kept consistent — never a parallel teardown path.
     document.addEventListener('close-terminal', function() {
+        ctl.close();
+    });
+})();
+
+// Launch popup — live terminal iframe with a Send-to-Flow footer button.
+// Mirrors the terminal modal IIFE pattern: mountModal owns backdrop/ESC/close
+// lifecycle; dispatchOpenLaunchPopup is the single Datastar-to-JS entry point.
+(function() {
+    var modal = document.getElementById('launch-popup-modal');
+    var body = document.getElementById('launch-popup-body');
+    var iframe = null;
+
+    var ctl = mountModal({
+        modal: modal,
+        backdrop: document.getElementById('launch-popup-backdrop'),
+        onClose: function () {
+            if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
+            iframe = null;
+        },
+    });
+
+    window.openLaunchPopup = function(url) {
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.id = 'launch-popup-iframe';
+            iframe.className = 'terminal-modal-iframe';
+            body.appendChild(iframe);
+        }
+        iframe.src = url;
+        ctl.open();
+    };
+
+    window.dispatchOpenLaunchPopup = function(url) {
+        if (!url) return;
+        document.dispatchEvent(new CustomEvent('open-launch-popup', {detail: {url: url}, bubbles: true}));
+    };
+
+    document.addEventListener('open-launch-popup', function(e) {
+        var url = e.detail && e.detail.url;
+        if (url) window.openLaunchPopup(url);
+    });
+
+    document.addEventListener('close-launch-popup', function() {
         ctl.close();
     });
 })();

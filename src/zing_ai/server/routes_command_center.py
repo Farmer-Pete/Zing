@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import uuid
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,22 +35,26 @@ from zing_ai.launch import (
     move_ticket_in_progress,
     rollback_worktree,  # used by /cleanup-worktree (explicit user action)
 )
-from zing_ai.server.attention import AttentionItem, build_attention_queue
+from zing_ai.server.attention import build_attention_queue
 from zing_ai.server.command_center import (
     aggregate,
     build_session_phases,
     generate_standup,
     infer_repo_for_ticket,
 )
+from zing_ai.server.flow import (
+    build_flow_context,
+    next_in_queue,
+    resolve_active_item,
+)
 from zing_ai.server.models import (
     LAUNCH_GRACE_SECONDS,
     ClaudeCodeSession,
     QuestionData,
     QuestionOption,
-    Session,
-    ZingSession,
 )
 from zing_ai.server.models_external import KanbanView
+from zing_ai.server.routes import _map_signals_to_responses
 from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
@@ -220,18 +225,6 @@ def render_board_fragment(app: FastAPI) -> str:
     )
 
 
-def render_attention_bar_fragment(app: FastAPI, sessions: list[Session] | None = None) -> str:
-    """Render the attention bar fragment. Used by SSE board_changed events."""
-    resolved: list[Session] = (
-        sessions if sessions is not None else app.state.session_manager.list_sessions()
-    )
-    attention_items = build_attention_queue(resolved, datetime.now(UTC))
-    return render(
-        "fragments/attention_bar.html",
-        attention_items=attention_items,
-    )
-
-
 def _render_tray_fragment(app: FastAPI) -> str:
     """Render the management tray. Used by SSE board_changed events."""
     view = _build_view(app)
@@ -281,18 +274,16 @@ def _build_initial_signals(
         # Polling status (also patched via SSE).
         "lastPolledLabel": last_polled_label or "",
         "lastError": last_error or "",
-        # Attention bar open/closed.
-        "attnBarOpen": True,
         # Per-button busy/disabled flags (see helper above).
         "busyButtons": busy_buttons,
         # Modal open/closed flags. Five modals share this dict so a single
         # data-on-signal-patch-filter on .cc-page can react to any change.
         "modals": {
-            "drawer": False,
             "mgmt": False,
             "standup": False,
             "terminal": False,
             "repoChooser": False,
+            "launchPopup": False,
         },
         # Currently-open kebab key (empty string = none open). Empty string
         # rather than null because Datastar deletes null'd keys from the proxy
@@ -303,8 +294,12 @@ def _build_initial_signals(
         # Standup modal state.
         "standupTab": "rendered",
         "standupMarkdown": "",
-        # Terminal modal — URL signal patched by /attach-session.
+        # Terminal modal — URL signal patched by /flow/launch-popup-open.
         "terminalUrl": "",
+        # Launch popup — session name, URL, and title patched by /flow/launch-popup-open.
+        "launchPopupSession": "",
+        "launchPopupUrl": "",
+        "launchPopupTitle": "",
     }
 
 
@@ -317,6 +312,7 @@ async def get_command_center(request: Request) -> HTMLResponse:
     sessions = request.app.state.session_manager.list_sessions()
     tray_data = _build_tray_data(view, sessions, live_sessions)
     attention_items = build_attention_queue(sessions, datetime.now(UTC))
+    queue_count = len(attention_items)
     session_phases = {}
     for s in sessions:
         if hasattr(s, "steps"):
@@ -332,6 +328,8 @@ async def get_command_center(request: Request) -> HTMLResponse:
             "command_center.html",
             view=view,
             current_path="/command-center",
+            current_view="board",
+            queue_count=queue_count,
             last_polled_at=cache.last_polled_at,
             last_polled_label=_format_last_polled(cache.last_polled_at),
             last_error=cache.last_error,
@@ -346,63 +344,176 @@ async def get_command_center(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/command-center/flow", response_class=HTMLResponse)
+async def get_flow(  # noqa: ANN201
+    request: Request,
+    session_id: str | None = None,
+    step_id: str | None = None,
+):
+    """Return the Flow Mode HTML page.
+
+    Query params ``session_id`` and ``step_id`` select the active item
+    directly — the URL is the only cursor.
+    """
+    manager = request.app.state.session_manager
+    sessions = manager.list_sessions()
+    queue = build_attention_queue(sessions, datetime.now(UTC))
+    active = resolve_active_item(queue, session_id, step_id)
+    ctx = build_flow_context(manager, queue, active)
+    logger.info(
+        "flow_page_rendered",
+        extra={
+            "event": "flow_page_rendered",
+            "session_id": session_id,
+            "step_id": step_id,
+            "queue_size": len(queue),
+        },
+    )
+    return HTMLResponse(
+        render("flow.html", current_path="/command-center/flow", current_view="flow", **ctx)
+    )
+
+
+async def _cc_events_stream(
+    request: Request,
+    on_board_changed: Callable[[Request], AsyncIterator[Any]],
+) -> AsyncIterator[Any]:
+    """Shared connection lifecycle for Command Center SSE handlers.
+
+    Owns: cc_queues registration, 30s heartbeat, event dispatch via callback,
+    contextlib.suppress(ValueError) cleanup in finally.
+
+    The queue is registered synchronously (before the generator body runs) so
+    the response headers flush before the first iteration, avoiding a race where
+    cc_queues is empty even though the SSE stream appears open.
+    """
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    request.app.state.cc_queues.append(q)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=30.0)
+            except TimeoutError:
+                yield SSE.patch_signals({"_heartbeat": True})
+                continue
+            kind, _, _target = event.partition(":")
+            if kind == "board_changed":
+                async for ev in on_board_changed(request):
+                    yield ev
+            elif kind == "poll_status":
+                cache = request.app.state.external_cache
+                yield SSE.patch_signals(
+                    {
+                        "lastPolledLabel": _format_last_polled(cache.last_polled_at),
+                        "lastError": cache.last_error or "",
+                    }
+                )
+    finally:
+        # Suppress ValueError in case the queue was already cleared (tests
+        # or admin endpoints may reset cc_queues); letting it raise here
+        # would mask the real cancellation reason in logs.
+        with contextlib.suppress(ValueError):
+            request.app.state.cc_queues.remove(q)
+
+
+def _badge_patch(count: int):  # noqa: ANN201
+    return SSE.patch_elements(
+        f'<span class="toggle-badge" id="flow-toggle-badge">{count}</span>',
+        selector="#flow-toggle-badge",
+        mode=ElementPatchMode.OUTER,
+    )
+
+
 @router.get("/command-center/events")
 @datastar_response
 async def command_center_events(request: Request):  # noqa: ANN201
     """SSE endpoint that pushes Command Center updates to the browser."""
-    # Register the queue synchronously, before returning the generator.
-    # Otherwise the response headers flush (and any waiter on `expect_response`
-    # unblocks) before the inner generator's first iteration runs, leaving a
-    # window where `cc_queues` is empty even though the SSE stream is "open".
-    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
-    request.app.state.cc_queues.append(queue)
 
-    async def _generate():  # noqa: ANN202
-        """Yield SSE events for board changes and poll status."""
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except TimeoutError:
-                    yield SSE.patch_signals({"_heartbeat": True})
-                    continue
-                kind, _, _target = event.partition(":")
-                if kind == "board_changed":
-                    sessions = request.app.state.session_manager.list_sessions()
-                    html = render_board_fragment(request.app)
-                    yield SSE.patch_elements(
-                        html,
-                        selector="#kanban-board",
-                        mode=ElementPatchMode.OUTER,
-                    )
-                    attn_html = render_attention_bar_fragment(request.app, sessions=sessions)
-                    yield SSE.patch_elements(
-                        attn_html,
-                        selector="#attention-bar",
-                        mode=ElementPatchMode.OUTER,
-                    )
-                    tray_html = _render_tray_fragment(request.app)
-                    yield SSE.patch_elements(
-                        tray_html,
-                        selector="#mgmt-tray",
-                        mode=ElementPatchMode.INNER,
-                    )
-                elif kind == "poll_status":
-                    cache = request.app.state.external_cache
-                    yield SSE.patch_signals(
-                        {
-                            "lastPolledLabel": _format_last_polled(cache.last_polled_at),
-                            "lastError": cache.last_error or "",
-                        }
-                    )
-        finally:
-            # Suppress ValueError in case the queue was already cleared (tests
-            # or admin endpoints may reset cc_queues); letting it raise here
-            # would mask the real cancellation reason in logs.
-            with contextlib.suppress(ValueError):
-                request.app.state.cc_queues.remove(queue)
+    async def _on_board_changed(req: Request):  # noqa: ANN202
+        sessions = req.app.state.session_manager.list_sessions()
+        queue_count = len(build_attention_queue(sessions, datetime.now(UTC)))
+        html = render_board_fragment(req.app)
+        yield SSE.patch_elements(
+            html,
+            selector="#kanban-board",
+            mode=ElementPatchMode.OUTER,
+        )
+        tray_html = _render_tray_fragment(req.app)
+        yield SSE.patch_elements(
+            tray_html,
+            selector="#mgmt-tray",
+            mode=ElementPatchMode.INNER,
+        )
+        # Update the Flow toggle badge (visible on the Board page too).
+        yield _badge_patch(queue_count)
 
-    return _generate()
+    async def _stream():  # noqa: ANN202
+        async for ev in _cc_events_stream(request, _on_board_changed):
+            yield ev
+
+    return _stream()
+
+
+@router.get("/command-center/flow/events")
+@datastar_response
+async def flow_events(request: Request):  # noqa: ANN201
+    """SSE endpoint that pushes Flow Mode updates to the browser.
+
+    The query param ``session_id`` is the session the page is currently
+    viewing. When ``board_changed`` rebuilds the queue and that session is
+    no longer present (it was killed, resolved, or aged out), we yield an
+    ``execute_script`` redirect to ``/command-center/flow`` so the body
+    isn't left showing stale content. The destination handles both the
+    "queue head" and "queue empty" cases via ``resolve_active_item``'s
+    fallback. The redirect causes a full page reload, which closes this
+    stream — that's correct.
+    """
+    subscribed_session_id = request.query_params.get("session_id") or ""
+
+    async def _on_board_changed(req: Request):  # noqa: ANN202
+        manager = req.app.state.session_manager
+        sessions = manager.list_sessions()
+        queue = build_attention_queue(sessions, datetime.now(UTC))
+        # Stale-active redirect: page is viewing a specific session that is
+        # no longer in the queue. Send the navigation script and skip the
+        # strip/badge patches — the reload supersedes them.
+        if subscribed_session_id and not any(
+            item.session_id == subscribed_session_id for item in queue
+        ):
+            logger.info(
+                "flow_events_stale_redirect",
+                extra={
+                    "event": "flow_events_stale_redirect",
+                    "subscribed_session_id": subscribed_session_id,
+                    "queue_len": len(queue),
+                },
+            )
+            yield SSE.execute_script("window.location = '/command-center/flow'")
+            return
+        active = resolve_active_item(queue, session_id=None, step_id=None)
+        ctx = build_flow_context(manager, queue, active)
+        ctx["current_view"] = "flow"
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        # Update the Flow toggle badge count.
+        yield _badge_patch(len(queue))
+
+    async def _stream():  # noqa: ANN202
+        logger.info(
+            "flow_events_subscribed",
+            extra={
+                "event": "flow_events_subscribed",
+                "client_addr": str(request.client),
+                "subscribed_session_id": subscribed_session_id,
+            },
+        )
+        async for ev in _cc_events_stream(request, _on_board_changed):
+            yield ev
+
+    return _stream()
 
 
 @router.post("/command-center/refresh")
@@ -459,52 +570,6 @@ async def get_standup(request: Request):  # noqa: ANN201
                 "standupMarkdown": markdown,
             }
         )
-
-    return _stream()
-
-
-# ---------------------------------------------------------------------------
-# Zellij session attach (browser proxy)
-# ---------------------------------------------------------------------------
-
-
-@router.post("/command-center/attach-session")
-@datastar_response
-async def attach_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    """Attach to a zellij session via the browser proxy."""
-
-    async def _stream():  # noqa: ANN202
-        if not getattr(request.app.state, "zellij_available", False):
-            logger.warning(
-                "attach-session: zellij unavailable",
-                extra={"event": "cc_attach_unavailable"},
-            )
-            yield _sse_toast("Zellij is not available", "err")
-            return
-        terminal_session = payload.get("terminal_session")
-        if not terminal_session:
-            logger.warning(
-                "attach-session: missing terminal_session",
-                extra={"event": "cc_attach_invalid"},
-            )
-            yield _sse_toast("terminal_session is required", "err")
-            return
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
-            logger.warning(
-                "attach-session: invalid session name %s",
-                terminal_session,
-                extra={"event": "cc_attach_invalid"},
-            )
-            yield _sse_toast("invalid session name", "err")
-            return
-        url_for_zellij_session = f"/zellij/{terminal_session}"
-        yield SSE.patch_signals(
-            {
-                "terminalUrl": url_for_zellij_session,
-                "modals": {"terminal": True},
-            }
-        )
-        yield _sse_toast("Terminal opened", "ok")
 
     return _stream()
 
@@ -819,7 +884,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             logger.info("Background session launched: %s (session: %s)", session_id, session_name)
 
             # Notify all SSE connections of board change.
-            _push_board_changed(request.app)
+            request.app.state.notify_cc("board_changed")
 
             # Schedule a follow-up board_changed when the launch grace window
             # ends. The 0.5s liveness poll already pushes board_changed when
@@ -829,7 +894,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
             # poll (~60s) finally re-rendered with the expired grace.
             async def _grace_expiry_push() -> None:
                 await asyncio.sleep(LAUNCH_GRACE_SECONDS + 1)
-                _push_board_changed(request.app)
+                request.app.state.notify_cc("board_changed")
 
             asyncio.create_task(_grace_expiry_push())
 
@@ -851,12 +916,6 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 # ---------------------------------------------------------------------------
 # Session management actions
 # ---------------------------------------------------------------------------
-
-
-def _push_board_changed(app: FastAPI) -> None:
-    """Push a board_changed event to all SSE queues."""
-    for q in app.state.cc_queues:
-        q.put_nowait("board_changed")
 
 
 @router.post("/command-center/start-ticket")
@@ -903,11 +962,11 @@ async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN2
             async def _bg_poll() -> None:
                 with contextlib.suppress(Exception):
                     await poller._poll_once()  # noqa: SLF001
-                _push_board_changed(request.app)
+                request.app.state.notify_cc("board_changed")
 
             asyncio.create_task(_bg_poll())
         else:
-            _push_board_changed(request.app)
+            request.app.state.notify_cc("board_changed")
 
         yield _sse_toast("Ticket started", "ok")
 
@@ -957,7 +1016,7 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
                 extra={"event": "cc_kill_no_zellij", "session_id": session_id},
             )
         manager.cleanup_session(session_id)
-        _push_board_changed(request.app)
+        request.app.state.notify_cc("board_changed")
         yield _sse_toast("Session killed", "ok")
 
     return _stream()
@@ -1012,7 +1071,7 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
             yield _sse_toast(str(exc), "err")
             return
         manager.cleanup_session(session_id)
-        _push_board_changed(request.app)
+        request.app.state.notify_cc("board_changed")
         yield _sse_toast("Worktree cleaned up", "ok")
 
     return _stream()
@@ -1134,238 +1193,222 @@ def _parse_question_payload(raw: object) -> tuple[str, QuestionData | None]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Review drawer
-# ---------------------------------------------------------------------------
-
-
-def _format_wait_label(seconds: int) -> str:
-    """Return a compact wait-time string: '42s', '5m', '2h'."""
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    return f"{seconds // 3600}h"
-
-
-def build_drawer_context(
-    session_id: str,
-    manager: object,
-    attention_queue: list[AttentionItem],
-) -> dict:
-    """Build template context for the review drawer.
-
-    Args:
-        session_id: The session to open in the drawer.
-        manager: The session manager (app.state.session_manager).
-        attention_queue: Current attention queue from build_attention_queue().
-
-    Returns:
-        A dict with keys: session, steps, current_step, mode, queue_position,
-        queue_total, queue_items, next_session_id, prev_session_id,
-        waiting_label, notification_body, notification.
-    """
-    session = manager.get_session(session_id)  # type: ignore[union-attr]
-    if session is None:
-        return {}
-
-    # Find this session in the attention queue to determine position.
-    queue_index = next(
-        (i for i, item in enumerate(attention_queue) if item.session_id == session_id),
-        None,
-    )
-
-    queue_total = len(attention_queue)
-    queue_position = (queue_index + 1) if queue_index is not None else 1
-
-    # Items after this one in the queue.
-    queue_items = attention_queue[queue_index + 1 :] if queue_index is not None else []
-
-    next_session_id: str | None = queue_items[0].session_id if queue_items else None
-    prev_session_id: str | None = (
-        attention_queue[queue_index - 1].session_id
-        if (queue_index is not None and queue_index > 0)
-        else None
-    )
-
-    # Determine mode.
-    current_attention = attention_queue[queue_index] if queue_index is not None else None
-    mode = current_attention.action_type if current_attention else "findings"
-
-    # Normalise: "questions" maps to "findings" for template mode.
-    if mode == "questions":
-        mode = "findings"
-
-    # Wait label.
-    waiting_label = ""
-    if current_attention:
-        waiting_label = _format_wait_label(current_attention.wait_seconds)
-
-    # Steps and current step for ZingSession.
-    steps: list = []
-    current_step = None
-    notification = None
-    notification_body = ""
-
-    phase_segments: list[dict] = []
-    if isinstance(session, ZingSession):
-        steps = list(session.steps)
-        # Current step = last READY step.
-        current_step = next((s for s in reversed(steps) if s.state.value == "ready"), None)
-        phase_segments = build_session_phases(session)
-    elif isinstance(session, ClaudeCodeSession):
-        notification = session.pending_question
-        notification_body = notification.body if notification else ""
-
-    # Build the responses signal dict for the drawer. Mirrors the standalone
-    # review page's saved_responses builder (see routes.get_session_page) so
-    # the shared render_finding macro sees the same envelope shape on both
-    # surfaces. Keys mirror what _map_signals_to_responses reads back on save:
-    #   <finding_id>                 → triage action / text answer
-    #   <finding_id>_approach        → selected suggested-approach label
-    #   <finding_id>_approach_other  → free-text "Other" approach
-    #   <finding_id>_complexity      → complexity override
-    # Storage pairs findings and responses by list index, which is fragile if
-    # findings are inserted, deleted, or reordered mid-step. The envelope is
-    # intentionally finding_id-keyed so it is robust to ordering drift; the
-    # index lookup below is only used to fetch the matching UserResponse.
-    saved_responses: dict[str, str] = {}
-    if current_step is not None:
-        responses = current_step.responses or []
-        same_length = len(responses) == len(current_step.findings)
-        for idx, finding in enumerate(current_step.findings):
-            if not (same_length and idx < len(responses)):
-                continue
-            resp = responses[idx]
-            if finding.type == "triage":
-                if resp.action is not None:
-                    saved_responses[finding.id] = resp.action.value
-                if resp.selected is not None:
-                    saved_responses[f"{finding.id}_approach"] = resp.selected
-                    if resp.other_text is not None:
-                        saved_responses[f"{finding.id}_approach_other"] = resp.other_text
-                if resp.complexity is not None:
-                    saved_responses[f"{finding.id}_complexity"] = resp.complexity.value
-            elif finding.type == "text" and resp.answer is not None:
-                saved_responses[finding.id] = resp.answer
-
-    # Build the openSteps signal dict for the step-section accordion.
-    # Default: all past steps closed; current step open (if present).
-    saved_open_steps: dict[str, bool] = {}
-    if current_step is not None:
-        saved_open_steps[current_step.step_id] = True
-
-    # Build the drawer's data-signals envelope server-side as a single dict so
-    # we can render it via | tojson once on the template. Hand-building the
-    # JSON with raw ``{{ ... }}`` substitutions invites quote-handling drift.
-    # Signal names match the standalone review page so the shared
-    # render_finding macro reads $responses + $step_id on both surfaces.
-    drawer_signals: dict[str, object] = {
-        "prevSessionId": prev_session_id or "",
-        "nextSessionId": next_session_id or "",
-        "sessionId": session.session_id,
-        "step_id": current_step.step_id if current_step else "",
-        "responses": saved_responses,
-        "openSteps": saved_open_steps,
-    }
-
-    return {
-        "session": session,
-        "steps": steps,
-        "current_step": current_step,
-        "phase_segments": phase_segments,
-        "mode": mode,
-        "queue_position": queue_position,
-        "queue_total": max(queue_total, 1),
-        "queue_items": queue_items,
-        "next_session_id": next_session_id,
-        "prev_session_id": prev_session_id,
-        "waiting_label": waiting_label,
-        "notification": notification,
-        "notification_body": notification_body,
-        "saved_responses": saved_responses,
-        "saved_open_steps": saved_open_steps,
-        "drawer_signals": drawer_signals,
-    }
-
-
-@router.post("/command-center/drawer/{session_id}")
+@router.post("/command-center/flow/pin")
 @datastar_response
-async def get_drawer(session_id: str, request: Request):  # noqa: ANN201
-    """Return the drawer HTML fragment for a session via SSE.
-
-    Patches the fragment into #review-drawer-container and opens the drawer
-    by setting modals.drawer = true in the Datastar signals.
-    """
-
+async def post_flow_pin(payload: dict[str, Any], request: Request):  # noqa: ANN201
     async def _stream():  # noqa: ANN202
         manager = request.app.state.session_manager
-        sessions = manager.list_sessions()
-        attention_queue = build_attention_queue(sessions, datetime.now(UTC))
-
-        ctx = build_drawer_context(session_id, manager, attention_queue)
-        if not ctx:
-            logger.warning("Drawer requested for unknown session: %s", session_id)
-            yield _sse_toast("Session not found", "err")
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            yield _sse_toast("Missing session_id", "err")
             return
-
-        session = ctx["session"]
-
-        had_pending_question = False
-        if isinstance(session, ClaudeCodeSession):
-            # Attach mode — use the simpler attach template.
-            had_pending_question = session.pending_question is not None
-            html = render("fragments/drawer_attach.html", **ctx)
-        else:
-            # Findings/questions mode.
-            html = render("fragments/review_drawer.html", **ctx)
-
-        yield SSE.patch_elements(
-            html,
-            selector="#review-drawer-container",
-            mode=ElementPatchMode.INNER,
+        session = manager.get_session(session_id)
+        if not isinstance(session, ClaudeCodeSession):
+            yield _sse_toast("Pin only available for terminal sessions", "err")
+            return
+        new_pinned = not session.pinned
+        try:
+            manager.set_pinned(session_id, new_pinned)
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                "flow_pin_failed",
+                extra={
+                    "event": "flow_pin_failed",
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
+            yield _sse_toast(str(exc), "err")
+            return
+        logger.info(
+            "flow_pin_toggled",
+            extra={
+                "event": "flow_pin_toggled",
+                "session_id": session_id,
+                "pinned": new_pinned,
+            },
         )
-        yield SSE.patch_signals({"modals": {"drawer": True}})
-
-        # Opening the drawer counts as "viewed" — clear the pending question so
-        # the attention bar entry and card attach strip drop on the next render.
-        if had_pending_question:
-            manager.mark_pending_question_answered(session_id)
-            _push_board_changed(request.app)
+        # Re-fetch queue to reflect new pin state
+        queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+        active = resolve_active_item(queue, session_id=session_id, step_id=None)
+        ctx = build_flow_context(manager, queue, active)
+        yield SSE.patch_elements(
+            render("fragments/flow_progress_strip.html", **ctx),
+            selector="#flow-strip",
+            mode=ElementPatchMode.OUTER,
+        )
+        yield _sse_toast("Pinned" if new_pinned else "Unpinned", "ok")
 
     return _stream()
 
 
-@router.post(
-    "/command-center/drawer/{session_id}/step/{step_id}",
-)
+@router.post("/command-center/flow/launch-popup-open")
 @datastar_response
-async def get_drawer_step(session_id: str, step_id: str, request: Request):  # noqa: ANN201
-    """Return a single step-history fragment for the drawer via SSE.
+async def post_flow_launch_popup_open(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Open the launch popup for a terminal session."""
 
-    Patches the step section into #review-drawer-container and opens the drawer.
-    """
+    async def _stream():  # noqa: ANN202
+        if not getattr(request.app.state, "zellij_available", False):
+            yield _sse_toast("Zellij is not available", "err")
+            return
+        terminal_session = str(payload.get("terminal_session") or "").strip()
+        if not terminal_session:
+            yield _sse_toast("terminal_session is required", "err")
+            return
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+            yield _sse_toast("invalid session name", "err")
+            return
+        url = f"/zellij/{terminal_session}"
+        # Derive a human-readable title from the matching ClaudeCodeSession, if found.
+        manager = request.app.state.session_manager
+        title = terminal_session
+        for s in manager.list_sessions():
+            if isinstance(s, ClaudeCodeSession) and s.terminal_session == terminal_session:
+                title = s.title or terminal_session
+                break
+        yield SSE.patch_signals(
+            {
+                "launchPopupSession": terminal_session,
+                "launchPopupUrl": url,
+                "launchPopupTitle": title,
+                "modals": {"launchPopup": True},
+            }
+        )
+
+    return _stream()
+
+
+@router.post("/command-center/flow/launch-popup-send")
+@datastar_response
+async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Pin the session and redirect to Flow mode."""
 
     async def _stream():  # noqa: ANN202
         manager = request.app.state.session_manager
-        session = manager.get_session(session_id)
-        if session is None or not isinstance(session, ZingSession):
-            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
+        terminal_session = str(payload.get("terminal_session") or "").strip()
+        if not terminal_session:
+            yield _sse_toast("Missing terminal session", "err")
+            return
+        sessions = manager.list_sessions()
+        match: ClaudeCodeSession | None = None
+        for session in sessions:
+            if isinstance(session, ClaudeCodeSession) and (
+                session.terminal_session == terminal_session
+            ):
+                match = session
+                break
+        if match is None:
+            logger.warning(
+                "flow_launch_popup_sent_failed",
+                extra={
+                    "event": "flow_launch_popup_sent_failed",
+                    "terminal_session": terminal_session,
+                    "error": "session not found",
+                },
+            )
             yield _sse_toast("Session not found", "err")
             return
-
-        step = next((s for s in session.steps if s.step_id == step_id), None)
-        if step is None:
-            logger.warning("Drawer step not found: session=%s step=%s", session_id, step_id)
-            yield _sse_toast("Step not found", "err")
-            return
-
-        html = render("fragments/drawer_step_history.html", step=step, session=session)
-        yield SSE.patch_elements(
-            html,
-            selector="#review-drawer-container",
-            mode=ElementPatchMode.INNER,
+        manager.set_pinned(match.session_id, True)
+        logger.info(
+            "flow_launch_popup_sent",
+            extra={
+                "event": "flow_launch_popup_sent",
+                "session_id": match.session_id,
+                "terminal_session": terminal_session,
+            },
         )
-        yield SSE.patch_signals({"modals": {"drawer": True}})
+        yield SSE.patch_signals({"modals": {"launchPopup": False}})
+        sid = match.session_id
+        # step_id mirrors session_id for attach items (Decision 10).
+        url = f"/command-center/flow?session_id={sid}&step_id={sid}"
+        yield SSE.execute_script(f"window.location = {url!r}")
+
+    return _stream()
+
+
+async def _flow_save_and_navigate(  # noqa: ANN201
+    request: Request,
+    payload: dict[str, Any],
+    direction: str,
+):
+    """Shared body for /flow/next and /flow/prev.
+
+    Both endpoints share the same logic — payload parsing, save-with-error-
+    handling, queue rebuild, URL construction, and ``SSE.execute_script``
+    emission — and differ only in the direction string passed to
+    :func:`next_in_queue` and the structured-log field names. This async
+    generator yields the SSE events; the route handler simply awaits it.
+
+    The save guard is ``if step_id:`` (no ``and responses``):
+    ``_map_signals_to_responses`` defaults triage findings to
+    ``ResponseAction.DISCUSS`` and text findings to ``None``, so calling
+    ``submit_responses`` with an empty dict is a valid "submit with all
+    defaults" flow. Submit & Next on un-typed findings should submit, not
+    silently skip.
+    """
+    manager = request.app.state.session_manager
+    session_id = payload.get("session_id") or ""
+    step_id = payload.get("step_id") or ""
+    responses = payload.get("responses") or {}
+    # Persist responses if this is a findings/questions item. Empty responses
+    # are still a valid submission — the response mapper supplies defaults.
+    if step_id:
+        try:
+            _, step = manager.get_step_by_id(step_id)
+            mapped = _map_signals_to_responses(step.findings, responses)
+            manager.submit_responses(session_id, step_id, mapped)
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                f"flow_{direction}_save_failed",
+                extra={
+                    "event": f"flow_{direction}_save_failed",
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
+            yield _sse_toast(f"Save failed: {exc}", "err")
+            return
+    # Compute the adjacent queue item.
+    queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+    target_item = next_in_queue(queue, session_id, direction=direction)
+    if target_item is None:
+        url = "/command-center/flow"
+    else:
+        url = (
+            f"/command-center/flow"
+            f"?session_id={target_item.session_id}"
+            f"&step_id={target_item.step_id or ''}"
+        )
+    logger.info(
+        f"flow_{direction}",
+        extra={
+            "event": f"flow_{direction}",
+            "session_id": session_id,
+            f"{direction}_session_id": target_item.session_id if target_item else None,
+        },
+    )
+    yield SSE.execute_script(f"window.location = {url!r}")
+
+
+@router.post("/command-center/flow/next")
+@datastar_response
+async def flow_next(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Save responses (if any), navigate to the next queue item."""
+
+    async def _stream():  # noqa: ANN202
+        async for ev in _flow_save_and_navigate(request, payload, direction="next"):
+            yield ev
+
+    return _stream()
+
+
+@router.post("/command-center/flow/prev")
+@datastar_response
+async def flow_prev(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Save responses (if any), navigate to the previous queue item."""
+
+    async def _stream():  # noqa: ANN202
+        async for ev in _flow_save_and_navigate(request, payload, direction="prev"):
+            yield ev
 
     return _stream()

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Flow — Command Center{% endblock %}
+
+{% block topnav_extra %}
+{% include 'fragments/_flow_board_toggle.html' %}
+{% endblock %}
+
+{% block content %}
+<div class="flow-page"
+     data-signals='{
+       "responses": {{ initial_responses | tojson }},
+       "step_id": "{{ active.step_id if active else '' }}",
+       "activeSessionId": "{{ active.session_id if active else '' }}",
+       "paletteOpen": false,
+       "paletteQuery": ""
+     }'
+     data-on:keydown__window="(evt.key === 'Escape' && ($paletteOpen = false)) || (evt.metaKey && evt.key === 'j' && !evt.shiftKey && (document.getElementById('flow-action-next').click(), evt.preventDefault())) || (evt.metaKey && evt.shiftKey && evt.key === 'J' && (document.getElementById('flow-action-prev').click(), evt.preventDefault())) || (evt.metaKey && evt.key === 'k' && ($paletteOpen = !$paletteOpen, evt.preventDefault())) || (evt.metaKey && evt.key === 'b' && (window.location = '/command-center')) || (evt.metaKey && evt.key === 'p' && (document.getElementById('flow-action-pin').click(), evt.preventDefault()))"
+     data-init="@get('/command-center/flow/events?session_id={{ active.session_id if active else '' }}', {filterSignals: {include: /^$/}})">
+  {# Canonical action buttons. The visible Prev/Next/Pin/Submit&Next buttons in the toolbar
+     and progress strip, plus the ⌘J / ⌘⇧J / ⌘P keybinds, all programmatically click these so
+     the payload lives in exactly one place. #}
+  <button id="flow-action-next" type="button" hidden
+          data-on:click="@post('/command-center/flow/next', {payload: {session_id: $activeSessionId, step_id: $step_id, responses: $responses}})">Next</button>
+  <button id="flow-action-prev" type="button" hidden
+          data-on:click="@post('/command-center/flow/prev', {payload: {session_id: $activeSessionId}})">Prev</button>
+  <button id="flow-action-pin" type="button" hidden
+          data-on:click="@post('/command-center/flow/pin', {payload: {session_id: $activeSessionId}})">Pin</button>
+  {% include 'fragments/flow_progress_strip.html' %}
+  <main id="flow-body" class="flow-body">
+    {% if active is none %}
+      {% include 'fragments/flow_body_empty.html' %}
+    {% elif active.action_type == 'attach' %}
+      {% include 'fragments/flow_body_attach.html' %}
+    {% elif active.action_type == 'findings' %}
+      {% include 'fragments/flow_body_findings.html' %}
+    {% elif active.action_type == 'questions' %}
+      {% include 'fragments/flow_body_question.html' %}
+    {% endif %}
+  </main>
+  {% include 'fragments/flow_toolbar.html' %}
+  {% include 'fragments/flow_palette.html' %}
+  {# cc-modals.js defines window.flowPaletteMatch (and other browser-API helpers). #}
+  <script src="/static/js/cc-modals.js?v={{ asset_version() }}" defer></script>
+</div>
+{% endblock %}

@@ -1,0 +1,9 @@
+<div class="flow-body-question">
+  <div class="question-card">
+    {% for finding in active_findings %}
+      {% with session_id=active.session_id %}
+        {% include 'fragments/finding.html' %}
+      {% endwith %}
+    {% endfor %}
+  </div>
+</div>

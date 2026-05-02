@@ -152,6 +152,12 @@ This launches the MCP server and review dashboard on `http://127.0.0.1:9876`. Th
 
 The MCP connection is automatically registered with Claude Code during installation (via `mcp-remote`), so Claude Code will connect to the running server when review tools are invoked.
 
+#### Command Center
+
+The **Command Center** (`http://127.0.0.1:9876/command-center`) is a live Kanban board that aggregates your Linear tickets, open GitHub PRs, and active Zing sessions into a single view. It polls your issue tracker and GitHub in the background and streams updates to the browser in real time.
+
+**Flow mode** (`/command-center/flow`) is a full-page, distraction-free work surface for processing attention items one at a time. Each item that needs your input — a findings step ready for triage, a Claude Code session waiting for a question answer — is presented sequentially with its full context. Toggle between Board and Flow views with `⌘B` from either page.
+
 ### Permissions
 
 The review commands use the MCP server and `curl` to coordinate agent workflows. To avoid repeated permission prompts, add the following to your global Claude Code settings (`~/.claude/settings.json`) under `permissions.allow`:

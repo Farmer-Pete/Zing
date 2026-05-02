@@ -1,0 +1,9 @@
+<div class="flow-body-findings">
+  <div class="findings-stack">
+    {% for finding in active_findings %}
+      {% with session_id=active.session_id %}
+        {% include 'fragments/finding.html' %}
+      {% endwith %}
+    {% endfor %}
+  </div>
+</div>

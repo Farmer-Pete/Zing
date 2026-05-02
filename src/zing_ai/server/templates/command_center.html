@@ -2,6 +2,8 @@
 
 {% block title %}Command Center{% endblock %}
 
+{% block topnav_extra %}{% include 'fragments/_flow_board_toggle.html' %}{% endblock %}
+
 {% block content %}
 <div class="cc-page"
      data-signals='{{ initial_signals | tojson }}'
@@ -10,14 +12,8 @@
         the request body, so transmitting the entire $busyButtons envelope
         (one entry per session per action) was wasting kilobytes per request. #}
      data-init="@get('/command-center/events', {filterSignals: {include: /^$/}})"
-     data-on:keydown__window="evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
-     data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')"
-     {# Logical-AND form (not `if (…) …`). Datastar wraps the body in
-        `new Function('return ' + expr)`, which makes `if` an unexpected token
-        the moment any signal change forces a recompile (e.g. an @post JSON
-        response merging keys into the signal store). Use a JS expression. #}
-     data-on-signal-patch-filter="{include: /^modals\.drawer$/}"
-     data-on-signal-patch="!$modals.drawer && (document.querySelector('#review-drawer-container').innerHTML = '')">
+     data-on:keydown__window="evt.metaKey && evt.key === 'b' ? (window.location = '/command-center/flow') : evt.key === 'Escape' && (Object.keys($modals).forEach(k => $modals[k] = false))"
+     data-on:click__window="evt.target.closest('.strip-kebab, .strip-menu') || ($openKebab = '')">
     {# Render inline display:none when there is no server-side error, so the
        empty red banner doesn't flash before Datastar initialises. The
        data-show directive overrides the inline style at runtime as $lastError
@@ -26,9 +22,6 @@
          data-show="$lastError"
          data-text="$lastError"
          {% if not last_error %}style="display: none"{% endif %}>{{ last_error or '' }}</div>
-    {# Toast container for transient notifications #}
-    <div id="cc-toast-container"></div>
-
     <div class="cc-toolbar">
         <span data-text="$lastPolledLabel ? `Last synced ${$lastPolledLabel}` : 'Waiting for first poll'">{{ "Last synced " + last_polled_label if last_polled_label else "Waiting for first poll" }}</span>
         <button class="cc-refresh-btn" id="cc-standup-btn"
@@ -41,16 +34,11 @@
                 data-attr:disabled="$busyButtons.refresh">&#x21BB; Refresh</button>
     </div>
 
-{% include 'fragments/attention_bar.html' %}
-
 {% include "fragments/kanban_board.html" %}
 
     <div id="mgmt-tray">
     {% include "fragments/management_tray.html" %}
     </div>
-
-    {# ── Review drawer container ── #}
-    <div id="review-drawer-container" data-show="$modals.drawer"></div>
 
     {# ── Terminal modal (Zellij iframe). Closes via mountModal.close() — the
          body-level signal-patch watcher dispatches close-terminal which calls
@@ -112,7 +100,7 @@
          data-show="$modals.standup"></div>
 
     {# ── Terminal launcher ── Signal-patch watcher: fires when $terminalUrl is
-       patched (e.g. by the attach-session SSE response). Calls dispatchOpenTerminal
+       patched (e.g. by the launch-popup-open SSE response). Calls dispatchOpenTerminal
        which dispatches 'open-terminal' — the only entry point from Datastar signals.
        No user-visible content; display:none keeps it out of layout. #}
     <div id="terminal-launcher"
@@ -120,9 +108,11 @@
          data-on-signal-patch-filter="{include: /^terminalUrl$/}"
          data-on-signal-patch="dispatchOpenTerminal($terminalUrl)"></div>
 
-    {# cc-modals.js handles iframe lifecycle for the terminal modal and the
-       ClipboardItem write for standup copy — both kept because they're
-       browser-API only. All other JS has been replaced by Datastar attributes. #}
+{% include "fragments/launch_popup.html" %}
+
+    {# cc-modals.js handles iframe lifecycle for the terminal modal and launch
+       popup, and the ClipboardItem write for standup copy — all browser-API
+       only. All other JS has been replaced by Datastar attributes. #}
     <script src="/static/js/cc-modals.js?v={{ asset_version() }}" defer></script>
 
 </div>

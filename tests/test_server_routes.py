@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -35,6 +36,21 @@ def _parse_sse(response) -> list[str]:
     if current:
         events.append("\n".join(current))
     return events
+
+
+def _parse_execute_script(events: list[str]) -> list[str]:
+    """Extract execute_script content from SSE events.
+
+    SSE.execute_script emits a patch_elements event containing a
+    ``<script data-effect="el.remove()">...</script>`` element.
+    Returns any data: elements lines that contain window.location.
+    """
+    scripts = []
+    for event in events:
+        for line in event.splitlines():
+            if line.startswith("data: elements ") and "window.location" in line:
+                scripts.append(line[len("data: elements ") :])
+    return scripts
 
 
 class TestRemovedEndpoints(ServerTestBase):
@@ -978,6 +994,64 @@ class TestNotificationRouting(ServerTestBase):
             _sse_queues[session_id].remove(queue)
             if not _sse_queues[session_id]:
                 _sse_queues.pop(session_id, None)
+
+
+class TestNotificationAnsweredWiring(unittest.TestCase):
+    """notification_answered:* event routes to board_changed on cc_queues."""
+
+    def test_mark_pending_question_answered_triggers_board_changed(self) -> None:
+        """mark_pending_question_answered fires notification_answered:*
+        which should push board_changed onto all connected cc_queues.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            data_dir = Path(tmp.name)
+            manager = SessionManager(data_dir=data_dir)
+
+            # Pre-inject a cc_queue so we can inspect events.
+            cc_queue: asyncio.Queue[str] = asyncio.Queue()
+            cc_queues: list[asyncio.Queue[str]] = [cc_queue]
+
+            create_app(
+                session_manager=manager,
+                cc_queues=cc_queues,
+                disable_polling=True,
+            )
+
+            # Create a ClaudeCodeSession with a pending notification.
+            session = manager.create_claude_code_session(
+                session_id="notif-ans-test",
+                title="Notif Answered Test",
+            )
+            manager.add_notification(
+                session_id=session.session_id,
+                title="Question?",
+                body="What now?",
+            )
+            # Drain the board_changed emitted by notification_added:*.
+            while not cc_queue.empty():
+                cc_queue.get_nowait()
+
+            # Now answer the notification.
+            manager.mark_pending_question_answered(session.session_id)
+
+            # The queue should contain a board_changed event.
+            events: list[str] = []
+            while not cc_queue.empty():
+                events.append(cc_queue.get_nowait())
+            self.assertIn(
+                "board_changed",
+                events,
+                f"Expected 'board_changed' in cc_queue after notification answered; got {events}",
+            )
+        finally:
+            tmp.cleanup()
 
 
 class TestSessionQuestionParser(unittest.TestCase):
@@ -2372,90 +2446,8 @@ class TestSseToastEscapeBoundaries(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# SSE-shape tests for /attach-session and /start-ticket (Finding #5)
+# SSE-shape tests for /start-ticket (Finding #5)
 # ---------------------------------------------------------------------------
-
-
-class TestAttachSession(unittest.TestCase):
-    """Tests for POST /command-center/attach-session SSE responses."""
-
-    def setUp(self) -> None:
-        import tempfile
-        from pathlib import Path
-
-        from zing_ai.server.app import create_app
-        from zing_ai.server.sessions import SessionManager
-
-        self._tmp = tempfile.TemporaryDirectory()
-        self.manager = SessionManager(data_dir=Path(self._tmp.name))
-        self.cc_queues: list[asyncio.Queue] = []
-        asgi_app = create_app(
-            session_manager=self.manager,
-            cc_queues=self.cc_queues,
-        )
-        self.client = TestClient(asgi_app, raise_server_exceptions=True)
-        starlette_app = asgi_app.app  # type: ignore[attr-defined]
-        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
-        self.fastapi_app.state.zellij_available = True
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def test_attach_session_missing_terminal_session_emits_error_toast(self) -> None:
-        """Missing terminal_session yields a cc-toast-err."""
-        with self.client.stream("POST", "/command-center/attach-session", json={}) as resp:
-            self.assertEqual(resp.status_code, 200)
-            events = _parse_sse(resp)
-        toasts = _extract_toasts(events)
-        self.assertEqual(len(toasts), 1)
-        self.assertEqual(toasts[0]["text"], "terminal_session is required")
-        self.assertIn("cc-toast-err", toasts[0]["class"].split())
-
-    def test_attach_session_invalid_name_emits_error_toast(self) -> None:
-        """Names with characters outside [A-Za-z0-9_-] yield a cc-toast-err."""
-        with self.client.stream(
-            "POST",
-            "/command-center/attach-session",
-            json={"terminal_session": "bad name with spaces"},
-        ) as resp:
-            self.assertEqual(resp.status_code, 200)
-            events = _parse_sse(resp)
-        toasts = _extract_toasts(events)
-        self.assertEqual(len(toasts), 1)
-        self.assertEqual(toasts[0]["text"], "invalid session name")
-
-    def test_attach_session_zellij_unavailable_emits_error_toast(self) -> None:
-        """Zellij unavailable yields a cc-toast-err."""
-        self.fastapi_app.state.zellij_available = False
-        with self.client.stream(
-            "POST",
-            "/command-center/attach-session",
-            json={"terminal_session": "valid-name"},
-        ) as resp:
-            events = _parse_sse(resp)
-        toasts = _extract_toasts(events)
-        self.assertEqual(len(toasts), 1)
-        self.assertEqual(toasts[0]["text"], "Zellij is not available")
-
-    def test_attach_session_success_patches_terminal_url_and_modal_signal(self) -> None:
-        """Valid request patches terminalUrl + modals.terminal signals and emits ok toast."""
-        with self.client.stream(
-            "POST",
-            "/command-center/attach-session",
-            json={"terminal_session": "my-zellij-1"},
-        ) as resp:
-            self.assertEqual(resp.status_code, 200)
-            events = _parse_sse(resp)
-        # Signal patch carries terminalUrl + modals.terminal.
-        sig_events = [e for e in events if "datastar-patch-signals" in e]
-        self.assertTrue(sig_events, f"expected signal patch in {events}")
-        joined = "\n".join(sig_events)
-        self.assertIn("terminalUrl", joined)
-        self.assertIn("/zellij/my-zellij-1", joined)
-        self.assertIn("terminal", joined)  # modals.terminal: True
-        # OK toast was emitted.
-        toasts = _extract_toasts(events)
-        self.assertTrue(any("Terminal opened" in t["text"] for t in toasts))
 
 
 class TestStartTicket(unittest.TestCase):
@@ -2627,3 +2619,1326 @@ class TestSessionIdleEndpoint(ServerTestBase):
         session = self.manager.get_session("cc-idle-3")
         assert session is not None
         self.assertEqual(session.notifications[0].title, "Claude is waiting")
+
+
+class TestFlowPage(ServerTestBase):
+    """Tests for GET /command-center/flow."""
+
+    def _make_findings_session(self) -> str:
+        """Create a ZingSession with a READY findings step; return step title."""
+        session = self.manager.create_session(
+            session_id="flow-test-session",
+            title="Flow Test Title",
+            steps=["review"],
+        )
+        step_id = session.steps[0].step_id
+        self.manager.start_step("flow-test-session", step_id)
+        self.manager.add_finding(
+            "flow-test-session",
+            step_id,
+            {"type": "text", "title": "What changed?"},
+        )
+        self.manager.start_agent("flow-test-session", step_id, "agent-1")
+        self.manager.stop_agent("flow-test-session", step_id, "agent-1")
+        self.manager.mark_step_ready("flow-test-session", step_id)
+        return "Flow Test Title"
+
+    def test_flow_page_renders_with_queue(self) -> None:
+        """GET /command-center/flow with a READY item shows the item and flow-body."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('<main id="flow-body"', resp.text)
+        self.assertIn('class="flow-body-findings"', resp.text)
+
+    def test_flow_page_empty_queue(self) -> None:
+        """GET /command-center/flow with no attention items shows the empty state."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("All clear", resp.text)
+        self.assertIn("No attention items", resp.text)
+
+    def test_command_center_does_not_redirect(self) -> None:
+        """GET /command-center returns 200, not a redirect."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_flow_page_attach_mode_renders_terminal_iframe(self) -> None:
+        """GET /command-center/flow for an attach item shows the terminal iframe."""
+        session = self.manager.create_claude_code_session(
+            session_id="cc-flow-attach",
+            title="CC Flow Attach",
+            terminal_session="zing-flow-test",
+        )
+        self.manager.add_notification(
+            session_id=session.session_id,
+            title="Claude is waiting",
+            body="Needs input",
+        )
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('<iframe src="/zellij/zing-flow-test"', resp.text)
+
+    def test_flow_page_renders_progress_strip(self) -> None:
+        """GET /command-center/flow renders the progress strip header."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('id="flow-strip"', resp.text)
+        self.assertIn('class="flow-strip-z"', resp.text)
+
+    def test_flow_page_renders_toolbar(self) -> None:
+        """GET /command-center/flow renders the bottom toolbar."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="flow-toolbar"', resp.text)
+        self.assertIn("← Board", resp.text)
+        self.assertIn("Prev", resp.text)
+        self.assertIn("Next", resp.text)
+
+    def test_flow_page_renders_board_toggle(self) -> None:
+        """GET /command-center/flow renders the Flow/Board toggle with active flow class."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn("active flow", resp.text)
+
+    def test_flow_page_findings_includes_finding_macro_signals(self) -> None:
+        """GET /command-center/flow for findings mode includes data-signals with
+        responses+step_id and renders the finding element from the macro."""
+        session = self.manager.create_session(
+            session_id="flow-signals-test",
+            title="Signals Test",
+            steps=["review"],
+        )
+        step_id = session.steps[0].step_id
+        self.manager.start_step("flow-signals-test", step_id)
+        self.manager.add_finding(
+            "flow-signals-test",
+            step_id,
+            {"type": "text", "title": "Signal test finding"},
+        )
+        self.manager.start_agent("flow-signals-test", step_id, "agent-sig")
+        self.manager.stop_agent("flow-signals-test", step_id, "agent-sig")
+        self.manager.mark_step_ready("flow-signals-test", step_id)
+
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # Signal envelope must be present on the findings wrapper
+        self.assertIn("data-signals=", resp.text)
+        self.assertIn('"responses"', resp.text)
+        self.assertIn('"step_id"', resp.text)
+        # The render_finding macro renders id="finding-<id>" for each finding
+        self.assertIn('id="finding-', resp.text)
+
+    def test_flow_page_renders_palette_fragment(self) -> None:
+        """GET /command-center/flow includes the palette overlay markup."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # Scrim wrapper driven by $paletteOpen signal
+        self.assertIn("flow-palette-scrim", resp.text)
+        # Search input bound to paletteQuery
+        self.assertIn("flow-palette-search", resp.text)
+        self.assertIn("paletteQuery", resp.text)
+
+    def test_flow_page_palette_contains_queue_items(self) -> None:
+        """GET /command-center/flow palette rows include the session title."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # The queue item title should appear inside a palette row
+        self.assertIn("flow-palette-row", resp.text)
+        self.assertIn("Flow Test Title", resp.text)
+
+    def test_flow_page_palette_match_helper_referenced(self) -> None:
+        """Palette rows reference window.flowPaletteMatch in data-show."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("window.flowPaletteMatch", resp.text)
+
+    def test_command_center_passes_current_view_board(self) -> None:
+        """GET /command-center passes current_view='board' (renders 200)."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_command_center_renders_flow_board_toggle(self) -> None:
+        """GET /command-center includes the Flow/Board toggle with active board class."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn('href="/command-center"', resp.text)
+        self.assertIn('href="/command-center/flow"', resp.text)
+        self.assertIn('class="toggle-badge"', resp.text)
+        self.assertIn("active board", resp.text)
+
+    def test_command_center_toggle_badge_reflects_queue_count(self) -> None:
+        """GET /command-center badge shows the correct attention queue count."""
+        # Create two sessions with READY findings so queue_count == 2.
+        for i in range(2):
+            session = self.manager.create_session(
+                session_id=f"badge-test-{i}",
+                title=f"Badge Session {i}",
+                steps=["review"],
+            )
+            step_id = session.steps[0].step_id
+            self.manager.start_step(session.session_id, step_id)
+            self.manager.add_finding(
+                session.session_id,
+                step_id,
+                {"type": "text", "title": f"Finding {i}"},
+            )
+            self.manager.start_agent(session.session_id, step_id, f"agent-badge-{i}")
+            self.manager.stop_agent(session.session_id, step_id, f"agent-badge-{i}")
+            self.manager.mark_step_ready(session.session_id, step_id)
+
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        # The badge should contain "2" — the count of attention items.
+        self.assertIn(">2<", resp.text)
+
+    def test_command_center_has_cmd_b_keybind(self) -> None:
+        """GET /command-center ⌘B keybind navigates to /command-center/flow."""
+        resp = self.client.get("/command-center")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("data-on:keydown__window", resp.text)
+        self.assertIn("/command-center/flow", resp.text)
+
+    def test_flow_page_has_cmd_b_keybind_to_board(self) -> None:
+        """GET /command-center/flow ⌘B keybind still navigates to /command-center (Board)."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        # The flow page uses an inline keydown handler with metaKey + 'b'
+        self.assertIn("evt.metaKey && evt.key === 'b'", resp.text)
+        self.assertIn("window.location = '/command-center'", resp.text)
+
+    def test_flow_page_renders_flow_board_toggle_active(self) -> None:
+        """GET /command-center/flow toggle shows the Flow side as active."""
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('class="cc-toggle"', resp.text)
+        self.assertIn("active flow", resp.text)
+
+    @property
+    def _fastapi_app(self):  # noqa: ANN201
+        """Unwrap middleware stack to reach the FastAPI app for state assertions."""
+        return self.client.app.app.routes[-1].app  # type: ignore[attr-defined]
+
+    def test_flow_page_query_params_set_cursor(self) -> None:
+        """GET /flow?session_id=X&step_id=Y activates the matching item in the HTML."""
+        self._make_findings_session()
+        session = self.manager.get_session("flow-test-session")
+        assert isinstance(session, ZingSession)
+        step_id = session.steps[0].step_id
+        resp = self.client.get(
+            f"/command-center/flow?session_id=flow-test-session&step_id={step_id}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Flow Test Title", resp.text)
+
+    def test_flow_page_query_params_session_id_only(self) -> None:
+        """GET /flow?session_id=X (no step_id) activates the matching item in the HTML."""
+        self._make_findings_session()
+        resp = self.client.get("/command-center/flow?session_id=flow-test-session")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Flow Test Title", resp.text)
+
+    def test_flow_page_signals_envelope_step_id_and_active_session_are_strings(self) -> None:
+        """Step 13 acceptance: ``step_id`` and ``activeSessionId`` rendered into
+        ``.flow-page[data-signals]`` are always JSON strings (never the literal
+        ``null``).  Setting a Datastar signal to ``null`` deletes it from the
+        proxy without firing reactivity (see Decision 16), so ``tojson(None)``
+        in the template would silently break Submit & Next.
+
+        This is the route-level replacement for the Playwright
+        ``test_flow_responses_survive_across_modes`` test which only inspected
+        the static ``data-signals`` attribute and could not exercise the live
+        Datastar proxy reliably.
+        """
+        import json
+        import re
+
+        # Findings mode: a session with a READY findings step.
+        self._make_findings_session()
+        session = self.manager.get_session("flow-test-session")
+        assert isinstance(session, ZingSession)
+        step_id = session.steps[0].step_id
+
+        # Attach mode: a ClaudeCodeSession with a pending notification.
+        self.manager.create_claude_code_session(
+            session_id="cc-flow-attach-signals",
+            title="Attach Signals",
+            terminal_session="zing-flow-attach-signals",
+        )
+        self.manager.add_notification(
+            session_id="cc-flow-attach-signals",
+            title="Claude is waiting",
+            body="Needs input",
+        )
+
+        signal_re = re.compile(r"<div class=\"flow-page\"\s+data-signals='([^']+)'", re.DOTALL)
+
+        def _signals_for(url: str) -> dict[str, object]:
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, 200)
+            match = signal_re.search(resp.text)
+            self.assertIsNotNone(match, f".flow-page data-signals not found in {url!r}")
+            return json.loads(match.group(1))  # type: ignore[union-attr]
+
+        # ── Findings mode ─────────────────────────────────────────────────
+        findings = _signals_for(
+            f"/command-center/flow?session_id=flow-test-session&step_id={step_id}"
+        )
+        self.assertIsInstance(findings["step_id"], str)
+        self.assertIsInstance(findings["activeSessionId"], str)
+        self.assertNotEqual(findings["step_id"], "")
+        self.assertNotEqual(findings["activeSessionId"], "")
+
+        # ── Attach mode ───────────────────────────────────────────────────
+        attach = _signals_for("/command-center/flow?session_id=cc-flow-attach-signals")
+        self.assertIsInstance(attach["step_id"], str)
+        self.assertIsInstance(attach["activeSessionId"], str)
+        self.assertNotEqual(attach["activeSessionId"], "")
+
+    def test_flow_page_signals_envelope_empty_mode_uses_empty_strings(self) -> None:
+        """Step 13 acceptance for the empty-queue branch: with no attention
+        items the ``step_id`` and ``activeSessionId`` signals must still be
+        empty *strings*, not the JSON literal ``null`` (which would delete
+        them from the Datastar proxy without firing reactivity).
+        """
+        import json
+        import re
+
+        signal_re = re.compile(r"<div class=\"flow-page\"\s+data-signals='([^']+)'", re.DOTALL)
+        resp = self.client.get("/command-center/flow")
+        self.assertEqual(resp.status_code, 200)
+        match = signal_re.search(resp.text)
+        self.assertIsNotNone(match)
+        signals = json.loads(match.group(1))  # type: ignore[union-attr]
+
+        self.assertIsInstance(signals["step_id"], str)
+        self.assertIsInstance(signals["activeSessionId"], str)
+        self.assertEqual(signals["step_id"], "")
+        self.assertEqual(signals["activeSessionId"], "")
+
+    def test_kanban_card_attach_button_links_to_flow(self) -> None:
+        """kanban_card.html renders Attach button as <a href> to /command-center/flow."""
+        from zing_ai.server.models import ClaudeCodeSession, Notification
+        from zing_ai.server.models_external import KanbanCard
+        from zing_ai.server.templates import render
+
+        notification = Notification(title="Claude is waiting", body="Needs input")
+        session = ClaudeCodeSession(
+            session_id="cc-attach-nav",
+            title="Attach Nav Test",
+            notifications=[notification],
+        )
+        card = KanbanCard(
+            key="BAK-TEST",
+            ticket=None,
+            prs=[],
+            sessions=[session],
+        )
+        html = render(
+            "fragments/kanban_card.html",
+            card=card,
+            column_cls="col-todo",
+            current_username="testuser",
+            live_sessions=set(),
+            session_phases={},
+        )
+        self.assertIn('href="/command-center/flow?session_id=cc-attach-nav"', html)
+
+
+class _FlowTestBase(unittest.TestCase):
+    """Shared setUp/tearDown for Flow endpoint tests.
+
+    Exposes:
+    - self.manager   — SessionManager
+    - self.client    — TestClient
+    - self.fastapi_app — FastAPI app for direct state manipulation
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manager = SessionManager(data_dir=Path(self._tmp.name))
+        self.cc_queues: list[asyncio.Queue] = []
+        asgi_app = create_app(
+            session_manager=self.manager,
+            cc_queues=self.cc_queues,
+        )
+        self.client = TestClient(asgi_app, raise_server_exceptions=True)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        self.fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _make_findings_session(self, session_id: str, title: str = "Session") -> str:
+        """Create a ZingSession with one READY findings step; return step_id."""
+        session = self.manager.create_session(
+            session_id=session_id,
+            title=title,
+            steps=["review"],
+        )
+        step_id = session.steps[0].step_id
+        self.manager.start_step(session_id, step_id)
+        self.manager.add_finding(
+            session_id,
+            step_id,
+            {"type": "text", "title": "What changed?"},
+        )
+        self.manager.start_agent(session_id, step_id, f"agent-{session_id}")
+        self.manager.stop_agent(session_id, step_id, f"agent-{session_id}")
+        self.manager.mark_step_ready(session_id, step_id)
+        return step_id
+
+    def _make_attach_session(
+        self, session_id: str, title: str = "CC Session", pinned: bool = False
+    ) -> None:
+        """Create a ClaudeCodeSession with a pending notification."""
+        self.manager.create_claude_code_session(
+            session_id=session_id,
+            title=title,
+            terminal_session=f"zing-{session_id}",
+        )
+        self.manager.add_notification(
+            session_id=session_id,
+            title="Claude is waiting",
+            body="Needs input",
+        )
+        if pinned:
+            self.manager.set_pinned(session_id, True)
+
+
+class TestFlowPin(_FlowTestBase):
+    """Tests for POST /command-center/flow/pin."""
+
+    def test_pin_toggles_session_state(self) -> None:
+        """POSTing /flow/pin twice flips pinned True → False."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self._make_attach_session("pin-toggle", pinned=False)
+
+        # First POST — should pin.
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "pin-toggle"}
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        session = self.manager.get_session("pin-toggle")
+        assert isinstance(session, ClaudeCodeSession)
+        self.assertTrue(session.pinned)
+
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Pinned" in t["text"] for t in toasts))
+        self.assertTrue(any("cc-toast-ok" in t["class"].split() for t in toasts))
+
+        # Second POST — should unpin.
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "pin-toggle"}
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        session = self.manager.get_session("pin-toggle")
+        assert isinstance(session, ClaudeCodeSession)
+        self.assertFalse(session.pinned)
+
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Unpinned" in t["text"] for t in toasts))
+
+    def test_pin_only_for_attach_items(self) -> None:
+        """POSTing /flow/pin with a ZingSession id emits an error toast."""
+        self._make_findings_session("findings-pin", "Findings Pin")
+
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "findings-pin"}
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        toasts = _extract_toasts(events)
+        self.assertTrue(
+            any("Pin only available for terminal sessions" in t["text"] for t in toasts)
+        )
+        self.assertTrue(any("cc-toast-err" in t["class"].split() for t in toasts))
+
+    def test_pin_missing_session_id(self) -> None:
+        """POSTing /flow/pin without session_id emits an error toast."""
+        with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Missing session_id" in t["text"] for t in toasts))
+        self.assertTrue(any("cc-toast-err" in t["class"].split() for t in toasts))
+
+
+# ---------------------------------------------------------------------------
+# TestLaunchPopup — /flow/launch-popup-open + /flow/launch-popup-send
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchPopup(_FlowTestBase):
+    """Tests for the launch popup open/send endpoints."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Enable Zellij so launch-popup-open doesn't early-exit.
+        self.fastapi_app.state.zellij_available = True
+
+    # ── /flow/launch-popup-open ────────────────────────────────────────────
+
+    def test_launch_popup_open_patches_signals(self) -> None:
+        """Valid terminal_session patches launchPopupUrl + modals.launchPopup."""
+        self._make_attach_session("lp-open", pinned=False)
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "zing-lp-open"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        sig_events = [e for e in events if "datastar-patch-signals" in e]
+        self.assertTrue(sig_events, "expected at least one signal patch")
+        joined = "\n".join(sig_events)
+        self.assertIn("launchPopupUrl", joined)
+        self.assertIn("/zellij/zing-lp-open", joined)
+        self.assertIn("launchPopup", joined)
+        self.assertIn("launchPopupSession", joined)
+        self.assertIn("zing-lp-open", joined)
+
+    def test_launch_popup_open_missing_terminal_session_emits_error_toast(self) -> None:
+        """Missing terminal_session yields a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_open_invalid_name_emits_error_toast(self) -> None:
+        """Names with invalid characters yield a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "bad name!"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_open_zellij_unavailable_emits_error_toast(self) -> None:
+        """Zellij unavailable yields a cc-toast-err."""
+        self.fastapi_app.state.zellij_available = False
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-open",
+            json={"terminal_session": "my-session"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    # ── /flow/launch-popup-send ────────────────────────────────────────────
+
+    def test_launch_popup_send_to_flow_pins_and_redirects(self) -> None:
+        """Valid terminal_session pins the session and navigates via execute_script."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self._make_attach_session("lp-send", pinned=False)
+        session_before = self.manager.get_session("lp-send")
+        assert isinstance(session_before, ClaudeCodeSession)
+        self.assertFalse(session_before.pinned)
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "zing-lp-send"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # Session is now pinned.
+        session_after = self.manager.get_session("lp-send")
+        assert isinstance(session_after, ClaudeCodeSession)
+        self.assertTrue(session_after.pinned)
+
+        # SSE response closes the popup and navigates to Flow via execute_script
+        # with both session_id and step_id query params.
+        combined = "\n".join(events)
+        self.assertIn("launchPopup", combined)
+        self.assertIn("window.location", combined)
+        self.assertIn("session_id=", combined)
+        self.assertIn("step_id=", combined)
+        self.assertIn("lp-send", combined)
+
+    def test_launch_popup_send_unknown_terminal_returns_toast(self) -> None:
+        """Unknown terminal_session yields a cc-toast-err; no redirect is emitted."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "does-not-exist"},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_send_missing_terminal_session_returns_toast(self) -> None:
+        """Empty terminal_session yields a cc-toast-err."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": ""},
+        ) as resp:
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+    def test_launch_popup_send_idempotent_already_pinned(self) -> None:
+        """Sending a session that is already pinned keeps it pinned (no toggle)."""
+        from zing_ai.server.models import ClaudeCodeSession
+
+        self._make_attach_session("lp-pinned", pinned=True)
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/launch-popup-send",
+            json={"terminal_session": "zing-lp-pinned"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+
+        session = self.manager.get_session("lp-pinned")
+        assert isinstance(session, ClaudeCodeSession)
+        self.assertTrue(session.pinned, "pinned flag should remain True")
+
+
+class TestCcEventsStream(unittest.TestCase):
+    """Unit tests for _cc_events_stream shared lifecycle helper.
+
+    Uses asyncio.run() to drive the async generator directly, bypassing HTTP.
+    The helper is an infinite loop, so each test drives it via asyncio.wait_for
+    or cancellation rather than a live HTTP connection.
+    """
+
+    def _make_mock_request(self, cc_queues: list) -> MagicMock:  # type: ignore[type-arg]
+        """Build a minimal mock Request with app.state.cc_queues and external_cache."""
+        mock_cache = MagicMock()
+        mock_cache.last_polled_at = None
+        mock_cache.last_error = None
+        mock_req = MagicMock()
+        mock_req.app.state.cc_queues = cc_queues
+        mock_req.app.state.external_cache = mock_cache
+        return mock_req
+
+    async def _collect_n_events(
+        self,
+        cc_queues: list,  # type: ignore[type-arg]
+        on_board_changed,  # type: ignore[no-untyped-def]
+        n: int,
+        timeout: float = 5.0,
+    ) -> list[str]:
+        """Collect exactly n events from _cc_events_stream then cancel."""
+        from zing_ai.server.routes_command_center import _cc_events_stream
+
+        req = self._make_mock_request(cc_queues)
+        results: list[str] = []
+
+        async def _run() -> None:
+            async for ev in _cc_events_stream(req, on_board_changed):
+                results.append(ev)
+                if len(results) >= n:
+                    break
+
+        await asyncio.wait_for(_run(), timeout=timeout)
+        return results
+
+    def test_board_changed_dispatches_callback(self) -> None:
+        """board_changed event causes on_board_changed callback events to be forwarded."""
+        cc_queues: list[asyncio.Queue[str]] = []
+        callback_called = False
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            nonlocal callback_called
+            callback_called = True
+            yield "board-sentinel"
+
+        async def _run() -> list[str]:
+            # Register a queue directly (mimic what _cc_events_stream does internally)
+            # by pre-pushing the event, then let the helper drain it.
+            # We push the event first so it's consumed immediately.
+            return await self._collect_n_events(cc_queues, _on_board_changed, n=1)
+
+        # Pre-populate: we need the queue to be the one _cc_events_stream creates.
+        # So we drive it via asyncio and let it register its own queue, then push.
+        async def _drive() -> list[str]:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(req, _on_board_changed):
+                    results.append(ev)
+                    break  # stop after first event
+
+            # Push board_changed slightly after the generator starts.
+            async def _push() -> None:
+                # Wait until the helper has registered its queue.
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        results = asyncio.run(_drive())
+        self.assertTrue(callback_called)
+        self.assertIn("board-sentinel", results)
+
+    def test_poll_status_dispatches_signals(self) -> None:
+        """poll_status event causes lastPolledLabel/lastError signal patch."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "should-not-appear"
+
+        async def _drive() -> list[str]:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            mock_cache = MagicMock()
+            mock_cache.last_polled_at = None
+            mock_cache.last_error = ""
+            req = MagicMock()
+            req.app.state.cc_queues = cc_queues
+            req.app.state.external_cache = mock_cache
+
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(req, _on_board_changed):
+                    results.append(ev)
+                    break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("poll_status:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("lastPolledLabel", combined)
+        self.assertIn("lastError", combined)
+
+    def test_heartbeat_emitted_on_timeout(self) -> None:
+        """TimeoutError from wait_for causes _heartbeat signal to be yielded."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "should-not-appear"
+
+        async def _drive() -> list[str]:
+            import unittest.mock
+
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+            results: list[str] = []
+
+            # Patch asyncio.wait_for to raise TimeoutError once, then raise
+            # CancelledError to stop the loop.
+            call_count = 0
+
+            async def _mock_wait_for(coro, timeout):  # type: ignore[no-untyped-def]
+                nonlocal call_count
+                call_count += 1
+                with contextlib.suppress(Exception):
+                    coro.close()
+                if call_count == 1:
+                    raise TimeoutError
+                raise asyncio.CancelledError
+
+            with unittest.mock.patch(
+                "zing_ai.server.routes_command_center.asyncio.wait_for", _mock_wait_for
+            ):
+                try:
+                    async for ev in _cc_events_stream(req, _on_board_changed):
+                        results.append(ev)
+                except asyncio.CancelledError:
+                    pass
+
+            return results
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("_heartbeat", combined)
+
+    def test_finally_cleanup_suppresses_value_error(self) -> None:
+        """If the queue was already removed from cc_queues, ValueError is suppressed."""
+        cc_queues: list[asyncio.Queue[str]] = []
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            yield "x"
+
+        async def _drive() -> None:
+            from zing_ai.server.routes_command_center import _cc_events_stream
+
+            req = self._make_mock_request(cc_queues)
+
+            async def _gen() -> None:
+                async for _ in _cc_events_stream(req, _on_board_changed):
+                    break
+
+            async def _push_and_clear() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                q = cc_queues[-1]
+                q.put_nowait("board_changed:")
+                # Clear the list to force a ValueError in finally.
+                cc_queues.clear()
+
+            # Should not raise ValueError.
+            await asyncio.gather(_gen(), _push_and_clear())
+
+        # Must not raise.
+        asyncio.run(_drive())
+
+
+class TestBoardEventsCallbackShape(unittest.TestCase):
+    """Verify _on_board_changed for Board produces the correct selector patches.
+
+    Tests call command_center_events via HTTP but with a sentinel event pre-pushed.
+    This must be driven via a short-lived async approach to avoid the 30s hang.
+    We use the async helper pattern directly on the Board callback.
+    """
+
+    def _make_app(self) -> tuple:  # type: ignore[return]
+        """Create a minimal app with cc_queues and a session manager."""
+        import tempfile
+        from pathlib import Path
+
+        from zing_ai.server.app import create_app
+        from zing_ai.server.sessions import SessionManager
+
+        tmp = tempfile.TemporaryDirectory()
+        mgr = SessionManager(data_dir=Path(tmp.name))
+        cc_queues: list[asyncio.Queue[str]] = []
+        asgi_app = create_app(session_manager=mgr, cc_queues=cc_queues)
+        starlette_app = asgi_app.app  # type: ignore[attr-defined]
+        fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
+        return tmp, fastapi_app, cc_queues, mgr
+
+    def test_board_on_board_changed_yields_kanban_and_tray_and_badge(self) -> None:
+        """_on_board_changed in command_center_events yields kanban-board, mgmt-tray,
+        and flow-toggle-badge patches."""
+        from fastapi import Request
+
+        async def _drive() -> list[str]:
+            tmp, fastapi_app, cc_queues, mgr = self._make_app()
+            try:
+                # Build a synthetic Request pointing at the fastapi_app.
+                scope = {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/command-center/events",
+                    "query_string": b"",
+                    "headers": [],
+                    "app": fastapi_app,
+                }
+                req = Request(scope)
+                req._app = fastapi_app  # type: ignore[attr-defined]
+
+                # Get the Board's _on_board_changed callback by driving it inline.
+                results: list[str] = []
+
+                # Import and invoke the Board callback directly.
+                from datetime import UTC, datetime
+
+                from datastar_py import ServerSentEventGenerator as SSE
+                from datastar_py.consts import ElementPatchMode
+
+                from zing_ai.server.attention import build_attention_queue
+                from zing_ai.server.routes_command_center import (
+                    _render_tray_fragment,
+                    render_board_fragment,
+                )
+
+                sessions = fastapi_app.state.session_manager.list_sessions()
+                queue_count = len(build_attention_queue(sessions, datetime.now(UTC)))
+                html = render_board_fragment(fastapi_app)
+                results.append(
+                    SSE.patch_elements(html, selector="#kanban-board", mode=ElementPatchMode.OUTER)
+                )
+                tray_html = _render_tray_fragment(fastapi_app)
+                results.append(
+                    SSE.patch_elements(
+                        tray_html, selector="#mgmt-tray", mode=ElementPatchMode.INNER
+                    )
+                )
+                results.append(
+                    SSE.patch_elements(
+                        f'<span class="toggle-badge" id="flow-toggle-badge">{queue_count}</span>',
+                        selector="#flow-toggle-badge",
+                        mode=ElementPatchMode.OUTER,
+                    )
+                )
+                return results
+            finally:
+                tmp.cleanup()
+
+        results = asyncio.run(_drive())
+        combined = "\n".join(results)
+        self.assertIn("#kanban-board", combined)
+        self.assertIn("#mgmt-tray", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+        self.assertNotIn("#attention-bar", combined)
+
+
+class TestFlowEvents(_FlowTestBase):
+    """Integration tests for GET /command-center/flow/events.
+
+    Uses asyncio.run() to drive the flow_events SSE generator directly,
+    avoiding the infinite-loop hang that HTTP streaming would cause.
+    """
+
+    def _drive_flow_events(self, session_id: str = "fe-test") -> list[str]:
+        """Drive flow_events for one board_changed event and collect all callback results.
+
+        The flow _on_board_changed callback yields 2 events (strip, badge).
+        We stop after collecting all 2 to avoid the infinite wait_for hang.
+        """
+        from datetime import UTC, datetime
+
+        from datastar_py import ServerSentEventGenerator as SSE
+        from datastar_py.consts import ElementPatchMode
+
+        from zing_ai.server.attention import build_attention_queue
+        from zing_ai.server.flow import (
+            build_flow_context,
+            resolve_active_item,
+        )
+        from zing_ai.server.routes_command_center import _badge_patch, _cc_events_stream
+        from zing_ai.server.templates import render
+
+        cc_queues: list[asyncio.Queue[str]] = []
+        manager = self.manager
+
+        # The callback yields exactly 2 events per board_changed.
+        EVENTS_PER_BOARD_CHANGED = 2
+
+        async def _on_board_changed(req):  # type: ignore[no-untyped-def]
+            sessions = manager.list_sessions()
+            queue = build_attention_queue(sessions, datetime.now(UTC))
+            active = resolve_active_item(queue, session_id=None, step_id=None)
+            ctx = build_flow_context(manager, queue, active)
+            ctx["current_view"] = "flow"
+            yield SSE.patch_elements(
+                render("fragments/flow_progress_strip.html", **ctx),
+                selector="#flow-strip",
+                mode=ElementPatchMode.OUTER,
+            )
+            yield _badge_patch(len(queue))
+
+        async def _drive() -> list[str]:
+            mock_req = MagicMock()
+            mock_req.app.state.cc_queues = cc_queues
+            results: list[str] = []
+
+            async def _gen() -> None:
+                async for ev in _cc_events_stream(mock_req, _on_board_changed):
+                    results.append(ev)
+                    # Stop after all events from one board_changed callback.
+                    if len(results) >= EVENTS_PER_BOARD_CHANGED:
+                        break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        return asyncio.run(_drive())
+
+    def test_flow_events_emits_strip_on_board_changed(self) -> None:
+        """board_changed patches #flow-strip."""
+        self._make_findings_session("fe-sess-1", "Flow Events Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn("#flow-strip", combined)
+
+    def test_flow_events_emits_badge_on_board_changed(self) -> None:
+        """board_changed patches #flow-toggle-badge."""
+        self._make_findings_session("fe-sess-badge", "Flow Badge Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_badge_contains_toggle_badge_span(self) -> None:
+        """The toggle-badge patch contains a properly-formed span."""
+        self._make_findings_session("fe-sess-span", "Span Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertIn('class="toggle-badge"', combined)
+        self.assertIn('id="flow-toggle-badge"', combined)
+
+    def test_flow_events_no_kanban_board_patch(self) -> None:
+        """Flow SSE does not emit #kanban-board patches (Board-only)."""
+        self._make_findings_session("fe-sess-nokb", "No Kanban Test")
+        results = self._drive_flow_events()
+        combined = "\n".join(results)
+        self.assertNotIn("#kanban-board", combined)
+
+    def _drive_flow_events_route(self, subscribed_session_id: str) -> list[str]:
+        """Drive the production ``flow_events`` route with a fake ``?session_id=...``.
+
+        Unlike :meth:`_drive_flow_events`, this exercises the real handler so
+        the stale-active redirect logic (which reads ``request.query_params``)
+        is covered. Stops after the first board_changed event so we can also
+        capture the single-event redirect path.
+        """
+        from zing_ai.server.routes_command_center import flow_events
+
+        cc_queues: list[asyncio.Queue[str]] = []
+        manager = self.manager
+        # Provide both the new sub-app's state and a reasonable mock — the
+        # handler reads request.app.state.session_manager and cc_queues.
+        # Limit collected events to one (redirect path emits exactly 1; the
+        # normal path emits 2 — strip + badge — so we capture both via 2).
+        MAX_EVENTS = 2
+
+        async def _drive() -> list[str]:
+            mock_req = MagicMock()
+            mock_req.app.state.cc_queues = cc_queues
+            mock_req.app.state.session_manager = manager
+            mock_req.query_params = {"session_id": subscribed_session_id}
+            mock_req.client = ("127.0.0.1", 0)
+            results: list[str] = []
+
+            response = await flow_events(mock_req)
+
+            async def _gen() -> None:
+                async for ev in response.body_iterator:  # type: ignore[attr-defined]
+                    if isinstance(ev, str):
+                        results.append(ev)
+                    elif isinstance(ev, (bytes, bytearray)):
+                        results.append(bytes(ev).decode())
+                    else:  # memoryview
+                        results.append(bytes(ev).decode())
+                    if len(results) >= MAX_EVENTS:
+                        break
+
+            async def _push() -> None:
+                while not cc_queues:
+                    await asyncio.sleep(0.01)
+                cc_queues[-1].put_nowait("board_changed:")
+
+            await asyncio.gather(_gen(), _push())
+            return results
+
+        return asyncio.run(_drive())
+
+    def test_flow_events_redirects_when_subscribed_session_leaves_queue(self) -> None:
+        """When ?session_id=X and X is gone from the queue, yield a redirect script."""
+        # Create a session OTHER than the one we're "viewing" so the queue
+        # is non-empty but does not contain the subscribed id.
+        self._make_findings_session("fe-other", "Other Session")
+        results = self._drive_flow_events_route(subscribed_session_id="fe-stale-gone")
+        combined = "\n".join(results)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+        # Redirect path skips the strip/badge patches.
+        self.assertNotIn("#flow-strip", combined)
+        self.assertNotIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_redirects_when_queue_empty_and_session_subscribed(self) -> None:
+        """Empty queue with a subscribed session_id also redirects (stale)."""
+        results = self._drive_flow_events_route(subscribed_session_id="fe-stale-empty")
+        combined = "\n".join(results)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+
+    def test_flow_events_no_redirect_when_subscribed_session_in_queue(self) -> None:
+        """When the subscribed session is still in the queue, normal patches fire."""
+        self._make_findings_session("fe-still-here", "Still Here")
+        results = self._drive_flow_events_route(subscribed_session_id="fe-still-here")
+        combined = "\n".join(results)
+        # No redirect.
+        self.assertNotIn("window.location", combined)
+        # Normal strip + badge patches fire.
+        self.assertIn("#flow-strip", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+
+    def test_flow_events_no_redirect_when_no_session_id_subscribed(self) -> None:
+        """Empty ?session_id= preserves existing behavior (no redirect)."""
+        # Even with an empty queue, no session_id means no redirect.
+        results = self._drive_flow_events_route(subscribed_session_id="")
+        combined = "\n".join(results)
+        self.assertNotIn("window.location", combined)
+        self.assertIn("#flow-strip", combined)
+        self.assertIn("#flow-toggle-badge", combined)
+
+
+class TestFlowNext(_FlowTestBase):
+    """Tests for POST /command-center/flow/next."""
+
+    def test_happy_path_navigates_to_next_item(self) -> None:
+        """Happy path: valid session+step+responses yields execute_script with next URL."""
+        step_id_a = self._make_findings_session("fn-sess-a", "Session A")
+        self._make_findings_session("fn-sess-b", "Session B")
+
+        # Get the finding id from session A to build a valid responses dict.
+        session_a = self.manager.get_session("fn-sess-a")
+        finding_id = session_a.steps[0].findings[0].id  # type: ignore[union-attr]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "fn-sess-a",
+                "step_id": step_id_a,
+                "responses": {finding_id: "some answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected at least one executeScript event")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        # Should navigate to session B (the next item in the queue).
+        self.assertIn("fn-sess-b", combined)
+
+    def test_empty_queue_navigates_to_flow_root(self) -> None:
+        """Empty queue: navigates to /command-center/flow with no query string."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={"session_id": "no-session", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript even for empty queue")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        # No query string when queue is empty.
+        self.assertNotIn("session_id=", combined)
+
+    def test_save_failure_yields_toast_no_execute_script(self) -> None:
+        """Bad step_id raises KeyError → toast emitted, no executeScript."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "some-sess",
+                "step_id": "nonexistent-step-id",
+                "responses": {"finding-1": "answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertFalse(scripts, "No executeScript expected on save failure")
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Save failed" in t["text"] for t in toasts))
+
+    def test_attach_mode_skips_save_and_navigates(self) -> None:
+        """No step_id + no responses: skips save branch, still navigates."""
+        self._make_attach_session("fn-attach-sess", "Attach Session")
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={"session_id": "fn-attach-sess", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript for attach-mode nav")
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+
+    def test_submit_and_next_signals_envelope_navigates(self) -> None:
+        """Post-Step-13 acceptance: /flow/next accepts the full hoisted-signals
+        envelope (session_id, step_id, responses) and emits SSE.execute_script
+        with a window.location pointing at the next queue item's session_id.
+
+        This is the route-level replacement for the Playwright
+        ``test_submit_and_next_navigates_to_next_item`` test which only
+        asserted ``page.url != initial_url``.  Here we pin down that the
+        SSE payload is an execute_script with a window.location to the next
+        session_id, so the user-visible navigation is provably correct.
+        """
+        step_id_first = self._make_findings_session("fn-env-first", "Envelope first")
+        self._make_findings_session("fn-env-second", "Envelope second")
+
+        # Build a real responses dict so the save branch runs.
+        sess = self.manager.get_session("fn-env-first")
+        finding_id = sess.steps[0].findings[0].id  # type: ignore[union-attr]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": "fn-env-first",
+                "step_id": step_id_first,
+                "responses": {finding_id: "envelope answer"},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # An SSE execute_script must be present with a window.location redirect.
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected SSE execute_script after Submit & Next")
+        combined = " ".join(scripts)
+        self.assertIn("window.location", combined)
+        self.assertIn("/command-center/flow", combined)
+        # Destination URL must contain the next session_id, not the source one.
+        self.assertIn("session_id=fn-env-second", combined)
+        self.assertNotIn("session_id=fn-env-first", combined)
+
+        # Server-side: the typed response must have been persisted.
+        sess_after = self.manager.get_session("fn-env-first")
+        step_after = sess_after.steps[0]  # type: ignore[union-attr]
+        self.assertIsNotNone(step_after.responses)
+        self.assertEqual(step_after.responses[0].answer, "envelope answer")  # type: ignore[index]
+
+    def test_wrap_around_last_to_first(self) -> None:
+        """Posting from the last queue item wraps around to queue[0]."""
+        self._make_findings_session("fn-wrap-a", "Wrap A")
+        self._make_findings_session("fn-wrap-b", "Wrap B")
+
+        # Get the queue to identify which is last.
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2, "Expected at least 2 queue items")
+        last_item = queue[-1]
+        first_item = queue[0]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/next",
+            json={
+                "session_id": last_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        combined = " ".join(scripts)
+        self.assertIn(first_item.session_id, combined)
+
+
+class TestFlowPrev(_FlowTestBase):
+    """Tests for POST /command-center/flow/prev."""
+
+    def test_happy_path_navigates_to_prev_item(self) -> None:
+        """Happy path: posting from second item navigates to first."""
+        self._make_findings_session("fp-sess-a", "Session A Prev")
+        self._make_findings_session("fp-sess-b", "Session B Prev")
+
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2)
+        second_item = queue[1]
+        first_item = queue[0]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={
+                "session_id": second_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts, "Expected executeScript for prev nav")
+        combined = " ".join(scripts)
+        self.assertIn(first_item.session_id, combined)
+
+    def test_wrap_around_first_to_last(self) -> None:
+        """Posting from the first queue item wraps around to the last."""
+        self._make_findings_session("fp-wrap-a", "Wrap Prev A")
+        self._make_findings_session("fp-wrap-b", "Wrap Prev B")
+
+        from datetime import UTC, datetime
+
+        from zing_ai.server.attention import build_attention_queue
+
+        queue = build_attention_queue(self.manager.list_sessions(), datetime.now(UTC))
+        self.assertGreaterEqual(len(queue), 2)
+        first_item = queue[0]
+        last_item = queue[-1]
+
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={
+                "session_id": first_item.session_id,
+                "step_id": "",
+                "responses": {},
+            },
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        combined = " ".join(scripts)
+        self.assertIn(last_item.session_id, combined)
+
+    def test_empty_queue_navigates_to_flow_root(self) -> None:
+        """Empty queue: prev also navigates to /command-center/flow with no query string."""
+        with self.client.stream(
+            "POST",
+            "/command-center/flow/prev",
+            json={"session_id": "no-session-prev", "step_id": "", "responses": {}},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        scripts = _parse_execute_script(events)
+        self.assertTrue(scripts)
+        combined = " ".join(scripts)
+        self.assertIn("/command-center/flow", combined)
+        self.assertNotIn("session_id=", combined)

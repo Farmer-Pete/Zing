@@ -63,7 +63,9 @@ Single-line signature, `# noqa: ANN201/ANN202`, no `-> AsyncGenerator[...]` anno
 
 **Where to look up Datastar.** Claude's training data on Datastar is out of date — the v1 API differs materially from earlier versions. When writing or reviewing Datastar code, always look up current docs via Context7: `mcp__context7__resolve-library-id "datastar"`, then `mcp__context7__query-docs` with `/websites/data-star_dev`.
 
-**Canonical examples in this repo.** `templates/fragments/finding.html` (signals + bind + click + class binding + `@post`), `templates/fragments/config_field.html` (debounced `@post`), `routes_command_center.py:command_center_events` (mixing `patch_elements` + `patch_signals` in one stream), `sse_helpers.py` (helper-builder pattern), `cc-modals.js` (browser-API + named dispatch functions).
+**Canonical examples in this repo.** `templates/fragments/finding.html` (signals + bind + click + class binding + `@post`), `templates/fragments/config_field.html` (debounced `@post`), `routes_command_center.py:command_center_events` (mixing `patch_elements` + `patch_signals` in one stream), `sse_helpers.py` (helper-builder pattern), `cc-modals.js` (browser-API + named dispatch functions), `templates/fragments/flow_palette.html` (client-side fuzzy filter over a server-rendered list).
+
+**Client-side filter pattern.** When you need to filter a server-rendered list reactively without a round-trip (e.g. a search palette), define a pure JS helper on `window` and call it from `data-show`. The helper receives signal values as arguments and returns a boolean; Datastar re-evaluates on every signal change. Example: `data-show='window.flowPaletteMatch($paletteQuery, "item text")'` where `window.flowPaletteMatch` is a one-liner in a JS file. This keeps the filter logic out of templates while staying fully declarative. Do not reach for `fetch()` or `@get` for this — the data is already in the DOM.
 
 ## Testing philosophy
 
