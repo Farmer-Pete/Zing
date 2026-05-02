@@ -2945,7 +2945,9 @@ class TestFlowPin(_FlowTestBase):
         self._make_attach_session("pin-toggle", pinned=False)
 
         # First POST — should pin.
-        with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "pin-toggle"}
+        ) as resp:
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
@@ -2958,7 +2960,9 @@ class TestFlowPin(_FlowTestBase):
         self.assertTrue(any("cc-toast-ok" in t["class"].split() for t in toasts))
 
         # Second POST — should unpin.
-        with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "pin-toggle"}
+        ) as resp:
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
@@ -2970,10 +2974,12 @@ class TestFlowPin(_FlowTestBase):
         self.assertTrue(any("Unpinned" in t["text"] for t in toasts))
 
     def test_pin_only_for_attach_items(self) -> None:
-        """POSTing /flow/pin while topmost item is a findings step emits an error toast."""
+        """POSTing /flow/pin with a ZingSession id emits an error toast."""
         self._make_findings_session("findings-pin", "Findings Pin")
 
-        with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
+        with self.client.stream(
+            "POST", "/command-center/flow/pin", json={"session_id": "findings-pin"}
+        ) as resp:
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
@@ -2981,6 +2987,16 @@ class TestFlowPin(_FlowTestBase):
         self.assertTrue(
             any("Pin only available for terminal sessions" in t["text"] for t in toasts)
         )
+        self.assertTrue(any("cc-toast-err" in t["class"].split() for t in toasts))
+
+    def test_pin_missing_session_id(self) -> None:
+        """POSTing /flow/pin without session_id emits an error toast."""
+        with self.client.stream("POST", "/command-center/flow/pin", json={}) as resp:
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        toasts = _extract_toasts(events)
+        self.assertTrue(any("Missing session_id" in t["text"] for t in toasts))
         self.assertTrue(any("cc-toast-err" in t["class"].split() for t in toasts))
 
 

@@ -1156,28 +1156,26 @@ def _parse_question_payload(raw: object) -> tuple[str, QuestionData | None]:
 
 @router.post("/command-center/flow/pin")
 @datastar_response
-async def post_flow_pin(request: Request):  # noqa: ANN201
+async def post_flow_pin(payload: dict[str, Any], request: Request):  # noqa: ANN201
     async def _stream():  # noqa: ANN202
         manager = request.app.state.session_manager
-        sessions = manager.list_sessions()
-        queue = build_attention_queue(sessions, datetime.now(UTC))
-        active = resolve_active_item(queue, session_id=None, step_id=None)
-        if active is None or active.action_type != "attach":
-            yield _sse_toast("Pin only available for terminal sessions", "err")
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            yield _sse_toast("Missing session_id", "err")
             return
-        session = manager.get_session(active.session_id)
+        session = manager.get_session(session_id)
         if not isinstance(session, ClaudeCodeSession):
-            yield _sse_toast("Session not found", "err")
+            yield _sse_toast("Pin only available for terminal sessions", "err")
             return
         new_pinned = not session.pinned
         try:
-            manager.set_pinned(active.session_id, new_pinned)
+            manager.set_pinned(session_id, new_pinned)
         except (KeyError, ValueError) as exc:
             yield _sse_toast(str(exc), "err")
             return
         # Re-fetch queue to reflect new pin state
         queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
-        active = resolve_active_item(queue, session_id=None, step_id=None)
+        active = resolve_active_item(queue, session_id=session_id, step_id=None)
         ctx = build_flow_context(manager, queue, active)
         yield SSE.patch_elements(
             render("fragments/flow_progress_strip.html", **ctx),
