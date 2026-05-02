@@ -15,7 +15,12 @@
        "paletteOpen": false,
        "paletteQuery": ""
      }'
-     data-on:keydown__window="evt.key === 'Escape' ? ($paletteOpen = false) : evt.metaKey && evt.key === 'j' && !evt.shiftKey ? @post('/command-center/flow/advance', {payload: {direction: 'next'}}) : evt.metaKey && evt.key === 'j' && evt.shiftKey ? @post('/command-center/flow/advance', {payload: {direction: 'prev'}}) : evt.metaKey && evt.key === 'k' ? ($paletteOpen = !$paletteOpen) : evt.metaKey && evt.key === 'b' ? (window.location = '/command-center') : evt.metaKey && evt.key === 'p' ? @post('/command-center/flow/pin') : void 0"
+     data-on:keydown__window="evt.key === 'Escape' && ($paletteOpen = false)"
+     data-on:keydown__window="evt.metaKey && evt.key === 'j' && !evt.shiftKey && (@post('/command-center/flow/next', {payload: {session_id: $activeSessionId, step_id: $step_id, responses: $responses}}), evt.preventDefault())"
+     data-on:keydown__window="evt.metaKey && evt.shiftKey && evt.key === 'J' && (@post('/command-center/flow/prev', {payload: {session_id: $activeSessionId}}), evt.preventDefault())"
+     data-on:keydown__window="evt.metaKey && evt.key === 'k' && ($paletteOpen = !$paletteOpen, evt.preventDefault())"
+     data-on:keydown__window="evt.metaKey && evt.key === 'b' && (window.location = '/command-center')"
+     data-on:keydown__window="evt.metaKey && evt.key === 'p' && (@post('/command-center/flow/pin', {payload: {session_id: $activeSessionId}}), evt.preventDefault())"
      data-init="@get('/command-center/flow/events', {filterSignals: {include: /^$/}})">
   {% include 'fragments/flow_progress_strip.html' %}
   <main id="flow-body" class="flow-body">
