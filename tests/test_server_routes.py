@@ -3075,7 +3075,7 @@ class TestLaunchPopup(_FlowTestBase):
     # ── /flow/launch-popup-send ────────────────────────────────────────────
 
     def test_launch_popup_send_to_flow_pins_and_redirects(self) -> None:
-        """Valid terminal_session pins the session and redirects to /command-center/flow."""
+        """Valid terminal_session pins the session and navigates via execute_script."""
         from zing_ai.server.models import ClaudeCodeSession
 
         self._make_attach_session("lp-send", pinned=False)
@@ -3096,10 +3096,13 @@ class TestLaunchPopup(_FlowTestBase):
         assert isinstance(session_after, ClaudeCodeSession)
         self.assertTrue(session_after.pinned)
 
-        # SSE response closes the popup and redirects to Flow with session_id.
+        # SSE response closes the popup and navigates to Flow via execute_script
+        # with both session_id and step_id query params.
         combined = "\n".join(events)
         self.assertIn("launchPopup", combined)
-        self.assertIn("/command-center/flow", combined)
+        self.assertIn("window.location", combined)
+        self.assertIn("session_id=", combined)
+        self.assertIn("step_id=", combined)
         self.assertIn("lp-send", combined)
 
     def test_launch_popup_send_unknown_terminal_returns_toast(self) -> None:

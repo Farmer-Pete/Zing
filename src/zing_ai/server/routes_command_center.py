@@ -1247,6 +1247,9 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
             return
         manager.set_pinned(match.session_id, True)
         yield SSE.patch_signals({"modals": {"launchPopup": False}})
-        yield SSE.redirect(f"/command-center/flow?session_id={match.session_id}")
+        sid = match.session_id
+        yield SSE.execute_script(
+            f"window.location = '/command-center/flow?session_id={sid}&step_id={sid}'"
+        )
 
     return _stream()
