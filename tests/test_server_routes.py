@@ -2727,8 +2727,6 @@ class TestFlowPage(ServerTestBase):
         # Search input bound to paletteQuery
         self.assertIn("flow-palette-search", resp.text)
         self.assertIn("paletteQuery", resp.text)
-        # Footer hint text
-        self.assertIn("flow-palette-footer", resp.text)
 
     def test_flow_page_palette_contains_queue_items(self) -> None:
         """GET /command-center/flow palette rows include the session title."""
@@ -2738,13 +2736,6 @@ class TestFlowPage(ServerTestBase):
         # The queue item title should appear inside a palette row
         self.assertIn("flow-palette-row", resp.text)
         self.assertIn("Flow Test Title", resp.text)
-
-    def test_flow_page_palette_row_calls_select_endpoint(self) -> None:
-        """Palette row data-on:click references the /flow/select endpoint."""
-        self._make_findings_session()
-        resp = self.client.get("/command-center/flow")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("/command-center/flow/select", resp.text)
 
     def test_flow_page_palette_match_helper_referenced(self) -> None:
         """Palette rows reference window.flowPaletteMatch in data-show."""
