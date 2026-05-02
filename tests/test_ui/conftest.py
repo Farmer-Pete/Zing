@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
 from zing_ai.server.app import create_app
 from zing_ai.server.external_cache import ExternalCache
@@ -46,13 +47,17 @@ def ui_server() -> Generator[_ServerInfo]:
     manager = SessionManager(data_dir=data_dir)
     external_cache = ExternalCache()
     cc_queues: list[asyncio.Queue[str]] = []
+    # Fresh FastMCP instance — keeps the module-level singleton's
+    # StreamableHTTPSessionManager (which can only be .run() once per process)
+    # available for any test that needs the production-equivalent path.
+    mcp_for_test = FastMCP("Zing UI Test", stateless_http=True)
     app = create_app(
         session_manager=manager,
         external_cache=external_cache,
         cc_queues=cc_queues,
         disable_polling=True,
         zellij_support=False,
-        disable_mcp_session=True,
+        mcp_server_instance=mcp_for_test,
     )
 
     # Navigate the ASGI middleware chain to the inner FastAPI app so tests can

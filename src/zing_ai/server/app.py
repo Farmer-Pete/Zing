@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -238,7 +239,7 @@ def create_app(
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
     zellij_support: bool | None = None,
-    disable_mcp_session: bool = False,
+    mcp_server_instance: FastMCP | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
 
@@ -252,8 +253,13 @@ def create_app(
         cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
         zellij_support: Override for Zellij web server startup. If None (default), reads
             ``command_center.zellij_support`` from config. Pass True/False to force.
+        mcp_server_instance: Optional FastMCP instance. Defaults to the module-level singleton
+            (loaded with all registered tools). Tests that call ``create_app`` more than once
+            per process must pass a fresh ``FastMCP(...)`` instance because each
+            ``StreamableHTTPSessionManager`` can only be ``.run()`` once.
     """
     sm = session_manager or SessionManager()
+    mcp = mcp_server_instance if mcp_server_instance is not None else mcp_server
 
     # Initialise cc_queues up-front so the session-event listener can close
     # over it. We also assign it to fastapi_app.state below for the SSE route
@@ -374,14 +380,7 @@ def create_app(
             fastapi_app.state.live_sessions = set()
 
         try:
-            if disable_mcp_session:
-                # Tests that don't exercise the MCP HTTP path opt out so the
-                # FastMCP module-level singleton's StreamableHTTPSessionManager
-                # (which can only be .run() once per process) stays available
-                # for tests that DO need it.
-                yield
-                return
-            async with mcp_server.session_manager.run():
+            async with mcp.session_manager.run():
                 yield
         finally:
             if poller_task is not None:
@@ -400,7 +399,7 @@ def create_app(
                 with contextlib.suppress(FileNotFoundError, OSError):
                     subprocess.run(["zellij", "web", "--stop"], check=False)
 
-    mcp_starlette = mcp_server.streamable_http_app()
+    mcp_starlette = mcp.streamable_http_app()
 
     external_cache = external_cache or ExternalCache()
 
