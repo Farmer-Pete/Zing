@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from zing_ai.server.attention import AttentionItem
@@ -69,22 +70,6 @@ def advance_cursor(
     return FlowCursor(session_id=new_item.session_id, step_id=new_item.step_id)
 
 
-def auto_dismiss_unpinned(
-    queue: list[AttentionItem], leaving_item: AttentionItem
-) -> list[AttentionItem]:
-    """Return the queue with ``leaving_item`` removed iff it is auto-dismissible.
-
-    Findings/questions items always have ``auto_dismiss=False`` by construction
-    so they are never dropped. Only unpinned attach items are removed.
-
-    This is a **pure function**: it does not call
-    ``mark_pending_question_answered`` or any other persistence path.
-    """
-    if leaving_item.auto_dismiss:
-        return [item for item in queue if item is not leaving_item]
-    return list(queue)
-
-
 # ---------------------------------------------------------------------------
 # Fragment dispatch
 # ---------------------------------------------------------------------------
@@ -125,7 +110,12 @@ def build_flow_context(
       action types only; empty list otherwise)
     - ``initial_responses`` — ``{finding_id: str}`` dict mirroring
       ``build_drawer_context``'s ``saved_responses`` shape
+    - ``recent_items`` — set of session_ids for items created within the last 3s
     """
+    now = datetime.now(UTC)
+    recent_items: set[str] = {
+        i.session_id for i in queue if (now - i.created_at).total_seconds() < 3.0
+    }
     queue_count = len(queue)
     active_position = (queue.index(active) + 1) if active and active in queue else 0
 
@@ -203,4 +193,5 @@ def build_flow_context(
         "active_findings": active_findings,
         "initial_responses": initial_responses,
         "next_ticket_id": next_ticket_id,
+        "recent_items": recent_items,
     }

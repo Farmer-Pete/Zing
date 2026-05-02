@@ -46,7 +46,6 @@ from zing_ai.server.flow import (
     FlowCursor,
     _body_fragment_for,
     advance_cursor,
-    auto_dismiss_unpinned,
     build_flow_context,
     resolve_active_item,
 )
@@ -1172,14 +1171,11 @@ async def post_flow_advance(payload: dict[str, Any], request: Request):  # noqa:
         sessions = manager.list_sessions()
         queue = build_attention_queue(sessions, datetime.now(UTC))
         cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
-        prev_active = resolve_active_item(queue, cursor)
         direction = payload.get("direction", "next")
-        # Auto-dismiss the leaving item if it's an unpinned attach.
-        filtered_queue = auto_dismiss_unpinned(queue, prev_active) if prev_active else queue
-        new_cursor = advance_cursor(filtered_queue, cursor, direction)
+        new_cursor = advance_cursor(queue, cursor, direction)
         request.app.state.flow_cursor = new_cursor
-        new_active = resolve_active_item(filtered_queue, new_cursor)
-        ctx = build_flow_context(manager, filtered_queue, new_active)
+        new_active = resolve_active_item(queue, new_cursor)
+        ctx = build_flow_context(manager, queue, new_active)
         yield SSE.patch_elements(
             render("fragments/flow_progress_strip.html", **ctx),
             selector="#flow-strip",

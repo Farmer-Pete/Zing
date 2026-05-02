@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from zing_ai.server.attention import AttentionItem
 from zing_ai.server.flow import (
     FlowCursor,
     _body_fragment_for,
     advance_cursor,
-    auto_dismiss_unpinned,
     build_flow_context,
     resolve_active_item,
 )
@@ -28,7 +27,6 @@ def _make_item(
     action_type: str = "findings",
     session_id: str = "sess-1",
     step_id: str | None = "step-1",
-    auto_dismiss: bool = False,
     created_at: datetime | None = None,
 ) -> AttentionItem:
     return AttentionItem(
@@ -41,7 +39,6 @@ def _make_item(
         finding_count=1,
         wait_seconds=60,
         card_key=session_id,
-        auto_dismiss=auto_dismiss,
         step_id=step_id,
         created_at=created_at or datetime.now(UTC),
     )
@@ -161,45 +158,6 @@ class TestAdvanceCursor(unittest.TestCase):
     def test_empty_queue_returns_empty_cursor(self) -> None:
         result = advance_cursor([], FlowCursor(), "next")
         self.assertEqual(result, FlowCursor())
-
-
-# ---------------------------------------------------------------------------
-# auto_dismiss_unpinned
-# ---------------------------------------------------------------------------
-
-
-class TestAutoDismissUnpinned(unittest.TestCase):
-    """auto_dismiss_unpinned filters correctly and never calls answered."""
-
-    def test_unpinned_attach_is_dropped(self) -> None:
-        attach = _make_item(action_type="attach", session_id="cc-1", auto_dismiss=True)
-        other = _make_item(action_type="findings", session_id="sess-2")
-        result = auto_dismiss_unpinned([attach, other], attach)
-        self.assertNotIn(attach, result)
-        self.assertIn(other, result)
-
-    def test_pinned_attach_stays(self) -> None:
-        attach = _make_item(action_type="attach", session_id="cc-1", auto_dismiss=False)
-        result = auto_dismiss_unpinned([attach], attach)
-        self.assertIn(attach, result)
-
-    def test_findings_never_dropped(self) -> None:
-        item = _make_item(action_type="findings", auto_dismiss=False)
-        result = auto_dismiss_unpinned([item], item)
-        self.assertIn(item, result)
-
-    def test_questions_never_dropped(self) -> None:
-        item = _make_item(action_type="questions", auto_dismiss=False)
-        result = auto_dismiss_unpinned([item], item)
-        self.assertIn(item, result)
-
-    def test_does_not_call_mark_pending_question_answered(self) -> None:
-        """auto_dismiss_unpinned must not touch any persistence path."""
-        attach = _make_item(action_type="attach", auto_dismiss=True)
-        with patch("zing_ai.server.flow.SessionManager", create=True) as mock_cls:
-            # Importing flow should not trigger any SessionManager method.
-            auto_dismiss_unpinned([attach], attach)
-            mock_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +301,6 @@ class TestBuildFlowContext(unittest.TestCase):
             finding_count=1,
             wait_seconds=0,
             card_key="sess-a",
-            auto_dismiss=False,
             step_id="st-a",
             created_at=datetime.now(UTC),
         )
@@ -357,7 +314,6 @@ class TestBuildFlowContext(unittest.TestCase):
             finding_count=1,
             wait_seconds=0,
             card_key="sess-b",
-            auto_dismiss=False,
             step_id="st-b",
             created_at=datetime.now(UTC),
         )
@@ -381,7 +337,6 @@ class TestBuildFlowContext(unittest.TestCase):
             finding_count=1,
             wait_seconds=0,
             card_key="sess-x",
-            auto_dismiss=False,
             step_id="st-x",
             created_at=datetime.now(UTC),
         )
@@ -405,7 +360,6 @@ class TestBuildFlowContext(unittest.TestCase):
             finding_count=1,
             wait_seconds=0,
             card_key="sess-a2",
-            auto_dismiss=False,
             step_id="st-a2",
             created_at=datetime.now(UTC),
         )
@@ -419,7 +373,6 @@ class TestBuildFlowContext(unittest.TestCase):
             finding_count=1,
             wait_seconds=0,
             card_key="sess-b2",
-            auto_dismiss=False,
             step_id="st-b2",
             created_at=datetime.now(UTC),
         )
