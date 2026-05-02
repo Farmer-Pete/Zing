@@ -45,7 +45,6 @@ from zing_ai.server.command_center import (
 from zing_ai.server.flow import (
     FlowCursor,
     _body_fragment_for,
-    advance_cursor,
     build_flow_context,
     resolve_active_item,
 )
@@ -1161,62 +1160,6 @@ def _parse_question_payload(raw: object) -> tuple[str, QuestionData | None]:
         multi_select=bool(raw.get("multiSelect")),
         options=options,
     )
-
-
-@router.post("/command-center/flow/advance")
-@datastar_response
-async def post_flow_advance(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        sessions = manager.list_sessions()
-        queue = build_attention_queue(sessions, datetime.now(UTC))
-        cursor = getattr(request.app.state, "flow_cursor", FlowCursor())
-        direction = payload.get("direction", "next")
-        new_cursor = advance_cursor(queue, cursor, direction)
-        request.app.state.flow_cursor = new_cursor
-        new_active = resolve_active_item(queue, new_cursor)
-        ctx = build_flow_context(manager, queue, new_active)
-        yield SSE.patch_elements(
-            render("fragments/flow_progress_strip.html", **ctx),
-            selector="#flow-strip",
-            mode=ElementPatchMode.OUTER,
-        )
-        yield SSE.patch_elements(
-            render(_body_fragment_for(new_active), **ctx),
-            selector="#flow-body",
-            mode=ElementPatchMode.INNER,
-        )
-
-    return _stream()
-
-
-@router.post("/command-center/flow/select")
-@datastar_response
-async def post_flow_select(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    async def _stream():  # noqa: ANN202
-        manager = request.app.state.session_manager
-        sessions = manager.list_sessions()
-        queue = build_attention_queue(sessions, datetime.now(UTC))
-        session_id = str(payload.get("session_id") or "")
-        step_id = payload.get("step_id") or None
-        if isinstance(step_id, str) and step_id == "":
-            step_id = None
-        request.app.state.flow_cursor = FlowCursor(session_id=session_id, step_id=step_id)
-        cursor = request.app.state.flow_cursor
-        active = resolve_active_item(queue, cursor)
-        ctx = build_flow_context(manager, queue, active)
-        yield SSE.patch_elements(
-            render("fragments/flow_progress_strip.html", **ctx),
-            selector="#flow-strip",
-            mode=ElementPatchMode.OUTER,
-        )
-        yield SSE.patch_elements(
-            render(_body_fragment_for(active), **ctx),
-            selector="#flow-body",
-            mode=ElementPatchMode.INNER,
-        )
-
-    return _stream()
 
 
 @router.post("/command-center/flow/pin")
