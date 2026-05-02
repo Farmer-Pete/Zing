@@ -903,6 +903,13 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-color: var(--orange);
 }
 
+.flow-strip-dot.dot-parked {
+    /* Pinned attach items with no pending question — visible but quiet. */
+    background: var(--cc-text-tertiary, #555);
+    border-color: var(--cc-text-tertiary, #555);
+    opacity: 0.6;
+}
+
 /* Dormant: .dot-pulse is no longer emitted by flow_progress_strip.html.
    Kept here harmlessly in case we re-introduce a "newly arrived" affordance later. */
 @keyframes flow-strip-dot-pulse {
@@ -1617,6 +1624,9 @@ a.strip-ci-dot[href] { cursor: pointer; }
     cursor: pointer;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     transition: background 0.1s ease;
+    /* Anchor element resets — was a <div> before Step 15. */
+    color: inherit;
+    text-decoration: none;
 }
 
 .flow-palette-row:hover {
