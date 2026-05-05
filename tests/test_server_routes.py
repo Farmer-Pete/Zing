@@ -1830,6 +1830,81 @@ class TestLaunchBackground(unittest.TestCase):
             any("/zing:" in a for a in exec_args),
             f"exec_or_detach got args containing /zing: — got {exec_args!r}",
         )
+        # The tmux session name carries the -shell suffix so an existing
+        # zing-pr-88 (from a prior /zing:plan etc.) cannot be reattached
+        # to instead of starting a fresh interactive session.
+        self.assertEqual(
+            mock_exec.call_args.kwargs.get("tmux_session"),
+            "zing-pr-88-shell",
+        )
+
+    def test_launch_background_interactive_does_not_attach_to_existing_skill_session(
+        self,
+    ) -> None:
+        """Open Claude must spawn fresh even if zing-pr-88 (skill session) is alive.
+
+        The route's "already running" branch keys on the *suffix-aware* tmux
+        session name. An existing ``zing-pr-88`` running ``/zing:plan`` lives
+        under a different name than ``zing-pr-88-shell``, so clicking
+        Open Claude builds a worktree and exec_or_detaches a new tmux session.
+        """
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from zing_ai.config import Config, GitConfig
+
+        self._set_kanban_card("BAK-78", "acme/repo", "feature/bak-78", 99)
+
+        # Pre-seed a live skill-based session for the same ticket/PR.
+        self.fastapi_app.state.live_sessions = {"zing-pr-99"}
+
+        config = Config(git=GitConfig(code_dir="/tmp/code"))
+        repo_path = Path("/tmp/code/repo")
+        worktree_path = Path("/tmp/code/repo-feature-bak-78")
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.find_repo_path",
+                return_value=repo_path,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.checkout_pr_branch",
+                return_value=worktree_path,
+            ),
+            patch("zing_ai.server.routes_command_center.create_session_on_server"),
+            patch(
+                "zing_ai.server.routes_command_center.build_claude_args",
+                return_value=["claude", "--session-id", "sid", "--name", "n"],
+            ),
+            patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
+            self.client.stream(
+                "POST",
+                "/command-center/launch-background",
+                json={"card_key": "BAK-78", "skill": "interactive", "pr_number": 99},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+
+        # Fresh launch happened — exec_or_detach was called with the -shell name.
+        mock_exec.assert_called_once()
+        self.assertEqual(
+            mock_exec.call_args.kwargs.get("tmux_session"),
+            "zing-pr-99-shell",
+        )
+        # And the success toast fired (not the "already running" info toast).
+        self.assertTrue(
+            any("cc-toast-ok" in e and "Launched" in e for e in events),
+            f"Expected fresh-launch success toast in events: {events}",
+        )
+        self.assertFalse(
+            any("already running" in e for e in events),
+            f"Did not expect 'already running' toast — got {events}",
+        )
 
     def test_launch_background_no_rollback_on_error(self) -> None:
         """When exec_or_detach raises, the worktree is left intact (next attempt will reuse it)."""

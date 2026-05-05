@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 from zing_ai.launch import (
     LaunchError,
     build_claude_args,
+    build_tmux_session_name,
     checkout_pr_branch,
     create_session_on_server,
     create_worktree,
@@ -674,6 +675,50 @@ class TestBuildClaudeArgs(TestCase):
                 "build session",
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# build_tmux_session_name
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTmuxSessionName(TestCase):
+    """Tests for the deterministic tmux session name builder."""
+
+    def test_ticket_id_lowercased(self) -> None:
+        self.assertEqual(build_tmux_session_name("BAK-7"), "zing-bak-7")
+
+    def test_pr_number_overrides_target(self) -> None:
+        self.assertEqual(build_tmux_session_name("anything", pr_number=88), "zing-pr-88")
+
+    def test_arbitrary_target_sanitised(self) -> None:
+        self.assertEqual(build_tmux_session_name("my plan!"), "zing-my_plan_")
+
+    def test_interactive_skill_appends_shell_suffix_for_ticket(self) -> None:
+        """skill='interactive' on a ticket yields a -shell-suffixed name.
+
+        Without the suffix, "Open Claude" would attach to whatever skill
+        session was started for the ticket first (e.g. /zing:plan), defeating
+        the user's request for a fresh prompt-less Claude.
+        """
+        self.assertEqual(
+            build_tmux_session_name("BAK-7", skill="interactive"),
+            "zing-bak-7-shell",
+        )
+
+    def test_interactive_skill_appends_shell_suffix_for_pr(self) -> None:
+        self.assertEqual(
+            build_tmux_session_name("anything", pr_number=88, skill="interactive"),
+            "zing-pr-88-shell",
+        )
+
+    def test_non_interactive_skills_get_no_suffix(self) -> None:
+        for skill in ("new", "plan", "pr-audit", "build", None):
+            with self.subTest(skill=skill):
+                self.assertEqual(
+                    build_tmux_session_name("BAK-7", skill=skill),
+                    "zing-bak-7",
+                )
 
 
 # ---------------------------------------------------------------------------

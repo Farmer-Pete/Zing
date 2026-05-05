@@ -900,24 +900,36 @@ def _sanitize_tmux_name(name: str) -> str:
     return _TMUX_UNSAFE_RE.sub("_", name)
 
 
-def build_tmux_session_name(target: str, pr_number: int | None = None) -> str:
+def build_tmux_session_name(
+    target: str,
+    pr_number: int | None = None,
+    skill: str | None = None,
+) -> str:
     """Build a tmux session name for a launch target.
 
     The ``zing-`` prefix is what the live-session poller filters on; renaming
     it would orphan in-flight sessions on the user's machine.
 
+    The ``interactive`` skill gets a ``-shell`` suffix so its tmux session
+    lives alongside (rather than collides with) skill-based sessions for the
+    same target. Without this, clicking "Open Claude" on a card that already
+    has a ``/zing:plan`` (or similar) session running would attach to that
+    existing session instead of starting a fresh prompt-less Claude.
+
     Args:
         target: Ticket ID, branch name, or other identifier for the session.
         pr_number: If provided, overrides ``target`` and produces a PR-based name.
+        skill: Skill name. ``"interactive"`` triggers the ``-shell`` suffix.
 
     Returns:
         A tmux-safe session name string.
     """
+    suffix = "-shell" if skill == "interactive" else ""
     if pr_number is not None:
-        return f"zing-pr-{pr_number}"
+        return f"zing-pr-{pr_number}{suffix}"
     if re.fullmatch(TICKET_ID_PATTERN, target):
-        return f"zing-{target.lower()}"
-    return f"zing-{_sanitize_tmux_name(target)}"
+        return f"zing-{target.lower()}{suffix}"
+    return f"zing-{_sanitize_tmux_name(target)}{suffix}"
 
 
 def require_tmux() -> None:
