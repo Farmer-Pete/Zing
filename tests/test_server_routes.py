@@ -1758,6 +1758,79 @@ class TestLaunchBackground(unittest.TestCase):
         # inspecting mock_exec was called (success path reached).
         self.assertTrue(mock_exec.called)
 
+    def test_launch_background_interactive_skill_omits_slash_command(self) -> None:
+        """skill='interactive' threads through to a bare claude argv (no /zing:...).
+
+        Regression: the kebab "Open Claude" action posts ``skill: 'interactive'``;
+        the route must pass that through unchanged so build_claude_args produces
+        ``["claude", "--session-id", ...]`` rather than ``["claude", "/zing:new ..."]``.
+        Mocks build_claude_args lightly so we can assert what skill the route hands it.
+        """
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from zing_ai.config import Config, GitConfig
+
+        self._set_kanban_card("BAK-77", "acme/repo", "feature/bak-77", 88)
+
+        config = Config(git=GitConfig(code_dir="/tmp/code"))
+        repo_path = Path("/tmp/code/repo")
+        worktree_path = Path("/tmp/code/repo-feature-bak-77")
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.load_config",
+                return_value=config,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.find_repo_path",
+                return_value=repo_path,
+            ),
+            patch(
+                "zing_ai.server.routes_command_center.checkout_pr_branch",
+                return_value=worktree_path,
+            ),
+            patch("zing_ai.server.routes_command_center.create_session_on_server") as mock_create,
+            patch(
+                "zing_ai.server.routes_command_center.build_claude_args",
+                return_value=["claude", "--session-id", "sid", "--name", "n"],
+            ) as mock_build_args,
+            patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
+            self.client.stream(
+                "POST",
+                "/command-center/launch-background",
+                json={"card_key": "BAK-77", "skill": "interactive", "pr_number": 88},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            _parse_sse(resp)
+
+        # The route must hand build_claude_args skill='interactive' (not 'pr-audit').
+        mock_build_args.assert_called_once()
+        called_skill = mock_build_args.call_args.args[0]
+        self.assertEqual(
+            called_skill,
+            "interactive",
+            f"Route overrode skill — got {called_skill!r}, expected 'interactive'",
+        )
+
+        # The session record persists skill='interactive' so resume/UI display agree.
+        # skill is passed positionally (6th arg) by the route.
+        mock_create.assert_called_once()
+        create_args = mock_create.call_args.args
+        self.assertEqual(
+            create_args[5] if len(create_args) > 5 else mock_create.call_args.kwargs.get("skill"),
+            "interactive",
+        )
+
+        # exec_or_detach was handed a bare argv — no /zing: anywhere.
+        mock_exec.assert_called_once()
+        exec_args = mock_exec.call_args.args[0]
+        self.assertFalse(
+            any("/zing:" in a for a in exec_args),
+            f"exec_or_detach got args containing /zing: — got {exec_args!r}",
+        )
+
     def test_launch_background_no_rollback_on_error(self) -> None:
         """When exec_or_detach raises, the worktree is left intact (next attempt will reuse it)."""
         from pathlib import Path
