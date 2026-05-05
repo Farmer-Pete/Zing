@@ -139,14 +139,29 @@ def touch_ttyd(app: FastAPI, tmux_session: str) -> bool:
     reaped. Returns ``True`` when the timestamp was bumped, ``False`` when
     the entry is missing or the process has died — heartbeats deliberately
     do not resurrect dead ttyds; that's the refresh endpoint's job.
+
+    A missed touch (registry key mismatch or dead process) is logged at
+    INFO so a "Press Enter to Reconnect" report can be diagnosed by
+    checking whether heartbeats are landing on the right entry.
     """
     procs = getattr(app.state, "ttyd_procs", None)
     if not procs:
+        logger.info("ttyd_touch_missed session=%s reason=no_registry", tmux_session)
         return False
     entry = procs.get(tmux_session)
     if entry is None:
+        logger.info(
+            "ttyd_touch_missed session=%s reason=key_not_in_registry known=%s",
+            tmux_session,
+            sorted(procs.keys()),
+        )
         return False
     if entry.proc.poll() is not None:
+        logger.info(
+            "ttyd_touch_missed session=%s reason=proc_dead exit_code=%s",
+            tmux_session,
+            entry.proc.returncode,
+        )
         return False
     entry.last_used_at = time.monotonic()
     return True

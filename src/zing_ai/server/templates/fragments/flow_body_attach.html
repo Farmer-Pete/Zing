@@ -12,8 +12,8 @@
 {% set _ttyd_session = tmux_session if tmux_session is defined else (active_session.tmux_session if active_session else '') %}
 <div class="flow-body-attach"
      {% if _ttyd_session %}
-     data-on-interval__duration.30s="@post('/command-center/ttyd/touch', {contentType: 'json', body: {tmux_session: '{{ _ttyd_session }}'}})"
-     data-on:visibilitychange__document="document.visibilityState === 'visible' && @post('/command-center/ttyd/refresh', {contentType: 'json', body: {tmux_session: '{{ _ttyd_session }}', host: 'flow'}})"
+     data-on-interval__duration.30s="@post('/command-center/ttyd/touch?tmux_session={{ _ttyd_session }}')"
+     data-on:visibilitychange__document="document.visibilityState === 'visible' && @post('/command-center/ttyd/refresh?tmux_session={{ _ttyd_session }}&host=flow')"
      {% endif %}>
   {% if attach_terminal_url %}
     <iframe src="{{ attach_terminal_url }}" class="flow-attach-frame" title="Terminal session"></iframe>

@@ -16,8 +16,8 @@
 <div id="launch-popup-modal" class="terminal-modal" style="display:none;"
      data-on-signal-patch-filter="{include: /^modals\.launchPopup$/}"
      data-on-signal-patch="$modals.launchPopup === false && document.dispatchEvent(new CustomEvent('close-launch-popup'))"
-     data-on-interval__duration.30s="$modals.launchPopup && $launchPopupSession && @post('/command-center/ttyd/touch', {contentType: 'json', body: {tmux_session: $launchPopupSession}})"
-     data-on:visibilitychange__document="$modals.launchPopup && $launchPopupSession && document.visibilityState === 'visible' && @post('/command-center/ttyd/refresh', {contentType: 'json', body: {tmux_session: $launchPopupSession, host: 'popup'}})">
+     data-on-interval__duration.30s="$modals.launchPopup && $launchPopupSession && @post(`/command-center/ttyd/touch?tmux_session=${$launchPopupSession}`)"
+     data-on:visibilitychange__document="$modals.launchPopup && $launchPopupSession && document.visibilityState === 'visible' && @post(`/command-center/ttyd/refresh?tmux_session=${$launchPopupSession}&host=popup`)">
   <div class="terminal-modal-bar">
     <span class="terminal-modal-title" id="launch-popup-title" data-text="$launchPopupTitle"></span>
     <button class="terminal-modal-close" id="launch-popup-close" aria-label="Close"
