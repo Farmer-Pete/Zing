@@ -132,6 +132,26 @@ async def ensure_ttyd_for(app: FastAPI, tmux_session: str) -> str | None:
         return None
 
 
+def touch_ttyd(app: FastAPI, tmux_session: str) -> bool:
+    """Bump *tmux_session*'s ``last_used_at`` if its ttyd is alive.
+
+    Called by the iframe heartbeat to keep visible terminals from being
+    reaped. Returns ``True`` when the timestamp was bumped, ``False`` when
+    the entry is missing or the process has died — heartbeats deliberately
+    do not resurrect dead ttyds; that's the refresh endpoint's job.
+    """
+    procs = getattr(app.state, "ttyd_procs", None)
+    if not procs:
+        return False
+    entry = procs.get(tmux_session)
+    if entry is None:
+        return False
+    if entry.proc.poll() is not None:
+        return False
+    entry.last_used_at = time.monotonic()
+    return True
+
+
 def kill_ttyd_for(app: FastAPI, tmux_session: str) -> None:
     """Terminate the ttyd for *tmux_session*, if any. No-op when not running."""
     procs = getattr(app.state, "ttyd_procs", None)

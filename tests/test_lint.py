@@ -10,12 +10,22 @@ import pathlib
 import re
 
 TEMPLATE_ROOT = pathlib.Path(__file__).parent.parent / "src/zing_ai/server/templates"
-DASHED_RE = re.compile(r"data-on-[a-z]")
+# Match a full attribute name starting with "data-on-" — letters, digits,
+# dashes, and the v1 modifier separators (``__`` and ``.``). Anchoring on
+# "data-on-" then consuming the whole token avoids false positives on
+# prose mentions in attribute *values* (e.g. comments or strings) that
+# happen to contain the substring "data-on-".
+DASHED_RE = re.compile(r"\bdata-on-[a-z][a-zA-Z0-9_.-]*")
 ALLOWED_PATTERNS = {
     "data-on-load",
     "data-on-signal-patch",
     "data-on-signal-patch-filter",
+    # Canonical v1 directives that share the dashed prefix because they
+    # are attribute names, not event listeners (verified via Datastar
+    # reference docs at /websites/data-star_dev).
+    "data-on-interval",
 }
+_JINJA_COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
 
 
 def test_no_dashed_data_on_attributes() -> None:
@@ -23,18 +33,24 @@ def test_no_dashed_data_on_attributes() -> None:
 
     Datastar v1 accepts both ``data-on:click`` (canonical) and the legacy
     dashed form ``data-on-click``. Mixing forms is a stale-pattern smell;
-    this test pins the project to the colon form. Three exceptions are
-    allowed: ``data-on-load``, ``data-on-signal-patch``,
-    ``data-on-signal-patch-filter`` — these are attribute names in v1,
-    not event listeners (verified via the Datastar reference).
+    this test pins the project to the colon form. A small allowlist covers
+    real v1 attribute-style directives (``data-on-load``,
+    ``data-on-signal-patch``, ``data-on-signal-patch-filter``,
+    ``data-on-interval``) plus their modifier suffixes
+    (e.g. ``data-on-interval__duration.30s``) — these are not event
+    listeners (verified via the Datastar reference).
     """
     offenders: list[str] = []
     for path in TEMPLATE_ROOT.rglob("*.html"):
-        text = path.read_text()
+        # Strip Jinja comments so prose references to attribute names
+        # don't trip the scanner.
+        text = _JINJA_COMMENT_RE.sub("", path.read_text())
         for match in DASHED_RE.finditer(text):
-            tail = text[match.start() : match.start() + 50]
-            attr_name = tail.split('"')[0].split("'")[0].split("=")[0].strip()
-            if attr_name in ALLOWED_PATTERNS:
+            attr_name = match.group(0)
+            # Strip any modifier suffix (``__duration.30s``) for the
+            # allowlist comparison; the base name is what matters.
+            base = attr_name.split("__", 1)[0]
+            if base in ALLOWED_PATTERNS:
                 continue
             line_num = text[: match.start()].count("\n") + 1
             offenders.append(

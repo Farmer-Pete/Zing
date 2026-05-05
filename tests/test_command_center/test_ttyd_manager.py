@@ -17,6 +17,7 @@ from zing_ai.server.ttyd_manager import (
     kill_all_ttyd,
     kill_ttyd_for,
     reap_idle_ttyds,
+    touch_ttyd,
 )
 
 
@@ -107,6 +108,44 @@ class TestReapIdleTtyds(unittest.IsolatedAsyncioTestCase):
         # Dead entries get dropped without a redundant terminate().
         proc.terminate.assert_not_called()
         self.assertNotIn("zing-x", app.state.ttyd_procs)
+
+
+class TestTouchTtyd(unittest.TestCase):
+    """touch_ttyd is the heartbeat hook called by /command-center/ttyd/touch."""
+
+    def test_returns_false_when_no_registry(self) -> None:
+        app = _fake_app()
+        self.assertFalse(touch_ttyd(app, "any-name"))
+
+    def test_returns_false_when_session_missing(self) -> None:
+        app = _fake_app()
+        app.state.ttyd_procs = {}
+        self.assertFalse(touch_ttyd(app, "missing"))
+
+    def test_returns_false_and_does_not_resurrect_dead_proc(self) -> None:
+        app = _fake_app()
+        proc = MagicMock()
+        proc.poll.return_value = 0  # already exited
+        original_ts = time.monotonic() - 100
+        app.state.ttyd_procs = {
+            "zing-x": _TtydProc(proc=proc, port=1, last_used_at=original_ts),
+        }
+        self.assertFalse(touch_ttyd(app, "zing-x"))
+        # Timestamp must NOT be bumped — the entry will be cleaned up on the
+        # next reaper sweep, but a heartbeat for a dead ttyd should not
+        # extend its life.
+        self.assertEqual(app.state.ttyd_procs["zing-x"].last_used_at, original_ts)
+
+    def test_bumps_last_used_at_on_live_entry(self) -> None:
+        app = _fake_app()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        original_ts = time.monotonic() - 100
+        app.state.ttyd_procs = {
+            "zing-x": _TtydProc(proc=proc, port=1, last_used_at=original_ts),
+        }
+        self.assertTrue(touch_ttyd(app, "zing-x"))
+        self.assertGreater(app.state.ttyd_procs["zing-x"].last_used_at, original_ts)
 
 
 class TestEnsureTtydFor(unittest.IsolatedAsyncioTestCase):

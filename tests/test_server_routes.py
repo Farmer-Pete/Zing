@@ -3188,6 +3188,166 @@ class TestLaunchPopup(_FlowTestBase):
         self.assertTrue(session.pinned, "pinned flag should remain True")
 
 
+class TestTtydHeartbeat(_FlowTestBase):
+    """Tests for /command-center/ttyd/touch and /command-center/ttyd/refresh."""
+
+    # ── /ttyd/touch ────────────────────────────────────────────────────────
+
+    def test_touch_bumps_last_used_at_for_known_session(self) -> None:
+        """Heartbeat advances the registry's timestamp for a live ttyd."""
+        import time
+
+        from zing_ai.server.ttyd_manager import _TtydProc
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        original_ts = time.monotonic() - 100
+        self.fastapi_app.state.ttyd_procs = {
+            "zing-touch": _TtydProc(proc=proc, port=12345, last_used_at=original_ts),
+        }
+        with self.client.stream(
+            "POST",
+            "/command-center/ttyd/touch",
+            json={"tmux_session": "zing-touch"},
+        ) as resp:
+            self.assertEqual(resp.status_code, 200)
+            _ = list(resp.iter_text())
+        bumped = self.fastapi_app.state.ttyd_procs["zing-touch"].last_used_at
+        self.assertGreater(bumped, original_ts)
+
+    def test_touch_unknown_session_is_a_silent_noop(self) -> None:
+        """Heartbeat for a missing session returns 200 and does not spawn."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=AssertionError("ensure_ttyd_for must not be called"),
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/touch",
+                json={"tmux_session": "zing-missing"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            _ = list(resp.iter_text())
+
+    def test_touch_invalid_session_name_is_rejected(self) -> None:
+        """Names with shell characters never reach touch_ttyd."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.touch_ttyd",
+                side_effect=AssertionError("touch_ttyd must not be called"),
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/touch",
+                json={"tmux_session": "bad name!"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            _ = list(resp.iter_text())
+
+    # ── /ttyd/refresh ──────────────────────────────────────────────────────
+
+    def test_refresh_flow_patches_iframe_fragment_with_fresh_url(self) -> None:
+        """Wake-up handler in flow mode replaces .flow-body-attach with new URL."""
+        from unittest.mock import patch
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return "http://127.0.0.1:55555/"
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/refresh",
+                json={"tmux_session": "zing-rf", "host": "flow"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            events = _parse_sse(resp)
+        # An OUTER patch_elements event carrying the .flow-body-attach selector
+        # and the fresh URL is what re-mounts the iframe.
+        elem_events = [e for e in events if "datastar-patch-elements" in e]
+        self.assertTrue(elem_events, "expected at least one patch_elements event")
+        joined = "\n".join(elem_events)
+        self.assertIn("flow-body-attach", joined)
+        self.assertIn("127.0.0.1:55555", joined)
+
+    def test_refresh_popup_clears_then_sets_url_signal(self) -> None:
+        """Wake-up in popup mode patches launchPopupUrl twice (force-rebind)."""
+        from unittest.mock import patch
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return "http://127.0.0.1:55556/"
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/refresh",
+                json={"tmux_session": "zing-rf-popup", "host": "popup"},
+            ) as resp,
+        ):
+            events = _parse_sse(resp)
+        sig_events = [e for e in events if "datastar-patch-signals" in e]
+        # Two consecutive patches: empty string then the fresh URL — the second
+        # one is what fires dispatchOpenLaunchPopup with a usable url.
+        self.assertEqual(len(sig_events), 2, f"expected 2 signal patches, got {sig_events}")
+        self.assertIn("127.0.0.1:55556", sig_events[1])
+
+    def test_refresh_invalid_host_is_rejected(self) -> None:
+        """Unknown host strings never reach ensure_ttyd_for."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=AssertionError("ensure_ttyd_for must not be called"),
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/refresh",
+                json={"tmux_session": "zing-rf", "host": "bogus"},
+            ) as resp,
+        ):
+            self.assertEqual(resp.status_code, 200)
+            _ = list(resp.iter_text())
+
+    def test_refresh_ttyd_unavailable_emits_error_toast(self) -> None:
+        """ensure_ttyd_for returning None surfaces a cc-toast-err."""
+        from unittest.mock import patch
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return None
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/refresh",
+                json={"tmux_session": "zing-rf", "host": "flow"},
+            ) as resp,
+        ):
+            events = _parse_sse(resp)
+        toasts = _extract_toasts(events)
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("cc-toast-err", toasts[0]["class"].split())
+
+
 class TestCcEventsStream(unittest.TestCase):
     """Unit tests for _cc_events_stream shared lifecycle helper.
 

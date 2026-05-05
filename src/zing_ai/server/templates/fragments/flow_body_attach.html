@@ -1,4 +1,20 @@
-<div class="flow-body-attach">
+{# tmux_session: explicit context (passed from get_flow and the refresh
+   endpoint) — preferred over active_session.tmux_session so the fragment
+   can be re-rendered in isolation by /command-center/ttyd/refresh.
+
+   Heartbeat: data-on-interval bumps last_used_at every 30s while the
+   wrapper is in the DOM, keeping the reaper from killing a visible ttyd.
+
+   Wake-up: visibilitychange fires when the laptop wakes / tab regains
+   focus. /refresh respawns ttyd if it was reaped during sleep and patches
+   this fragment with a fresh URL — converting "Press Enter to Reconnect"
+   into a transparent reload. #}
+{% set _ttyd_session = tmux_session if tmux_session is defined else (active_session.tmux_session if active_session else '') %}
+<div class="flow-body-attach"
+     {% if _ttyd_session %}
+     data-on-interval__duration.30s="@post('/command-center/ttyd/touch', {contentType: 'json', body: {tmux_session: '{{ _ttyd_session }}'}})"
+     data-on:visibilitychange__document="document.visibilityState === 'visible' && @post('/command-center/ttyd/refresh', {contentType: 'json', body: {tmux_session: '{{ _ttyd_session }}', host: 'flow'}})"
+     {% endif %}>
   {% if attach_terminal_url %}
     <iframe src="{{ attach_terminal_url }}" class="flow-attach-frame" title="Terminal session"></iframe>
   {% else %}

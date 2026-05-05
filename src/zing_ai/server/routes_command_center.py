@@ -58,7 +58,7 @@ from zing_ai.server.routes import _map_signals_to_responses
 from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
-from zing_ai.server.ttyd_manager import ensure_ttyd_for, kill_ttyd_for
+from zing_ai.server.ttyd_manager import ensure_ttyd_for, kill_ttyd_for, touch_ttyd
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1367,6 +1367,67 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
         # step_id mirrors session_id for attach items (Decision 10).
         url = f"/command-center/flow?session_id={sid}&step_id={sid}"
         yield SSE.execute_script(f"window.location = {url!r}")
+
+    return _stream()
+
+
+_TMUX_SESSION_RE = re.compile(r"[a-zA-Z0-9_-]+")
+
+
+@router.post("/command-center/ttyd/touch")
+@datastar_response
+async def post_ttyd_touch(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Heartbeat from a visible iframe — bumps last_used_at to defer reaping."""
+
+    async def _stream():  # noqa: ANN202
+        tmux_session = str(payload.get("tmux_session") or "").strip()
+        if not tmux_session or not _TMUX_SESSION_RE.fullmatch(tmux_session):
+            return
+        touch_ttyd(request.app, tmux_session)
+        # Heartbeat is fire-and-forget: the only side effect is the timestamp
+        # bump above, so the SSE stream stays empty.
+        if False:  # makes _stream() an async generator
+            yield
+
+    return _stream()
+
+
+@router.post("/command-center/ttyd/refresh")
+@datastar_response
+async def post_ttyd_refresh(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Wake-up handler — respawn ttyd if reaped, swap iframe to fresh URL."""
+
+    async def _stream():  # noqa: ANN202
+        tmux_session = str(payload.get("tmux_session") or "").strip()
+        host = str(payload.get("host") or "").strip()
+        if not tmux_session or not _TMUX_SESSION_RE.fullmatch(tmux_session):
+            return
+        if host not in {"flow", "popup"}:
+            return
+        url = await ensure_ttyd_for(request.app, tmux_session)
+        if url is None:
+            yield _sse_toast(
+                "Failed to refresh terminal session — ttyd may not be installed.",
+                "err",
+            )
+            return
+        if host == "flow":
+            yield SSE.patch_elements(
+                render(
+                    "fragments/flow_body_attach.html",
+                    attach_terminal_url=url,
+                    tmux_session=tmux_session,
+                ),
+                selector=".flow-body-attach",
+                mode=ElementPatchMode.OUTER,
+            )
+        else:
+            # The launch-popup iframe is JS-managed via dispatchOpenLaunchPopup.
+            # Clearing the URL first guarantees the signal-patch watcher fires
+            # again even when ensure_ttyd_for reused the existing port — that
+            # forces iframe.src to be set, which establishes a fresh WS.
+            yield SSE.patch_signals({"launchPopupUrl": ""})
+            yield SSE.patch_signals({"launchPopupUrl": url})
 
     return _stream()
 
