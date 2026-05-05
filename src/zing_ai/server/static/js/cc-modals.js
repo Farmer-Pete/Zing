@@ -12,9 +12,9 @@ window.flowPaletteMatch = function (query, haystack) {
   return (haystack || '').toLowerCase().includes(q);
 };
 
-window.dispatchOpenTerminal = function(url) {
+window.dispatchOpenTerminal = function(url, title) {
     if (!url) return;
-    document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url}, bubbles: true}));
+    document.dispatchEvent(new CustomEvent('open-terminal', {detail: {url: url, title: title}, bubbles: true}));
 };
 
 window.dispatchCopyStandup = function(markdown) {
@@ -100,7 +100,8 @@ function mountModal(opts) {
     // this event.
     document.addEventListener('open-terminal', function(e) {
         var url = e.detail && e.detail.url;
-        if (url) window.openTerminal(url);
+        var sessionTitle = e.detail && e.detail.title;
+        if (url) window.openTerminal(url, sessionTitle);
     });
 
     // Body-level signal-patch watcher dispatches 'close-terminal' when

@@ -271,7 +271,7 @@ def _build_claude_code_view(session: ClaudeCodeSession) -> ClaudeCodeSessionView
     state = session.state
     is_alive = state == SessionState.STARTED
     is_starting = state == SessionState.STARTING
-    has_terminal = session.terminal_session is not None
+    has_terminal = session.tmux_session is not None
 
     if is_alive:
         status_label = f"Running: {session.title}"

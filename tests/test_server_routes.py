@@ -1419,22 +1419,22 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    def test_post_create_claude_code_session_with_terminal_session(self) -> None:
-        """POST /api/sessions/claude-code with terminal_session persists it."""
+    def test_post_create_claude_code_session_with_tmux_session(self) -> None:
+        """POST /api/sessions/claude-code with tmux_session persists it."""
         resp = self.client.post(
             "/api/sessions/claude-code",
             json={
                 "session_id": "cc-zellij-1",
                 "title": "Background Session",
                 "ticket_id": "FRO-123",
-                "terminal_session": "zing--fro-123",
+                "tmux_session": "zing-fro-123",
             },
         )
         self.assertEqual(resp.status_code, 200)
         session = self.manager.get_session("cc-zellij-1")
         self.assertIsNotNone(session)
         assert session is not None  # narrow for pyright
-        self.assertEqual(session.terminal_session, "zing--fro-123")  # type: ignore[union-attr]
+        self.assertEqual(session.tmux_session, "zing-fro-123")  # type: ignore[union-attr]
 
     def test_get_sessions_returns_all(self) -> None:
         """GET /api/sessions returns all sessions."""
@@ -1477,14 +1477,14 @@ class TestClaudeCodeSessionEndpoints(ServerTestBase):
         self.assertIn("session_id", session)
         self.assertIn("ticket_id", session)
 
-    def test_post_create_claude_code_session_with_terminal_session_shape(self) -> None:
+    def test_post_create_claude_code_session_with_tmux_session_shape(self) -> None:
         """POST /api/sessions/claude-code returns expected shape."""
         resp = self.client.post(
             "/api/sessions/claude-code",
             json={
                 "session_id": "cc-zellij-shape",
                 "title": "Shape",
-                "terminal_session": "zing-test",
+                "tmux_session": "zing-test",
             },
         )
         self.assertEqual(resp.status_code, 200)
@@ -1692,7 +1692,7 @@ class TestLaunchBackground(unittest.TestCase):
         )
 
     def test_launch_background_success(self) -> None:
-        """Success path: session created with terminal_session, board_changed queued."""
+        """Success path: session created with tmux_session, board_changed queued."""
         import asyncio
         from pathlib import Path
         from unittest.mock import patch
@@ -1739,15 +1739,15 @@ class TestLaunchBackground(unittest.TestCase):
             f"Expected success toast in events: {events}",
         )
 
-        # Verify create_session_on_server was called with a terminal_session kwarg.
+        # Verify create_session_on_server was called with a tmux_session kwarg.
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        self.assertIsNotNone(call_kwargs.get("terminal_session"))
+        self.assertIsNotNone(call_kwargs.get("tmux_session"))
 
-        # exec_or_detach should be called with terminal_session set.
+        # exec_or_detach should be called with tmux_session set.
         mock_exec.assert_called_once()
         exec_kwargs = mock_exec.call_args.kwargs
-        self.assertIsNotNone(exec_kwargs.get("terminal_session"))
+        self.assertIsNotNone(exec_kwargs.get("tmux_session"))
 
         # board_changed should have been queued.
         queue: asyncio.Queue = asyncio.Queue()
@@ -1792,7 +1792,7 @@ class TestLaunchBackground(unittest.TestCase):
             ),
             patch(
                 "zing_ai.server.routes_command_center.exec_or_detach",
-                side_effect=LaunchError("zellij session already exists"),
+                side_effect=LaunchError("tmux session already exists"),
             ),
             patch("zing_ai.server.routes_command_center.rollback_worktree") as mock_rollback,
             self.client.stream(
@@ -1806,15 +1806,15 @@ class TestLaunchBackground(unittest.TestCase):
 
         # Error toast should contain the LaunchError message.
         self.assertTrue(
-            any("cc-toast-err" in e and "zellij session already exists" in e for e in events),
+            any("cc-toast-err" in e and "tmux session already exists" in e for e in events),
             f"Expected LaunchError toast in events: {events}",
         )
         # Rollback must NOT run on launch failure — the worktree stays so the next
         # attempt can reuse it.
         mock_rollback.assert_not_called()
 
-    def test_launch_background_orphan_zellij_session_pruned(self) -> None:
-        """Live Zellij session with no in-app record → kill it, then proceed normally."""
+    def test_launch_background_orphan_tmux_session_pruned(self) -> None:
+        """Live tmux session with no in-app record → kill it, then proceed normally."""
         from pathlib import Path
         from unittest.mock import patch
 
@@ -1824,7 +1824,7 @@ class TestLaunchBackground(unittest.TestCase):
 
         # Pre-seed live_sessions with the orphan name. session_manager is empty,
         # so the reconciliation logic should classify it as orphaned.
-        self.fastapi_app.state.live_sessions = {"zing--pr-254"}
+        self.fastapi_app.state.live_sessions = {"zing-pr-254"}
 
         config = Config(git=GitConfig(code_dir="/tmp/code"))
         repo_path = Path("/tmp/code/repo")
@@ -1859,18 +1859,16 @@ class TestLaunchBackground(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
-        # zellij delete-session --force was invoked for the orphaned name.
-        # (kill-session would leave the record as EXITED and re-trip the
-        # downstream collision check.)
+        # tmux kill-session was invoked for the orphaned name.
         prune_calls = [
             c
             for c in mock_run.call_args_list
-            if c.args and c.args[0] == ["zellij", "delete-session", "--force", "zing--pr-254"]
+            if c.args and c.args[0] == ["tmux", "kill-session", "-t", "zing-pr-254"]
         ]
         self.assertEqual(
             len(prune_calls),
             1,
-            f"Expected one zellij delete-session --force call, got {mock_run.call_args_list}",
+            f"Expected one tmux kill-session call, got {mock_run.call_args_list}",
         )
 
         # Launch proceeded after the prune.
@@ -1881,10 +1879,10 @@ class TestLaunchBackground(unittest.TestCase):
         )
 
         # Cache was cleared so a re-trip won't see the stale entry.
-        self.assertNotIn("zing--pr-254", self.fastapi_app.state.live_sessions)
+        self.assertNotIn("zing-pr-254", self.fastapi_app.state.live_sessions)
 
     def test_launch_background_live_tracked_attaches(self) -> None:
-        """Live Zellij session with a tracked in-app record → redirect to attach, no relaunch."""
+        """Live tmux session with a tracked in-app record → spawn ttyd and route to attach."""
         from pathlib import Path
         from unittest.mock import patch
 
@@ -1892,17 +1890,20 @@ class TestLaunchBackground(unittest.TestCase):
 
         self._set_kanban_card("BAK-7", "acme/repo", "feature/bak-7", 255)
 
-        # Seed an in-app session that claims the same terminal_session name.
+        # Seed an in-app session that claims the same tmux_session name.
         self.manager.create_claude_code_session(
             session_id="cc-existing",
             title="existing",
             ticket_id="BAK-7",
-            terminal_session="zing--pr-255",
+            tmux_session="zing-pr-255",
         )
-        self.fastapi_app.state.live_sessions = {"zing--pr-255"}
+        self.fastapi_app.state.live_sessions = {"zing-pr-255"}
 
         config = Config(git=GitConfig(code_dir="/tmp/code"))
         repo_path = Path("/tmp/code/repo")
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return "http://127.0.0.1:54321/"
 
         with (
             patch(
@@ -1918,6 +1919,10 @@ class TestLaunchBackground(unittest.TestCase):
             ) as mock_checkout,
             patch("zing_ai.server.routes_command_center.exec_or_detach") as mock_exec,
             patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run,
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
             self.client.stream(
                 "POST",
                 "/command-center/launch-background",
@@ -1932,15 +1937,15 @@ class TestLaunchBackground(unittest.TestCase):
         mock_exec.assert_not_called()
         self.assertFalse(
             any(
-                c.args and c.args[0][:2] == ["zellij", "delete-session"]
+                c.args and c.args[0][:2] == ["tmux", "kill-session"]
                 for c in mock_run.call_args_list
             ),
-            f"Did not expect a delete-session call, got {mock_run.call_args_list}",
+            f"Did not expect a kill-session call, got {mock_run.call_args_list}",
         )
 
         # Attach signal was patched (terminalUrl + modals.terminal).
         self.assertTrue(
-            any("/zellij/zing--pr-255" in e and "terminalUrl" in e for e in events),
+            any("127.0.0.1:54321" in e and "terminalUrl" in e for e in events),
             f"Expected terminalUrl signal patch in events: {events}",
         )
         self.assertTrue(
@@ -1989,14 +1994,14 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
     def _create_cc_session(
         self,
         session_id: str = "cc-kill-1",
-        terminal_session: str | None = "zing-test",
+        tmux_session: str | None = "zing-test",
         worktree_path: str | None = None,
         ticket_id: str | None = None,
     ) -> None:
         """Create a ClaudeCodeSession via the API."""
         payload: dict = {"session_id": session_id, "title": "Test CC"}
-        if terminal_session is not None:
-            payload["terminal_session"] = terminal_session
+        if tmux_session is not None:
+            payload["tmux_session"] = tmux_session
         if worktree_path is not None:
             payload["worktree_path"] = worktree_path
         if ticket_id is not None:
@@ -2008,10 +2013,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_kill_session_success(self) -> None:
-        """POST kill-session kills the zellij session and cleans up."""
+        """POST kill-session kills the tmux session and cleans up."""
         from unittest.mock import patch
 
-        self._create_cc_session(session_id="cc-kill-ok", terminal_session="zing-kill-ok")
+        self._create_cc_session(session_id="cc-kill-ok", tmux_session="zing-kill-ok")
 
         with (
             patch("zing_ai.server.routes_command_center.subprocess.run") as mock_run,
@@ -2030,10 +2035,10 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
             f"Expected success toast in events: {events}",
         )
 
-        # zellij kill-session should have been called.
+        # tmux kill-session should have been called.
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        self.assertEqual(call_args[0], "zellij")
+        self.assertEqual(call_args[0], "tmux")
         self.assertIn("kill-session", call_args)
         self.assertIn("zing-kill-ok", call_args)
 
@@ -2077,9 +2082,9 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
             f"Expected not-found error toast in events: {events}",
         )
 
-    def test_kill_session_no_terminal_session_returns_404(self) -> None:
-        """POST kill-session returns SSE error when session has no terminal_session."""
-        self._create_cc_session(session_id="cc-no-terminal", terminal_session=None)
+    def test_kill_session_no_tmux_session_returns_404(self) -> None:
+        """POST kill-session returns SSE error when session has no tmux_session."""
+        self._create_cc_session(session_id="cc-no-terminal", tmux_session=None)
         with self.client.stream(
             "POST",
             "/command-center/kill-session",
@@ -2103,7 +2108,7 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
         self._create_cc_session(
             session_id="cc-wt-ok",
-            terminal_session="zing-wt-ok",
+            tmux_session="zing-wt-ok",
             worktree_path="/tmp/worktrees/repo-feature",
         )
         # terminal session is NOT alive → cleanup is allowed.
@@ -2133,11 +2138,11 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         """POST cleanup-worktree returns SSE error when session terminal session is still alive."""
         self._create_cc_session(
             session_id="cc-wt-alive",
-            terminal_session="zing--wt-alive",
+            tmux_session="zing-wt-alive",
             worktree_path="/tmp/worktrees/repo-alive",
         )
         # Mark terminal session as alive.
-        self.fastapi_app.state.live_sessions = {"zing--wt-alive"}
+        self.fastapi_app.state.live_sessions = {"zing-wt-alive"}
 
         with self.client.stream(
             "POST",
@@ -2169,7 +2174,7 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         """POST cleanup-worktree returns SSE error when session has no worktree_path."""
         self._create_cc_session(
             session_id="cc-no-wt",
-            terminal_session="zing-no-wt",
+            tmux_session="zing-no-wt",
             worktree_path=None,
         )
         with self.client.stream(
@@ -2197,19 +2202,19 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
         # and one with no ticket_id at all.
         self._create_cc_session(
             session_id="cc-orphan-done",
-            terminal_session="zing-done",
+            tmux_session="zing-done",
             worktree_path="/tmp/wt/done",
             ticket_id="BAK-100",
         )
         self._create_cc_session(
             session_id="cc-orphan-active",
-            terminal_session="zing-active",
+            tmux_session="zing-active",
             worktree_path="/tmp/wt/active",
             ticket_id="BAK-200",
         )
         self._create_cc_session(
             session_id="cc-orphan-no-ticket",
-            terminal_session="zing-no-ticket",
+            tmux_session="zing-no-ticket",
             worktree_path="/tmp/wt/no-ticket",
             ticket_id=None,
         )
@@ -2242,113 +2247,6 @@ class TestKillSessionAndCleanupWorktree(unittest.TestCase):
 
         # Counts
         self.assertEqual(data["running_count"], 1)
-
-
-class TestZellijLifespan(unittest.TestCase):
-    """Tests for Zellij web server lifecycle in create_app().
-
-    The mcp_server module-level singleton has a session_manager that can only
-    call .run() once per instance.  These tests patch ``zing_ai.server.app.mcp_server``
-    for the *entire* lifespan — app creation AND TestClient context — so the
-    lifespan closure sees the mock and never touches the real MCP server.
-    """
-
-    def _build_mock_mcp(self) -> MagicMock:
-        """Return a MagicMock that stands in for the module-level mcp_server."""
-        import contextlib
-        from collections.abc import AsyncIterator
-
-        @contextlib.asynccontextmanager
-        async def _noop_run() -> AsyncIterator[None]:
-            yield
-
-        mock_sm = MagicMock()
-        mock_sm.run = _noop_run
-
-        mock_mcp = MagicMock()
-        mock_mcp.session_manager = mock_sm
-        mock_mcp.streamable_http_app.return_value = MagicMock(routes=[])
-        return mock_mcp
-
-    def test_create_app_with_zellij_support_false(self) -> None:
-        """When zellij_support=False, zellij_available is False and /zellij/ returns 503."""
-        import tempfile
-        from pathlib import Path
-
-        from fastapi.testclient import TestClient
-
-        from zing_ai.server.app import create_app
-        from zing_ai.server.sessions import SessionManager
-
-        mock_mcp = self._build_mock_mcp()
-        with patch("zing_ai.server.app.mcp_server", mock_mcp):
-            tmp = tempfile.mkdtemp()
-            manager = SessionManager(data_dir=Path(tmp))
-            app = create_app(
-                session_manager=manager,
-                disable_polling=True,
-                zellij_support=False,
-            )
-            with TestClient(app) as client:
-                resp = client.get("/zellij/")
-                # 503 = Zellij unavailable (correct — zellij_support=False)
-                self.assertEqual(resp.status_code, 503)
-
-    def test_zellij_startup_failure_sets_unavailable(self) -> None:
-        """When zellij web --start fails (non-zero return), zellij_available is False."""
-        import tempfile
-        from pathlib import Path
-
-        from fastapi.testclient import TestClient
-
-        from zing_ai.server.app import create_app
-        from zing_ai.server.sessions import SessionManager
-
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "zellij web not supported"
-
-        mock_mcp = self._build_mock_mcp()
-        with (
-            patch("zing_ai.server.app.mcp_server", mock_mcp),
-            patch("zing_ai.server.app.subprocess.run", return_value=mock_result),
-        ):
-            tmp = tempfile.mkdtemp()
-            manager = SessionManager(data_dir=Path(tmp))
-            app = create_app(
-                session_manager=manager,
-                disable_polling=True,
-                zellij_support=True,
-            )
-            with TestClient(app) as client:
-                resp = client.get("/zellij/")
-                self.assertEqual(resp.status_code, 503)
-
-    def test_zellij_binary_missing_sets_unavailable(self) -> None:
-        """When the zellij binary is missing (FileNotFoundError), zellij_available is False."""
-        import tempfile
-        from pathlib import Path
-
-        from fastapi.testclient import TestClient
-
-        from zing_ai.server.app import create_app
-        from zing_ai.server.sessions import SessionManager
-
-        mock_mcp = self._build_mock_mcp()
-        with (
-            patch("zing_ai.server.app.mcp_server", mock_mcp),
-            patch("zing_ai.server.app.subprocess.run", side_effect=FileNotFoundError),
-        ):
-            tmp = tempfile.mkdtemp()
-            manager = SessionManager(data_dir=Path(tmp))
-            app = create_app(
-                session_manager=manager,
-                disable_polling=True,
-                zellij_support=True,
-            )
-            with TestClient(app) as client:
-                resp = client.get("/zellij/")
-                self.assertEqual(resp.status_code, 503)
 
 
 # ---------------------------------------------------------------------------
@@ -2537,10 +2435,10 @@ class TestStartTicket(unittest.TestCase):
 class TestSessionIdleEndpoint(ServerTestBase):
     """Tests for POST /command-center/session-idle (Notification hook)."""
 
-    def _create_cc(self, session_id: str, terminal_session: str | None = None) -> None:
+    def _create_cc(self, session_id: str, tmux_session: str | None = None) -> None:
         payload: dict = {"session_id": session_id, "title": "CC"}
-        if terminal_session is not None:
-            payload["terminal_session"] = terminal_session
+        if tmux_session is not None:
+            payload["tmux_session"] = tmux_session
         self.client.post("/api/sessions/claude-code", json=payload)
 
     def test_idle_appends_notification(self) -> None:
@@ -2565,9 +2463,9 @@ class TestSessionIdleEndpoint(ServerTestBase):
         self.assertEqual(notif.body, "Waiting on user input")
         self.assertIsNone(notif.question)
 
-    def test_idle_falls_back_to_terminal_session(self) -> None:
-        """When session_id is unknown, fall back to matching terminal_session."""
-        self._create_cc("cc-idle-2", terminal_session="zing-idle-2")
+    def test_idle_falls_back_to_tmux_session(self) -> None:
+        """When session_id is unknown, fall back to matching tmux_session."""
+        self._create_cc("cc-idle-2", tmux_session="zing-idle-2")
         resp = self.client.post(
             "/command-center/session-idle",
             json={
@@ -2655,8 +2553,35 @@ class TestFlowPage(ServerTestBase):
         """GET /command-center/flow with no attention items shows the empty state."""
         resp = self.client.get("/command-center/flow")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("All clear", resp.text)
-        self.assertIn("No attention items", resp.text)
+        self.assertIn("Flow is", resp.text)
+        self.assertIn("Nothing needs your attention", resp.text)
+
+    def test_flow_page_cursor_end_forces_empty_state(self) -> None:
+        """``?cursor=end`` forces the empty state even if the queue is non-empty.
+
+        Reproduces the original bug: a pinned ClaudeCodeSession kept the
+        attention queue non-empty forever, so clicking Next on the only
+        attach item redirected to bare /flow → resolved back to queue[0]
+        → terminal stuck on screen. The cursor=end sentinel signals "user
+        has stepped past the end" so the GET handler renders empty state
+        regardless of queue contents.
+        """
+        # Seed a pinned ClaudeCodeSession so the queue is non-empty.
+        sess = self.manager.create_claude_code_session(
+            session_id="11111111-1111-1111-1111-111111111111",
+            title="Pinned terminal",
+            ticket_id="REPRO-1",
+            tmux_session="zing-repro-1",
+        )
+        self.manager.set_pinned(sess.session_id, True)
+
+        resp = self.client.get("/command-center/flow?cursor=end")
+        self.assertEqual(resp.status_code, 200)
+        # Empty body rendered.
+        self.assertIn("Flow is", resp.text)
+        self.assertIn("Nothing needs your attention", resp.text)
+        # Terminal body is NOT rendered.
+        self.assertNotIn("flow-body-attach", resp.text)
 
     def test_command_center_does_not_redirect(self) -> None:
         """GET /command-center returns 200, not a redirect."""
@@ -2664,20 +2589,30 @@ class TestFlowPage(ServerTestBase):
         self.assertEqual(resp.status_code, 200)
 
     def test_flow_page_attach_mode_renders_terminal_iframe(self) -> None:
-        """GET /command-center/flow for an attach item shows the terminal iframe."""
+        """GET /command-center/flow for an attach item shows the ttyd terminal iframe."""
+        from unittest.mock import patch
+
         session = self.manager.create_claude_code_session(
             session_id="cc-flow-attach",
             title="CC Flow Attach",
-            terminal_session="zing-flow-test",
+            tmux_session="zing-flow-test",
         )
         self.manager.add_notification(
             session_id=session.session_id,
             title="Claude is waiting",
             body="Needs input",
         )
-        resp = self.client.get("/command-center/flow")
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return "http://127.0.0.1:54321/"
+
+        with patch(
+            "zing_ai.server.routes_command_center.ensure_ttyd_for",
+            side_effect=_fake_ensure_ttyd,
+        ):
+            resp = self.client.get("/command-center/flow")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('<iframe src="/zellij/zing-flow-test"', resp.text)
+        self.assertIn('<iframe src="http://127.0.0.1:54321/"', resp.text)
 
     def test_flow_page_renders_progress_strip(self) -> None:
         """GET /command-center/flow renders the progress strip header."""
@@ -2870,7 +2805,7 @@ class TestFlowPage(ServerTestBase):
         self.manager.create_claude_code_session(
             session_id="cc-flow-attach-signals",
             title="Attach Signals",
-            terminal_session="zing-flow-attach-signals",
+            tmux_session="zing-flow-attach-signals",
         )
         self.manager.add_notification(
             session_id="cc-flow-attach-signals",
@@ -3008,7 +2943,7 @@ class _FlowTestBase(unittest.TestCase):
         self.manager.create_claude_code_session(
             session_id=session_id,
             title=title,
-            terminal_session=f"zing-{session_id}",
+            tmux_session=f"zing-{session_id}",
         )
         self.manager.add_notification(
             session_id=session_id,
@@ -3092,34 +3027,43 @@ class TestFlowPin(_FlowTestBase):
 class TestLaunchPopup(_FlowTestBase):
     """Tests for the launch popup open/send endpoints."""
 
-    def setUp(self) -> None:
-        super().setUp()
-        # Enable Zellij so launch-popup-open doesn't early-exit.
-        self.fastapi_app.state.zellij_available = True
-
     # ── /flow/launch-popup-open ────────────────────────────────────────────
 
     def test_launch_popup_open_patches_signals(self) -> None:
-        """Valid terminal_session patches launchPopupUrl + modals.launchPopup."""
+        """Valid tmux_session patches launchPopupUrl + modals.launchPopup."""
+        from unittest.mock import patch
+
         self._make_attach_session("lp-open", pinned=False)
-        with self.client.stream(
-            "POST",
-            "/command-center/flow/launch-popup-open",
-            json={"terminal_session": "zing-lp-open"},
-        ) as resp:
+        # Pre-seed live_sessions so the pre-flight tmux has-session check is skipped.
+        self.fastapi_app.state.live_sessions = {"zing-lp-open"}
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return "http://127.0.0.1:54321/"
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/flow/launch-popup-open",
+                json={"tmux_session": "zing-lp-open"},
+            ) as resp,
+        ):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
         sig_events = [e for e in events if "datastar-patch-signals" in e]
         self.assertTrue(sig_events, "expected at least one signal patch")
         joined = "\n".join(sig_events)
         self.assertIn("launchPopupUrl", joined)
-        self.assertIn("/zellij/zing-lp-open", joined)
+        self.assertIn("127.0.0.1:54321", joined)
         self.assertIn("launchPopup", joined)
         self.assertIn("launchPopupSession", joined)
         self.assertIn("zing-lp-open", joined)
 
-    def test_launch_popup_open_missing_terminal_session_emits_error_toast(self) -> None:
-        """Missing terminal_session yields a cc-toast-err."""
+    def test_launch_popup_open_missing_tmux_session_emits_error_toast(self) -> None:
+        """Missing tmux_session yields a cc-toast-err."""
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-open",
@@ -3136,21 +3080,34 @@ class TestLaunchPopup(_FlowTestBase):
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-open",
-            json={"terminal_session": "bad name!"},
+            json={"tmux_session": "bad name!"},
         ) as resp:
             events = _parse_sse(resp)
         toasts = _extract_toasts(events)
         self.assertEqual(len(toasts), 1)
         self.assertIn("cc-toast-err", toasts[0]["class"].split())
 
-    def test_launch_popup_open_zellij_unavailable_emits_error_toast(self) -> None:
-        """Zellij unavailable yields a cc-toast-err."""
-        self.fastapi_app.state.zellij_available = False
-        with self.client.stream(
-            "POST",
-            "/command-center/flow/launch-popup-open",
-            json={"terminal_session": "my-session"},
-        ) as resp:
+    def test_launch_popup_open_ttyd_unavailable_emits_error_toast(self) -> None:
+        """ttyd unavailable yields a cc-toast-err."""
+        from unittest.mock import patch
+
+        self._make_attach_session("lp-open", pinned=False)
+        self.fastapi_app.state.live_sessions = {"zing-lp-open"}
+
+        async def _fake_ensure_ttyd(_app, _name):
+            return None
+
+        with (
+            patch(
+                "zing_ai.server.routes_command_center.ensure_ttyd_for",
+                side_effect=_fake_ensure_ttyd,
+            ),
+            self.client.stream(
+                "POST",
+                "/command-center/flow/launch-popup-open",
+                json={"tmux_session": "zing-lp-open"},
+            ) as resp,
+        ):
             events = _parse_sse(resp)
         toasts = _extract_toasts(events)
         self.assertEqual(len(toasts), 1)
@@ -3159,7 +3116,7 @@ class TestLaunchPopup(_FlowTestBase):
     # ── /flow/launch-popup-send ────────────────────────────────────────────
 
     def test_launch_popup_send_to_flow_pins_and_redirects(self) -> None:
-        """Valid terminal_session pins the session and navigates via execute_script."""
+        """Valid tmux_session pins the session and navigates via execute_script."""
         from zing_ai.server.models import ClaudeCodeSession
 
         self._make_attach_session("lp-send", pinned=False)
@@ -3170,7 +3127,7 @@ class TestLaunchPopup(_FlowTestBase):
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-send",
-            json={"terminal_session": "zing-lp-send"},
+            json={"tmux_session": "zing-lp-send"},
         ) as resp:
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
@@ -3190,23 +3147,23 @@ class TestLaunchPopup(_FlowTestBase):
         self.assertIn("lp-send", combined)
 
     def test_launch_popup_send_unknown_terminal_returns_toast(self) -> None:
-        """Unknown terminal_session yields a cc-toast-err; no redirect is emitted."""
+        """Unknown tmux_session yields a cc-toast-err; no redirect is emitted."""
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-send",
-            json={"terminal_session": "does-not-exist"},
+            json={"tmux_session": "does-not-exist"},
         ) as resp:
             events = _parse_sse(resp)
         toasts = _extract_toasts(events)
         self.assertEqual(len(toasts), 1)
         self.assertIn("cc-toast-err", toasts[0]["class"].split())
 
-    def test_launch_popup_send_missing_terminal_session_returns_toast(self) -> None:
-        """Empty terminal_session yields a cc-toast-err."""
+    def test_launch_popup_send_missing_tmux_session_returns_toast(self) -> None:
+        """Empty tmux_session yields a cc-toast-err."""
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-send",
-            json={"terminal_session": ""},
+            json={"tmux_session": ""},
         ) as resp:
             events = _parse_sse(resp)
         toasts = _extract_toasts(events)
@@ -3222,7 +3179,7 @@ class TestLaunchPopup(_FlowTestBase):
         with self.client.stream(
             "POST",
             "/command-center/flow/launch-popup-send",
-            json={"terminal_session": "zing-lp-pinned"},
+            json={"tmux_session": "zing-lp-pinned"},
         ) as resp:
             self.assertEqual(resp.status_code, 200)
 
@@ -3749,8 +3706,15 @@ class TestFlowNext(_FlowTestBase):
         # No query string when queue is empty.
         self.assertNotIn("session_id=", combined)
 
-    def test_save_failure_yields_toast_no_execute_script(self) -> None:
-        """Bad step_id raises KeyError → toast emitted, no executeScript."""
+    def test_stale_payload_skips_save_and_navigates(self) -> None:
+        """Stale (session_id, step_id) not in queue → save skipped, navigate.
+
+        Replaces the older "save failure raises toast" expectation. The
+        endpoint now only attempts a save when the (session_id, step_id)
+        pair matches a queued findings/questions item; anything else is
+        treated as a stale or attach-shaped payload and the navigation
+        runs unconditionally. This is what fixes Next-on-a-pinned-terminal.
+        """
         with self.client.stream(
             "POST",
             "/command-center/flow/next",
@@ -3763,10 +3727,14 @@ class TestFlowNext(_FlowTestBase):
             self.assertEqual(resp.status_code, 200)
             events = _parse_sse(resp)
 
+        # Navigation happened (no save attempt, so no toast).
         scripts = _parse_execute_script(events)
-        self.assertFalse(scripts, "No executeScript expected on save failure")
+        self.assertTrue(scripts, "Expected executeScript navigation")
         toasts = _extract_toasts(events)
-        self.assertTrue(any("Save failed" in t["text"] for t in toasts))
+        self.assertFalse(
+            any("Save failed" in t["text"] for t in toasts),
+            "Stale payloads must not raise a save-failed toast",
+        )
 
     def test_attach_mode_skips_save_and_navigates(self) -> None:
         """No step_id + no responses: skips save branch, still navigates."""
@@ -3831,12 +3799,17 @@ class TestFlowNext(_FlowTestBase):
         self.assertIsNotNone(step_after.responses)
         self.assertEqual(step_after.responses[0].answer, "envelope answer")  # type: ignore[index]
 
-    def test_wrap_around_last_to_first(self) -> None:
-        """Posting from the last queue item wraps around to queue[0]."""
-        self._make_findings_session("fn-wrap-a", "Wrap A")
-        self._make_findings_session("fn-wrap-b", "Wrap B")
+    def test_next_at_last_item_lands_on_empty_state(self) -> None:
+        """Posting next from the last queue item navigates to the empty state.
 
-        # Get the queue to identify which is last.
+        Wrap-around was removed — clicking Next at the end of the queue is
+        the user signalling "I'm done with this run," so we drop them on
+        ``/command-center/flow?cursor=end`` which the GET handler renders
+        as the empty state regardless of queue contents.
+        """
+        self._make_findings_session("fn-edge-a", "Edge A")
+        self._make_findings_session("fn-edge-b", "Edge B")
+
         from datetime import UTC, datetime
 
         from zing_ai.server.attention import build_attention_queue
@@ -3860,7 +3833,10 @@ class TestFlowNext(_FlowTestBase):
 
         scripts = _parse_execute_script(events)
         combined = " ".join(scripts)
-        self.assertIn(first_item.session_id, combined)
+        self.assertIn("cursor=end", combined)
+        self.assertNotIn("session_id=", combined)
+        # Sanity: must NOT have wrapped to queue[0].
+        self.assertNotIn(first_item.session_id, combined)
 
 
 class TestFlowPrev(_FlowTestBase):
@@ -3897,10 +3873,15 @@ class TestFlowPrev(_FlowTestBase):
         combined = " ".join(scripts)
         self.assertIn(first_item.session_id, combined)
 
-    def test_wrap_around_first_to_last(self) -> None:
-        """Posting from the first queue item wraps around to the last."""
-        self._make_findings_session("fp-wrap-a", "Wrap Prev A")
-        self._make_findings_session("fp-wrap-b", "Wrap Prev B")
+    def test_prev_at_first_item_lands_on_empty_state(self) -> None:
+        """Posting prev from the first queue item navigates to the empty state.
+
+        Symmetric with Next-at-last: Prev at the head of the queue redirects
+        to ``/command-center/flow?cursor=end`` rather than wrapping to the
+        last item.
+        """
+        self._make_findings_session("fp-edge-a", "Edge Prev A")
+        self._make_findings_session("fp-edge-b", "Edge Prev B")
 
         from datetime import UTC, datetime
 
@@ -3925,7 +3906,9 @@ class TestFlowPrev(_FlowTestBase):
 
         scripts = _parse_execute_script(events)
         combined = " ".join(scripts)
-        self.assertIn(last_item.session_id, combined)
+        self.assertIn("cursor=end", combined)
+        self.assertNotIn("session_id=", combined)
+        self.assertNotIn(last_item.session_id, combined)
 
     def test_empty_queue_navigates_to_flow_root(self) -> None:
         """Empty queue: prev also navigates to /command-center/flow with no query string."""

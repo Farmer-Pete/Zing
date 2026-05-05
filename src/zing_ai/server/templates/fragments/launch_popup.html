@@ -1,13 +1,13 @@
 {# ── Launch Popup ────────────────────────────────────────────────────────────
-   Live terminal iframe (same Zellij proxy as the terminal modal) plus a
-   primary "Send to Flow ▸" button.  The iframe lifecycle is owned by the
+   Live terminal iframe (a per-session ttyd loopback URL) plus a primary
+   "Send to Flow ▸" button.  The iframe lifecycle is owned by the
    openLaunchPopup / closeLaunchPopup functions in cc-modals.js, which mirror
    the openTerminal / close-terminal pattern.
 
    Signals consumed (all pre-declared in _build_initial_signals):
      $modals.launchPopup   — boolean; true = visible
-     $launchPopupSession   — terminal session name (e.g. "zing-abc123")
-     $launchPopupUrl       — /zellij/<session> iframe src
+     $launchPopupSession   — tmux session name (e.g. "zing-bak-1")
+     $launchPopupUrl       — http://127.0.0.1:<port>/ iframe src
      $launchPopupTitle     — human-readable session title
 ── #}
 <div id="launch-popup-modal" class="terminal-modal" style="display:none;"
@@ -24,7 +24,7 @@
     <button type="button" class="launch-popup-btn launch-popup-btn-close"
             data-on:click="$modals.launchPopup = false; $launchPopupUrl = ''">Close</button>
     <button type="button" class="launch-popup-btn launch-popup-btn-send"
-            data-on:click="@post('/command-center/flow/launch-popup-send', {payload: {terminal_session: $launchPopupSession}})">
+            data-on:click="@post('/command-center/flow/launch-popup-send', {payload: {tmux_session: $launchPopupSession}})">
       Send to Flow &#9654;
     </button>
   </div>

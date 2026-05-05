@@ -6,12 +6,9 @@ import asyncio
 import contextlib
 import logging
 import pathlib
-import socket
-import subprocess
 import time
 from collections.abc import AsyncGenerator
 
-import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from mcp.server.fastmcp import FastMCP
@@ -36,8 +33,11 @@ from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
 from zing_ai.server.sessions import SessionManager
-from zing_ai.server.zellij_config import ensure_zellij_config
-from zing_ai.server.zellij_proxy import create_zellij_router
+from zing_ai.server.ttyd_manager import (
+    IDLE_TIMEOUT_SECONDS,
+    kill_all_ttyd,
+    reap_idle_ttyds,
+)
 
 logger = logging.getLogger("zing_ai.server")
 
@@ -55,9 +55,9 @@ def sync_session_liveness(sm: SessionManager, live: set[str]) -> bool:
     """
     liveness_changed = False
     for session in sm.list_sessions():
-        if not (isinstance(session, ClaudeCodeSession) and session.terminal_session):
+        if not (isinstance(session, ClaudeCodeSession) and session.tmux_session):
             continue
-        now_alive = session.terminal_session in live
+        now_alive = session.tmux_session in live
         if now_alive != session._session_alive:
             liveness_changed = True
         session._session_alive = now_alive
@@ -142,103 +142,12 @@ class MCPDebugMiddleware:
         logger.info("MCP --- %s /mcp → %d (%.3fs)", method, response_status, elapsed)
 
 
-async def _start_zellij(app: FastAPI, port: int) -> None:
-    """Start the Zellij web server and authenticate, storing state on app.state.
-
-    Sets app.state.zellij_available, app.state.zellij_http_client, and
-    app.state.zellij_session_cookie. Uses early returns on each failure
-    rather than deep nesting.
-    """
-    # 1. Start Zellij web server (daemonized)
-    try:
-        result = subprocess.run(
-            ["zellij", "web", "--start", "--daemonize", "--port", str(port)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("zellij binary not found — terminal sessions unavailable")
-        return
-    except Exception:
-        logger.exception("Zellij startup failed — terminal sessions unavailable")
-        return
-
-    if result.returncode != 0:
-        logger.warning("Zellij web server failed to start: %s", result.stderr)
-        return
-
-    # 2. Create auth token
-    try:
-        token_result = subprocess.run(
-            ["zellij", "web", "--create-token"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        logger.exception("Zellij startup failed — terminal sessions unavailable")
-        return
-
-    auth_token = None
-    if token_result.returncode == 0:
-        for line in token_result.stdout.strip().splitlines():
-            line = line.strip()
-            if line.startswith("token_") and ":" in line:
-                auth_token = line.split(":", 1)[1].strip()
-                break
-
-    if not auth_token:
-        logger.warning("Zellij token creation failed — terminal sessions unavailable")
-        return
-
-    # 3. Readiness probe — poll the port before login
-    for _ in range(30):
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                break
-        except OSError:
-            await asyncio.sleep(0.1)
-
-    # 4. Server-side login to get session cookie
-    try:
-        async with httpx.AsyncClient() as login_client:
-            resp = await login_client.post(
-                f"http://127.0.0.1:{port}/command/login",
-                json={"auth_token": auth_token, "remember_me": True},
-            )
-            session_cookie = None
-            if resp.status_code == 200:
-                session_cookie = resp.cookies.get("session_token")
-                if not session_cookie:
-                    for header_val in resp.headers.get_list("set-cookie"):
-                        if "session_token=" in header_val:
-                            session_cookie = header_val.split("session_token=")[1].split(";")[0]
-                            break
-    except Exception:
-        logger.exception("Zellij startup failed — terminal sessions unavailable")
-        return
-
-    if not session_cookie:
-        logger.warning("Zellij login failed — terminal sessions unavailable")
-        return
-
-    app.state.zellij_http_client = httpx.AsyncClient(
-        timeout=30.0,
-        cookies={"session_token": session_cookie},
-    )
-    app.state.zellij_available = True
-    app.state.zellij_session_cookie = session_cookie
-    logger.info("Zellij web server ready")
-
-
 def create_app(
     session_manager: SessionManager | None = None,
     port: int = 9876,
     external_cache: ExternalCache | None = None,
     cc_queues: list[asyncio.Queue[str]] | None = None,
     disable_polling: bool = False,
-    zellij_support: bool | None = None,
     mcp_server_instance: FastMCP | None = None,
 ) -> ASGIApp:
     """Create and configure the application.
@@ -251,8 +160,6 @@ def create_app(
         port: The port the server will listen on, used for MCP tool URL construction.
         external_cache: Optional ExternalCache instance for testing (injects pre-populated state).
         cc_queues: Optional list of asyncio queues for SSE command-center events (for testing).
-        zellij_support: Override for Zellij web server startup. If None (default), reads
-            ``command_center.zellij_support`` from config. Pass True/False to force.
         mcp_server_instance: Optional FastMCP instance. Defaults to the module-level singleton
             (loaded with all registered tools). Tests that call ``create_app`` more than once
             per process must pass a fresh ``FastMCP(...)`` instance because each
@@ -337,23 +244,7 @@ def create_app(
         # Note: state is set on fastapi_app.state, NOT starlette_app.state (different objects).
         poller_task: asyncio.Task[None] | None = None
         session_poll_task: asyncio.Task[None] | None = None
-
-        # ------------------------------------------------------------------
-        # Zellij web server startup (soft — never crashes the server)
-        # ------------------------------------------------------------------
-        config = load_config()
-        zellij_enabled = (
-            zellij_support if zellij_support is not None else config.command_center.zellij_support
-        )
-
-        fastapi_app.state.zellij_available = False
-        fastapi_app.state.zellij_http_client = None
-        fastapi_app.state.zellij_session_cookie = None
-        fastapi_app.state.zellij_web_port = config.command_center.zellij_web_port
-
-        if zellij_enabled:
-            ensure_zellij_config()
-            await _start_zellij(fastapi_app, config.command_center.zellij_web_port)
+        ttyd_reaper_task: asyncio.Task[None] | None = None
 
         if not disable_polling:
             poller = ExternalPoller(
@@ -376,6 +267,21 @@ def create_app(
                     await asyncio.sleep(0.5)
 
             session_poll_task = asyncio.create_task(_poll_sessions())
+
+            async def _reap_loop() -> None:
+                # Sweep idle ttyd procs every 30 seconds. Idle threshold is
+                # IDLE_TIMEOUT_SECONDS (5 minutes) — long enough that the user
+                # can leave the popup open while reading without surprise
+                # disconnects, short enough that abandoned sessions don't
+                # leak indefinitely.
+                while True:
+                    try:
+                        await reap_idle_ttyds(fastapi_app, IDLE_TIMEOUT_SECONDS)
+                    except Exception:
+                        logger.exception("ttyd reaper sweep failed")
+                    await asyncio.sleep(30)
+
+            ttyd_reaper_task = asyncio.create_task(_reap_loop())
         else:
             fastapi_app.state.live_sessions = set()
 
@@ -392,12 +298,11 @@ def create_app(
                 session_poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await session_poll_task
-            zellij_client = getattr(fastapi_app.state, "zellij_http_client", None)
-            if zellij_client is not None:
-                await zellij_client.aclose()
-            if zellij_enabled:
-                with contextlib.suppress(FileNotFoundError, OSError):
-                    subprocess.run(["zellij", "web", "--stop"], check=False)
+            if ttyd_reaper_task is not None:
+                ttyd_reaper_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ttyd_reaper_task
+            kill_all_ttyd(fastapi_app)
 
     mcp_starlette = mcp.streamable_http_app()
 
@@ -427,6 +332,10 @@ def create_app(
     # Cache of repo-name → resolved Path used by /launch-background. Initialised
     # here for the same reason as launching_set above.
     fastapi_app.state.repo_path_cache = {}
+    # Per-tmux-session ttyd subprocess registry; populated lazily by
+    # ttyd_manager.ensure_ttyd_for. Initialised here so getattr fallbacks
+    # in the manager hit a real dict on first call.
+    fastapi_app.state.ttyd_procs = {}
     configure(sm, port=port)
     fastapi_app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     # Specific routers must come before the main router because the latter has
@@ -434,7 +343,6 @@ def create_app(
     fastapi_app.include_router(config_router)
     fastapi_app.include_router(install_router)
     fastapi_app.include_router(command_center_router)
-    fastapi_app.include_router(create_zellij_router())
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]

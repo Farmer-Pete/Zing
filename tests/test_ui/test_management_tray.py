@@ -101,7 +101,7 @@ def test_mgmt_panel_closes_on_escape(server: _ServerInfo, page: Page) -> None:
 def test_kill_session_button_removes_session(server: _ServerInfo, page: Page) -> None:
     """Clicking Kill on a running session POSTs kill-session and the session is removed.
 
-    Seeds a running session (terminal_session set), opens the management tray,
+    Seeds a running session (tmux_session set), opens the management tray,
     clicks Kill, and asserts that the session is gone from the manager.
     """
     manager = server.manager
@@ -122,14 +122,14 @@ def test_kill_session_button_removes_session(server: _ServerInfo, page: Page) ->
         )
     ]
 
-    # Create a ClaudeCodeSession with terminal_session populated (makes it appear in
+    # Create a ClaudeCodeSession with tmux_session populated (makes it appear in
     # the "Running Sessions" section of the management tray).
-    # terminal_session is only settable at creation time via create_claude_code_session.
+    # tmux_session is only settable at creation time via create_claude_code_session.
     manager.create_claude_code_session(
         session_id="kill-test-1",
         title="Kill Test Session",
         ticket_id="BAK-9999",
-        terminal_session="fake-tmux-session",
+        tmux_session="fake-tmux-session",
     )
 
     # Seed the FastAPI app's live_sessions set so the route counts this session as

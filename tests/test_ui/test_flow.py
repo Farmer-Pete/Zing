@@ -155,7 +155,7 @@ class TestFlowGoldenPath:
         - The ``.launch-popup-btn-send`` button DOM node is rendered with the
           expected selector and is clickable from a real browser.
         - When the click triggers a POST to ``/command-center/flow/launch-popup-send``
-          with a valid terminal_session, the server pins the session
+          with a valid tmux_session, the server pins the session
           (verified via ``manager.get_session(...).pinned``).
         - The browser navigates to ``/command-center/flow?session_id=...``.
 
@@ -180,7 +180,7 @@ class TestFlowGoldenPath:
         cc_session = manager.create_claude_code_session(
             session_id="cc-flow-popup-1",
             title="Flow popup test",
-            terminal_session="zing-flow-popup-test",
+            tmux_session="zing-flow-popup-test",
         )
         assert not cc_session.pinned
 
@@ -230,7 +230,7 @@ class TestFlowGoldenPath:
                     fetch('{base_url}/command-center/flow/launch-popup-send', {{
                         method: 'POST',
                         headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify({{terminal_session: 'zing-flow-popup-test'}}),
+                        body: JSON.stringify({{tmux_session: 'zing-flow-popup-test'}}),
                     }}).then(function() {{
                         var url = '{base_url}/command-center/flow?session_id=cc-flow-popup-1';
                         window.location = url;

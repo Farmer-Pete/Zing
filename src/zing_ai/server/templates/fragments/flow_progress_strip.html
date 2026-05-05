@@ -1,38 +1,59 @@
-<header id="flow-strip" class="flow-strip">
+<header id="flow-strip" class="flow-strip{% if not active %} flow-strip-empty{% endif %}">
   <div class="flow-strip-left">
     <div class="flow-strip-z">Z</div>
     {% if active %}
       <div class="flow-strip-ticket">
-        {% if active.action_type == 'attach' and active_session and active_session.pinned %}
-          <span class="flow-strip-pin-glyph" title="Pinned">📌</span>
-        {% endif %}
-        {% if active.ticket_id %}<span class="flow-strip-ticket-id">{{ active.ticket_id }}</span>{% endif %}
+        <span class="flow-strip-ticket-id{% if active.action_type == 'attach' and active_session and active_session.pinned %} pinned{% endif %}">
+          {% if active.action_type == 'attach' and active_session and active_session.pinned %}<span class="flow-strip-pin-glyph" title="Pinned">📌</span>{% endif %}
+          {% if active.ticket_id %}{{ active.ticket_id }}{% endif %}
+        </span>
         <span class="flow-strip-title">{{ active.title }}</span>
-        {% if active.step_name %}<span class="flow-strip-step-pill">{{ active.step_name }}</span>{% endif %}
+      </div>
+      {% if active.step_name %}<span class="flow-strip-step-pill">{{ active.step_name }}</span>{% endif %}
+    {% else %}
+      <div class="flow-strip-ticket">
+        <span class="flow-strip-ticket-id">— Nothing active —</span>
+        <span class="flow-strip-title">All caught up</span>
       </div>
     {% endif %}
   </div>
-  <div class="flow-strip-dots">
-    {% for item in queue %}
-      <span class="flow-strip-dot
-                   {% if active and item.session_id == active.session_id and item.step_id == active.step_id %}dot-active{% endif %}
-                   {% if item.pinned %}dot-pinned{% endif %}
-                   {% if not item.has_urgency %}dot-parked{% endif %}"
-            title="{{ item.title }}"></span>
-    {% endfor %}
+
+  <div class="flow-strip-progress">
+    <div class="flow-strip-dots">
+      {% for item in queue %}
+        <span class="flow-strip-dot
+                     {% if active and item.session_id == active.session_id and item.step_id == active.step_id %}dot-active{% endif %}
+                     {% if item.pinned %}dot-pinned{% endif %}
+                     {% if not item.has_urgency %}dot-parked{% endif %}"
+              title="{{ item.title }}"></span>
+      {% endfor %}
+    </div>
+    <div class="flow-strip-progress-label">
+      {% if active and queue_count %}
+        Item <b>{{ active_position }}</b> of <b>{{ queue_count }}</b> in queue
+      {% else %}
+        <b>0</b> of <b>0</b> · all caught up
+      {% endif %}
+    </div>
   </div>
+
   <div class="flow-strip-right">
-    <button type="button" class="keycap-btn" id="flow-palette-open-btn"
-            data-on:click="$paletteOpen = true"
-            title="Switch to item (⌘K)"><span class="keycap">⌘K</span><span class="keycap-label">Switch · {{ queue_count }} queued</span></button>
-    <span class="keycap">⌘J</span><span class="keycap">⌘⇧J</span>
+    <div class="flow-strip-keys">
+      <span class="flow-strip-key-group"><span class="keycap">⌘J</span><span class="keycap-label">next</span></span>
+      <span class="flow-strip-key-group"><span class="keycap">⌘⇧J</span><span class="keycap-label">prev</span></span>
+    </div>
     {% if active and active.action_type == 'attach' %}
       <button type="button"
-              class="flow-strip-pin"
+              class="flow-strip-pin{% if active_session and active_session.pinned %} active{% endif %}"
               title="Keeps this terminal in the queue when you switch away. Other items stay until resolved."
-              data-on:click="document.getElementById('flow-action-pin').click()">
-        <span class="keycap">⌘P</span> Pin
-      </button>
+              data-on:click="document.getElementById('flow-action-pin').click()">📌</button>
     {% endif %}
+    <button type="button" class="flow-strip-cmdk" id="flow-palette-open-btn"
+            data-on:click="$paletteOpen = true"
+            title="Switch to item (⌘K)"{% if not queue_count %} disabled{% endif %}>
+      <span class="keycap">⌘K</span>
+      <span class="flow-strip-cmdk-label">Switch</span>
+      <span class="flow-strip-cmdk-badge">{{ queue_count }}</span>
+    </button>
   </div>
 </header>

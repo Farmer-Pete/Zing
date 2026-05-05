@@ -19,7 +19,7 @@
     <div class="mgmt-section-title">Running Sessions ({{ running_sessions | length }})</div>
     {% for session in running_sessions %}
       <div class="mgmt-row">
-        <span class="mgmt-row-name">{{ session.terminal_session }}</span>
+        <span class="mgmt-row-name">{{ session.tmux_session }}</span>
         <span class="mgmt-row-detail">{{ session.ticket_id or session.title }}</span>
         <button class="mgmt-row-action mgmt-btn-danger"
                 data-on:click="@post('/command-center/kill-session', {payload: {session_id: {{ session.session_id | js_str }}}})">

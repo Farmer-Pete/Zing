@@ -56,7 +56,6 @@ def ui_server() -> Generator[_ServerInfo]:
         external_cache=external_cache,
         cc_queues=cc_queues,
         disable_polling=True,
-        zellij_support=False,
         mcp_server_instance=mcp_for_test,
     )
 

@@ -41,7 +41,7 @@ def next_in_queue(
     current_session_id: str,
     direction: str,
 ) -> AttentionItem | None:
-    """Return the next or previous item in the queue with wrap-around.
+    """Return the next or previous item in the queue, or ``None`` at the edge.
 
     Args:
         queue: Ordered list of AttentionItems from build_attention_queue.
@@ -49,9 +49,11 @@ def next_in_queue(
         direction: ``"next"`` to advance forward, ``"prev"`` to go backward.
 
     Returns:
-        The adjacent AttentionItem (with wrap-around), ``queue[0]`` if
-        ``current_session_id`` is not found in the queue, or ``None`` if the
-        queue is empty.
+        The adjacent AttentionItem, ``queue[0]`` if ``current_session_id`` is
+        not found in the queue, or ``None`` if the queue is empty *or* the
+        cursor is already at the relevant edge (no next from the last item;
+        no prev from the first). The endpoint translates ``None`` into a
+        navigate-to-empty-state redirect.
 
     Note:
         The fallback when ``current_session_id`` is missing from the queue is
@@ -60,14 +62,18 @@ def next_in_queue(
         topmost item is the most-urgent, and the user may have arrived at a
         dead URL (the session was completed/dismissed since the page loaded),
         so dropping them at the top of the queue is the most useful default.
+
+        Wrap-around was removed deliberately: with a single-item queue (a
+        common case for an attached terminal), wrap-around made Next/Prev
+        no-op back to the same item — the user-visible bug.
     """
     if not queue:
         return None
     for i, item in enumerate(queue):
         if item.session_id == current_session_id:
             if direction == "prev":
-                return queue[(i - 1) % len(queue)]
-            return queue[(i + 1) % len(queue)]
+                return queue[i - 1] if i > 0 else None
+            return queue[i + 1] if i + 1 < len(queue) else None
     # current_session_id not in queue — fall back to first item (see Note above).
     return queue[0]
 
@@ -168,18 +174,17 @@ def build_flow_context(
                         elif finding.type == "text" and resp.answer is not None:
                             initial_responses[finding.id] = resp.answer
 
-    # Compute the ticket_id of the next item in the queue (wraps around).
-    # Used by the toolbar's "Next ▸ <ticket>" button.
+    # Compute the ticket_id of the next item in the queue. Used by the
+    # toolbar's "Next ▸ <ticket>" button. None when the active item is the
+    # last in the queue (no wrap-around).
     next_ticket_id: str | None = None
     if active and queue:
         try:
             idx = queue.index(active)
         except ValueError:
             idx = -1
-        if idx >= 0:
-            next_idx = (idx + 1) % len(queue)
-            if next_idx != idx and queue[next_idx].ticket_id:
-                next_ticket_id = queue[next_idx].ticket_id
+        if 0 <= idx < len(queue) - 1 and queue[idx + 1].ticket_id:
+            next_ticket_id = queue[idx + 1].ticket_id
 
     return {
         "queue": queue,

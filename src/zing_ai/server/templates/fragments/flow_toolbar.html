@@ -1,28 +1,35 @@
 <footer class="flow-toolbar">
   <div class="flow-toolbar-left">
-    <a href="/command-center" class="flow-toolbar-btn flow-toolbar-board">← Board</a>
+    <div class="flow-toolbar-back-cluster">
+      <a href="/command-center" class="flow-toolbar-btn flow-toolbar-board">← Board</a>
+      <span class="flow-toolbar-back-hint">press <b>B</b> to toggle</span>
+    </div>
   </div>
   <div class="flow-toolbar-center">
     {% if active %}
-      Item {{ active_position }} of {{ queue_count }}
-      {% if active.step_name %} · {{ active.step_name }}{% endif %}
-      {% if active.ticket_id %} · {{ active.ticket_id }}{% endif %}
+      Reviewing
+      {% if active.action_type == 'findings' %}<b>{{ active_findings | length }} findings</b>
+      {% elif active.action_type == 'questions' %}<b>{{ active_findings | length }} questions</b>
+      {% elif active.action_type == 'attach' %}<b>terminal</b>
+      {% else %}<b>item</b>{% endif %}
+      {% if active.ticket_id %}<span class="flow-toolbar-sep">·</span><span class="flow-toolbar-ticket">{{ active.ticket_id }}</span>{% endif %}
+      {% if active.step_name %}<span class="flow-toolbar-step-pill">{{ active.step_name }}</span>{% endif %}
     {% else %}
-      All clear
+      Queue is empty <span class="flow-toolbar-sep">·</span> Claude will surface new items here
     {% endif %}
   </div>
   <div class="flow-toolbar-right">
-    {% if active and active.action_type in ('findings', 'questions') %}
-    <button type="button" class="btn-primary"
+    <button type="button" class="flow-toolbar-btn"{% if not active %} disabled{% endif %}
+            data-on:click="document.getElementById('flow-action-prev').click()">← Prev</button>
+    <button type="button" class="flow-toolbar-btn flow-toolbar-next"{% if not active %} disabled{% endif %}
             data-on:click="document.getElementById('flow-action-next').click()">
-      Submit &amp; Next ▸
+      Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% else %} ▸{% endif %}
+    </button>
+    {% if active and active.action_type in ('findings', 'questions') %}
+    <button type="button" class="flow-toolbar-btn flow-toolbar-done"
+            data-on:click="document.getElementById('flow-action-next').click()">
+      ✓ Done
     </button>
     {% endif %}
-    <button type="button" class="flow-toolbar-btn"
-            data-on:click="document.getElementById('flow-action-prev').click()">Prev</button>
-    <button type="button" class="flow-toolbar-btn flow-toolbar-next"
-            data-on:click="document.getElementById('flow-action-next').click()">
-      Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% endif %}
-    </button>
   </div>
 </footer>

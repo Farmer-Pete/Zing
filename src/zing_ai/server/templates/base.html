@@ -68,7 +68,10 @@
     </header>
     <nav class="top-nav">
         <a href="/dashboard"{% if current_path == "/dashboard" %} class="active"{% endif %}>Sessions</a>
-        <a href="/command-center"{% if current_path == "/command-center" %} class="active"{% endif %}>Command Center</a>
+        <span class="top-nav-cc-group">
+            <a href="/command-center"{% if current_path == "/command-center" or current_path == "/command-center/flow" %} class="active"{% endif %}>Command Center</a>
+            {% block command_center_toggle %}{% endblock %}
+        </span>
         <a href="/config"{% if current_path == "/config" %} class="active"{% endif %}>Config</a>
         <a href="/install"{% if current_path == "/install" %} class="active"{% endif %}>Install</a>
         {% block topnav_extra %}{% endblock %}

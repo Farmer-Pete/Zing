@@ -6,28 +6,6 @@ from unittest.mock import patch
 
 import pytest
 
-from zing_ai.config import load_config as _real_load_config
-
-
-@pytest.fixture(autouse=True)
-def _disable_zellij_in_config():
-    """Force ``command_center.zellij_support`` off for the test suite.
-
-    Prevents the app lifespan from invoking ``zellij web --start`` /
-    ``zellij web --stop`` on the host (which would disrupt the developer's
-    real zellij sessions). Tests that need to exercise the zellij startup
-    path should pass ``zellij_support=True`` to ``create_app`` explicitly
-    (with ``subprocess.run`` mocked).
-    """
-
-    def _patched_load_config():
-        cfg = _real_load_config()
-        cfg.command_center.zellij_support = False
-        return cfg
-
-    with patch("zing_ai.server.app.load_config", _patched_load_config):
-        yield
-
 
 @pytest.fixture()
 def mock_state_file(tmp_path):

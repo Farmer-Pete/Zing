@@ -298,11 +298,11 @@ class TestNewFields(unittest.TestCase):
             created_at=datetime(2026, 1, 1, 12, 0, 0),
         )
         # Create a session that will appear STOPPED:
-        # terminal_session set, launched_at well outside grace window, pinned=True.
+        # tmux_session set, launched_at well outside grace window, pinned=True.
         session = ClaudeCodeSession(
             session_id="cc-stopped",
             title="Stopped Session",
-            terminal_session="old-session",
+            tmux_session="old-session",
             launched_at=datetime(2025, 1, 1, 0, 0, 0),  # very old
             pinned=True,
             notifications=[notif],

@@ -3,7 +3,7 @@
 Takes typed snapshots from Linear, GitHub, and the in-memory SessionManager
 and produces the Kanban view rendered on ``/command-center``. Most functions
 are pure (no I/O) and can be unit tested with synthetic data.
-``get_live_sessions`` is the exception — it shells out to ``zellij``.
+``get_live_sessions`` is the exception — it shells out to ``tmux``.
 """
 
 from __future__ import annotations
@@ -345,6 +345,13 @@ def _is_recently_done(card: KanbanCard, cutoff: datetime, current_username: str 
 
 def _should_include_card(card: KanbanCard, current_username: str, cutoff: datetime) -> bool:
     """Return False when the card should be excluded from the board entirely."""
+    # Backlog tickets are deferred work — exclude regardless of any local
+    # session, audit step, or PR state.  If the user is actively working
+    # on something, the ticket should be in another state ("started",
+    # "unstarted", etc.).
+    if card.ticket is not None and card.ticket.state_type == "backlog":
+        return False
+
     # Orphan-PR cards where the user is neither author nor reviewer and has no session.
     if card.ticket is None and card.prs:
         user_involved = any(
@@ -565,18 +572,13 @@ def _assign_done_group(card: KanbanCard, current_username: str) -> str:
 def _todo_sort_key(card: KanbanCard) -> tuple:
     """Sort key for todo column.
 
-    State-type bucket: other=0 (TOP), backlog=1, triage=2 (BOTTOM).
+    State-type bucket: other=0 (TOP), triage=1 (BOTTOM).  Backlog tickets
+    are excluded from the board entirely (see ``_should_include_card``).
     Within bucket: priority ascending (1=urgent first, 4=low last, 0=no priority last).
     """
     if card.ticket is None:
         return (0, 0)
-    state_type = card.ticket.state_type
-    if state_type == "triage":
-        bucket = 2
-    elif state_type == "backlog":
-        bucket = 1
-    else:
-        bucket = 0
+    bucket = 1 if card.ticket.state_type == "triage" else 0
     priority = card.ticket.priority
     # 0 = no priority → sort last within bucket
     effective_priority = priority if priority != 0 else 5
@@ -1104,10 +1106,15 @@ def build_session_phases(session: ZingSession) -> list[dict]:
 
 
 def get_live_sessions() -> set[str]:
-    """Return the set of live Zellij session names with the zing-- prefix."""
+    """Return the set of live tmux session names with the zing- prefix.
+
+    ``tmux list-sessions`` exits non-zero when there is no server running,
+    which we treat as "no live sessions" rather than an error — a fresh boot
+    has no tmux server until something connects.
+    """
     try:
         result = subprocess.run(
-            ["zellij", "list-sessions", "-sn"],
+            ["tmux", "list-sessions", "-F", "#S"],
             capture_output=True,
             text=True,
         )
@@ -1115,6 +1122,4 @@ def get_live_sessions() -> set[str]:
         return set()
     if result.returncode != 0:
         return set()
-    return {
-        line.strip() for line in result.stdout.splitlines() if line.strip().startswith("zing--")
-    }
+    return {line.strip() for line in result.stdout.splitlines() if line.strip().startswith("zing-")}

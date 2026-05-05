@@ -371,8 +371,8 @@ class TestZingSessionView(unittest.TestCase):
 
 
 class TestClaudeCodeSessionView(unittest.TestCase):
-    def test_no_terminal_session_means_alive(self) -> None:
-        # state property returns STARTED when terminal_session is None
+    def test_no_tmux_session_means_alive(self) -> None:
+        # state property returns STARTED when tmux_session is None
         session = _make_cc_session(title="Foo")
         view = build_card_view(_card(sessions=[session]), "in_progress", "octocat")
         cv = view.claude_code_session_views[0]
@@ -712,7 +712,7 @@ class TestDebugToolCoverage(unittest.TestCase):
             session_id="cc-1",
             title="cc",
             ticket_id="BAK-99",
-            terminal_session="zellij-1",
+            tmux_session="zing-1",
             notifications=[Notification(title="q", body="test question?")],
         )
         audit_step = WorkflowStep(step_name="plan-audit", sequence=0)

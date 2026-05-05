@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 
+{% set body_class = 'command-center flow' %}
+
 {% block title %}Flow — Command Center{% endblock %}
 
-{% block topnav_extra %}
+{% block command_center_toggle %}
 {% include 'fragments/_flow_board_toggle.html' %}
 {% endblock %}
 

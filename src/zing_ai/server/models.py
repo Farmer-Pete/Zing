@@ -166,7 +166,7 @@ class SessionState(StrEnum):
 
 # Window in which a freshly created ClaudeCodeSession is considered "starting up"
 # rather than "stopped". Covers the gap between create_session_on_server and the
-# 0.5s zellij list-sessions poll first observing the new session name.
+# 0.5s tmux list-sessions poll first observing the new session name.
 LAUNCH_GRACE_SECONDS = 30
 
 
@@ -398,7 +398,7 @@ class ClaudeCodeSession(SessionBase):
     skill: str | None = None
     pr_number: int | None = None
     pr_repo: str | None = None
-    terminal_session: str | None = None
+    tmux_session: str | None = None
     launched_at: datetime | None = None
     pinned: bool = False
     notifications: list[Notification] = Field(default_factory=list)
@@ -407,10 +407,10 @@ class ClaudeCodeSession(SessionBase):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_tmux_session(cls, data: dict) -> dict:
-        """Backward compat: load old JSON files with 'tmux_session' key."""
-        if isinstance(data, dict) and "tmux_session" in data and "terminal_session" not in data:
-            data["terminal_session"] = data.pop("tmux_session")
+    def _migrate_terminal_session(cls, data: dict) -> dict:
+        """Backward compat: load Zellij-era JSON that used 'terminal_session'."""
+        if isinstance(data, dict) and "terminal_session" in data and "tmux_session" not in data:
+            data["tmux_session"] = data.pop("terminal_session")
         return data
 
     @property
@@ -422,15 +422,15 @@ class ClaudeCodeSession(SessionBase):
     def state(self) -> SessionState:
         """Return the session state.
 
-        STARTED when zellij currently has the session. STARTING when launched
+        STARTED when tmux currently has the session. STARTING when launched
         recently and never observed alive yet — this covers the brief window
-        between record creation and zellij list-sessions catching up. STOPPED
-        when terminal_session is set but the session has gone away (or never
+        between record creation and tmux list-sessions catching up. STOPPED
+        when tmux_session is set but the session has gone away (or never
         appeared within the grace window).
         """
         if self._session_alive:
             return SessionState.STARTED
-        if self.terminal_session is None:
+        if self.tmux_session is None:
             return SessionState.STARTED
         if (
             not self._ever_seen_alive

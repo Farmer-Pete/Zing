@@ -25,7 +25,7 @@ from zing_ai.config import load_config
 from zing_ai.launch import (
     LaunchError,
     build_claude_args,
-    build_session_name,
+    build_tmux_session_name,
     checkout_pr_branch,
     create_session_on_server,
     create_worktree,
@@ -58,6 +58,7 @@ from zing_ai.server.routes import _map_signals_to_responses
 from zing_ai.server.signals import to_signal_key as _to_signal_key
 from zing_ai.server.sse_helpers import sse_toast as _sse_toast
 from zing_ai.server.templates import render, render_markdown
+from zing_ai.server.ttyd_manager import ensure_ttyd_for, kill_ttyd_for
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -159,7 +160,7 @@ def _build_tray_data(
     Args:
         view: The current KanbanView (all columns).
         sessions: All sessions from the session manager.
-        live_sessions: Set of currently alive zellij session names.
+        live_sessions: Set of currently alive tmux session names.
 
     Returns:
         A dict with keys: running_sessions, worktree_entries, running_count, orphan_count.
@@ -180,8 +181,8 @@ def _build_tray_data(
         if not isinstance(session, ClaudeCodeSession):
             continue
 
-        # Track running sessions (alive in zellij).
-        if session.terminal_session and session.terminal_session in live_sessions:
+        # Track running sessions (alive in tmux).
+        if session.tmux_session and session.tmux_session in live_sessions:
             running_sessions.append(session)
 
         # Build worktree entries for sessions with a worktree_path.
@@ -294,8 +295,9 @@ def _build_initial_signals(
         # Standup modal state.
         "standupTab": "rendered",
         "standupMarkdown": "",
-        # Terminal modal — URL signal patched by /flow/launch-popup-open.
+        # Terminal modal — URL + title signals patched by /command-center/launch-background.
         "terminalUrl": "",
+        "terminalTitle": "",
         # Launch popup — session name, URL, and title patched by /flow/launch-popup-open.
         "launchPopupSession": "",
         "launchPopupUrl": "",
@@ -349,17 +351,27 @@ async def get_flow(  # noqa: ANN201
     request: Request,
     session_id: str | None = None,
     step_id: str | None = None,
+    cursor: str | None = None,
 ):
     """Return the Flow Mode HTML page.
 
     Query params ``session_id`` and ``step_id`` select the active item
-    directly — the URL is the only cursor.
+    directly — the URL is the only cursor. The ``cursor=end`` sentinel
+    forces the empty state regardless of queue contents (used by the
+    Next/Prev redirect when the user steps past the queue edge so they
+    don't land back on a sticky pinned attach item).
     """
     manager = request.app.state.session_manager
     sessions = manager.list_sessions()
     queue = build_attention_queue(sessions, datetime.now(UTC))
-    active = resolve_active_item(queue, session_id, step_id)
+    active = None if cursor == "end" else resolve_active_item(queue, session_id, step_id)
     ctx = build_flow_context(manager, queue, active)
+    # Bake the ttyd URL into the page when the active item is an attach,
+    # so the iframe in flow_body_attach.html has a usable src on first paint.
+    # Reuses the existing ttyd if one is already running for this session.
+    active_session = ctx.get("active_session")
+    if active_session is not None and active_session.tmux_session:
+        ctx["attach_terminal_url"] = await ensure_ttyd_for(request.app, active_session.tmux_session)
     logger.info(
         "flow_page_rendered",
         extra={
@@ -579,6 +591,18 @@ async def get_standup(request: Request):  # noqa: ANN201
 # ---------------------------------------------------------------------------
 
 
+def _terminal_title_for(session_manager, tmux_session: str) -> str:  # noqa: ANN001
+    """Friendly heading for the terminal modal: ``<TICKET> · <title>``.
+
+    Falls back to the raw slug when no in-app session claims this tmux
+    session (orphan tmux processes the user attaches to manually).
+    """
+    for s in session_manager.list_sessions():
+        if isinstance(s, ClaudeCodeSession) and s.tmux_session == tmux_session:
+            return f"{s.ticket_id} · {s.title}" if s.ticket_id else s.title
+    return tmux_session
+
+
 @router.post("/command-center/launch-background")
 @datastar_response
 async def launch_background(payload: dict[str, Any], request: Request):  # noqa: ANN201
@@ -771,7 +795,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
         title = card.ticket.title if (card is not None and card.ticket is not None) else card_key
         skill = skill_override or ("pr-audit" if is_pr_card else "new")
         target = card.prs[0].url if (is_pr_card and card is not None and card.prs) else ticket_id
-        session_name = build_session_name(
+        session_name = build_tmux_session_name(
             target=ticket_id or branch_name,
             pr_number=pr_number,
         )
@@ -779,11 +803,12 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
         logger.info("Launching background session for card %s (repo: %s)", card_key, repo_name)
 
-        # Reconcile against any existing Zellij session with the same name before
-        # we hand off to exec_or_detach (which would fail with "Session already
+        # Reconcile against any existing tmux session with the same name before
+        # we hand off to exec_or_detach (which would fail with "session already
         # exists"). Two cases:
-        #   - Live + tracked by an in-app session → redirect user to attach.
-        #   - Live + orphaned (no record claims it) → kill the stale Zellij
+        #   - Live + tracked by an in-app session → spawn ttyd and surface
+        #     the terminal so the user attaches to the running session.
+        #   - Live + orphaned (no record claims it) → kill the stale tmux
         #     session and proceed.
         live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
         if session_name in live_sessions:
@@ -792,7 +817,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                 (
                     s
                     for s in session_manager.list_sessions()
-                    if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_name
+                    if isinstance(s, ClaudeCodeSession) and s.tmux_session == session_name
                 ),
                 None,
             )
@@ -803,10 +828,20 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     tracked.session_id,
                 )
                 launching_set.discard(card_key)
+                ttyd_url = await ensure_ttyd_for(request.app, session_name)
+                if ttyd_url is None:
+                    yield _sse_toast(
+                        f"ttyd unavailable; attach manually with `tmux attach -t {session_name}`",
+                        "err",
+                    )
+                    if reset_busy is not None:
+                        yield reset_busy
+                    return
                 yield _sse_toast(f"Session {session_name} already running — attaching", "info")
                 yield SSE.patch_signals(
                     {
-                        "terminalUrl": f"/zellij/{session_name}",
+                        "terminalUrl": ttyd_url,
+                        "terminalTitle": _terminal_title_for(session_manager, session_name),
                         "modals": {"terminal": True},
                     }
                 )
@@ -814,17 +849,13 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     yield reset_busy
                 return
             logger.warning(
-                "launch-background: pruning orphaned Zellij session %s "
-                "(no in-app record claims it)",
+                "launch-background: pruning orphaned tmux session %s (no in-app record claims it)",
                 session_name,
             )
-            # `kill-session` only signals the session — the name lingers in
-            # `list-sessions` as EXITED until the record is removed, which
-            # would still trip exec_or_detach's collision check. `delete-session
-            # --force` kills (if alive) and removes the record in one step.
+            kill_ttyd_for(request.app, session_name)
             await asyncio.to_thread(
                 subprocess.run,
-                ["zellij", "delete-session", "--force", session_name],
+                ["tmux", "kill-session", "-t", session_name],
                 capture_output=True,
                 check=False,
             )
@@ -865,7 +896,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     skill,
                     pr_number=pr_number,
                     pr_repo=pr_repo,
-                    terminal_session=session_name,
+                    tmux_session=session_name,
                 )
 
                 args = build_claude_args(
@@ -875,7 +906,7 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
                     target,
                     claude_flags=config.command_center.claude_flags,
                 )
-                exec_or_detach(args, wt, terminal_session=session_name)
+                exec_or_detach(args, wt, tmux_session=session_name)
 
                 return session_id, wt
 
@@ -888,8 +919,8 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
 
             # Schedule a follow-up board_changed when the launch grace window
             # ends. The 0.5s liveness poll already pushes board_changed when
-            # zellij comes up, so the happy path flips STARTING→STARTED quickly.
-            # This timer covers the unhappy path (zellij never starts): without
+            # tmux comes up, so the happy path flips STARTING→STARTED quickly.
+            # This timer covers the unhappy path (tmux never starts): without
             # it the strip would sit on "Starting…" until the next external
             # poll (~60s) finally re-rendered with the expired grace.
             async def _grace_expiry_push() -> None:
@@ -976,7 +1007,7 @@ async def start_ticket(payload: dict[str, Any], request: Request):  # noqa: ANN2
 @router.post("/command-center/kill-session")
 @datastar_response
 async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    """Kill a running zellij session and remove the session record."""
+    """Kill a running tmux session and remove the session record."""
     session_id = payload.get("session_id")
 
     async def _stream():  # noqa: ANN202
@@ -992,7 +1023,7 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
         if (
             session is None
             or not isinstance(session, ClaudeCodeSession)
-            or not session.terminal_session
+            or not session.tmux_session
         ):
             logger.warning(
                 "kill-session: session not found %s",
@@ -1001,19 +1032,20 @@ async def kill_session(payload: dict[str, Any], request: Request):  # noqa: ANN2
             )
             yield _sse_toast("Session not found", "err")
             return
-        # zellij may legitimately be absent (CI runners, dev machines without
+        # tmux may legitimately be absent (CI runners, dev machines without
         # the binary). Surface a soft warning but still clean up the session
         # record so the UI reflects the user's intent.
+        kill_ttyd_for(request.app, session.tmux_session)
         try:
             subprocess.run(
-                ["zellij", "kill-session", session.terminal_session],
+                ["tmux", "kill-session", "-t", session.tmux_session],
                 capture_output=True,
                 check=False,
             )
         except FileNotFoundError:
             logger.warning(
-                "kill-session: zellij binary not found; cleaning up session record only",
-                extra={"event": "cc_kill_no_zellij", "session_id": session_id},
+                "kill-session: tmux binary not found; cleaning up session record only",
+                extra={"event": "cc_kill_no_tmux", "session_id": session_id},
             )
         manager.cleanup_session(session_id)
         request.app.state.notify_cc("board_changed")
@@ -1051,7 +1083,7 @@ async def cleanup_worktree(payload: dict[str, Any], request: Request):  # noqa: 
             yield _sse_toast("Session not found", "err")
             return
         live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
-        if session.terminal_session and session.terminal_session in live_sessions:
+        if session.tmux_session and session.tmux_session in live_sessions:
             logger.warning(
                 "cleanup-worktree: session %s still running",
                 session_id,
@@ -1106,9 +1138,9 @@ async def session_question(request: Request) -> JSONResponse:
     if session is not None and not isinstance(session, ClaudeCodeSession):
         session = None  # Only accept ClaudeCodeSession for hook questions
     if session is None:
-        # Fallback: scan for a ClaudeCodeSession whose terminal_session matches.
+        # Fallback: scan for a ClaudeCodeSession whose tmux_session matches.
         for s in manager.list_sessions():
-            if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_id:
+            if isinstance(s, ClaudeCodeSession) and s.tmux_session == session_id:
                 session = s
                 session_id = s.session_id
                 break
@@ -1148,7 +1180,7 @@ async def session_idle(request: Request) -> JSONResponse:
         session = None
     if session is None:
         for s in manager.list_sessions():
-            if isinstance(s, ClaudeCodeSession) and s.terminal_session == session_id:
+            if isinstance(s, ClaudeCodeSession) and s.tmux_session == session_id:
                 session = s
                 session_id = s.session_id
                 break
@@ -1245,30 +1277,45 @@ async def post_flow_pin(payload: dict[str, Any], request: Request):  # noqa: ANN
 @router.post("/command-center/flow/launch-popup-open")
 @datastar_response
 async def post_flow_launch_popup_open(payload: dict[str, Any], request: Request):  # noqa: ANN201
-    """Open the launch popup for a terminal session."""
+    """Open the launch popup for a tmux session — spawns or reuses a ttyd."""
 
     async def _stream():  # noqa: ANN202
-        if not getattr(request.app.state, "zellij_available", False):
-            yield _sse_toast("Zellij is not available", "err")
+        tmux_session = str(payload.get("tmux_session") or "").strip()
+        if not tmux_session:
+            yield _sse_toast("tmux_session is required", "err")
             return
-        terminal_session = str(payload.get("terminal_session") or "").strip()
-        if not terminal_session:
-            yield _sse_toast("terminal_session is required", "err")
-            return
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", terminal_session):
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", tmux_session):
             yield _sse_toast("invalid session name", "err")
             return
-        url = f"/zellij/{terminal_session}"
+        # Pre-flight: if tmux doesn't have the session, ttyd would spawn and
+        # immediately exit with a confusing error.
+        live_sessions: set[str] = getattr(request.app.state, "live_sessions", set())
+        if tmux_session not in live_sessions:
+            has = await asyncio.to_thread(
+                subprocess.run,
+                ["tmux", "has-session", "-t", tmux_session],
+                capture_output=True,
+            )
+            if has.returncode != 0:
+                yield _sse_toast(f"tmux session '{tmux_session}' is not running", "err")
+                return
+        url = await ensure_ttyd_for(request.app, tmux_session)
+        if url is None:
+            yield _sse_toast(
+                "ttyd unavailable. Install with `brew install ttyd` (or your package manager).",
+                "err",
+            )
+            return
         # Derive a human-readable title from the matching ClaudeCodeSession, if found.
         manager = request.app.state.session_manager
-        title = terminal_session
+        title = tmux_session
         for s in manager.list_sessions():
-            if isinstance(s, ClaudeCodeSession) and s.terminal_session == terminal_session:
-                title = s.title or terminal_session
+            if isinstance(s, ClaudeCodeSession) and s.tmux_session == tmux_session:
+                title = s.title or tmux_session
                 break
         yield SSE.patch_signals(
             {
-                "launchPopupSession": terminal_session,
+                "launchPopupSession": tmux_session,
                 "launchPopupUrl": url,
                 "launchPopupTitle": title,
                 "modals": {"launchPopup": True},
@@ -1285,16 +1332,14 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
 
     async def _stream():  # noqa: ANN202
         manager = request.app.state.session_manager
-        terminal_session = str(payload.get("terminal_session") or "").strip()
-        if not terminal_session:
-            yield _sse_toast("Missing terminal session", "err")
+        tmux_session = str(payload.get("tmux_session") or "").strip()
+        if not tmux_session:
+            yield _sse_toast("Missing tmux session", "err")
             return
         sessions = manager.list_sessions()
         match: ClaudeCodeSession | None = None
         for session in sessions:
-            if isinstance(session, ClaudeCodeSession) and (
-                session.terminal_session == terminal_session
-            ):
+            if isinstance(session, ClaudeCodeSession) and (session.tmux_session == tmux_session):
                 match = session
                 break
         if match is None:
@@ -1302,7 +1347,7 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
                 "flow_launch_popup_sent_failed",
                 extra={
                     "event": "flow_launch_popup_sent_failed",
-                    "terminal_session": terminal_session,
+                    "tmux_session": tmux_session,
                     "error": "session not found",
                 },
             )
@@ -1314,7 +1359,7 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
             extra={
                 "event": "flow_launch_popup_sent",
                 "session_id": match.session_id,
-                "terminal_session": terminal_session,
+                "tmux_session": tmux_session,
             },
         )
         yield SSE.patch_signals({"modals": {"launchPopup": False}})
@@ -1350,9 +1395,18 @@ async def _flow_save_and_navigate(  # noqa: ANN201
     session_id = payload.get("session_id") or ""
     step_id = payload.get("step_id") or ""
     responses = payload.get("responses") or {}
-    # Persist responses if this is a findings/questions item. Empty responses
+    # Build the queue once — used both to look up the active item's
+    # action_type (so we skip the save block for attach items, whose
+    # step_id mirrors session_id and would not resolve via get_step_by_id)
+    # and for navigation below.
+    queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+    active_item = next(
+        (it for it in queue if it.session_id == session_id and it.step_id == step_id),
+        None,
+    )
+    # Persist responses only for findings/questions items. Empty responses
     # are still a valid submission — the response mapper supplies defaults.
-    if step_id:
+    if active_item is not None and active_item.action_type in ("findings", "questions") and step_id:
         try:
             _, step = manager.get_step_by_id(step_id)
             mapped = _map_signals_to_responses(step.findings, responses)
@@ -1368,11 +1422,33 @@ async def _flow_save_and_navigate(  # noqa: ANN201
             )
             yield _sse_toast(f"Save failed: {exc}", "err")
             return
-    # Compute the adjacent queue item.
-    queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+    # Paging forward off an attached terminal counts as acknowledging its
+    # pending question — without this the same notification keeps the
+    # session in the attention queue and Next loops back to it.
+    elif direction == "next" and active_item is not None and active_item.action_type == "attach":
+        session = manager.get_session(session_id)
+        if isinstance(session, ClaudeCodeSession) and session.pending_question is not None:
+            try:
+                manager.mark_pending_question_answered(session_id)
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    f"flow_{direction}_dismiss_failed",
+                    extra={
+                        "event": f"flow_{direction}_dismiss_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    },
+                )
+                yield _sse_toast(f"Dismiss failed: {exc}", "err")
+                return
+    # Compute the adjacent queue item using the queue we already built.
     target_item = next_in_queue(queue, session_id, direction=direction)
     if target_item is None:
-        url = "/command-center/flow"
+        # Stepped past the end of the queue. Use ?cursor=end so the GET
+        # handler renders the empty state — without it, bare /flow falls
+        # back to queue[0] which is sticky for pinned attach items and
+        # would land the user right back on the terminal they just left.
+        url = "/command-center/flow?cursor=end"
     else:
         url = (
             f"/command-center/flow"

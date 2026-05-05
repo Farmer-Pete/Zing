@@ -721,7 +721,7 @@ def create_session_on_server(
     skill: str | None,
     pr_number: int | None = None,
     pr_repo: str | None = None,
-    terminal_session: str | None = None,
+    tmux_session: str | None = None,
 ) -> None:
     """Create a ``ClaudeCodeSession`` on the Zing server via REST.
 
@@ -737,7 +737,7 @@ def create_session_on_server(
         skill: Skill/command name, or ``None``.
         pr_number: GitHub PR number, or ``None``.
         pr_repo: GitHub repo as ``"owner/repo"``, or ``None``.
-        terminal_session: Terminal session name for detached launches, or ``None``.
+        tmux_session: tmux session name for detached launches, or ``None``.
 
     Raises:
         LaunchError: If the HTTP call fails.
@@ -750,7 +750,7 @@ def create_session_on_server(
         "skill": skill,
         "pr_number": pr_number,
         "pr_repo": pr_repo,
-        "terminal_session": terminal_session,
+        "tmux_session": tmux_session,
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -857,6 +857,8 @@ def build_claude_args(
     Modes:
 
     - ``skill == "resume"``: ``["claude", "--resume", session_id]``
+    - ``skill == "interactive"``: ``["claude", "--session-id", session_id,
+      "--name", name]`` — bare interactive session with no slash command.
     - anything else: ``["claude", "/zing:<skill> <target>", "--session-id",
       session_id, "--name", name]``
 
@@ -864,8 +866,8 @@ def build_claude_args(
     after the base arguments.
 
     Args:
-        skill: Skill name (e.g. ``"resume"``, ``"new"``, ``"pr-audit"``,
-            ``"pr-audit-visual"``).
+        skill: Skill name (e.g. ``"resume"``, ``"interactive"``, ``"new"``,
+            ``"pr-audit"``, ``"pr-audit-visual"``).
         session_id: Claude session identifier.
         name: Session display name.
         target: Argument passed to the slash command (ticket ID for new-ticket
@@ -879,109 +881,111 @@ def build_claude_args(
 
     if skill == "resume":
         return ["claude", "--resume", session_id, *extra]
+    if skill == "interactive":
+        return ["claude", "--session-id", session_id, "--name", name, *extra]
 
     slash_cmd = f"/zing:{skill} {target}" if target else f"/zing:{skill}"
     return ["claude", slash_cmd, "--session-id", session_id, "--name", name, *extra]
 
 
 # ---------------------------------------------------------------------------
-# Session name helpers
+# tmux session helpers
 # ---------------------------------------------------------------------------
 
-_SESSION_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+_TMUX_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-]")
 
 
-def _sanitize_session_name(name: str) -> str:
-    """Replace characters unsafe for session names with underscores."""
-    return _SESSION_NAME_RE.sub("_", name)
+def _sanitize_tmux_name(name: str) -> str:
+    """Replace characters unsafe for tmux session names with underscores."""
+    return _TMUX_UNSAFE_RE.sub("_", name)
 
 
-def build_session_name(target: str, pr_number: int | None = None) -> str:
-    """Build a Zellij session name for a launch target.
+def build_tmux_session_name(target: str, pr_number: int | None = None) -> str:
+    """Build a tmux session name for a launch target.
+
+    The ``zing-`` prefix is what the live-session poller filters on; renaming
+    it would orphan in-flight sessions on the user's machine.
 
     Args:
         target: Ticket ID, branch name, or other identifier for the session.
         pr_number: If provided, overrides ``target`` and produces a PR-based name.
 
     Returns:
-        A session-safe name string.
+        A tmux-safe session name string.
     """
     if pr_number is not None:
-        return f"zing--pr-{pr_number}"
+        return f"zing-pr-{pr_number}"
     if re.fullmatch(TICKET_ID_PATTERN, target):
-        return f"zing--{target.lower()}"
-    return f"zing--{_sanitize_session_name(target)}"
+        return f"zing-{target.lower()}"
+    return f"zing-{_sanitize_tmux_name(target)}"
 
 
-def require_session_backend() -> None:
-    """Check that Zellij is available on PATH.
+def require_tmux() -> None:
+    """Check that tmux is available on PATH.
 
     Raises:
-        LaunchError: If Zellij is not found.
+        LaunchError: If tmux is not found.
     """
-    if shutil.which("zellij") is None:
+    if shutil.which("tmux") is None:
         raise LaunchError(
-            "Zellij is required for --detach mode but was not found on PATH."
-            " Install it from https://zellij.dev/"
+            "tmux is required for --detach mode but was not found on PATH."
+            " Install it with `brew install tmux` or your package manager."
         )
 
 
-def exec_or_detach(args: list[str], work_dir: Path, terminal_session: str | None = None) -> None:
-    """Execute a command in the foreground or in a detached Zellij session.
+def exec_or_detach(args: list[str], work_dir: Path, tmux_session: str | None = None) -> None:
+    """Execute a command in the foreground or in a detached tmux session.
 
-    When ``terminal_session`` is ``None``, the current process is replaced via
-    ``os.execvp`` (foreground mode).  When set, a new detached Zellij session
-    is created.
+    When ``tmux_session`` is ``None``, the current process is replaced via
+    ``os.execvp`` (foreground mode).  When set, a new detached tmux session
+    is created via ``tmux new-session -d``.
+
+    The session is launched with our managed ``tmux.conf`` (mouse mode on),
+    layered over the user's own config so their keybindings still work.
 
     Args:
         args: Command and arguments, e.g. ``["claude", "/zing:new BAK-1", ...]``.
         work_dir: Working directory for the process.
-        terminal_session: Zellij session name.  ``None`` means foreground (exec).
+        tmux_session: tmux session name. ``None`` means foreground (exec).
 
     Raises:
-        LaunchError: If the session name already exists.
+        LaunchError: If the tmux session name already exists.
     """
-    if terminal_session is None:
+    if tmux_session is None:
         os.chdir(work_dir)
         os.execvp(args[0], args)
         return  # unreachable — satisfies type checkers
 
-    # Check if session already exists
-    result = subprocess.run(
-        ["zellij", "list-sessions", "-sn"],
+    # Collision check: tmux has-session -t <name> exits 0 when the session exists.
+    has_session = subprocess.run(
+        ["tmux", "has-session", "-t", tmux_session],
         capture_output=True,
-        text=True,
     )
-    existing = {s.strip() for s in result.stdout.splitlines() if s.strip()}
-    if terminal_session in existing:
-        raise LaunchError(f"Session '{terminal_session}' already exists")
+    if has_session.returncode == 0:
+        raise LaunchError(f"tmux session '{tmux_session}' already exists")
 
-    # Write a layout file for this command
-    from zing_ai.server.zellij_config import ensure_zellij_config, write_command_layout
+    # Lazy import: launch.py is reused by tests that don't have the server
+    # package on the import path (and never spawn a real tmux session).
+    from zing_ai.server.tmux_config import ensure_tmux_config
 
-    config_path, config_dir = ensure_zellij_config()
-    layout_path = write_command_layout(args[0], args[1:])
+    conf_path = ensure_tmux_config()
     subprocess.run(
         [
-            "zellij",
-            "--config",
-            str(config_path),
-            "--config-dir",
-            str(config_dir),
-            "-l",
-            str(layout_path),
-            "attach",
-            terminal_session,
-            "-b",
+            "tmux",
+            "-f",
+            str(conf_path),
+            "new-session",
+            "-d",
+            "-s",
+            tmux_session,
             "-c",
+            str(work_dir),
+            shlex.join(args),
         ],
-        cwd=str(work_dir),
         check=True,
     )
-    print(f"Session '{terminal_session}' started (detached)")
-    print(
-        f"View in browser at the Command Center, or attach with: zellij attach {terminal_session}"
-    )
+    print(f"Session '{tmux_session}' started (detached)")
+    print(f"View in browser at the Command Center, or attach with: tmux attach -t {tmux_session}")
 
 
 # ---------------------------------------------------------------------------
