@@ -195,15 +195,6 @@
                       data-s="setup environment"><span class="menu-icon">&#128736;</span> Setup env</button>
               <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --setup-only ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
-            <div class="menu-row" data-s="open claude interactive shell no prompt"
-                 data-show="$kebabQuery === '' || el.dataset.s.toLowerCase().includes($kebabQuery.toLowerCase())">
-              <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
-                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: {{ card.key | js_str }}, btn_id: 'btn-launch-{{ card.key | e }}-pr-{{ pr.number }}-interactive', skill: 'interactive', pr_number: {{ pr.number }}}}); $openKebab = ''"
-                      data-s="open claude interactive shell no prompt"><span class="menu-icon">&#9655;</span> Open Claude<br><span class="menu-desc">Interactive session, no prompt</span></button>
-              <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --skill interactive ' ~ pr.url) | tojson }}); $openKebab = ""'>&#128203;</button>
-            </div>
             <div class="strip-menu-divider"></div>
             {# LINKS section #}
             <div class="menu-section-label">Links</div>
@@ -359,13 +350,6 @@
                       data-on:click="@post('/command-center/launch-background', {payload: {card_key: {{ card.key | js_str }}, btn_id: 'btn-launch-{{ card.key | e }}-footer-todo-plan-menu', skill: 'plan'}}); $openKebab = ''"><span class="menu-icon">&#128221;</span> Plan</button>
               <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --skill plan ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
-            <div class="menu-row">
-              <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
-                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: {{ card.key | js_str }}, btn_id: 'btn-launch-{{ card.key | e }}-footer-todo-interactive-menu', skill: 'interactive'}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Open Claude</button>
-              <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --skill interactive ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
-            </div>
             <div class="strip-menu-divider"></div>
             <div class="menu-row">
               <button class="menu-row-main" data-on:click='dispatchCopyCmd({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = ""'><span class="menu-icon">&#128203;</span> Copy launch cmd</button>
@@ -423,13 +407,6 @@
                       data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
                       data-on:click="@post('/command-center/launch-background', {payload: {card_key: {{ card.key | js_str }}, btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-setup-menu', skill: 'setup-only'}}); $openKebab = ''"><span class="menu-icon">&#128736;</span> Setup Env</button>
               <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --setup-only ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
-            </div>
-            <div class="menu-row">
-              <button class="menu-row-main"
-                      data-indicator="$busyButtons.launch_{{ card.signal_key }}"
-                      data-attr:disabled="$busyButtons.launch_{{ card.signal_key }}"
-                      data-on:click="@post('/command-center/launch-background', {payload: {card_key: {{ card.key | js_str }}, btn_id: 'btn-launch-{{ card.key | e }}-footer-progress-interactive-menu', skill: 'interactive'}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Open Claude</button>
-              <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('zing-ai launch --skill interactive ' ~ card.key) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" data-on:click='dispatchCopyCmd({{ ('zing-ai launch ' ~ card.key) | tojson }}); $openKebab = ""'><span class="menu-icon">&#128203;</span> Copy launch cmd</button>

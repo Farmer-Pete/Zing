@@ -467,10 +467,8 @@ def launch(
             branch_name = derive_branch_name(ticket_id, api_key)
             wf_mode = _prompt_workflow_mode()
             work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
+            session_name = build_tmux_session_name(ticket_id) if detach else None
             ticket_skill = skill or "new"
-            session_name = (
-                build_tmux_session_name(ticket_id, skill=ticket_skill) if detach else None
-            )
 
             _init_create_and_launch(
                 repo_root=repo_root,
@@ -521,8 +519,8 @@ def launch(
                     shutil.copy2(md_path, dest)
                     md_path = dest
 
+            session_name = build_tmux_session_name(md_name) if detach else None
             md_skill = skill or "new"
-            session_name = build_tmux_session_name(md_name, skill=md_skill) if detach else None
 
             _init_create_and_launch(
                 repo_root=repo_root,
@@ -584,11 +582,7 @@ def launch(
             else:
                 work_dir = Path.cwd()
 
-            session_name = (
-                build_tmux_session_name(target, pr_number=pr_number, skill=pr_skill)
-                if detach
-                else None
-            )
+            session_name = build_tmux_session_name(target, pr_number=pr_number) if detach else None
 
             _init_create_and_launch(
                 repo_root=repo_root,

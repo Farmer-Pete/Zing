@@ -798,7 +798,6 @@ async def launch_background(payload: dict[str, Any], request: Request):  # noqa:
         session_name = build_tmux_session_name(
             target=ticket_id or branch_name,
             pr_number=pr_number,
-            skill=skill,
         )
         server_url = str(request.base_url).rstrip("/")
 
