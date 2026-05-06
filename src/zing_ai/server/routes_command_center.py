@@ -500,7 +500,7 @@ async def flow_events(request: Request):  # noqa: ANN201
                     "queue_len": len(queue),
                 },
             )
-            yield SSE.execute_script("window.location = '/command-center/flow'")
+            yield _navigate("/command-center/flow")
             return
         active = resolve_active_item(queue, session_id=None, step_id=None)
         ctx = build_flow_context(manager, queue, active)
@@ -1366,12 +1366,31 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
         sid = match.session_id
         # step_id mirrors session_id for attach items (Decision 10).
         url = f"/command-center/flow?session_id={sid}&step_id={sid}"
-        yield SSE.execute_script(f"window.location = {url!r}")
+        yield _navigate(url)
 
     return _stream()
 
 
 _TMUX_SESSION_RE = re.compile(r"[a-zA-Z0-9_-]+")
+
+
+def _navigate(url: str):  # noqa: ANN201
+    """Browser navigation that strips iframes first.
+
+    Cross-origin ttyd iframes register a ``beforeunload`` handler ("data
+    might be lost"). A bare ``window.location = ...`` unloads the page
+    *with* the iframe still mounted, which fires the dialog every time
+    the user hits Next/Prev/Pin in Flow mode. Removing every iframe
+    before the navigation severs the listener so the page can leave
+    silently.
+
+    Returns a single ``SSE.execute_script`` event so call sites stay
+    one-line ``yield`` statements.
+    """
+    return SSE.execute_script(
+        "document.querySelectorAll('iframe').forEach(function(f){f.remove();}); "
+        f"window.location = {url!r}"
+    )
 
 
 @router.post("/command-center/ttyd/touch")
@@ -1525,7 +1544,7 @@ async def _flow_save_and_navigate(  # noqa: ANN201
             f"{direction}_session_id": target_item.session_id if target_item else None,
         },
     )
-    yield SSE.execute_script(f"window.location = {url!r}")
+    yield _navigate(url)
 
 
 @router.post("/command-center/flow/next")

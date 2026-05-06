@@ -3868,6 +3868,10 @@ class TestFlowNext(_FlowTestBase):
         self.assertIn("/command-center/flow", combined)
         # Should navigate to session B (the next item in the queue).
         self.assertIn("fn-sess-b", combined)
+        # Iframes must be stripped before navigation so cross-origin ttyd
+        # beforeunload handlers don't trigger "Leave site?" dialogs.
+        self.assertIn("querySelectorAll('iframe')", combined)
+        self.assertIn(".remove()", combined)
 
     def test_empty_queue_navigates_to_flow_root(self) -> None:
         """Empty queue: navigates to /command-center/flow with no query string."""
