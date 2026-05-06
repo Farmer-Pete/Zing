@@ -1374,20 +1374,13 @@ async def post_flow_launch_popup_send(payload: dict[str, Any], request: Request)
 _TMUX_SESSION_RE = re.compile(r"[a-zA-Z0-9_-]+")
 
 
-# Datastar's ``@post()`` accepts only ``openWhenHidden`` and ``contentType``
-# as options — a ``body:`` / ``payload:`` key is silently dropped, and the
-# page's full signal set is sent as the JSON body instead. Heartbeat and
-# refresh take their parameters from the query string so the call site
-# stays simple and the server doesn't have to dig through unrelated signals.
-
-
 @router.post("/command-center/ttyd/touch")
 @datastar_response
-async def post_ttyd_touch(request: Request):  # noqa: ANN201
+async def post_ttyd_touch(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Heartbeat from a visible iframe — bumps last_used_at to defer reaping."""
 
     async def _stream():  # noqa: ANN202
-        tmux_session = request.query_params.get("tmux_session", "").strip()
+        tmux_session = str(payload.get("tmux_session") or "").strip()
         if not tmux_session or not _TMUX_SESSION_RE.fullmatch(tmux_session):
             logger.info("ttyd_touch_invalid session=%r", tmux_session)
             return
@@ -1402,12 +1395,12 @@ async def post_ttyd_touch(request: Request):  # noqa: ANN201
 
 @router.post("/command-center/ttyd/refresh")
 @datastar_response
-async def post_ttyd_refresh(request: Request):  # noqa: ANN201
+async def post_ttyd_refresh(payload: dict[str, Any], request: Request):  # noqa: ANN201
     """Wake-up handler — respawn ttyd if reaped, swap iframe to fresh URL."""
 
     async def _stream():  # noqa: ANN202
-        tmux_session = request.query_params.get("tmux_session", "").strip()
-        host = request.query_params.get("host", "").strip()
+        tmux_session = str(payload.get("tmux_session") or "").strip()
+        host = str(payload.get("host") or "").strip()
         if not tmux_session or not _TMUX_SESSION_RE.fullmatch(tmux_session):
             return
         if host not in {"flow", "popup"}:

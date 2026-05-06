@@ -3205,12 +3205,12 @@ class TestTtydHeartbeat(_FlowTestBase):
         self.fastapi_app.state.ttyd_procs = {
             "zing-touch": _TtydProc(proc=proc, port=12345, last_used_at=original_ts),
         }
-        # The browser-side heartbeat carries tmux_session via the URL query
-        # string — Datastar's @post() doesn't accept arbitrary body params.
+        # The browser-side heartbeat carries tmux_session via Datastar's
+        # ``payload:`` option, which becomes the JSON body server-side.
         with self.client.stream(
             "POST",
             "/command-center/ttyd/touch",
-            params={"tmux_session": "zing-touch"},
+            json={"tmux_session": "zing-touch"},
         ) as resp:
             self.assertEqual(resp.status_code, 200)
             _ = list(resp.iter_text())
@@ -3229,7 +3229,7 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/touch",
-                params={"tmux_session": "zing-missing"},
+                json={"tmux_session": "zing-missing"},
             ) as resp,
         ):
             self.assertEqual(resp.status_code, 200)
@@ -3247,14 +3247,14 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/touch",
-                params={"tmux_session": "bad name!"},
+                json={"tmux_session": "bad name!"},
             ) as resp,
         ):
             self.assertEqual(resp.status_code, 200)
             _ = list(resp.iter_text())
 
-    def test_touch_missing_query_param_is_rejected(self) -> None:
-        """No tmux_session at all is rejected without spawning anything."""
+    def test_touch_missing_field_is_rejected(self) -> None:
+        """Body without tmux_session is rejected without spawning anything."""
         from unittest.mock import patch
 
         with (
@@ -3262,7 +3262,11 @@ class TestTtydHeartbeat(_FlowTestBase):
                 "zing_ai.server.routes_command_center.touch_ttyd",
                 side_effect=AssertionError("touch_ttyd must not be called"),
             ),
-            self.client.stream("POST", "/command-center/ttyd/touch") as resp,
+            self.client.stream(
+                "POST",
+                "/command-center/ttyd/touch",
+                json={"someOtherSignal": "value"},
+            ) as resp,
         ):
             self.assertEqual(resp.status_code, 200)
             _ = list(resp.iter_text())
@@ -3284,7 +3288,7 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/refresh",
-                params={"tmux_session": "zing-rf", "host": "flow"},
+                json={"tmux_session": "zing-rf", "host": "flow"},
             ) as resp,
         ):
             self.assertEqual(resp.status_code, 200)
@@ -3312,7 +3316,7 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/refresh",
-                params={"tmux_session": "zing-rf-popup", "host": "popup"},
+                json={"tmux_session": "zing-rf-popup", "host": "popup"},
             ) as resp,
         ):
             events = _parse_sse(resp)
@@ -3334,7 +3338,7 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/refresh",
-                params={"tmux_session": "zing-rf", "host": "bogus"},
+                json={"tmux_session": "zing-rf", "host": "bogus"},
             ) as resp,
         ):
             self.assertEqual(resp.status_code, 200)
@@ -3355,7 +3359,7 @@ class TestTtydHeartbeat(_FlowTestBase):
             self.client.stream(
                 "POST",
                 "/command-center/ttyd/refresh",
-                params={"tmux_session": "zing-rf", "host": "flow"},
+                json={"tmux_session": "zing-rf", "host": "flow"},
             ) as resp,
         ):
             events = _parse_sse(resp)
