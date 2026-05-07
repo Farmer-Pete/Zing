@@ -130,12 +130,18 @@ function mountModal(opts) {
     });
 
     window.openLaunchPopup = function(url) {
-        if (!iframe) {
-            iframe = document.createElement('iframe');
-            iframe.id = 'launch-popup-iframe';
-            iframe.className = 'terminal-modal-iframe';
-            body.appendChild(iframe);
-        }
+        // Always remove-and-recreate the iframe. The wake-up refresh path
+        // (/command-center/ttyd/refresh, host=popup) calls this with a new
+        // URL while the modal is still open and the previous ttyd iframe is
+        // still mounted — setting iframe.src on a live cross-origin frame
+        // fires ttyd's beforeunload handler and the browser shows the
+        // "Leave site?" dialog. Tearing the old iframe down first severs
+        // the listener so the new src lands on a frame with no history.
+        if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        iframe = document.createElement('iframe');
+        iframe.id = 'launch-popup-iframe';
+        iframe.className = 'terminal-modal-iframe';
+        body.appendChild(iframe);
         iframe.src = url;
         ctl.open();
     };

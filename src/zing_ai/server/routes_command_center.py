@@ -1432,6 +1432,16 @@ async def post_ttyd_refresh(payload: dict[str, Any], request: Request):  # noqa:
             )
             return
         if host == "flow":
+            # Strip the existing iframe before the OUTER patch detaches it.
+            # An OUTER replacement on .flow-body-attach removes the live
+            # cross-origin ttyd iframe, which fires its beforeunload handler
+            # ("Leave site?") on unload. Removing the iframe first severs the
+            # listener so the patch can swap the wrapper silently — same
+            # strategy as _navigate uses for full-page navigation.
+            yield SSE.execute_script(
+                "document.querySelectorAll('.flow-body-attach iframe')"
+                ".forEach(function(f){f.remove();});"
+            )
             yield SSE.patch_elements(
                 render(
                     "fragments/flow_body_attach.html",
@@ -1446,6 +1456,9 @@ async def post_ttyd_refresh(payload: dict[str, Any], request: Request):  # noqa:
             # Clearing the URL first guarantees the signal-patch watcher fires
             # again even when ensure_ttyd_for reused the existing port — that
             # forces iframe.src to be set, which establishes a fresh WS.
+            # openLaunchPopup itself remove-and-recreates the iframe so the
+            # src assignment never lands on a live cross-origin frame (which
+            # would trigger ttyd's beforeunload "Leave site?" dialog).
             yield SSE.patch_signals({"launchPopupUrl": ""})
             yield SSE.patch_signals({"launchPopupUrl": url})
 
