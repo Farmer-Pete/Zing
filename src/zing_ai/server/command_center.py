@@ -869,8 +869,11 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
     yesterday_start = today_start - timedelta(days=1)
 
     # -- Done items: split into yesterday vs today --
+    # in_progress_items is declared early so ready-to-merge cards from view.done
+    # (which aren't actually shipped yet) can be reclassified onto today's plate.
     done_yesterday: list[str] = []
     done_today: list[str] = []
+    in_progress_items: list[str] = []
 
     for card in view.done:
         # Only include cards the user owns (assigned ticket or authored PR).
@@ -888,12 +891,17 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
         has_merged_pr = any(pr.state == "merged" for pr in card.prs)
         ticket_completed = card.ticket is not None and card.ticket.state_type == "completed"
 
+        # Ready-to-merge cards aren't shipped yet — they belong on today's plate,
+        # not in yesterday's recap.
+        if card.done_group == "ready_to_merge" and not has_merged_pr and not ticket_completed:
+            label = f"Merge in [{title}]({url})" if url else f"Merge in {title}"
+            in_progress_items.append(f"- {label}")
+            continue
+
         if has_merged_pr:
             label = f"Merged [{title}]({url})" if url else f"Merged {title}"
         elif ticket_completed:
             label = f"Completed [{title}]({url})" if url else f"Completed {title}"
-        elif card.done_group == "ready_to_merge":
-            label = f"Ready to merge [{title}]({url})" if url else f"Ready to merge {title}"
         else:
             label = f"Completed [{title}]({url})" if url else f"Completed {title}"
 
@@ -903,8 +911,6 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
             done_yesterday.append(f"- {label}")
 
     # -- In progress items --
-    in_progress_items: list[str] = []
-
     for card in view.in_progress:
         title = _card_display_title(card)
         url = _card_url(card)
@@ -943,6 +949,33 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
         pr_url = card.prs[0].url if card.prs else _card_url(card)
         label = f"Need a review on [{title}]({pr_url})" if pr_url else (f"Need a review on {title}")
         blocker_items.append(f"- {label}")
+
+    # -- Reviewed PRs: someone else's PRs the user submitted a review on --
+    # Scan every column so we catch reviews regardless of where the PR landed
+    # (still in needs_review, back in in_progress while the author iterates, or
+    # already merged in done). PR.updated_at is used as the activity-time proxy
+    # since reviews don't carry their own timestamp on the card.
+    seen_reviewed_urls: set[str] = set()
+    for col in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in col:
+            for pr in card.prs:
+                if pr.author == current_username:
+                    continue
+                if current_username not in pr.reviewers:
+                    continue
+                if pr.url in seen_reviewed_urls:
+                    continue
+                seen_reviewed_urls.add(pr.url)
+
+                activity_time = _ensure_utc(pr.updated_at)
+                if activity_time < yesterday_start:
+                    continue
+
+                bullet = f"- Reviewed [{pr.title}]({pr.url})"
+                if activity_time >= today_start:
+                    done_today.append(bullet)
+                else:
+                    done_yesterday.append(bullet)
 
     # -- Build message --
     sections: list[str] = []
