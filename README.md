@@ -1,6 +1,6 @@
 # Zing!
 
-<img width="500" height="607" alt="Zing! Don't wing your code. Zing your code." src="https://github.com/user-attachments/assets/57de6005-633f-4c13-93a3-427264fd3ee1" />
+<img width="500" alt="Zing! Don't wing your code. Zing your code." src="https://github.com/user-attachments/assets/57de6005-633f-4c13-93a3-427264fd3ee1" />
 <br /><br /><br />
 
 > Zing plans, builds, tests, and ships clean code with AI.<br/>
