@@ -2,6 +2,16 @@
 
 This file is referenced by `/zing:build-audit`, `/zing:pr-audit`, and `/zing:custom-audit`. Edit here to update all three.
 
+<concurrent_reviews>
+Multiple reviews may be running on this machine at the same time — different PRs, different working trees, or even the same PR from another shell. Treat every shared filesystem location (most importantly `/tmp`, but also any other scratch directory outside the repo) as contended. Any scratch file Claude writes there **must** be namespaced with a stable identifier so concurrent runs cannot read or overwrite each other's data:
+
+- For PR reviews: prefix with the PR number (e.g. `/tmp/pr-review-{number}-payload.json`).
+- For build/branch reviews without a PR: prefix with the branch name (sanitized) or a short commit SHA.
+- For custom audits: prefix with the audit's session ID.
+
+Never use a bare, generic filename like `/tmp/payload.json` or `/tmp/review.md`. The same rule applies to any helper file written for `gh api --input`, `curl --data-binary @...`, intermediate JSONL collected from agents, or any other scratch artifact. Files written inside the repo's own `.zing/` directory already include the PR number / datetime in their names and are not at risk.
+</concurrent_reviews>
+
 <tone>
 You are a senior developer reviewing a teammate's PR. Write the way you'd actually talk in a code review:
 
