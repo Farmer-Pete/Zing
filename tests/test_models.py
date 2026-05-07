@@ -498,19 +498,19 @@ class TestClaudeCodeSessionNotifications(unittest.TestCase):
 class TestClaudeCodeSessionState(unittest.TestCase):
     """Tests for ClaudeCodeSession.state lifecycle behavior."""
 
-    def test_state_started_when_no_terminal_session(self) -> None:
-        """State is STARTED when terminal_session is None."""
+    def test_state_started_when_no_tmux_session(self) -> None:
+        """State is STARTED when tmux_session is None."""
         session = ClaudeCodeSession(session_id="s1", title="Test")
         assert session.state == SessionState.STARTED
 
     def test_state_stopped_when_session_not_alive(self) -> None:
-        """State is STOPPED when terminal_session is set but not alive."""
-        session = ClaudeCodeSession(session_id="s2", title="Test", terminal_session="zing--fro-123")
+        """State is STOPPED when tmux_session is set but not alive."""
+        session = ClaudeCodeSession(session_id="s2", title="Test", tmux_session="zing-fro-123")
         assert session.state == SessionState.STOPPED
 
     def test_state_started_when_session_alive(self) -> None:
-        """State is STARTED when terminal_session is set and alive."""
-        session = ClaudeCodeSession(session_id="s3", title="Test", terminal_session="zing--fro-123")
+        """State is STARTED when tmux_session is set and alive."""
+        session = ClaudeCodeSession(session_id="s3", title="Test", tmux_session="zing-fro-123")
         session._session_alive = True
         assert session.state == SessionState.STARTED
 
@@ -520,18 +520,18 @@ class TestClaudeCodeSessionState(unittest.TestCase):
         dump = session.model_dump()
         assert "_session_alive" not in dump
 
-    def test_terminal_session_in_model_dump(self) -> None:
-        """terminal_session appears in model_dump."""
-        session = ClaudeCodeSession(session_id="s5", title="Test", terminal_session="zing--x")
+    def test_tmux_session_in_model_dump(self) -> None:
+        """tmux_session appears in model_dump."""
+        session = ClaudeCodeSession(session_id="s5", title="Test", tmux_session="zing-x")
         dump = session.model_dump()
-        assert dump["terminal_session"] == "zing--x"
+        assert dump["tmux_session"] == "zing-x"
 
-    def test_migrate_tmux_session_backward_compat(self) -> None:
-        """Old JSON with tmux_session key loads into terminal_session field."""
+    def test_migrate_terminal_session_backward_compat(self) -> None:
+        """Zellij-era JSON with terminal_session key loads into tmux_session field."""
         session = ClaudeCodeSession.model_validate(
-            {"session_id": "s6", "title": "Test", "tmux_session": "zing--x"}
+            {"session_id": "s6", "title": "Test", "terminal_session": "zing-x"}
         )
-        assert session.terminal_session == "zing--x"
+        assert session.tmux_session == "zing-x"
 
     def test_state_starting_within_grace_window(self) -> None:
         """State is STARTING when launched recently and never observed alive."""
@@ -540,19 +540,19 @@ class TestClaudeCodeSessionState(unittest.TestCase):
         session = ClaudeCodeSession(
             session_id="s7",
             title="Test",
-            terminal_session="zing--x",
+            tmux_session="zing-x",
             launched_at=datetime.now() - timedelta(seconds=2),
         )
         assert session.state == SessionState.STARTING
 
     def test_state_stopped_after_grace_window(self) -> None:
-        """State is STOPPED once the grace window has expired without zellij seeing it."""
+        """State is STOPPED once the grace window has expired without tmux seeing it."""
         from datetime import datetime, timedelta
 
         session = ClaudeCodeSession(
             session_id="s8",
             title="Test",
-            terminal_session="zing--x",
+            tmux_session="zing-x",
             launched_at=datetime.now() - timedelta(seconds=120),
         )
         assert session.state == SessionState.STOPPED
@@ -564,7 +564,7 @@ class TestClaudeCodeSessionState(unittest.TestCase):
         session = ClaudeCodeSession(
             session_id="s9",
             title="Test",
-            terminal_session="zing--x",
+            tmux_session="zing-x",
             launched_at=datetime.now(),
         )
         session._ever_seen_alive = True

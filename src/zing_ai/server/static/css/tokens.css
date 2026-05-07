@@ -29,8 +29,10 @@
     --gray-100: #f3f1ee;
     --gray-200: #e8e5e1;
     --gray-300: #d4d0cb;
+    --gray-400: #b3aea8;
     --gray-500: #8a8580;
     --gray-700: #4a4540;
+    --green: #16a34a;
     --text-primary: #1a1714;
     --border: var(--gray-200);
     /* Kanban column header tokens */
@@ -66,25 +68,48 @@ body::before {
     z-index: 0;
 }
 
-/* === Brand Header === */
+/* === Brand Header ===
+   Slim 24px navy strip with the rainbow gradient as a 4px stripe at its
+   bottom edge. The Zing! logo is anchored as a 64px badge that perches
+   across the seam — its lower edge sits on the rainbow, and it overlaps
+   ~36px into the top-nav row below. Top-nav.css padding clears it. */
 .brand-bar {
     background: var(--navy);
     margin: 0 -2rem;
-    padding: 0.75rem 2rem;
+    padding: 0 2rem;
+    height: 24px;
     position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
+    /* Allow the perched logo to overflow downward into the nav row. */
+    overflow: visible;
 }
 
-.brand-bar a { display: inline-block; line-height: 0; }
-.brand-bar img { height: 111px; width: auto; }
+/* The logo link wraps the <img>; both are absolutely positioned so the
+   badge protrudes below the brand bar's bottom edge into the nav row.
+   Top: 0 (not negative) because the brand bar sits at viewport y=0 and
+   any negative top would clip the logo against the window edge. */
+.brand-bar a {
+    display: block;
+    line-height: 0;
+    position: absolute;
+    left: 2rem;
+    top: 0;
+    z-index: 4;
+}
+.brand-bar img {
+    height: 56px;
+    width: auto;
+    filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.35));
+}
 
+/* Rainbow stripe at the bottom of the navy band. */
 .brand-bar::after {
     content: '';
     position: absolute;
     bottom: 0; left: 0; right: 0;
-    height: 3px;
+    height: 4px;
     background: linear-gradient(90deg, var(--red-orange), var(--orange), var(--amber), var(--gold), var(--cyan));
 }
 
@@ -112,7 +137,9 @@ h2 {
     border-bottom: 1px solid var(--border);
     gap: 0.25rem;
     margin: 0 -2rem;
-    padding: 0 2rem;
+    /* Left padding clears the perched brand-bar logo badge (anchored at
+       left: 2rem, 64px wide → reserve ~7rem before the first nav link). */
+    padding: 0 2rem 0 7rem;
     background: var(--gray-50);
 }
 

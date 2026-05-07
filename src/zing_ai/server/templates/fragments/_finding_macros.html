@@ -37,7 +37,7 @@
     <div class="finding-meta">{{ finding.context }}</div>
     {% endif %}
     <textarea data-bind="responses.{{ finding.id }}"
-              data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, answer: $responses[{{ fid_str }}]})"
+              data-on:blur="@post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})"
               placeholder="Type your answer..."></textarea>
 </div>
 {% elif finding.type == "triage" %}
@@ -67,7 +67,7 @@
                 data-complexity="{{ cx }}"
                 data-attr:aria-pressed="$responses[{{ complexity_key_str }}] === '{{ cx }}'"
                 data-class:selected="$responses[{{ complexity_key_str }}] === '{{ cx }}'"
-                data-on:click="$responses[{{ complexity_key_str }}] = '{{ cx }}'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, complexity: '{{ cx }}'})"
+                data-on:click="$responses[{{ complexity_key_str }}] = '{{ cx }}'; @post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})"
                 type="button">{{ cx | capitalize }}</button>
         {% endfor %}
     </div>
@@ -76,7 +76,7 @@
         <button class="action-btn"
                 data-action="{{ action }}"
                 data-class:selected="$responses[{{ fid_str }}] === '{{ action }}'"
-                data-on:click="$responses[{{ fid_str }}] = '{{ action }}'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: '{{ action }}'})"
+                data-on:click="$responses[{{ fid_str }}] = '{{ action }}'; @post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})"
                 type="button">{{ action | capitalize }}</button>
         {% endfor %}
     </div>
@@ -88,7 +88,7 @@
             <input type="radio" name="approach-{{ finding.id }}"
                    data-bind="responses.{{ approach_key }}"
                    value="{{ option.label }}"
-                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: 'accept', selected: $responses[{{ approach_key_str }}]})">
+                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})">
             <div class="option-content">
                 <div class="option-label">{{ option.label }}</div>
                 <div class="option-description">{{ option.description }}</div>
@@ -99,7 +99,7 @@
             <input type="radio" name="approach-{{ finding.id }}"
                    data-bind="responses.{{ approach_key }}"
                    value="__other__"
-                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, action: 'accept', selected: $responses[{{ approach_key_str }}]})">
+                   data-on:change="$responses[{{ fid_str }}] = 'accept'; @post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})">
             <div class="option-content">
                 <div class="option-label">Other</div>
                 <div class="option-description">Describe a different approach</div>
@@ -107,7 +107,7 @@
         </label>
         <div data-show="$responses[{{ approach_key_str }}] === '__other__'" style="margin-top: 0.5rem;">
             <textarea data-bind="responses.{{ other_key }}"
-                      data-on:blur="@post('/{{ session_id }}/save-response', {step_id: $step_id, finding_id: {{ fid_str }}, selected: $responses[{{ approach_key_str }}], other_text: $responses[{{ other_key_str }}]})"
+                      data-on:blur="@post('/{{ session_id }}/save-response', {payload: {step_id: $step_id, responses: $responses}})"
                       placeholder="Describe your preferred approach..."></textarea>
         </div>
     </div>

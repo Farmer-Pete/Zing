@@ -3,7 +3,7 @@
 Takes typed snapshots from Linear, GitHub, and the in-memory SessionManager
 and produces the Kanban view rendered on ``/command-center``. Most functions
 are pure (no I/O) and can be unit tested with synthetic data.
-``get_live_sessions`` is the exception — it shells out to ``zellij``.
+``get_live_sessions`` is the exception — it shells out to ``tmux``.
 """
 
 from __future__ import annotations
@@ -345,6 +345,13 @@ def _is_recently_done(card: KanbanCard, cutoff: datetime, current_username: str 
 
 def _should_include_card(card: KanbanCard, current_username: str, cutoff: datetime) -> bool:
     """Return False when the card should be excluded from the board entirely."""
+    # Backlog tickets are deferred work — exclude regardless of any local
+    # session, audit step, or PR state.  If the user is actively working
+    # on something, the ticket should be in another state ("started",
+    # "unstarted", etc.).
+    if card.ticket is not None and card.ticket.state_type == "backlog":
+        return False
+
     # Orphan-PR cards where the user is neither author nor reviewer and has no session.
     if card.ticket is None and card.prs:
         user_involved = any(
@@ -565,18 +572,13 @@ def _assign_done_group(card: KanbanCard, current_username: str) -> str:
 def _todo_sort_key(card: KanbanCard) -> tuple:
     """Sort key for todo column.
 
-    State-type bucket: other=0 (TOP), backlog=1, triage=2 (BOTTOM).
+    State-type bucket: other=0 (TOP), triage=1 (BOTTOM).  Backlog tickets
+    are excluded from the board entirely (see ``_should_include_card``).
     Within bucket: priority ascending (1=urgent first, 4=low last, 0=no priority last).
     """
     if card.ticket is None:
         return (0, 0)
-    state_type = card.ticket.state_type
-    if state_type == "triage":
-        bucket = 2
-    elif state_type == "backlog":
-        bucket = 1
-    else:
-        bucket = 0
+    bucket = 1 if card.ticket.state_type == "triage" else 0
     priority = card.ticket.priority
     # 0 = no priority → sort last within bucket
     effective_priority = priority if priority != 0 else 5
@@ -867,8 +869,11 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
     yesterday_start = today_start - timedelta(days=1)
 
     # -- Done items: split into yesterday vs today --
+    # in_progress_items is declared early so ready-to-merge cards from view.done
+    # (which aren't actually shipped yet) can be reclassified onto today's plate.
     done_yesterday: list[str] = []
     done_today: list[str] = []
+    in_progress_items: list[str] = []
 
     for card in view.done:
         # Only include cards the user owns (assigned ticket or authored PR).
@@ -886,12 +891,17 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
         has_merged_pr = any(pr.state == "merged" for pr in card.prs)
         ticket_completed = card.ticket is not None and card.ticket.state_type == "completed"
 
+        # Ready-to-merge cards aren't shipped yet — they belong on today's plate,
+        # not in yesterday's recap.
+        if card.done_group == "ready_to_merge" and not has_merged_pr and not ticket_completed:
+            label = f"Merge in [{title}]({url})" if url else f"Merge in {title}"
+            in_progress_items.append(f"- {label}")
+            continue
+
         if has_merged_pr:
             label = f"Merged [{title}]({url})" if url else f"Merged {title}"
         elif ticket_completed:
             label = f"Completed [{title}]({url})" if url else f"Completed {title}"
-        elif card.done_group == "ready_to_merge":
-            label = f"Ready to merge [{title}]({url})" if url else f"Ready to merge {title}"
         else:
             label = f"Completed [{title}]({url})" if url else f"Completed {title}"
 
@@ -901,8 +911,6 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
             done_yesterday.append(f"- {label}")
 
     # -- In progress items --
-    in_progress_items: list[str] = []
-
     for card in view.in_progress:
         title = _card_display_title(card)
         url = _card_url(card)
@@ -941,6 +949,33 @@ def generate_standup(view: KanbanView, current_username: str) -> str:
         pr_url = card.prs[0].url if card.prs else _card_url(card)
         label = f"Need a review on [{title}]({pr_url})" if pr_url else (f"Need a review on {title}")
         blocker_items.append(f"- {label}")
+
+    # -- Reviewed PRs: someone else's PRs the user submitted a review on --
+    # Scan every column so we catch reviews regardless of where the PR landed
+    # (still in needs_review, back in in_progress while the author iterates, or
+    # already merged in done). PR.updated_at is used as the activity-time proxy
+    # since reviews don't carry their own timestamp on the card.
+    seen_reviewed_urls: set[str] = set()
+    for col in (view.todo, view.in_progress, view.needs_review, view.done):
+        for card in col:
+            for pr in card.prs:
+                if pr.author == current_username:
+                    continue
+                if current_username not in pr.reviewers:
+                    continue
+                if pr.url in seen_reviewed_urls:
+                    continue
+                seen_reviewed_urls.add(pr.url)
+
+                activity_time = _ensure_utc(pr.updated_at)
+                if activity_time < yesterday_start:
+                    continue
+
+                bullet = f"- Reviewed [{pr.title}]({pr.url})"
+                if activity_time >= today_start:
+                    done_today.append(bullet)
+                else:
+                    done_yesterday.append(bullet)
 
     # -- Build message --
     sections: list[str] = []
@@ -1104,10 +1139,15 @@ def build_session_phases(session: ZingSession) -> list[dict]:
 
 
 def get_live_sessions() -> set[str]:
-    """Return the set of live Zellij session names with the zing-- prefix."""
+    """Return the set of live tmux session names with the zing- prefix.
+
+    ``tmux list-sessions`` exits non-zero when there is no server running,
+    which we treat as "no live sessions" rather than an error — a fresh boot
+    has no tmux server until something connects.
+    """
     try:
         result = subprocess.run(
-            ["zellij", "list-sessions", "-sn"],
+            ["tmux", "list-sessions", "-F", "#S"],
             capture_output=True,
             text=True,
         )
@@ -1115,6 +1155,4 @@ def get_live_sessions() -> set[str]:
         return set()
     if result.returncode != 0:
         return set()
-    return {
-        line.strip() for line in result.stdout.splitlines() if line.strip().startswith("zing--")
-    }
+    return {line.strip() for line in result.stdout.splitlines() if line.strip().startswith("zing-")}

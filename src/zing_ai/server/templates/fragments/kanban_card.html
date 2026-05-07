@@ -5,7 +5,7 @@
     card        — KanbanCard instance
     column_cls  — CSS column class string, e.g. "col-todo" (from parent column template)
     current_username — GitHub username of the current user
-    live_sessions — set of live zellij session names
+    live_sessions — set of live tmux session names
 #}
 {% from "fragments/_phase_strip.html" import phase_strip %}
 {% from "fragments/launch_button.html" import launch_button %}
@@ -231,8 +231,8 @@
       <span class="strip-session-dot {{ cc_view.dot_class }}" title="{{ cc_view.dot_title }}"></span>
       <span class="strip-session-label{% if cc_view.status_label_class %} {{ cc_view.status_label_class }}{% endif %}">{{ cc_view.status_label }}</span>
       <span class="strip-spacer"></span>
-      {% if session.terminal_session and is_alive %}
-        <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/flow/launch-popup-open', {payload: {terminal_session: {{ session.terminal_session | js_str }}}})">Attach</button>
+      {% if session.tmux_session and is_alive %}
+        <button class="strip-primary-btn strip-primary-btn-blue" id="btn-attach-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/flow/launch-popup-open', {payload: {tmux_session: {{ session.tmux_session | js_str }}}})">Attach</button>
         {{ kebab_toggle(sess_menu_key, controls_id=sess_menu_id) }}
         {{ kebab_menu_open(sess_menu_key, menu_id=sess_menu_id) }}
           <div class="menu-col-header">
@@ -241,8 +241,8 @@
           </div>
           <div class="menu-items">
             <div class="menu-row">
-              <button class="menu-row-main" id="btn-attach-kebab-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/flow/launch-popup-open', {payload: {terminal_session: {{ session.terminal_session | js_str }}}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Attach</button>
-              <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('tmux attach -t ' ~ session.terminal_session) | tojson }}); $openKebab = ""'>&#128203;</button>
+              <button class="menu-row-main" id="btn-attach-kebab-{{ session.session_id | e }}" data-indicator="$busyButtons.attach_{{ sess_sig }}" data-on:click="@post('/command-center/flow/launch-popup-open', {payload: {tmux_session: {{ session.tmux_session | js_str }}}}); $openKebab = ''"><span class="menu-icon">&#9655;</span> Attach</button>
+              <button class="menu-row-copy" data-on:click='dispatchCopyCmd({{ ('tmux attach -t ' ~ session.tmux_session) | tojson }}); $openKebab = ""'>&#128203;</button>
             </div>
             <div class="menu-row">
               <button class="menu-row-main" id="btn-kill-{{ session.session_id | e }}" data-indicator="$busyButtons.kill_{{ sess_sig }}" data-on:click="@post('/command-center/kill-session', {payload: {session_id: {{ session.session_id | js_str }}, btn_id: 'btn-kill-{{ session.session_id | e }}'}}); $openKebab = ''"><span class="menu-icon">&#128683;</span> Kill session</button>

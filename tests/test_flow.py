@@ -165,7 +165,7 @@ class TestBuildFlowContext(unittest.TestCase):
         cc_session = ClaudeCodeSession(
             session_id="cc-1",
             title="Terminal",
-            terminal_session="zellij-abc",
+            tmux_session="zing-abc",
         )
         item = _make_item(
             action_type="attach",
@@ -206,7 +206,7 @@ class TestBuildFlowContext(unittest.TestCase):
         self.assertEqual(ctx["initial_responses"], {finding.id: "my answer"})
 
     def test_next_ticket_id_resolved_from_queue(self) -> None:
-        """next_ticket_id is the ticket_id of the item after active (wraps)."""
+        """next_ticket_id is the ticket_id of the item directly after active."""
         from zing_ai.server.sessions import SessionManager
 
         mgr = MagicMock(spec=SessionManager)

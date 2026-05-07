@@ -27,7 +27,7 @@ class TestAppLifespan(unittest.TestCase):
 
     def test_lifespan_starts_and_stops_poller_cleanly(self) -> None:
         """Entering and exiting the lifespan context must not raise."""
-        app = create_app(session_manager=self.manager, zellij_support=False)
+        app = create_app(session_manager=self.manager)
         with TestClient(app):
             # Lifespan has entered: poller is running as a background task.
             pass
@@ -41,7 +41,7 @@ class TestAppLifespan(unittest.TestCase):
         # We need access to the inner fastapi_app, not the Starlette wrapper.
         # TestClient entering the lifespan is not needed for this check because
         # state is set in create_app() body, before the lifespan runs.
-        app = _create_app(session_manager=self.manager, zellij_support=False)
+        app = _create_app(session_manager=self.manager)
 
         # Unwrap MCPDebugMiddleware → Starlette → find FastAPI mount
         starlette_app = app.app  # type: ignore[attr-defined]
@@ -61,7 +61,7 @@ class TestAppLifespan(unittest.TestCase):
         """
         from zing_ai.server.routes import _dashboard_queues, _sse_queues
 
-        app = create_app(session_manager=self.manager, zellij_support=False)
+        app = create_app(session_manager=self.manager)
         starlette_app = app.app  # type: ignore[attr-defined]
         fastapi_app = starlette_app.routes[-1].app  # type: ignore[attr-defined]
 
@@ -79,7 +79,7 @@ class TestAppLifespan(unittest.TestCase):
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
         cc_queues.append(queue)
 
-        app = create_app(session_manager=self.manager, cc_queues=cc_queues, zellij_support=False)
+        app = create_app(session_manager=self.manager, cc_queues=cc_queues)
         assert app is not None  # smoke check; listener attached in create_app
 
         # Trigger a session creation — fires session_created.
@@ -113,23 +113,21 @@ class TestSyncSessionLiveness(unittest.TestCase):
         """Returns False when no tracked session's liveness flipped."""
         from zing_ai.server.app import sync_session_liveness
 
-        self.manager.create_claude_code_session(
-            session_id="s1", title="T", terminal_session="zing--a"
-        )
-        # First call: False→True transition for "zing--a", returns True.
-        assert sync_session_liveness(self.manager, {"zing--a"}) is True
+        self.manager.create_claude_code_session(session_id="s1", title="T", tmux_session="zing-a")
+        # First call: False→True transition for "zing-a", returns True.
+        assert sync_session_liveness(self.manager, {"zing-a"}) is True
         # Second call with same set: no flip, returns False.
-        assert sync_session_liveness(self.manager, {"zing--a"}) is False
+        assert sync_session_liveness(self.manager, {"zing-a"}) is False
 
     def test_appearing_flips_to_alive_and_returns_true(self) -> None:
         """A tracked session appearing in the live set flips _session_alive."""
         from zing_ai.server.app import sync_session_liveness
 
         session = self.manager.create_claude_code_session(
-            session_id="s2", title="T", terminal_session="zing--b"
+            session_id="s2", title="T", tmux_session="zing-b"
         )
         assert session._session_alive is False
-        assert sync_session_liveness(self.manager, {"zing--b"}) is True
+        assert sync_session_liveness(self.manager, {"zing-b"}) is True
         assert session._session_alive is True
         assert session._ever_seen_alive is True
 
@@ -138,10 +136,10 @@ class TestSyncSessionLiveness(unittest.TestCase):
         from zing_ai.server.app import sync_session_liveness
 
         session = self.manager.create_claude_code_session(
-            session_id="s3", title="T", terminal_session="zing--c"
+            session_id="s3", title="T", tmux_session="zing-c"
         )
         # Bring it alive first.
-        sync_session_liveness(self.manager, {"zing--c"})
+        sync_session_liveness(self.manager, {"zing-c"})
         assert session._session_alive is True
         # Now drop from live set.
         assert sync_session_liveness(self.manager, set()) is True
@@ -151,16 +149,14 @@ class TestSyncSessionLiveness(unittest.TestCase):
         assert session._ever_seen_alive is True
 
     def test_unrelated_live_names_do_not_flip(self) -> None:
-        """Untracked zellij sessions don't trigger a board_changed push."""
+        """Untracked tmux sessions don't trigger a board_changed push."""
         from zing_ai.server.app import sync_session_liveness
 
-        self.manager.create_claude_code_session(
-            session_id="s4", title="T", terminal_session="zing--d"
-        )
+        self.manager.create_claude_code_session(session_id="s4", title="T", tmux_session="zing-d")
         # Bring tracked session alive.
-        sync_session_liveness(self.manager, {"zing--d"})
+        sync_session_liveness(self.manager, {"zing-d"})
         # Add an unrelated live name; tracked session still alive.
-        assert sync_session_liveness(self.manager, {"zing--d", "zing--unrelated"}) is False
+        assert sync_session_liveness(self.manager, {"zing-d", "zing-unrelated"}) is False
 
 
 if __name__ == "__main__":

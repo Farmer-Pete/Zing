@@ -202,7 +202,7 @@ def launch(
         TICKET_ID_PATTERN,
         LaunchError,
         build_claude_args,
-        build_session_name,
+        build_tmux_session_name,
         checkout_pr_branch,
         create_session_on_server,
         create_worktree,
@@ -215,7 +215,7 @@ def launch(
         fetch_session,
         move_ticket_in_progress,
         parse_pr_url,
-        require_session_backend,
+        require_tmux,
         resolve_repo_root,
         run_init_script,
         sanitize_branch_name,
@@ -247,7 +247,7 @@ def launch(
             ) from e
 
         if detach:
-            require_session_backend()
+            require_tmux()
 
         # -- shared helpers (capture enclosing scope) ----------------------
 
@@ -266,7 +266,7 @@ def launch(
                 claude_flags=cfg.command_center.claude_flags,
             )
             resume_cwd = Path(existing_worktree) if existing_worktree else Path.cwd()
-            session_name = build_session_name(name) if detach else None
+            session_name = build_tmux_session_name(name) if detach else None
             explicit = resume not in ("auto", "")
             if explicit:
                 click.echo(f"cwd: {resume_cwd}", err=True)
@@ -402,7 +402,7 @@ def launch(
                 skill=resolved_skill,
                 pr_number=pr_number,
                 pr_repo=pr_repo,
-                terminal_session=session_name,
+                tmux_session=session_name,
             )
 
             if setup_only:
@@ -467,7 +467,7 @@ def launch(
             branch_name = derive_branch_name(ticket_id, api_key)
             wf_mode = _prompt_workflow_mode()
             work_dir, worktree_path = _create_new_branch_worktree(repo_root, branch_name, wf_mode)
-            session_name = build_session_name(ticket_id) if detach else None
+            session_name = build_tmux_session_name(ticket_id) if detach else None
             ticket_skill = skill or "new"
 
             _init_create_and_launch(
@@ -519,7 +519,7 @@ def launch(
                     shutil.copy2(md_path, dest)
                     md_path = dest
 
-            session_name = build_session_name(md_name) if detach else None
+            session_name = build_tmux_session_name(md_name) if detach else None
             md_skill = skill or "new"
 
             _init_create_and_launch(
@@ -582,7 +582,7 @@ def launch(
             else:
                 work_dir = Path.cwd()
 
-            session_name = build_session_name(target, pr_number=pr_number) if detach else None
+            session_name = build_tmux_session_name(target, pr_number=pr_number) if detach else None
 
             _init_create_and_launch(
                 repo_root=repo_root,

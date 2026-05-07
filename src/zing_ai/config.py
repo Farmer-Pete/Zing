@@ -84,8 +84,9 @@ class CommandCenterConfig(BaseModel):
     github_excluded_repos: list[str] = Field(default_factory=list)
     poll_seconds: PollSeconds = 60
     claude_flags: str = ""
-    zellij_support: bool = True
-    zellij_web_port: int = 8082
+    # 'browser' embeds an iframe to a per-session ttyd; 'copy' just copies the
+    # `tmux attach -t` command to the clipboard for the user to paste.
+    tmux_attach_mode: Literal["browser", "copy"] = "browser"
 
 
 class Config(BaseModel):

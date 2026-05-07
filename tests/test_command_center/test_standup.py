@@ -57,6 +57,24 @@ class TestGenerateStandup(unittest.TestCase):
         assert "Completed [Fix auth bug]" in msg
         assert "BAK-42" not in msg.split("[Fix auth bug]")[0].split("\n")[-1]
 
+    def test_ready_to_merge_appears_on_today_plate(self) -> None:
+        """A ready-to-merge card lives under 'on my plate today', not yesterday's recap."""
+        now = self._now()
+        pr = make_pr(
+            number=3,
+            title="Approved feature",
+            state="open",
+            author="alice",
+            updated_at=now - timedelta(hours=4),
+        )
+        card = KanbanCard(key="pr-org/repo-3", prs=[pr], done_group="ready_to_merge")
+        view = KanbanView(done=[card])
+        msg = generate_standup(view, "alice")
+        done_section = msg.split("**What got done yesterday:**")[1].split("**")[0]
+        today_section = msg.split("**What's on my plate today:**")[1].split("**")[0]
+        assert "Merge in [Approved feature]" in today_section
+        assert "Approved feature" not in done_section
+
     def test_in_progress_new_work(self) -> None:
         """A card in progress with no feedback shows 'Work on'."""
         issue = make_issue(identifier="BAK-10", title="Build dashboard")
@@ -145,8 +163,8 @@ class TestGenerateStandup(unittest.TestCase):
         assert "Someone else PR" not in msg
         assert "None" in msg.split("**Blockers:**")[1]
 
-    def test_reviewed_prs_excluded_from_done(self) -> None:
-        """PRs the user only reviewed (not authored) should NOT appear in done."""
+    def test_reviewed_prs_appear_in_done(self) -> None:
+        """PRs the user reviewed (not authored) appear under 'what got done' as 'Reviewed ...'."""
         now = self._now()
         pr = make_pr(
             number=99,
@@ -160,7 +178,45 @@ class TestGenerateStandup(unittest.TestCase):
         card = KanbanCard(key="pr-org/repo-99", prs=[pr], done_group="completed")
         view = KanbanView(done=[card])
         msg = generate_standup(view, "alice")
-        assert "Someone else work" not in msg
+        done_section = msg.split("**What got done yesterday:**")[1].split("**")[0]
+        assert "Reviewed [Someone else work]" in done_section
+        # And it must not be mislabelled as the user's own merge.
+        assert "Merged [Someone else work]" not in msg
+
+    def test_reviewed_pr_outside_window_excluded(self) -> None:
+        """A review PR last touched before yesterday is not surfaced."""
+        now = self._now()
+        old = now - timedelta(days=5)
+        pr = make_pr(
+            number=42,
+            title="Stale review",
+            state="merged",
+            author="bob",
+            reviewers=["alice"],
+            merged_at=old,
+            updated_at=old,
+        )
+        card = KanbanCard(key="pr-org/repo-42", prs=[pr], done_group="completed")
+        view = KanbanView(done=[card])
+        msg = generate_standup(view, "alice")
+        assert "Stale review" not in msg
+
+    def test_reviewed_pr_in_needs_review(self) -> None:
+        """A review on a PR still sitting in needs_review is surfaced under done."""
+        now = self._now()
+        pr = make_pr(
+            number=11,
+            title="Bob open PR",
+            state="open",
+            author="bob",
+            reviewers=["alice"],
+            requested_reviewers=[],
+            updated_at=now - timedelta(hours=4),
+        )
+        card = KanbanCard(key="pr-org/repo-11", prs=[pr], review_group="mine_passing")
+        view = KanbanView(needs_review=[card])
+        msg = generate_standup(view, "alice")
+        assert "Reviewed [Bob open PR]" in msg
 
     def test_no_pr_numbers_in_output(self) -> None:
         """PR and ticket numbers should not appear as visible text in the message."""

@@ -2,7 +2,7 @@
 
 {% block title %}Command Center{% endblock %}
 
-{% block topnav_extra %}{% include 'fragments/_flow_board_toggle.html' %}{% endblock %}
+{% block command_center_toggle %}{% include 'fragments/_flow_board_toggle.html' %}{% endblock %}
 
 {% block content %}
 <div class="cc-page"
@@ -40,7 +40,7 @@
     {% include "fragments/management_tray.html" %}
     </div>
 
-    {# ── Terminal modal (Zellij iframe). Closes via mountModal.close() — the
+    {# ── Terminal modal (ttyd iframe). Closes via mountModal.close() — the
          body-level signal-patch watcher dispatches close-terminal which calls
          the same close() so the iframe lifecycle stays in one place. ── #}
     <div id="terminal-modal" class="terminal-modal" style="display:none;"
@@ -106,7 +106,7 @@
     <div id="terminal-launcher"
          style="display:none"
          data-on-signal-patch-filter="{include: /^terminalUrl$/}"
-         data-on-signal-patch="dispatchOpenTerminal($terminalUrl)"></div>
+         data-on-signal-patch="dispatchOpenTerminal($terminalUrl, $terminalTitle)"></div>
 
 {% include "fragments/launch_popup.html" %}
 

@@ -250,7 +250,7 @@ The `line` value must be a line number in the **new version** of the file that f
   ````
 - Keep it concise — this is a PR comment, not an essay
 
-**Submit the review** using `gh api`:
+**Submit the review** using `gh api`. **Important — concurrent reviews:** multiple `/zing:pr-audit` runs may be in flight at the same time on this machine (different PRs, or even the same PR from a different shell). Any file written under `/tmp` (or any other shared scratch directory) **must** be namespaced with the PR number to avoid two reviews clobbering each other's payload mid-submit. Use `/tmp/pr-review-{number}-payload.json` — never the bare `/tmp/pr-review-payload.json`.
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{number}/reviews \
@@ -258,13 +258,13 @@ gh api repos/{owner}/{repo}/pulls/{number}/reviews \
   -f commit_id='{commit_sha}' \
   -f event='{APPROVE|COMMENT|REQUEST_CHANGES}' \
   -f body='{review_body}' \
-  --input /tmp/pr-review-payload.json
+  --input /tmp/pr-review-{number}-payload.json
 ```
 
 To handle the complex JSON payload with the comments array, write the full JSON body to a temporary file first, then use `--input`:
 
 ```bash
-cat > /tmp/pr-review-payload.json << 'PAYLOAD'
+cat > /tmp/pr-review-{number}-payload.json << 'PAYLOAD'
 {
   "commit_id": "{commit_sha}",
   "event": "{event}",
@@ -279,7 +279,7 @@ cat > /tmp/pr-review-payload.json << 'PAYLOAD'
 }
 PAYLOAD
 
-gh api repos/{owner}/{repo}/pulls/{number}/reviews --input /tmp/pr-review-payload.json
+gh api repos/{owner}/{repo}/pulls/{number}/reviews --input /tmp/pr-review-{number}-payload.json
 ```
 
 Get the `{owner}/{repo}` from:

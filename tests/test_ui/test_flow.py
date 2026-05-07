@@ -155,7 +155,7 @@ class TestFlowGoldenPath:
         - The ``.launch-popup-btn-send`` button DOM node is rendered with the
           expected selector and is clickable from a real browser.
         - When the click triggers a POST to ``/command-center/flow/launch-popup-send``
-          with a valid terminal_session, the server pins the session
+          with a valid tmux_session, the server pins the session
           (verified via ``manager.get_session(...).pinned``).
         - The browser navigates to ``/command-center/flow?session_id=...``.
 
@@ -180,7 +180,7 @@ class TestFlowGoldenPath:
         cc_session = manager.create_claude_code_session(
             session_id="cc-flow-popup-1",
             title="Flow popup test",
-            terminal_session="zing-flow-popup-test",
+            tmux_session="zing-flow-popup-test",
         )
         assert not cc_session.pinned
 
@@ -230,7 +230,7 @@ class TestFlowGoldenPath:
                     fetch('{base_url}/command-center/flow/launch-popup-send', {{
                         method: 'POST',
                         headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify({{terminal_session: 'zing-flow-popup-test'}}),
+                        body: JSON.stringify({{tmux_session: 'zing-flow-popup-test'}}),
                     }}).then(function() {{
                         var url = '{base_url}/command-center/flow?session_id=cc-flow-popup-1';
                         window.location = url;
@@ -284,23 +284,13 @@ class TestFlowGoldenPath:
         # Toast container must be present (moved to base.html so all pages share it)
         expect(page.locator("#cc-toast-container")).to_be_attached()
 
-    def test_submit_and_next_button_visible_on_findings(
-        self, server: _ServerInfo, page: Page
-    ) -> None:
-        """Submit & Next button is visible for findings action_type, absent for empty queue."""
-        _seed_flow_session(server, session_id="flow-sn-1", title="Submit Next test")
-
-        page.goto(f"{server.base_url}/command-center/flow", wait_until="domcontentloaded")
-
-        # Button must be present and visible on a findings item.
-        submit_btn = page.locator("button.btn-primary", has_text="Submit")
-        expect(submit_btn).to_be_visible(timeout=5000)
-        expect(submit_btn).to_contain_text("Submit & Next ▸", timeout=3000)
-
-    # NOTE: ``test_submit_and_next_navigates_to_next_item`` (and the
-    # ``TestFlowSignalHoisting`` class with ``test_flow_responses_survive_across_modes``)
-    # used to live here.  Both were removed as part of the Step-13 cleanup
-    # because they exercised behavior that is more reliably tested at lower layers:
+    # NOTE: ``test_submit_and_next_button_visible_on_findings``,
+    # ``test_submit_and_next_navigates_to_next_item``, and the
+    # ``TestFlowSignalHoisting`` class with ``test_flow_responses_survive_across_modes``
+    # used to live here.  All were removed as the Flow toolbar evolved past the
+    # ``btn-primary`` "Submit & Next ▸" button — the toolbar now exposes Prev,
+    # Next, and ✓ Done (see ``flow_toolbar.html``).  The underlying behaviour is
+    # more reliably tested at lower layers:
     # - The Submit-&-Next navigation case is exercised at the route level by
     #   ``TestFlowNext.test_submit_and_next_signals_envelope_navigates`` in
     #   ``tests/test_server_routes.py`` (asserts the SSE ``execute_script``

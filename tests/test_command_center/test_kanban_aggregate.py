@@ -514,23 +514,19 @@ class TestColumnPriorityRule(unittest.TestCase):
 
 
 class TestTodoSortOrder(unittest.TestCase):
-    """To Do column: state_type bucket (other=0, backlog=1, triage=2), then priority asc."""
+    """To Do column: state_type bucket (other=0, triage=1), then priority asc.
 
-    def test_other_bucket_before_backlog(self) -> None:
-        """'other' state_type (bucket 0) sorts before 'backlog' (bucket 1)."""
+    Backlog tickets are excluded from the board entirely; see
+    ``TestBacklogExclusion`` for that behaviour.
+    """
+
+    def test_other_bucket_before_triage(self) -> None:
+        """'other' state_type (bucket 0) sorts before 'triage' (bucket 1)."""
         unstarted = _make_issue(identifier="BAK-1", state_type="unstarted", priority=0)
-        backlog = _make_issue(identifier="BAK-2", state_type="backlog", priority=0)
-        view = _agg(issues=[unstarted, backlog])
+        triage = _make_issue(identifier="BAK-2", state_type="triage", priority=0)
+        view = _agg(issues=[unstarted, triage])
         self.assertEqual(view.todo[0].key, "BAK-1")
         self.assertEqual(view.todo[1].key, "BAK-2")
-
-    def test_backlog_before_triage(self) -> None:
-        """'backlog' (bucket 1) sorts before 'triage' (bucket 2)."""
-        triage = _make_issue(identifier="BAK-3", state_type="triage", priority=0)
-        backlog = _make_issue(identifier="BAK-2", state_type="backlog", priority=0)
-        view = _agg(issues=[triage, backlog])
-        self.assertEqual(view.todo[0].key, "BAK-2")
-        self.assertEqual(view.todo[1].key, "BAK-3")
 
     def test_priority_within_bucket_urgent_first(self) -> None:
         """Within same bucket, priority=1 (urgent) sorts before priority=4 (low)."""
@@ -547,6 +543,35 @@ class TestTodoSortOrder(unittest.TestCase):
         view = _agg(issues=[no_priority, low])
         self.assertEqual(view.todo[0].key, "BAK-2")  # explicit priority first
         self.assertEqual(view.todo[1].key, "BAK-1")  # no-priority last
+
+
+# ---------------------------------------------------------------------------
+# Backlog exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestBacklogExclusion(unittest.TestCase):
+    """Backlog tickets are excluded from the board regardless of attached state."""
+
+    def test_plain_backlog_ticket_excluded(self) -> None:
+        backlog = _make_issue(identifier="BAK-1", state_type="backlog")
+        view = _agg(issues=[backlog])
+        self.assertEqual(_all_cards(view), [])
+
+    def test_backlog_ticket_with_active_session_excluded(self) -> None:
+        """Stale started session on a backlog ticket does not bring it back."""
+        active_step = _make_workflow_step(step_name="build", state=SessionState.STARTED)
+        session = _make_session(session_id="s1", ticket_id="BAK-1", steps=[active_step])
+        backlog = _make_issue(identifier="BAK-1", state_type="backlog")
+        view = _agg(issues=[backlog], sessions=[session])
+        self.assertEqual(_all_cards(view), [])
+
+    def test_backlog_ticket_with_open_pr_excluded(self) -> None:
+        """An open PR linked to a backlog ticket does not pull the card onto the board."""
+        pr = _make_pr(number=1, state="open", head_ref="bak-1-feature")
+        backlog = _make_issue(identifier="BAK-1", state_type="backlog")
+        view = _agg(issues=[backlog], prs=[pr])
+        self.assertEqual(_all_cards(view), [])
 
 
 # ---------------------------------------------------------------------------
