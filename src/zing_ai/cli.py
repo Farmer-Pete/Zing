@@ -648,7 +648,15 @@ def _register_sim() -> None:
     cli.add_command(sim)
 
 
+def _register_viz() -> None:
+    """Register the viz command group eagerly (imports viz module at CLI load time)."""
+    from zing_ai.viz.cli import viz
+
+    cli.add_command(viz)
+
+
 _register_sim()
+_register_viz()
 
 
 def main() -> None:
