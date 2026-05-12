@@ -7,7 +7,7 @@
        "viewportW": 0,
        "viewportH": 0
      }'
-     data-init="$viewportW = el.clientWidth; $viewportH = el.clientHeight"
+     data-init="$viewportW = el.clientWidth; $viewportH = el.clientHeight; window.zingViz._setScale = (v) => { $scale = v; }"
      data-on:resize__window="$viewportW = el.clientWidth; $viewportH = el.clientHeight"
      data-on:wheel__prevent="window.zingViz.onWheel(evt, $pan, $scale)"
      data-on:pointerdown="window.zingViz.onPointerDown(evt)"

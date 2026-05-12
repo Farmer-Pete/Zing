@@ -1,0 +1,268 @@
+/* viz.css — SVG-only rules for the plan-detail Convene viewer.
+ *
+ * Page chrome, typography, and colours come from Zing's existing tokens
+ * (tokens.css, components.css). The prototype's paper/sienna palette stays
+ * in prototypes/plan-viz/.
+ */
+
+/* ===== page-level split: markdown left, viewer right ===== */
+.plan-detail {
+    display: grid;
+    grid-template-columns: minmax(360px, 1fr) 2fr;
+    gap: 1rem;
+    height: calc(100vh - 160px);
+    min-height: 0;
+}
+
+.plan-md {
+    overflow: auto;
+    padding: 1.25rem 1.5rem;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.plan-md h1,
+.plan-md h2,
+.plan-md h3 { color: var(--navy); }
+
+.plan-viz {
+    position: relative;
+    min-width: 0;
+    background: var(--gray-50);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+/* ===== stage + viewport (CSS transform sourced from $pan/$scale signals) ===== */
+.viz-stage {
+    position: absolute;
+    inset: 0;
+    cursor: grab;
+    overflow: hidden;
+    touch-action: none;
+}
+
+.viz-stage:active { cursor: grabbing; }
+
+.viz-viewport {
+    width: 200%;
+    height: 200%;
+    overflow: visible;
+}
+
+/* ===== HUD (status text + release button) ===== */
+.viz-hud {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    pointer-events: none;
+}
+
+.viz-hud__status {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    pointer-events: auto;
+}
+
+.viz-hud__release {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    pointer-events: auto;
+    font-family: inherit;
+}
+
+.viz-hud__release:hover:not(:disabled) {
+    background: var(--orange-subtle);
+    border-color: var(--orange-border);
+}
+
+.viz-hud__release:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* ===== step card frame + header ===== */
+.viz-card {
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 0.3s;
+    cursor: pointer;
+}
+
+.viz-card__frame {
+    fill: var(--white);
+    stroke: var(--gray-300);
+    stroke-width: 1;
+}
+
+.viz-card__head-bg {
+    fill: var(--gray-50);
+}
+
+.viz-card__rule {
+    stroke: var(--gray-200);
+    stroke-width: 1;
+}
+
+.viz-card__num {
+    fill: var(--gray-500);
+    font: 600 12px 'Inter', system-ui, sans-serif;
+}
+
+.viz-card__title {
+    fill: var(--navy);
+    font: 600 14px 'Inter', system-ui, sans-serif;
+}
+
+.viz-card__concern {
+    fill: var(--gray-700);
+    font: 400 11px 'Inter', system-ui, sans-serif;
+}
+
+/* focus states */
+.viz-card--focused .viz-card__frame {
+    stroke: var(--orange);
+    stroke-width: 2;
+    filter: drop-shadow(0 4px 18px var(--orange-glow));
+}
+
+.viz-card--pred .viz-card__frame,
+.viz-card--succ .viz-card__frame {
+    stroke: var(--orange-border);
+    stroke-width: 1.5;
+}
+
+.viz-card--faded {
+    opacity: 0.16;
+    pointer-events: none;
+}
+
+/* ===== inner-DAG shapes ===== */
+.viz-shape__outline {
+    fill: var(--gray-50);
+    stroke: var(--gray-300);
+    stroke-width: 1;
+}
+
+.viz-shape--side-existing .viz-shape__outline {
+    fill: var(--orange-subtle);
+    stroke: var(--orange-border);
+    stroke-dasharray: 4 3;
+}
+
+.viz-shape--side-proposed .viz-shape__outline {
+    fill: var(--white);
+    stroke: var(--orange);
+}
+
+.viz-shape--side-shared .viz-shape__outline {
+    fill: var(--white);
+    stroke: var(--gray-400);
+}
+
+.viz-shape__label {
+    fill: var(--text-primary);
+    font: 500 11px 'Inter', system-ui, sans-serif;
+}
+
+/* diverged */
+.viz-shape__diverged-half--today {
+    fill: var(--gray-100);
+}
+
+.viz-shape__diverged-half--proposed {
+    fill: var(--orange-subtle);
+}
+
+.viz-shape__divider {
+    stroke: var(--gray-300);
+    stroke-width: 0.5;
+}
+
+.viz-shape__concern {
+    fill: var(--navy);
+    font: 600 11px 'Inter', system-ui, sans-serif;
+}
+
+.viz-shape__side-label {
+    fill: var(--gray-500);
+    font: 500 9px 'Inter', system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.viz-shape__formula {
+    fill: var(--text-primary);
+    font: 400 11px 'Inter', system-ui, sans-serif;
+}
+
+/* ===== in-step edges ===== */
+.viz-edge {
+    fill: none;
+    stroke: var(--gray-500);
+    stroke-width: 1.2;
+}
+
+.viz-edge--soft { stroke: var(--gray-300); }
+.viz-edge--dashed { stroke-dasharray: 4 3; }
+
+.viz-arrow--inner { fill: var(--gray-500); }
+
+/* ===== cross-flows (kind-coded colours from Zing tokens) ===== */
+.viz-xflow__path {
+    fill: none;
+    stroke-width: 1.8;
+}
+
+.viz-xflow__hub { stroke: none; }
+
+.viz-xflow--data .viz-xflow__path,
+.viz-xflow--data .viz-xflow__hub { stroke: var(--cyan); fill: var(--cyan); }
+
+.viz-xflow--control .viz-xflow__path,
+.viz-xflow--control .viz-xflow__hub { stroke: var(--orange); fill: var(--orange); }
+
+.viz-xflow--schema .viz-xflow__path,
+.viz-xflow--schema .viz-xflow__hub { stroke: var(--amber); fill: var(--amber); }
+.viz-xflow--schema .viz-xflow__path { stroke-dasharray: 4 3; }
+
+.viz-xflow--queue .viz-xflow__path,
+.viz-xflow--queue .viz-xflow__hub { stroke: var(--red-orange); fill: var(--red-orange); }
+.viz-xflow--queue .viz-xflow__path { stroke-dasharray: 6 4; }
+
+.viz-xflow--utility .viz-xflow__path,
+.viz-xflow--utility .viz-xflow__hub { stroke: var(--gray-500); fill: var(--gray-500); }
+.viz-xflow--utility .viz-xflow__path { stroke-dasharray: 2 4; }
+
+.viz-xflow--observability .viz-xflow__path,
+.viz-xflow--observability .viz-xflow__hub { stroke: var(--gray-400); fill: var(--gray-400); }
+.viz-xflow--observability .viz-xflow__path { stroke-dasharray: 1 3; }
+
+.viz-xflow__label {
+    fill: var(--text-primary);
+    font: 500 10px 'Inter', system-ui, sans-serif;
+    paint-order: stroke;
+    stroke: var(--white);
+    stroke-width: 3;
+    stroke-linejoin: round;
+}
+
+.viz-arrow--data { fill: var(--cyan); }
+.viz-arrow--control { fill: var(--orange); }
+.viz-arrow--schema { fill: var(--amber); }
+.viz-arrow--queue { fill: var(--red-orange); }
+.viz-arrow--utility { fill: var(--gray-500); }
+.viz-arrow--observability { fill: var(--gray-400); }
