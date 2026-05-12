@@ -78,6 +78,32 @@ class TestDesignPill:
         href = pill.get_attribute("href")
         assert href == f"/command-center/{session_id}/plan"
 
+    def test_end_to_end_click_through_to_plan_detail_and_focus(
+        self, server: _ServerInfo, page: Page
+    ) -> None:
+        """Click Design pill on kanban → land on plan-detail → focus a step."""
+        _, session_id = _seed_card_with_plan(server)
+
+        page.goto(f"{server.base_url}/command-center", wait_until="domcontentloaded")
+        card = page.locator("#card-bak-2001")
+        expect(card).to_be_visible(timeout=5000)
+        pill = card.locator(".design-pill")
+        expect(pill).to_be_visible(timeout=3000)
+
+        # Click the pill — should navigate to /command-center/<sid>/plan
+        pill.click()
+        page.wait_for_url(
+            f"{server.base_url}/command-center/{session_id}/plan",
+            timeout=5000,
+        )
+        expect(page.locator("#viz-stage")).to_be_visible(timeout=5000)
+        # Default-grid renders all 13 fixture cards.
+        expect(page.locator(".viz-card--default")).to_have_count(13, timeout=3000)
+
+        # Focus interaction still works end-to-end.
+        page.locator("#card-6").dispatch_event("click")
+        expect(page.locator("#card-6.viz-card--focused")).to_be_attached(timeout=5000)
+
     def test_no_design_pill_when_no_viz_json_on_disk(self, server: _ServerInfo, page: Page) -> None:
         # Seed an issue + session but NO viz.json sibling.
         tmp = tempfile.mkdtemp(prefix="zing-design-pill-")
