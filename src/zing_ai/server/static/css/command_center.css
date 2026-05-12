@@ -347,6 +347,70 @@ a.card-ticket-id:hover { text-decoration: underline; }
 .strip-pill-reviewed { background: #fff3e0; color: #e65100; }
 .strip-pill-draft    { background: var(--gray-100); color: var(--gray-500); }
 
+/* Design pill — link(s) from a kanban card to a plan-detail viewer.
+ * Inherits from existing strip-pill tokens, no new colour values. */
+.design-pill {
+    display: inline-block;
+    margin: 0.4rem 0 0;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 999px;
+    background: var(--orange-subtle);
+    color: var(--orange);
+    border: 1px solid var(--orange-border);
+    text-decoration: none;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.design-pill:hover {
+    background: var(--orange);
+    color: var(--white);
+}
+
+.design-pill--menu {
+    border-style: solid;
+    appearance: none;
+}
+
+.design-pill-menu {
+    position: relative;
+    display: inline-block;
+    margin: 0.4rem 0 0;
+}
+
+.design-pill-menu__list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    padding: 0.25rem 0;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    list-style: none;
+    box-shadow: 0 4px 12px var(--orange-glow);
+    z-index: 10;
+    min-width: 12rem;
+}
+
+.design-pill-menu__list li { margin: 0; }
+
+.design-pill-menu__list a {
+    display: block;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+.design-pill-menu__list a:hover {
+    background: var(--orange-subtle);
+}
+
 .strip-ci-dots {
     display: flex;
     gap: 2px;
