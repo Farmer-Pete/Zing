@@ -102,6 +102,7 @@ def make_session(
     title: str = "Session 1",
     ticket_id: str | None = None,
     steps: list[WorkflowStep] | None = None,
+    zing_file: str | None = None,
 ) -> Session:
     """Build a :class:`Session` with sensible defaults for tests."""
     return ZingSession(
@@ -109,6 +110,7 @@ def make_session(
         title=title,
         ticket_id=ticket_id,
         steps=steps or [],
+        zing_file=zing_file,
     )
 
 

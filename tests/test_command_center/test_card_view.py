@@ -682,6 +682,43 @@ class TestDebugToolCoverage(unittest.TestCase):
     asserting each field name appears in the formatter's output.
     """
 
+    def setUp(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        self._plan_tmp = tempfile.TemporaryDirectory()
+        plan_dir = Path(self._plan_tmp.name)
+        self.md_path = plan_dir / "comprehensive-plan.md"
+        self.viz_path = plan_dir / "comprehensive-plan.viz.json"
+        self.md_path.write_text("# Comprehensive plan\n")
+        self.viz_path.write_text(
+            json.dumps(
+                {
+                    "title": "Comprehensive test plan",
+                    "steps": [
+                        {
+                            "step": 1,
+                            "id": "only_step",
+                            "title": "only",
+                            "nodes": [
+                                {
+                                    "id": "n1",
+                                    "shape": "rect",
+                                    "side": "shared",
+                                    "label": "n1",
+                                }
+                            ],
+                            "edges": [],
+                        }
+                    ],
+                }
+            )
+        )
+
+    def tearDown(self) -> None:
+        self._plan_tmp.cleanup()
+
     def _comprehensive_card_view(self):
         """Build a CardView populated enough to exercise every nested model."""
         from zing_ai.server.models import (
@@ -707,6 +744,7 @@ class TestDebugToolCoverage(unittest.TestCase):
             session_id="zs-1",
             ticket_id="BAK-99",
             steps=[_make_workflow_step(step_name="review", state=SessionState.STARTED)],
+            zing_file=str(self.md_path),
         )
         cc_session = ClaudeCodeSession(
             session_id="cc-1",
