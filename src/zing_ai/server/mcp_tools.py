@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from uuid import uuid4
 
 import yaml
 from mcp.server.fastmcp import FastMCP
 
 from zing_ai.server.sessions import SessionManager
+from zing_ai.server.step_validators import STEP_VALIDATORS, ValidationException
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,23 @@ async def session_update(
     """
     sm = _get_session_manager()
 
+    if zing_file is not None:
+        p = Path(zing_file)
+        if not p.is_absolute():
+            return {
+                "error": (
+                    f"zing_file must be an absolute path, got {zing_file!r}. "
+                    "Resolve via os.path.abspath() or Path.resolve() before submitting."
+                )
+            }
+        if not p.exists():
+            return {
+                "error": (
+                    f"zing_file does not exist: {zing_file}. "
+                    "Write the file first, then call session_update."
+                )
+            }
+
     resolved_ticket_id = ticket_id
     if resolved_ticket_id is None and zing_file is not None:
         resolved_ticket_id = _extract_ticket_id_from_frontmatter(zing_file)
@@ -151,6 +171,30 @@ async def step_start(session_id: str, step_id: str) -> dict:
         "step_name": step.step_name,
         "sequence": step.sequence,
     }
+
+
+@mcp_server.tool()
+async def step_stop(session_id: str, step_id: str) -> dict:
+    """Complete a step (STARTED -> READY) after running its validators.
+
+    Short-circuits on the first failing validator. Returns
+    ``{"error": "<formatted errors>"}`` on validation failure so Claude can
+    fix the underlying issue and retry. Only ``json.JSONDecodeError`` and
+    ``ValidationException`` are caught — server bugs (KeyError, OSError,
+    etc.) propagate as 500s so Claude doesn't retry-loop on something it
+    can't fix.
+    """
+    sm = _get_session_manager()
+    try:
+        sess, step = sm.get_step_by_id(step_id)
+        for validator in STEP_VALIDATORS.get(step.step_name, []):
+            errors = validator(sess, step)
+            if errors:
+                return {"error": "\n\n".join(errors)}
+        sm.mark_step_ready(session_id, step_id)
+    except (json.JSONDecodeError, ValidationException) as exc:
+        return {"error": str(exc)}
+    return {"status": "ready", "step_id": step_id, "step_name": step.step_name}
 
 
 @mcp_server.tool()
