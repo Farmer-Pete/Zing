@@ -57,6 +57,29 @@
     </div>
   </div>
 
+  {# ── Design pill: link(s) to plan-detail viewer(s) ── #}
+  {% if card_view.plans %}
+    {% if card_view.plans | length == 1 %}
+      <a class="design-pill"
+         href="/command-center/{{ card_view.plans[0].session_id }}/plan"
+         title="{{ card_view.plans[0].title }}">Design</a>
+    {% else %}
+      <div class="design-pill-menu"
+           data-signals="{designOpen{{ card.signal_key }}: false}">
+        <button class="design-pill design-pill--menu"
+                data-on:click="$designOpen{{ card.signal_key }} = !$designOpen{{ card.signal_key }}">
+          Design ({{ card_view.plans | length }})
+        </button>
+        <ul class="design-pill-menu__list"
+            data-show="$designOpen{{ card.signal_key }}">
+          {% for p in card_view.plans %}
+            <li><a href="/command-center/{{ p.session_id }}/plan">{{ p.title }}</a></li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  {% endif %}
+
   {# ── PR strips: one per PR, with inline action buttons ── #}
   {% for pr_view in card_view.pr_views %}
     {% set pr = pr_view.pr %}
