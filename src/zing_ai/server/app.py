@@ -32,6 +32,7 @@ from zing_ai.server.routes import (
 from zing_ai.server.routes_command_center import router as command_center_router
 from zing_ai.server.routes_config import router as config_router
 from zing_ai.server.routes_install import router as install_router
+from zing_ai.server.routes_viz_schema import router as viz_schema_router
 from zing_ai.server.sessions import SessionManager
 from zing_ai.server.ttyd_manager import (
     IDLE_TIMEOUT_SECONDS,
@@ -343,6 +344,7 @@ def create_app(
     fastapi_app.include_router(config_router)
     fastapi_app.include_router(install_router)
     fastapi_app.include_router(command_center_router)
+    fastapi_app.include_router(viz_schema_router)
     fastapi_app.include_router(router)
 
     routes = [*mcp_starlette.routes, Mount("/", app=fastapi_app)]
