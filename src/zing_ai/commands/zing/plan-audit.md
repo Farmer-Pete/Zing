@@ -447,6 +447,24 @@ Tell the user:
 - A brief summary of what was merged and why
 </step>
 
+<step name="sync_viz_graph">
+If you made any change to `.zing/<slug>.md` during this audit (improvements applied, steps merged, content rewritten), you MUST also update `.zing/<slug>.viz.json` so the two never drift. The hard gate in `step_stop` enforces this contract — a step that edits the markdown but fails to rewrite the JSON will be rejected.
+
+1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL stored in the zing file's frontmatter, or default to `9876`. Always refetch — the schema may have changed since the plan was first written.
+
+2. Re-derive the topology from the updated markdown and rewrite `.zing/<slug>.viz.json` end-to-end. Do not patch in place — rewrite the whole file. Pull steps, nodes, edges, and cross-flows from the current state of the markdown:
+   - every numbered step / phase → `steps[]` entry
+   - decisions / branches → `diamond`
+   - operations → `rect`
+   - input/output boundaries → `parallelogram`
+   - same-site different-behaviour → `diverged` (with `concern` / `today_label` / `proposed_label`)
+   - cross-step data/control flow → `cross_flows[]` entries
+
+3. Call `mcp__zing-ai__step_stop(session_id, plan_audit_step_id)` where `plan_audit_step_id` is `steps["plan-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and call `step_stop` again. Only proceed past this step when it returns `{"status": "ready"}`.
+
+If no markdown edits were made during this audit, you may still call `step_stop` — the validator only checks the current state of the file, not whether it changed.
+</step>
+
 <step name="ensure_progress_section">
 After improvements are complete, check if the document has a `## Progress` section with a checklist.
 

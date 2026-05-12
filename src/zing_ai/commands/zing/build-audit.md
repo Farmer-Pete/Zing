@@ -228,6 +228,18 @@ Wrote {valid_count} findings to {file_path}
 If zero valid findings, write a short file noting "Nothing to flag — changes looked good." and tell the user.
 </step>
 
+<step name="sync_viz_graph">
+If you (or any earlier step in this audit) made changes to `.zing/<slug>.md` — for example to tick off Progress items, document deviations, or amend the plan after the build — you MUST also update `.zing/<slug>.viz.json`. The hard gate in `step_stop` enforces this contract.
+
+1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL in the zing file's frontmatter, or default to `9876`. Always refetch.
+
+2. Re-derive the topology from the current state of `.zing/<slug>.md` and rewrite `.zing/<slug>.viz.json` end-to-end (not in place). Map content to shapes as described in the schema's `description` fields (rect = operation, diamond = decision, parallelogram = boundary, hexagon = pre-existing module, diverged = same-site split).
+
+3. Call `mcp__zing-ai__step_stop(session_id, build_audit_step_id)` where `build_audit_step_id` is `steps["build-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and retry until it returns `{"status": "ready"}`.
+
+If `.zing/<slug>.md` was not edited during this audit, you may still call `step_stop` — the validator checks the current state of the JSON, not whether the markdown changed. Skip this step entirely only if you are confident no markdown edits occurred.
+</step>
+
 <step name="create_pr">
 End your review summary with: "Zing! Review complete."
 
