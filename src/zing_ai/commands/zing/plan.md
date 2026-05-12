@@ -234,6 +234,32 @@ After all questions are answered, update the zing document so it can be handed t
    All items start unchecked. The user (or an agent) will check them off as work is completed.
 </step>
 
+<step name="write_viz_graph">
+After saving the fleshed-out markdown, write the sibling visualization JSON so the plan can be rendered in the Command Center. The markdown and the JSON must stay in sync; the hard gate in `step_stop` enforces this.
+
+1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL stored in the zing file's frontmatter (extract via simple string parse), or default to `9876` if the frontmatter has no URL. The response is the full JSON Schema — read every property's `description` field; they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step").
+
+2. Write `.zing/<plan-slug>.viz.json` (sibling to `.zing/<plan-slug>.md`) matching the schema. Pull the topology from the plan you just wrote:
+   - every numbered "Step" or phase becomes a `steps[]` entry
+   - every "if/branch" inside a step becomes a `diamond` node
+   - every operation becomes a `rect`
+   - every input/output boundary is a `parallelogram`
+   - when the same site has different behaviour today vs in the proposed plan, use a `diverged` shape (and provide `concern` / `today_label` / `proposed_label`)
+
+3. Connect steps via `cross_flows` whenever one step's output is consumed by another step's input — labelled by the kind of thing that flows (`data`, `control`, `schema`, `queue`, `utility`, `observability`).
+
+The viz file's existence is what marks something as a plan. Don't try to discriminate plans from non-plans by content — every plan output by `/zing/plan` is graphable by definition.
+</step>
+
+<step name="finalize_plan_step">
+Call `mcp__zing-ai__step_stop(session_id, plan_step_id)` where `session_id` and `plan_step_id` come from the zing file's frontmatter (`steps.plan`). Zing will run the plan-step validator (schema + cross-references) against the `.viz.json`.
+
+- If validation fails, you'll receive `{"error": "<formatted errors>"}` with JSON Pointers and "did you mean" suggestions. Fix the JSON file and call `step_stop` again. Repeat until it succeeds.
+- Only when `step_stop` returns `{"status": "ready"}` may you chain to `/zing/plan-audit`.
+
+Do NOT chain to plan-audit (or build) before `step_stop` returns `{"status": "ready"}`. The hard gate is mandatory.
+</step>
+
 <step name="next_steps">
 After saving the updated document, print a brief summary of what was added (Relevant Files, Action Plan, Progress sections).
 
