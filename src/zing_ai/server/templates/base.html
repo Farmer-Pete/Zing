@@ -58,6 +58,7 @@
     <link rel="stylesheet" href="/static/css/components.css?v={{ asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages.css?v={{ asset_version() }}">
     <link rel="stylesheet" href="/static/css/command_center.css?v={{ asset_version() }}">
+    {% block extra_head %}{% endblock %}
 </head>
 <body{% if body_class %} class="{{ body_class }}"{% endif %}>
     <header class="brand-bar">
@@ -81,5 +82,6 @@
     </main>
     <div id="cc-toast-container"></div>
     <script src="/static/js/base.js?v={{ asset_version() }}" defer></script>
+    {% block extra_scripts %}{% endblock %}
 </body>
 </html>

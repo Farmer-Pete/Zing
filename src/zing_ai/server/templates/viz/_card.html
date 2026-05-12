@@ -1,0 +1,23 @@
+<g id="card-{{ step.step }}"
+   class="viz-card viz-card--{{ step.class_state }}"
+   data-on:click="@post('/command-center/{{ session_id }}/plan/focus', {step: {{ step.step }}, viewport: {w: $viewportW, h: $viewportH}})"
+   transform="translate({{ step.position.x }}, {{ step.position.y }})">
+  <rect class="viz-card__frame" x="0" y="0" width="{{ step.card_w }}" height="{{ step.card_h }}" rx="4" />
+  <rect class="viz-card__head-bg" x="0" y="0" width="{{ step.card_w }}" height="70" />
+  <line class="viz-card__rule" x1="0" y1="70" x2="{{ step.card_w }}" y2="70" />
+  <text class="viz-card__num" x="18" y="30">№ {{ step.step }}</text>
+  <text class="viz-card__title" x="70" y="30">{{ step.title|truncate(64) }}</text>
+  {% if step.concern %}
+    <text class="viz-card__concern" x="18" y="56">{{ step.concern|truncate(100) }}</text>
+  {% endif %}
+
+  <g class="viz-card__dag"
+     transform="translate({{ -step.viewBox[0] }}, {{ 70 - step.viewBox[1] }})">
+    {% for edge in step.edges %}
+      {% include "viz/_inner_edge.html" %}
+    {% endfor %}
+    {% for node in step.nodes %}
+      {% include "viz/_inner_node.html" %}
+    {% endfor %}
+  </g>
+</g>

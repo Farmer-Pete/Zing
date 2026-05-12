@@ -1,0 +1,8 @@
+<marker id="viz-arrow-inner" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+  <path class="viz-arrow viz-arrow--inner" d="M0,0 L8,4 L0,8 Z" />
+</marker>
+{% for kind, _ in kinds.items() %}
+  <marker id="viz-arrow-{{ kind }}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path class="viz-arrow viz-arrow--{{ kind }}" d="M0,0 L8,4 L0,8 Z" />
+  </marker>
+{% endfor %}

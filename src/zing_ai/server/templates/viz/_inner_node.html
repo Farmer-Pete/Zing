@@ -1,0 +1,35 @@
+<g class="viz-shape viz-shape--{{ node.shape }} viz-shape--side-{{ node.side }}" data-node="{{ node.id }}">
+  {% if node.shape == "diverged" %}
+    <path class="viz-shape__outline" d="{{ node.diverged.outer }}" />
+    <rect class="viz-shape__diverged-half viz-shape__diverged-half--today"
+          x="{{ node.diverged.today_half.x }}" y="{{ node.diverged.today_half.y }}"
+          width="{{ node.diverged.today_half.width }}" height="{{ node.diverged.today_half.height }}" />
+    <rect class="viz-shape__diverged-half viz-shape__diverged-half--proposed"
+          x="{{ node.diverged.proposed_half.x }}" y="{{ node.diverged.proposed_half.y }}"
+          width="{{ node.diverged.proposed_half.width }}" height="{{ node.diverged.proposed_half.height }}" />
+    <line class="viz-shape__divider"
+          x1="{{ node.diverged.divider_top.x1 }}" y1="{{ node.diverged.divider_top.y1 }}"
+          x2="{{ node.diverged.divider_top.x2 }}" y2="{{ node.diverged.divider_top.y2 }}" />
+    <line class="viz-shape__divider"
+          x1="{{ node.diverged.divider_mid.x1 }}" y1="{{ node.diverged.divider_mid.y1 }}"
+          x2="{{ node.diverged.divider_mid.x2 }}" y2="{{ node.diverged.divider_mid.y2 }}" />
+    <text class="viz-shape__concern"
+          x="{{ node.diverged.concern_anchor.x }}" y="{{ node.diverged.concern_anchor.y }}"
+          text-anchor="middle">↔ {{ node.concern }}</text>
+    <text class="viz-shape__side-label viz-shape__side-label--today"
+          x="{{ node.diverged.today_side_label_pos.x }}" y="{{ node.diverged.today_side_label_pos.y }}">today</text>
+    <text class="viz-shape__formula viz-shape__formula--today"
+          x="{{ node.diverged.today_label_pos.x }}" y="{{ node.diverged.today_label_pos.y }}"
+          text-anchor="middle">{{ node.today_label }}</text>
+    <text class="viz-shape__side-label viz-shape__side-label--proposed"
+          x="{{ node.diverged.proposed_side_label_pos.x }}" y="{{ node.diverged.proposed_side_label_pos.y }}">proposed</text>
+    <text class="viz-shape__formula viz-shape__formula--proposed"
+          x="{{ node.diverged.proposed_label_pos.x }}" y="{{ node.diverged.proposed_label_pos.y }}"
+          text-anchor="middle">{{ node.proposed_label }}</text>
+  {% else %}
+    <path class="viz-shape__outline" d="{{ node.outline_path }}" />
+    <text class="viz-shape__label"
+          x="{{ node.x + node.w / 2 }}" y="{{ node.y + node.h / 2 + 4 }}"
+          text-anchor="middle">{{ node.label }}</text>
+  {% endif %}
+</g>

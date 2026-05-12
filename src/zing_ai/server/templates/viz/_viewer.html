@@ -1,0 +1,39 @@
+<div id="viz-stage"
+     class="viz-stage"
+     data-signals='{
+       "focusedStep": "",
+       "pan": {"x": 0, "y": 0},
+       "scale": 0.4,
+       "viewportW": 0,
+       "viewportH": 0
+     }'
+     data-init="$viewportW = el.clientWidth; $viewportH = el.clientHeight"
+     data-on:resize__window="$viewportW = el.clientWidth; $viewportH = el.clientHeight"
+     data-on:wheel__prevent="window.zingViz.onWheel(evt, $pan, $scale)"
+     data-on:pointerdown="window.zingViz.onPointerDown(evt)"
+     data-on:pointermove="window.zingViz.onPointerMove(evt, $pan, $scale)"
+     data-on:pointerup="window.zingViz.onPointerUp(evt)"
+     data-on:keydown__window__key.escape="@post('/command-center/{{ session_id }}/plan/release')">
+
+  <svg class="viz-viewport"
+       data-attr-style="`transform: translate(${$pan.x}px, ${$pan.y}px) scale(${$scale}); transform-origin: 0 0;`">
+    <defs>
+      {% include "viz/_markers.html" %}
+    </defs>
+
+    {% for step in steps %}
+      {% include "viz/_card.html" %}
+    {% endfor %}
+
+    {% include "viz/_xflow_layer.html" %}
+  </svg>
+
+  <div class="viz-hud">
+    <div class="viz-hud__status">
+      <span data-text="$focusedStep ? `Focused · Step ${$focusedStep}` : 'Default plan'"></span>
+    </div>
+    <button class="viz-hud__release"
+            data-on:click="@post('/command-center/{{ session_id }}/plan/release')"
+            data-attr-disabled="!$focusedStep">release</button>
+  </div>
+</div>

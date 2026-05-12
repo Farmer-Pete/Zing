@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Plan · {{ session_id }} — Zing{% endblock %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="/static/css/viz.css?v={{ asset_version() }}">
+{% endblock %}
+
+{% block content %}
+<main class="plan-detail">
+  <aside class="plan-md">
+    {{ rendered_markdown | safe }}
+  </aside>
+  <section class="plan-viz">
+    {% include "viz/_viewer.html" %}
+  </section>
+</main>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="/static/js/viz-gestures.js?v={{ asset_version() }}" defer></script>
+{% endblock %}

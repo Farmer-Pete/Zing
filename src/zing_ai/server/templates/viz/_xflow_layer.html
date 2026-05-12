@@ -1,0 +1,15 @@
+<g id="xflow-layer">
+  {% for cf in cross_flows %}
+    <g class="viz-xflow viz-xflow--{{ cf.kind }}{% if cf.style %} viz-xflow--{{ cf.style }}{% endif %}"
+       data-from-step="{{ cf.from_step }}"
+       data-to-step="{{ cf.to_step }}">
+      <circle class="viz-xflow__hub" cx="{{ cf.a.x }}" cy="{{ cf.a.y }}" r="5" />
+      <circle class="viz-xflow__hub" cx="{{ cf.b.x }}" cy="{{ cf.b.y }}" r="5" />
+      <path class="viz-xflow__path" d="{{ cf.d }}" marker-end="url(#viz-arrow-{{ cf.kind }})" />
+      <text class="viz-xflow__label"
+            x="{{ ((cf.a.x + cf.b.x) / 2) | round(2) }}"
+            y="{{ ((cf.a.y + cf.b.y) / 2 - 4) | round(2) }}"
+            text-anchor="middle">{{ cf.label }}</text>
+    </g>
+  {% endfor %}
+</g>
