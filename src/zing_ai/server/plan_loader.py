@@ -12,8 +12,11 @@ from zing_ai.server.models import ZingSession
 from zing_ai.server.sessions import SessionManager
 
 
-def load_plan_for_session(session_id: str, sm: SessionManager) -> tuple[str, dict[str, Any]]:
-    """Return (markdown_text, viz_graph) for the given session.
+def load_plan_for_session(session_id: str, sm: SessionManager) -> tuple[str, dict[str, Any], Path]:
+    """Return ``(markdown_text, viz_graph, viz_path)`` for the given session.
+
+    ``viz_path`` is returned so callers can key their own caches on
+    ``(viz_path, mtime)`` without re-deriving the sibling rule.
 
     Raises HTTPException(404) if the session is unknown, is not a ZingSession,
     has no zing_file, or either the markdown or the .viz.json sibling does
@@ -33,4 +36,8 @@ def load_plan_for_session(session_id: str, sm: SessionManager) -> tuple[str, dic
         raise HTTPException(404, f"plan markdown missing: {md_path}")
     if not viz_path.exists():
         raise HTTPException(404, f"viz JSON missing: {viz_path}")
-    return md_path.read_text(), json.loads(viz_path.read_text())
+    return (
+        md_path.read_text(encoding="utf-8"),
+        json.loads(viz_path.read_text(encoding="utf-8")),
+        viz_path,
+    )

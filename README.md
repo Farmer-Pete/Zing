@@ -126,6 +126,7 @@ Point Zing at any area of your codebase — files, directories, or just a descri
 
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- [Graphviz](https://graphviz.org/download/) — required for plan-viz layout. The `dot` binary must be on `PATH`. Install via `brew install graphviz` (macOS), `apt install graphviz` (Debian/Ubuntu), or your platform's equivalent. Zing imports `graphviz` at startup; the CLI fails fast with `ExecutableNotFound` if `dot` is missing.
 
 ### Recommended MCP Servers
 

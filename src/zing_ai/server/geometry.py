@@ -202,12 +202,12 @@ _PORT_CANDIDATES: list[tuple[str, str]] = [
 def pick_port_pair(
     from_ports: Mapping[str, Point], to_ports: Mapping[str, Point]
 ) -> dict[str, Any]:
-    """Pick the shortest-distance port pair, biased against horizontal pairs.
+    """Pick the shortest-distance port pair, biased toward horizontal pairs.
 
-    Horizontal-to-horizontal pairs get a 0.7 multiplier on their score so the
-    layout prefers them when the result is close. Returns
-    ``{from_side, to_side, a, b}`` where ``a`` and ``b`` are the chosen
-    points.
+    Horizontal-to-horizontal pairs get a 0.7 multiplier on their score, and
+    since lower score wins, the layout prefers them when the result is close.
+    Returns ``{from_side, to_side, a, b}`` where ``a`` and ``b`` are the
+    chosen points.
     """
     best: dict[str, Any] | None = None
     for fs, ts in _PORT_CANDIDATES:

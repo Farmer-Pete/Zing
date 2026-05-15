@@ -28,16 +28,21 @@ StepValidator = Callable[[ZingSession, WorkflowStep], list[str]]
 def _plan_viz_validator(sess: ZingSession, step: WorkflowStep) -> list[str]:
     """Validate that .zing/<slug>.viz.json exists, parses, and conforms to the schema.
 
-    Caller (mcp_tools.step_stop) trusts that sess.zing_file is absolute and exists —
-    session_update enforces that invariant at the boundary, so this validator
-    doesn't re-check.
+    Returns an actionable error list when ``sess.zing_file`` is unset (the
+    session was never passed through ``session_update``); a bare ``assert``
+    here would propagate as a 500 because ``step_stop`` only catches
+    ``(json.JSONDecodeError, ValidationException)``.
     """
-    assert sess.zing_file is not None
+    if sess.zing_file is None:
+        return [
+            "session has no zing_file — call session_update with the plan markdown "
+            "path before step_stop"
+        ]
     md_path = Path(sess.zing_file)
     viz_path = md_path.with_name(md_path.stem + ".viz.json")
     if not viz_path.exists():
         return [f"viz JSON not written; expected at {viz_path}"]
-    graph = json.loads(viz_path.read_text())
+    graph = json.loads(viz_path.read_text(encoding="utf-8"))
     issues = viz_validate.validate(graph)
     return [issue.format(str(viz_path)) for issue in issues]
 

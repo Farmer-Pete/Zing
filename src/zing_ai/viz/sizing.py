@@ -1,4 +1,10 @@
-"""Per-shape size heuristic. Sizes scale to label length."""
+"""Per-shape size heuristic. Sizes scale to label length.
+
+The literal multipliers and minimums in ``size_for_node`` are ported verbatim
+from ``prototypes/plan-viz/v4/loom.html``'s ``autoSizeNode`` — they're tuned
+for the Convene aesthetic. Adjusting them without re-checking the prototype
+will produce a visibly different layout.
+"""
 
 from __future__ import annotations
 

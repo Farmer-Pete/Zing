@@ -46,7 +46,8 @@ class TestPlanLoader(unittest.TestCase):
 
     def test_happy_path_returns_markdown_and_viz(self) -> None:
         self._create_session()
-        md_text, graph = load_plan_for_session("happy", self.manager)
+        md_text, graph, viz_path = load_plan_for_session("happy", self.manager)
+        self.assertEqual(viz_path, self.viz_path)
         self.assertIn("smoke-plan", md_text)
         self.assertEqual(graph["title"], "BAK-1321 · DirectFlatten pipeline")
         self.assertIn("steps", graph)

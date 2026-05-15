@@ -41,7 +41,13 @@ def layout_step(step: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ingest(dot_json: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
-    """Convert dot's JSON output into our augmented step dict."""
+    """Convert dot's JSON output into our augmented step dict.
+
+    Graphviz's coordinate system has its origin at the **bottom-left** and
+    measures sizes in **inches**. SVG's origin is **top-left** and measures
+    in user units (treated as pixels by browsers). We flip y and scale by
+    72 (Graphviz's default DPI) to bridge the two.
+    """
     bb = [float(x) for x in dot_json["bb"].split(",")]
     height = bb[3] - bb[1]
 
@@ -53,8 +59,8 @@ def _ingest(dot_json: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
         if node is None:
             continue
         cx, cy_bottom = (float(v) for v in obj["pos"].split(","))
-        cy = height - cy_bottom
-        w = float(obj["width"]) * 72
+        cy = height - cy_bottom  # Graphviz origin is bottom-left; SVG is top-left.
+        w = float(obj["width"]) * 72  # inches → SVG user units at 72 DPI
         h = float(obj["height"]) * 72
         new_nodes.append(
             {

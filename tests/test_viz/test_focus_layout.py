@@ -28,7 +28,7 @@ def test_default_grid_positions_steps_in_vertical_column(laid_out_graph: dict) -
         assert curr_pos["y"] > prev_pos["y"]
     # All cards are horizontally centred at x = -w/2.
     for step in laid_out_graph["steps"]:
-        sz = fl._step_size(step)
+        sz = fl.step_size(step)
         assert positions[step["step"]]["x"] == -sz["w"] / 2
 
 
@@ -59,7 +59,7 @@ def test_compute_centres_focused_step_at_origin(laid_out_graph: dict) -> None:
     focused = 6
     positions = fl.compute(laid_out_graph, focused)
     step = next(s for s in laid_out_graph["steps"] if s["step"] == focused)
-    sz = fl._step_size(step)
+    sz = fl.step_size(step)
     # Focused step: top-left corner is at (-w/2, -h/2) so center is at (0, 0)
     assert positions[focused]["x"] == -sz["w"] / 2
     assert positions[focused]["y"] == -sz["h"] / 2
@@ -91,7 +91,7 @@ def test_fit_to_cluster_centres_cluster_in_viewport(laid_out_graph: dict) -> Non
             cluster_steps.add(cf["from_step"])
         if cf["from_step"] == focused:
             cluster_steps.add(cf["to_step"])
-    sizes = {s["step"]: fl._step_size(s) for s in laid_out_graph["steps"]}
+    sizes = {s["step"]: fl.step_size(s) for s in laid_out_graph["steps"]}
     xs = [positions[s]["x"] for s in cluster_steps]
     ys = [positions[s]["y"] for s in cluster_steps]
     xs_max = [positions[s]["x"] + sizes[s]["w"] for s in cluster_steps]

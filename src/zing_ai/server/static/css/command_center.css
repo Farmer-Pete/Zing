@@ -371,7 +371,7 @@ a.card-ticket-id:hover { text-decoration: underline; }
     color: var(--white);
 }
 
-.design-pill--menu {
+.design-pill-toggle {
     border-style: solid;
     appearance: none;
 }
@@ -382,7 +382,7 @@ a.card-ticket-id:hover { text-decoration: underline; }
     margin: 0.4rem 0 0;
 }
 
-.design-pill-menu__list {
+.design-pill-list {
     position: absolute;
     top: 100%;
     left: 0;
@@ -397,9 +397,9 @@ a.card-ticket-id:hover { text-decoration: underline; }
     min-width: 12rem;
 }
 
-.design-pill-menu__list li { margin: 0; }
+.design-pill-list li { margin: 0; }
 
-.design-pill-menu__list a {
+.design-pill-list a {
     display: block;
     padding: 0.25rem 0.75rem;
     font-size: 0.8rem;
@@ -407,7 +407,7 @@ a.card-ticket-id:hover { text-decoration: underline; }
     text-decoration: none;
 }
 
-.design-pill-menu__list a:hover {
+.design-pill-list a:hover {
     background: var(--orange-subtle);
 }
 

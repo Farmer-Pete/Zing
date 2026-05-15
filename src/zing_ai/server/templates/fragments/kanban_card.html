@@ -66,11 +66,11 @@
     {% else %}
       <div class="design-pill-menu"
            data-signals="{designOpen{{ card.signal_key }}: false}">
-        <button class="design-pill design-pill--menu"
+        <button class="design-pill design-pill-toggle"
                 data-on:click="$designOpen{{ card.signal_key }} = !$designOpen{{ card.signal_key }}">
           Design ({{ card_view.plans | length }})
         </button>
-        <ul class="design-pill-menu__list"
+        <ul class="design-pill-list"
             data-show="$designOpen{{ card.signal_key }}">
           {% for p in card_view.plans %}
             <li><a href="/command-center/{{ p.session_id }}/plan">{{ p.title }}</a></li>

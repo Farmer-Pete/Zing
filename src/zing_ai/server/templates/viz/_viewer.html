@@ -1,22 +1,31 @@
+{#
+  data-init measures the viewport and centres pan.x server-side defaults can't
+  know (the server emits pan.y / scale into data-signals; only x needs the
+  client's viewport width). It also installs window.zingViz._setScale — the
+  bridge that lets the JS gesture handler write the $scale signal. $scale is a
+  scalar (passed by value into JS), so unlike $pan (passed by reference) it
+  can't be mutated directly from inside an event handler; the bridge captures
+  the Datastar setter at init time and exposes it as a callable.
+#}
 <div id="viz-stage"
      class="viz-stage"
      data-signals='{
        "focusedStep": "",
-       "pan": {"x": 0, "y": 0},
-       "scale": 0.4,
+       "pan": {"x": 0, "y": {{ default_pan_y }}},
+       "scale": {{ default_scale }},
        "viewportW": 0,
        "viewportH": 0
      }'
-     data-init="$viewportW = el.clientWidth; $viewportH = el.clientHeight; $pan = {x: $viewportW/2, y: 40}; if (window.zingViz) { window.zingViz._setScale = (v) => { $scale = v; }; }"
+     data-init="$viewportW = el.clientWidth; $viewportH = el.clientHeight; $pan = {x: $viewportW/2, y: {{ default_pan_y }}}; window.zingViz._setScale = (v) => { $scale = v; }"
      data-on:resize__window="$viewportW = el.clientWidth; $viewportH = el.clientHeight"
      data-on:wheel__prevent="window.zingViz.onWheel(evt, $pan, $scale)"
      data-on:pointerdown="window.zingViz.onPointerDown(evt)"
      data-on:pointermove="window.zingViz.onPointerMove(evt, $pan, $scale)"
      data-on:pointerup="window.zingViz.onPointerUp(evt)"
-     data-on:keydown__window__key.escape="@post('/command-center/{{ session_id }}/plan/release')">
+     data-on:keydown__window__key.escape="@post({{ ('/command-center/' ~ session_id ~ '/plan/release') | js_str }}, {contentType: 'json', payload: {viewport: {w: $viewportW, h: $viewportH}}})">
 
   <svg class="viz-viewport"
-       data-attr-style="`transform: translate(${$pan.x}px, ${$pan.y}px) scale(${$scale}); transform-origin: 0 0;`">
+       data-attr:style="`transform: translate(${$pan.x}px, ${$pan.y}px) scale(${$scale}); transform-origin: 0 0;`">
     <defs>
       {% include "viz/_markers.html" %}
     </defs>
@@ -33,7 +42,7 @@
       <span data-text="$focusedStep ? `Focused · Step ${$focusedStep}` : 'Default plan'"></span>
     </div>
     <button class="viz-hud__release"
-            data-on:click="@post('/command-center/{{ session_id }}/plan/release')"
-            data-attr-disabled="!$focusedStep">release</button>
+            data-on:click="@post({{ ('/command-center/' ~ session_id ~ '/plan/release') | js_str }}, {contentType: 'json', payload: {viewport: {w: $viewportW, h: $viewportH}}})"
+            data-attr:disabled="!$focusedStep">release</button>
   </div>
 </div>

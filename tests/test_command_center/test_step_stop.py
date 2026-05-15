@@ -85,6 +85,25 @@ class TestStepStop(ServerTestBase):
         self.assertIn("error", result)
         self.assertIn("/cross_flows/0/from_node", result["error"])
 
+    def test_step_stop_returns_actionable_error_when_session_has_no_zing_file(self) -> None:
+        """A session created without a zing_file should hit step_stop and get a
+        recoverable error message, not crash with AssertionError."""
+        # Build a parallel session with no zing_file
+        configure(self.manager, port=9876)
+        session = self.manager.create_session(
+            session_id="ss-no-file",
+            title="no file",
+            zing_file=None,
+            steps=["plan"],
+        )
+        plan_step_id = session.steps[0].step_id
+        self.manager.start_step("ss-no-file", plan_step_id)
+
+        result = asyncio.run(step_stop(session_id="ss-no-file", step_id=plan_step_id))
+        self.assertIn("error", result)
+        self.assertIn("zing_file", result["error"])
+        self.assertIn("session_update", result["error"])
+
     def test_server_bug_in_validator_propagates_as_unhandled_exception(self) -> None:
         """A KeyError raised by a validator must NOT be converted to {error: ...}."""
 

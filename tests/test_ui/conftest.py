@@ -12,6 +12,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from playwright.sync_api import Page
 
 from zing_ai.server.app import create_app
 from zing_ai.server.external_cache import ExternalCache
@@ -116,3 +117,25 @@ def server(ui_server: _ServerInfo) -> Generator[_ServerInfo]:
     ui_server.external_cache.last_polled_at = None
     ui_server.external_cache.last_error = None
     ui_server.external_cache.version += 1
+
+
+@pytest.fixture
+def console_errors(page: Page) -> Generator[list[str]]:
+    """Capture page errors and console.error() messages; assert empty at teardown.
+
+    Tests opt in by accepting this fixture. Any uncaught JS exception or
+    ``console.error(...)`` call between fixture setup and test exit fails the
+    test with the collected messages. CLAUDE.md's testing philosophy calls
+    this out: \"Check for console errors after Datastar actions.\"
+
+    Yields the list so tests can also assert specific messages mid-test if
+    needed.
+    """
+    errors: list[str] = []
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+    page.on(
+        "console",
+        lambda msg: errors.append(msg.text) if msg.type == "error" else None,
+    )
+    yield errors
+    assert not errors, f"Console errors during test: {errors}"

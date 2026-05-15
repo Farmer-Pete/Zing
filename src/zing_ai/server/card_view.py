@@ -18,7 +18,6 @@ template until each block is migrated.  Nothing in this module mutates
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -397,31 +396,17 @@ def _extra_card_classes(column: KanbanColumn, card: KanbanCard) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _humanise(slug: str) -> str:
-    """``BAK-1321-direct-flatten`` → ``'Direct flatten'``."""
-    parts = slug.split("-")
-    if len(parts) >= 3 and parts[0].isalpha() and parts[1].isdigit():
-        parts = parts[2:]
-    return " ".join(parts).capitalize() if parts else slug
-
-
-def _read_viz_title(viz_path: Path) -> str | None:
-    """Best-effort read of the viz JSON's title; ``None`` on any error."""
-    try:
-        data = json.loads(viz_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    title = data.get("title")
-    return title if isinstance(title, str) else None
-
-
 def _find_plans_for_card(zing_sessions: list[ZingSession]) -> list[PlanRef]:
-    """Return ``PlanRef`` per session with an on-disk sibling ``.viz.json``.
+    """Return ``PlanRef`` per session whose markdown has a sibling ``.viz.json``.
 
     The caller (``build_card_view``) does the ``isinstance(s, ZingSession)``
     filter at the call site, mirroring how ``zing_session_views`` and
     ``claude_code_session_views`` are already built. No filesystem glob,
     no ``Path.cwd()``, no ``SessionManager`` helper.
+
+    The plan title is taken from ``sess.title`` (already in memory, set by
+    session_create / session_update) rather than parsing the viz JSON. The
+    only disk touch is the existence check for the viz sibling.
 
     Trust invariant: ``sess.zing_file`` (when not ``None``) is absolute and
     exists. ``session_update`` enforces this at the MCP boundary.
@@ -434,9 +419,13 @@ def _find_plans_for_card(zing_sessions: list[ZingSession]) -> list[PlanRef]:
         viz_path = md_path.with_name(md_path.stem + ".viz.json")
         if not viz_path.exists():
             continue
-        slug = md_path.stem
-        title = _read_viz_title(viz_path) or _humanise(slug)
-        refs.append(PlanRef(session_id=sess.session_id, slug=slug, title=title))
+        refs.append(
+            PlanRef(
+                session_id=sess.session_id,
+                slug=md_path.stem,
+                title=sess.title,
+            )
+        )
     return refs
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,13 +28,14 @@ FIXTURE = (
 )
 
 
-def _seed_card_with_plan(server: _ServerInfo) -> tuple[Path, str]:
+def _seed_card_with_plan(server: _ServerInfo, tmp_path: Path) -> tuple[Path, str]:
     """Seed an issue, a ZingSession with a real on-disk viz.json sibling.
 
-    Returns ``(tmp_dir, session_id)`` so the test can introspect.
+    Returns ``(work_dir, session_id)``. ``tmp_path`` is pytest's auto-cleaned
+    temp directory fixture.
     """
-    tmp = tempfile.mkdtemp(prefix="zing-design-pill-")
-    work = Path(tmp)
+    work = tmp_path / "design-pill-seed"
+    work.mkdir()
     md = work / "BAK-2001-some-plan.md"
     viz = work / "BAK-2001-some-plan.viz.json"
     md.write_text("# Plan\n")
@@ -66,8 +66,10 @@ def _seed_card_with_plan(server: _ServerInfo) -> tuple[Path, str]:
 
 
 class TestDesignPill:
-    def test_design_pill_links_to_plan_route(self, server: _ServerInfo, page: Page) -> None:
-        _, session_id = _seed_card_with_plan(server)
+    def test_design_pill_links_to_plan_route(
+        self, server: _ServerInfo, page: Page, tmp_path: Path
+    ) -> None:
+        _, session_id = _seed_card_with_plan(server, tmp_path)
 
         page.goto(f"{server.base_url}/command-center", wait_until="domcontentloaded")
         card = page.locator("#card-bak-2001")
@@ -79,10 +81,14 @@ class TestDesignPill:
         assert href == f"/command-center/{session_id}/plan"
 
     def test_end_to_end_click_through_to_plan_detail_and_focus(
-        self, server: _ServerInfo, page: Page
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
     ) -> None:
         """Click Design pill on kanban → land on plan-detail → focus a step."""
-        _, session_id = _seed_card_with_plan(server)
+        _, session_id = _seed_card_with_plan(server, tmp_path)
 
         page.goto(f"{server.base_url}/command-center", wait_until="domcontentloaded")
         card = page.locator("#card-bak-2001")
@@ -104,10 +110,12 @@ class TestDesignPill:
         page.locator("#card-6").dispatch_event("click")
         expect(page.locator("#card-6.viz-card--focused")).to_be_attached(timeout=5000)
 
-    def test_no_design_pill_when_no_viz_json_on_disk(self, server: _ServerInfo, page: Page) -> None:
+    def test_no_design_pill_when_no_viz_json_on_disk(
+        self, server: _ServerInfo, page: Page, tmp_path: Path
+    ) -> None:
         # Seed an issue + session but NO viz.json sibling.
-        tmp = tempfile.mkdtemp(prefix="zing-design-pill-")
-        work = Path(tmp)
+        work = tmp_path / "noviz-seed"
+        work.mkdir()
         md = work / "BAK-2002-noviz.md"
         md.write_text("# Plan\n")
 

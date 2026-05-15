@@ -1,6 +1,6 @@
 <g id="card-{{ step.step }}"
    class="viz-card viz-card--{{ step.class_state }}"
-   data-on:click="@post('/command-center/{{ session_id }}/plan/focus', {contentType: 'json', payload: {step: {{ step.step }}, viewport: {w: $viewportW, h: $viewportH}}})"
+   data-on:click="@post({{ ('/command-center/' ~ session_id ~ '/plan/focus') | js_str }}, {contentType: 'json', payload: {step: {{ step.step }}, viewport: {w: $viewportW, h: $viewportH}}})"
    transform="translate({{ step.position.x }}, {{ step.position.y }})">
   <rect class="viz-card__frame" x="0" y="0" width="{{ step.card_w }}" height="{{ step.card_h }}" rx="4" />
   <rect class="viz-card__head-bg" x="0" y="0" width="{{ step.card_w }}" height="70" />

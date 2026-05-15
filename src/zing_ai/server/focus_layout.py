@@ -15,6 +15,13 @@ FIT_PADDING = 80
 SCALE_MIN = 0.06
 SCALE_MAX = 1.4
 
+# Default-grid camera. The first paint and post-release view both use these
+# so they stop disagreeing. ``DEFAULT_PAN_Y`` is the top padding (in SVG user
+# units) above the first card; ``DEFAULT_SCALE`` is the zoom level that lets
+# a typical 10-15 step plan fit on a 1400 px-tall stage.
+DEFAULT_PAN_Y = 40
+DEFAULT_SCALE = 0.4
+
 
 class CardPosition(TypedDict):
     x: float
@@ -28,7 +35,7 @@ class ViewportFit(TypedDict):
     scale: float
 
 
-def _step_size(step: dict[str, Any]) -> dict[str, float]:
+def step_size(step: dict[str, Any]) -> dict[str, float]:
     """Derive card width/height from a step's laid-out viewBox.
 
     layout.layout_graph annotates every step with viewBox = [x, y, w, h].
@@ -47,7 +54,7 @@ def compute(graph: dict, focused_step: int) -> dict[int, CardPosition]:
     succs = sorted(
         {cf["to_step"] for cf in graph.get("cross_flows", []) if cf["from_step"] == focused_step}
     )
-    sizes = {s["step"]: _step_size(s) for s in graph["steps"]}
+    sizes = {s["step"]: step_size(s) for s in graph["steps"]}
     focus_size = sizes[focused_step]
     layout: dict[int, CardPosition] = {
         focused_step: {"x": -focus_size["w"] / 2, "y": -focus_size["h"] / 2},
@@ -75,9 +82,27 @@ def compute(graph: dict, focused_step: int) -> dict[int, CardPosition]:
     return layout
 
 
+def default_camera(viewport_w: float) -> ViewportFit:
+    """Return the camera (pan + scale) for the default-grid view.
+
+    Used by both the initial GET (rendered into ``data-signals``) and
+    ``plan_release`` (sent as SSE patch signals) so the two paths always
+    produce the same view. ``pan.x`` centres the cards horizontally in the
+    viewport; ``pan.y`` and ``scale`` are constants.
+
+    Viewport height isn't needed: the default grid scrolls vertically rather
+    than fitting all cards into the viewport. If we ever want fit-to-content
+    on first paint, this is the place to compute it.
+    """
+    return {
+        "pan": {"x": viewport_w / 2, "y": float(DEFAULT_PAN_Y)},
+        "scale": DEFAULT_SCALE,
+    }
+
+
 def default_grid(graph: dict) -> dict[int, CardPosition]:
     """Position every step in a single vertical column, top-to-bottom by step number."""
-    sizes = {s["step"]: _step_size(s) for s in graph["steps"]}
+    sizes = {s["step"]: step_size(s) for s in graph["steps"]}
     layout: dict[int, CardPosition] = {}
     y = 0.0
     for step in sorted(graph["steps"], key=lambda s: s["step"]):
@@ -107,7 +132,7 @@ def fit_to_cluster(
         if cf["from_step"] == focused_step:
             cluster_steps.add(cf["to_step"])
 
-    sizes = {s["step"]: _step_size(s) for s in graph["steps"]}
+    sizes = {s["step"]: step_size(s) for s in graph["steps"]}
 
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")

@@ -46,6 +46,11 @@
 
 .viz-stage:active { cursor: grabbing; }
 
+/* 200% gives the SVG headroom for the translate transform: card positions
+ * can be negative or extend beyond the viewport in either direction without
+ * the SVG clipping them. Large plans in default-grid still extend beyond
+ * this area vertically — fit-to-content on first paint is tracked as a
+ * follow-up. */
 .viz-viewport {
     width: 200%;
     height: 200%;

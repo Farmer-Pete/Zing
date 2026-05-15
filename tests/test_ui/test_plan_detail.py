@@ -7,7 +7,6 @@ and release restores the default grid.
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -26,14 +25,15 @@ FIXTURE = (
 )
 
 
-def _seed_plan_session(server: _ServerInfo, session_id: str = "plan-ui-1") -> Path:
+def _seed_plan_session(server: _ServerInfo, tmp_path: Path, session_id: str = "plan-ui-1") -> Path:
     """Create a session backed by an on-disk markdown + viz JSON pair.
 
-    Returns the path to the temporary work directory so the test can clean it
-    up if needed. The session manager itself cleans up the session.
+    ``tmp_path`` is pytest's auto-cleaned temporary directory fixture — pass
+    it from the test to get free cleanup. The session manager cleans up the
+    in-memory session separately.
     """
-    tmp = tempfile.mkdtemp(prefix="zing-plan-ui-")
-    work = Path(tmp)
+    work = tmp_path / session_id
+    work.mkdir()
     md = work / "plan.md"
     viz = work / "plan.viz.json"
     md.write_text("# Plan\n\nbody.\n")
@@ -50,8 +50,10 @@ def _seed_plan_session(server: _ServerInfo, session_id: str = "plan-ui-1") -> Pa
 class TestPlanDetailViewer:
     """End-to-end browser tests for the plan-detail page."""
 
-    def test_default_grid_renders_all_step_cards(self, server: _ServerInfo, page: Page) -> None:
-        _seed_plan_session(server, session_id="plan-ui-default")
+    def test_default_grid_renders_all_step_cards(
+        self, server: _ServerInfo, page: Page, tmp_path: Path
+    ) -> None:
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-default")
         page.goto(
             f"{server.base_url}/command-center/plan-ui-default/plan",
             wait_until="domcontentloaded",
@@ -64,9 +66,13 @@ class TestPlanDetailViewer:
         expect(page.locator(".viz-card--default")).to_have_count(13, timeout=2000)
 
     def test_click_focus_applies_pred_succ_faded_classes(
-        self, server: _ServerInfo, page: Page
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
     ) -> None:
-        _seed_plan_session(server, session_id="plan-ui-focus")
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-focus")
         page.goto(
             f"{server.base_url}/command-center/plan-ui-focus/plan",
             wait_until="domcontentloaded",
@@ -87,8 +93,14 @@ class TestPlanDetailViewer:
         # At least one unconnected card faded.
         expect(page.locator(".viz-card--faded").first).to_be_attached(timeout=3000)
 
-    def test_release_button_restores_default_grid(self, server: _ServerInfo, page: Page) -> None:
-        _seed_plan_session(server, session_id="plan-ui-release")
+    def test_release_button_restores_default_grid(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-release")
         page.goto(
             f"{server.base_url}/command-center/plan-ui-release/plan",
             wait_until="domcontentloaded",
@@ -105,8 +117,14 @@ class TestPlanDetailViewer:
         # focusedStep cleared back to empty string.
         expect(page.locator(".viz-hud__status span")).to_contain_text("Default plan", timeout=2000)
 
-    def test_escape_key_releases_focus(self, server: _ServerInfo, page: Page) -> None:
-        _seed_plan_session(server, session_id="plan-ui-esc")
+    def test_escape_key_releases_focus(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-esc")
         page.goto(
             f"{server.base_url}/command-center/plan-ui-esc/plan",
             wait_until="domcontentloaded",
@@ -121,17 +139,17 @@ class TestPlanDetailViewer:
         page.keyboard.press("Escape")
         expect(page.locator(".viz-card--default")).to_have_count(13, timeout=5000)
 
-    def test_no_console_errors_after_default_render(self, server: _ServerInfo, page: Page) -> None:
-        _seed_plan_session(server, session_id="plan-ui-noerr")
-        errors: list[str] = []
-        page.on("pageerror", lambda exc: errors.append(str(exc)))
-        page.on(
-            "console",
-            lambda msg: errors.append(msg.text) if msg.type == "error" else None,
-        )
+    def test_no_console_errors_after_default_render(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-noerr")
         page.goto(
             f"{server.base_url}/command-center/plan-ui-noerr/plan",
             wait_until="networkidle",
         )
         expect(page.locator("#viz-stage")).to_be_visible(timeout=5000)
-        assert not errors, f"Console errors after render: {errors}"
+        # Listener-based check happens in the console_errors fixture teardown.
