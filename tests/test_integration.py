@@ -36,6 +36,7 @@ CLAUDE_EXPECTED_FILES = [
     "zing/_shared/review-core.md",
     "zing/pr-audit-visual.md",
     "zing/learn.md",
+    "zing/sim-viz.md",
 ]
 
 OPENCODE_EXPECTED_FILES = [
@@ -52,6 +53,7 @@ OPENCODE_EXPECTED_FILES = [
     "_shared/review-core.md",
     "zing-pr-audit-visual.md",
     "zing-learn.md",
+    "zing-sim-viz.md",
 ]
 
 # PascalCase Claude tool names that must NOT appear in OpenCode files.

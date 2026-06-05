@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import click
@@ -11,6 +12,7 @@ import click
 from zing_ai.server.models import Category, Complexity, Confidence, Rating, Severity
 
 _STATE_FILE = Path.home() / ".zing-ai-sim.json"
+_STAGING_ROOT = Path.home() / ".zing-ai" / "sim-sessions"
 
 
 def _load_state() -> dict:
@@ -439,3 +441,180 @@ def wait(ctx: click.Context, step: str, timeout: int | None) -> None:
         click.echo("\nCancelled.", err=True)
         raise SystemExit(130) from None
     click.echo(json.dumps(result, indent=2))
+
+
+# -- viz-attach / url / viz-teardown ------------------------------------------
+
+
+@sim.command("viz-attach")
+@click.argument("viz_path")
+@click.option(
+    "--md",
+    "md_source",
+    default=None,
+    help="Source markdown file. If omitted, a stub is written using the viz's title.",
+)
+@click.option(
+    "--title",
+    default=None,
+    help="Title for the stub markdown (used only when --md is omitted).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Replace an existing attachment on this session.",
+)
+@click.pass_context
+def viz_attach(
+    ctx: click.Context,
+    viz_path: str,
+    md_source: str | None,
+    title: str | None,
+    force: bool,
+) -> None:
+    """Stage a .md + .viz.json pair on disk and attach to the current session.
+
+    VIZ_PATH is a filesystem path to a .viz.json file. The pair is staged into
+    ~/.zing-ai/sim-sessions/<session_id>/ with both files sharing the
+    session_id stem so plan_loader's sibling-lookup resolves.
+    """
+    from zing_ai.viz import validate as viz_validate
+
+    state = _load_state()
+    session_id = state["session_id"]
+
+    viz_src = Path(viz_path).expanduser().resolve()
+    if not viz_src.exists():
+        raise click.ClickException(f"viz file not found: {viz_src}")
+
+    try:
+        graph = json.loads(viz_src.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"viz file is not valid JSON: {exc}") from None
+
+    errors = viz_validate.validate(graph)
+    if errors:
+        for err in errors:
+            click.echo(err.format(str(viz_src)), err=True)
+        raise click.ClickException(f"viz failed validation ({len(errors)} issue(s))")
+
+    stage_dir = _STAGING_ROOT / session_id
+    md_target = stage_dir / f"{session_id}.md"
+    viz_target = stage_dir / f"{session_id}.viz.json"
+
+    if not force and (md_target.exists() or viz_target.exists()):
+        raise click.ClickException(
+            f"session already has a viz attached at {stage_dir}. Use --force to replace."
+        )
+
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    if md_source is not None:
+        md_src = Path(md_source).expanduser().resolve()
+        if not md_src.exists():
+            raise click.ClickException(f"markdown file not found: {md_src}")
+        shutil.copyfile(md_src, md_target)
+    else:
+        stub_title = title or graph.get("title") or session_id
+        md_target.write_text(
+            f"# {stub_title}\n\nStub markdown for sim session.\n",
+            encoding="utf-8",
+        )
+    shutil.copyfile(viz_src, viz_target)
+
+    result = _call_mcp(
+        ctx.obj["url"],
+        "session_update",
+        {"session_id": session_id, "zing_file": str(md_target)},
+    )
+    if "error" in result:
+        err_text = result["error"]
+        # KeyError from SessionManager surfaces as "'<session_id>'" via mcp_tools.py.
+        # Recognise that shape (and "not found" wording) and re-emit with a recovery hint.
+        if session_id in err_text and (
+            err_text.strip() == f"'{session_id}'" or "not found" in err_text.lower()
+        ):
+            raise click.ClickException(
+                f"session {session_id} not found on server — the MCP server may "
+                f"have been restarted since 'sim create'. Run 'sim viz-teardown' "
+                f"then 'sim create' to start over."
+            )
+        raise click.ClickException(err_text)
+
+    state["staging_dir"] = str(stage_dir)
+    state["zing_file"] = str(md_target)
+    _save_state(state)
+
+    base = ctx.obj["url"].rsplit("/mcp", 1)[0]
+    plan_url = f"{base}/command-center/{session_id}/plan"
+    click.echo(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "zing_file": str(md_target),
+                "viz_file": str(viz_target),
+                "plan_url": plan_url,
+                "steps": len(graph["steps"]),
+                "cross_flows": len(graph.get("cross_flows", [])),
+            },
+            indent=2,
+        )
+    )
+
+
+@sim.command("url")
+@click.option(
+    "--plan",
+    is_flag=True,
+    default=False,
+    help="Print the plan-detail URL instead of the dashboard.",
+)
+@click.pass_context
+def url_cmd(ctx: click.Context, plan: bool) -> None:
+    """Print the URL for the current sim session.
+
+    The dashboard form (no --plan) works any time after 'sim create'. The
+    --plan form refuses to print until 'sim viz-attach' has run, mirroring
+    production's kanban-Design-pill visibility gate so the plan_loader 404
+    case is unreachable from a well-formed CLI flow.
+    """
+    state = _load_state()
+    base = ctx.obj["url"].rsplit("/mcp", 1)[0]
+    if plan:
+        if "zing_file" not in state:
+            raise click.ClickException(
+                "no plan attached yet — run 'sim viz-attach <viz> --md <md>' first."
+            )
+        click.echo(f"{base}/command-center/{state['session_id']}/plan")
+    else:
+        click.echo(f"{base}/{state['session_id']}")
+
+
+@sim.command("viz-teardown")
+@click.option(
+    "--keep-staging",
+    is_flag=True,
+    default=False,
+    help="Don't remove the staging dir (default: remove).",
+)
+def viz_teardown_cmd(keep_staging: bool) -> None:
+    """Clear local sim state and (by default) its staging dir.
+
+    Does NOT remove the session from the running server — the server has no
+    session_delete MCP tool today. Restart `zing-ai mcp` to fully clear
+    server-side state.
+    """
+    if not _STATE_FILE.exists():
+        click.echo("No sim state to remove.")
+        return
+    try:
+        state = json.loads(_STATE_FILE.read_text())
+    except json.JSONDecodeError:
+        state = {}
+    staging = state.get("staging_dir")
+    _STATE_FILE.unlink()
+    if staging and not keep_staging:
+        shutil.rmtree(staging, ignore_errors=True)
+        click.echo(f"removed {_STATE_FILE} and {staging}")
+    else:
+        click.echo(f"removed {_STATE_FILE}")

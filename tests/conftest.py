@@ -16,6 +16,18 @@ def mock_state_file(tmp_path):
 
 
 @pytest.fixture()
+def mock_staging_root(tmp_path):
+    """Provide a temporary staging root, patched into sim._STAGING_ROOT.
+
+    Keeps viz-attach/viz-teardown tests from touching the real
+    ~/.zing-ai/sim-sessions/ directory.
+    """
+    staging_root = tmp_path / "sim-sessions"
+    with patch("zing_ai.sim._STAGING_ROOT", staging_root):
+        yield staging_root
+
+
+@pytest.fixture()
 def mock_mcp_call():
     """Patch _call_mcp to return configurable responses without a real MCP server."""
     with patch("zing_ai.sim._call_mcp") as mock:

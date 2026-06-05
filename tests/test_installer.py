@@ -28,6 +28,7 @@ EXPECTED_FILES = [
     "zing/_shared/review-core.md",
     "zing/pr-audit-visual.md",
     "zing/learn.md",
+    "zing/sim-viz.md",
 ]
 
 # Directories that should be created.
@@ -183,6 +184,7 @@ OPENCODE_EXPECTED_FILES = [
     "_shared/review-core.md",
     "zing-pr-audit-visual.md",
     "zing-learn.md",
+    "zing-sim-viz.md",
 ]
 
 OPENCODE_EXPECTED_DIRS = [
