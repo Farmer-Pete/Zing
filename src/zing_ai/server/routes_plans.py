@@ -9,7 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, TypedDict
 
-from datastar_py.consts import ElementPatchMode
+from datastar_py.consts import ElementPatchMode, ElementPatchNamespace
 from datastar_py.fastapi import datastar_response
 from datastar_py.sse import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, Request
@@ -25,6 +25,29 @@ from zing_ai.viz import layout as viz_layout
 router = APIRouter()
 
 HEADER_H = 70
+
+
+def _patch_svg(elements: str, selector: str) -> Any:
+    """``patch_elements`` wrapper that pins the SVG namespace.
+
+    Datastar treats patched markup as HTML by default; for SVG fragments
+    that means children land in the XHTML namespace and don't render
+    (zero-size <g>). Passing ``namespace=svg`` keeps the parsed elements
+    in the SVG namespace so the browser actually paints them.
+
+    The ``# pyright: ignore`` is intentional: the datastar-py SDK ships
+    ``@overload`` declarations for ``patch_elements`` that predate the
+    runtime ``namespace`` keyword. The implementation accepts it; the
+    overloads don't, so static analysis reports a call-site error.
+    Centralising the call here pins the suppression to one place.
+    """
+    return SSE.patch_elements(  # pyright: ignore[reportCallIssue]
+        elements,
+        selector=selector,
+        mode=ElementPatchMode.OUTER,
+        namespace=ElementPatchNamespace.SVG,
+    )
+
 
 # LRU cache for laid-out graphs keyed on (viz_path, mtime_ns). A typical
 # focus → release click cycle re-uses the same layout three times; without
@@ -259,23 +282,21 @@ async def plan_focus(session_id: str, payload: dict[str, Any], request: Request)
             }
         )
         for step in context["steps"]:
-            yield SSE.patch_elements(
+            yield _patch_svg(
                 render(
                     "viz/_card.html",
                     step=step,
                     session_id=session_id,
                     focused_step=focused_step,
                 ),
-                selector=f"#card-{step['step']}",
-                mode=ElementPatchMode.OUTER,
+                f"#card-{step['step']}",
             )
-        yield SSE.patch_elements(
+        yield _patch_svg(
             render(
                 "viz/_xflow_layer.html",
                 cross_flows=context["cross_flows"],
             ),
-            selector="#xflow-layer",
-            mode=ElementPatchMode.OUTER,
+            "#xflow-layer",
         )
 
     return _stream()
@@ -308,23 +329,21 @@ async def plan_release(session_id: str, payload: dict[str, Any], request: Reques
             }
         )
         for step in context["steps"]:
-            yield SSE.patch_elements(
+            yield _patch_svg(
                 render(
                     "viz/_card.html",
                     step=step,
                     session_id=session_id,
                     focused_step=None,
                 ),
-                selector=f"#card-{step['step']}",
-                mode=ElementPatchMode.OUTER,
+                f"#card-{step['step']}",
             )
-        yield SSE.patch_elements(
+        yield _patch_svg(
             render(
                 "viz/_xflow_layer.html",
                 cross_flows=context["cross_flows"],
             ),
-            selector="#xflow-layer",
-            mode=ElementPatchMode.OUTER,
+            "#xflow-layer",
         )
 
     return _stream()

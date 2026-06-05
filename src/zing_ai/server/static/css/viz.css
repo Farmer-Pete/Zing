@@ -234,27 +234,28 @@
 
 .viz-xflow__hub { stroke: none; }
 
-.viz-xflow--data .viz-xflow__path,
-.viz-xflow--data .viz-xflow__hub { stroke: var(--cyan); fill: var(--cyan); }
+/* Paths use stroke only — the base .viz-xflow__path rule above sets
+   fill: none, but the combined selectors below previously overrode it
+   with fill: var(--color), causing closed-bezier paths to fill as solid
+   amoeba shapes. Keep path styling (stroke) separate from hub styling
+   (fill) so the base fill: none stays effective. */
+.viz-xflow--data .viz-xflow__path { stroke: var(--cyan); }
+.viz-xflow--data .viz-xflow__hub { fill: var(--cyan); }
 
-.viz-xflow--control .viz-xflow__path,
-.viz-xflow--control .viz-xflow__hub { stroke: var(--orange); fill: var(--orange); }
+.viz-xflow--control .viz-xflow__path { stroke: var(--orange); }
+.viz-xflow--control .viz-xflow__hub { fill: var(--orange); }
 
-.viz-xflow--schema .viz-xflow__path,
-.viz-xflow--schema .viz-xflow__hub { stroke: var(--amber); fill: var(--amber); }
-.viz-xflow--schema .viz-xflow__path { stroke-dasharray: 4 3; }
+.viz-xflow--schema .viz-xflow__path { stroke: var(--amber); stroke-dasharray: 4 3; }
+.viz-xflow--schema .viz-xflow__hub { fill: var(--amber); }
 
-.viz-xflow--queue .viz-xflow__path,
-.viz-xflow--queue .viz-xflow__hub { stroke: var(--red-orange); fill: var(--red-orange); }
-.viz-xflow--queue .viz-xflow__path { stroke-dasharray: 6 4; }
+.viz-xflow--queue .viz-xflow__path { stroke: var(--red-orange); stroke-dasharray: 6 4; }
+.viz-xflow--queue .viz-xflow__hub { fill: var(--red-orange); }
 
-.viz-xflow--utility .viz-xflow__path,
-.viz-xflow--utility .viz-xflow__hub { stroke: var(--gray-500); fill: var(--gray-500); }
-.viz-xflow--utility .viz-xflow__path { stroke-dasharray: 2 4; }
+.viz-xflow--utility .viz-xflow__path { stroke: var(--gray-500); stroke-dasharray: 2 4; }
+.viz-xflow--utility .viz-xflow__hub { fill: var(--gray-500); }
 
-.viz-xflow--observability .viz-xflow__path,
-.viz-xflow--observability .viz-xflow__hub { stroke: var(--gray-400); fill: var(--gray-400); }
-.viz-xflow--observability .viz-xflow__path { stroke-dasharray: 1 3; }
+.viz-xflow--observability .viz-xflow__path { stroke: var(--gray-400); stroke-dasharray: 1 3; }
+.viz-xflow--observability .viz-xflow__hub { fill: var(--gray-400); }
 
 .viz-xflow__label {
     fill: var(--text-primary);

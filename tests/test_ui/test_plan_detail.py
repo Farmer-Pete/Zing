@@ -93,6 +93,55 @@ class TestPlanDetailViewer:
         # At least one unconnected card faded.
         expect(page.locator(".viz-card--faded").first).to_be_attached(timeout=3000)
 
+    def test_focus_patched_cards_stay_in_svg_namespace(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        """Regression: cards patched via SSE must stay in the SVG namespace.
+
+        Datastar parses ``patch_elements`` markup as HTML by default. Without
+        ``namespace=svg`` on the SSE event, the new ``<g>`` lands in the
+        XHTML namespace, attaches to the DOM with the right class, but
+        renders at zero size — the focus interaction silently wipes the
+        canvas. Existing tests passed because ``to_be_attached`` only
+        checks DOM presence; this test asserts both the namespace and a
+        nonzero bounding rect so future regressions in routes_plans.py or
+        the datastar-py SDK get caught.
+        """
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-ns")
+        page.goto(
+            f"{server.base_url}/command-center/plan-ui-ns/plan",
+            wait_until="domcontentloaded",
+        )
+        expect(page.locator("#card-6")).to_be_attached(timeout=5000)
+        page.locator("#card-6").dispatch_event("click")
+        expect(page.locator("#card-6.viz-card--focused")).to_be_attached(timeout=5000)
+
+        snapshot = page.evaluate(
+            """
+            () => {
+              const c = document.getElementById('card-6');
+              const r = c.getBoundingClientRect();
+              return {
+                ns: c.namespaceURI,
+                w: Math.round(r.width),
+                h: Math.round(r.height),
+              };
+            }
+            """
+        )
+        assert snapshot["ns"] == "http://www.w3.org/2000/svg", (
+            f"focused card landed in {snapshot['ns']!r} — namespace=svg missing from "
+            "patch_elements? (see routes_plans._patch_svg)"
+        )
+        assert snapshot["w"] > 0 and snapshot["h"] > 0, (
+            f"focused card has zero size {snapshot['w']}x{snapshot['h']} — "
+            "Datastar likely parsed the SVG fragment as HTML"
+        )
+
     def test_release_button_restores_default_grid(
         self,
         server: _ServerInfo,

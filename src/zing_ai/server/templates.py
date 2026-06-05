@@ -62,6 +62,26 @@ _markdown = mistune.create_markdown(
 )
 
 
+def _strip_frontmatter(text: str) -> str:
+    """Strip YAML frontmatter (``---\\n...\\n---``) from the head of a doc.
+
+    Zing plan markdowns start with a YAML block delimited by ``---`` lines
+    that the markdown renderer would otherwise display as literal text.
+    Mirrors python-frontmatter's split semantics without the dependency.
+    """
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return text
+    after = end + len("\n---")
+    # Consume the line terminator after the closing fence so the rendered
+    # markdown doesn't start with a leading blank line.
+    if after < len(text) and text[after] == "\n":
+        after += 1
+    return text[after:]
+
+
 def _render_markdown(text: str | None) -> markupsafe.Markup:
     """Jinja2 filter: convert markdown to HTML with syntax-highlighted code blocks.
 
@@ -71,7 +91,7 @@ def _render_markdown(text: str | None) -> markupsafe.Markup:
     if not text:
         return markupsafe.Markup("")
     try:
-        result = _markdown(text)
+        result = _markdown(_strip_frontmatter(text))
         return markupsafe.Markup(result)
     except Exception:
         logger.exception("Markdown rendering failed, falling back to plain text")
