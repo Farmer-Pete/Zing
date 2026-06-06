@@ -78,8 +78,108 @@ gh api repos/{owner}/{repo}/pulls/{number}/reviews --paginate
 Follow the `read_changed_files` step from the shared review reference.
 </step>
 
+<step name="build_topology_viz">
+Before forming the big-picture assessment or running the detailed review, sketch the PR's topology as a side-coded viz. Two purposes: it gives you a structural map to reference during analysis, and it gives the reviewer the same map alongside the batch-triage UI later.
+
+This produces two files sharing a stem: `.zing/pr-review-{number}-{datetime}.md` and `.zing/pr-review-{number}-{datetime}.viz.json`. Pick the `{datetime}` once here in {{ report.datetime_format }} format (e.g. `2026-06-06-1423`) and reuse it later when `write_report` rewrites the markdown — the sibling stem must stay stable so `plan_loader` resolves the pair.
+
+### 1. Write the skeleton markdown
+
+Ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write `.zing/pr-review-{number}-{datetime}.md` with this content:
+
+```markdown
+# PR Review — #{number} `{title}`
+
+PR: {pr_url}
+
+## About this PR
+
+{full PR description as fetched in fetch_pr_context}
+
+---
+
+_Review in progress — findings will appear below after triage._
+```
+
+If the PR description is empty, write `_No description provided._` in its place. Do not paraphrase the description; embed it verbatim so the reviewer can compare the author's claimed intent against the topology you'll draw below.
+
+### 2. Register the file with the session
+
+Resolve the markdown path to an absolute path. Call `mcp__zing-ai__session_update(session_id, zing_file=abs_path)` where `session_id` is the value returned by `session_create` back in the `resolve_pr` step. The MCP tool rejects non-absolute paths and paths that don't exist, so verify the file is on disk first.
+
+This makes the report discoverable from the per-session dashboard immediately, even before findings exist.
+
+### 3. Decide whether to skip the viz
+
+This sub-step is **optional but you should generally do it** — most PRs have at least some structural shape worth showing as a before/after, and the side-coded rendering helps reviewers see the change at a glance. Skip only when the PR is genuinely trivial.
+
+Skip if and only if the PR is purely one or more of the following:
+
+- Renames (variable, function, class, file) with no behaviour change.
+- Comment or docstring edits.
+- Whitespace, formatting, or import-order changes.
+- Log message wording tweaks.
+- Type annotation tightening with no callsite change.
+- Test-only changes with no production code touched.
+- Dependency version bumps with no API surface change.
+
+If any change in the PR falls outside these categories — write the viz. When in doubt, write it; a viz on a borderline PR is more useful than no viz on a structurally interesting one.
+
+If skipping, append this line to the report markdown immediately after the `---` line (replacing the `_Review in progress_` line is fine):
+
+```markdown
+
+> _no viz: topology unchanged_
+```
+
+Do not write a `.viz.json` and skip the rest of this step. The Design pill won't appear, which is correct — there's nothing structural to show.
+
+### 4. Fetch the schema
+
+If you got here, the PR is topology-changing. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Default `{port}` to `9876` if you don't know it. Read every property's `description` field — they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step", node ids are kebab-case, step ids are snake_case).
+
+### 5. Build the graph from the diff
+
+Sketch the topology with one step per coherent region of the system the PR touches (a module, a request path, a job pipeline, etc.). Within each step, nodes describe what's there and edges describe local flow. Use `cross_flows` whenever one step's output is consumed by another step's input.
+
+For every node, pick `side` from the diff:
+
+- **`shared`** — code present in both base and PR; unchanged. Use this for context that helps the reviewer understand where the changes sit (e.g. an existing module the PR's new code calls into).
+- **`existing`** — code present in base, removed by the PR. The node represents what's going away.
+- **`proposed`** — code added by the PR, not present in base. The node represents what's coming in.
+- **`diverged`** — same site, behavior changes in place. Populate `today_label` (current behavior, on the base branch) and `proposed_label` (new behavior, on the PR). Reserve for in-place changes where the site keeps its identity but the semantics shift (e.g. "on_delete: CASCADE → SET_NULL", "rate-limit: 100/min → 10/min").
+
+Map shapes the same way as `/zing/plan`:
+
+- Operations → `rect`
+- Decisions / branches → `diamond`
+- Input/output boundaries → `parallelogram`
+- Pre-existing modules being referenced (not the target of the change) → `hexagon`
+- Same-site split → `diverged`
+
+If a step contains only `shared` nodes, it's context — include it sparingly, only when it makes the diff legible. If a step is entirely `existing` (a module being removed) or entirely `proposed` (a module being added), that's fine and expected.
+
+### 6. Write the file
+
+Write to `.zing/pr-review-{number}-{datetime}.viz.json` — the **same stem** as the markdown you wrote in sub-step 1. The plan-detail viewer's sibling-lookup is `md.with_name(md.stem + '.viz.json')`, so the stem must match exactly.
+
+### 7. Validate
+
+Run `zing-ai viz validate pr-review-{number}-{datetime}` against the slug (the CLI resolves to `.zing/<slug>.{md,viz.json}`). If it reports errors:
+
+- JSON Pointer issues (e.g. `/steps/0/nodes/2/id`) tell you exactly which field is wrong.
+- "did you mean" suggestions help with typo'd cross-references.
+- Common gotchas: node ids must be kebab-case (`^[a-z][a-z0-9-]*$`); step ids must be snake_case (`^[a-z][a-z0-9_]*$`); every node needs a `side`; every cross_flow needs a `label`.
+
+Fix and re-validate until clean. Do not call `step_stop` — pr-audit's `code-review` step is intentionally not viz-gated, since the viz is optional.
+
+### 8. What the user will see
+
+The Design pill auto-lights on the PR's kanban card (the existing `_find_plans_for_card` machinery checks for the viz sibling). Clicking the pill opens the plan-detail viewer: the left panel shows the PR description (the skeleton you wrote in sub-step 1); the right panel shows the side-coded viz. The reviewer can use this picture as context during the rest of the flow — especially the batch-triage UI in `check_and_review`.
+</step>
+
 <step name="big_picture">
-Follow the `big_picture` step from the shared review reference.
+Follow the `big_picture` step from the shared review reference. You already have the topology in hand from `build_topology_viz`; reference it explicitly when sizing the change and naming the systems it touches.
 </step>
 
 <step name="analyze_changes">
@@ -138,9 +238,9 @@ Follow the `check_and_review` step from the shared review reference.
 </step>
 
 <step name="write_report">
-Compile the triaged findings (accepted, downgraded, and discuss items) into a GitHub-flavored markdown file as a local record.
+Replace the skeleton report (written earlier in `build_topology_viz`) with the final review, keeping the same file path so the viz sibling stays paired.
 
-First, ensure the `.zing` directory exists in the current working directory (create it if it doesn't). Write the file to `.zing/pr-review-{number}-{datetime}.md` where `{number}` is the PR number and `{datetime}` is the current date and time in {{ report.datetime_format }} format (e.g. `2025-06-15-1423`).
+The file lives at `.zing/pr-review-{number}-{datetime}.md` — same `{datetime}` you picked in `build_topology_viz`. Rewrite it end-to-end using the structure below; do not edit-in-place around the skeleton's "review in progress" line. The PR description (`## About this PR` section from the skeleton) is preserved at the top so reviewers reading the final report still see the author's claimed intent next to the findings.
 
 Use this structure:
 
@@ -150,6 +250,10 @@ Use this structure:
 Reviewed on {YYYY-MM-DD} against `{baseRefName}`. {count} files changed across {commit_count} commits. {valid_count} issues worth flagging out of {total_count} things I looked at.
 
 PR: {pr_url}
+
+## About this PR
+
+{full PR description as fetched in fetch_pr_context — the same text you wrote into the skeleton}
 
 ## At a Glance
 
@@ -184,86 +288,6 @@ PR: {pr_url}
 If zero valid findings, write a short file noting "Nothing to flag — changes looked good."
 
 This file serves as a local record and can be passed to `/zing:plan` to plan fixes.
-</step>
-
-<step name="register_zing_file">
-After writing the report, register its absolute path with the Zing session so the Command Center can surface it on the kanban card and so the next step (`write_pr_viz_graph`) can write a sibling viz JSON that the plan-detail viewer will find.
-
-Resolve the path of the report file (just written in `write_report`) to an absolute path. Then call `mcp__zing-ai__session_update(session_id, zing_file=abs_path)` where `session_id` is the value returned by `session_create` back in the `resolve_pr` step.
-
-The MCP tool rejects non-absolute paths and paths that don't exist, so resolve via `os.path.abspath(...)` or `Path(...).resolve()` and verify the file is on disk before calling.
-
-Do this even when you'll be skipping the viz file in the next step — the per-session dashboard surfaces the report regardless, and the Design pill (which only renders when the viz sibling also exists) keys off `zing_file` being set.
-</step>
-
-<step name="write_pr_viz_graph">
-The Zing viz integration can render a side-coded "before / after" picture of the PR's topology: `shared` nodes for code present in both states, `existing` for code removed by the PR, `proposed` for code added, `diverged` for in-place changes with today/proposed labels. The viewer's existing CSS paints each side distinctly (subtle orange + dashed for `existing`, solid orange border for `proposed`, gray border for `shared`); no toggle, no client-side state — just one picture that reads as a diff.
-
-This step is **optional**. Many PRs don't change topology — a rename, a log message tweak, type tightening, formatting, comment polish, a bug fix that doesn't move a module or a flow. For those PRs, a viz would be noise. Skip it.
-
-### 1. Decide whether the viz adds value
-
-Does this PR do any of the following?
-
-- Add or remove a module / file that other modules import.
-- Add or remove a route / handler / job / task.
-- Change a function or method signature that other modules call.
-- Restructure a data flow (e.g. callsite A used to call B → C; now it calls X → Y → C).
-- Add or remove a database column, table, or migration that other code reads.
-- Change an external integration boundary (API client, message broker, third-party service).
-- Replace an existing module with a new one (`old_module` removed, `new_module` added, callsites switched).
-
-If the answer to all of the above is no — this PR is not topology-changing. Append this line to the report markdown (`.zing/pr-review-{number}-{datetime}.md`), then STOP this step:
-
-```markdown
-
-> _no viz: topology unchanged_
-```
-
-Do not write a `.viz.json`. The Design pill won't appear, which is correct — there's nothing structural to show.
-
-### 2. Fetch the schema
-
-If you got here, the PR is topology-changing. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Default `{port}` to `9876` if you don't know it. Read every property's `description` field — they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step", node ids are kebab-case, step ids are snake_case).
-
-### 3. Build the graph from the diff
-
-Sketch the topology with one step per coherent region of the system the PR touches (a module, a request path, a job pipeline, etc.). Within each step, nodes describe what's there and edges describe local flow. Use `cross_flows` whenever one step's output is consumed by another step's input.
-
-For every node, pick `side` from the diff:
-
-- **`shared`** — code present in both base and PR; unchanged. Use this for context that helps the reviewer understand where the changes sit (e.g. an existing module the PR's new code calls into).
-- **`existing`** — code present in base, removed by the PR. The node represents what's going away.
-- **`proposed`** — code added by the PR, not present in base. The node represents what's coming in.
-- **`diverged`** — same site, behavior changes in place. Populate `today_label` (current behavior, on the base branch) and `proposed_label` (new behavior, on the PR). Reserve for in-place changes where the site keeps its identity but the semantics shift (e.g. "on_delete: CASCADE → SET_NULL", "rate-limit: 100/min → 10/min").
-
-Map shapes the same way as `/zing/plan`:
-
-- Operations → `rect`
-- Decisions / branches → `diamond`
-- Input/output boundaries → `parallelogram`
-- Pre-existing modules being referenced (not the target of the change) → `hexagon`
-- Same-site split → `diverged`
-
-If a step contains only `shared` nodes, it's context — include it sparingly, only when it makes the diff legible. If a step is entirely `existing` (a module being removed) or entirely `proposed` (a module being added), that's fine and expected.
-
-### 4. Write the file
-
-Write to `.zing/pr-review-{number}-{datetime}.viz.json` — the **same stem** as the markdown from `write_report`. The plan-detail viewer's sibling-lookup is `md.with_name(md.stem + '.viz.json')`, so the stem must match exactly.
-
-### 5. Validate
-
-Run `zing-ai viz validate pr-review-{number}-{datetime}` against the slug (the CLI resolves to `.zing/<slug>.{md,viz.json}`). If it reports errors:
-
-- JSON Pointer issues (e.g. `/steps/0/nodes/2/id`) tell you exactly which field is wrong.
-- "did you mean" suggestions help with typo'd cross-references.
-- Common gotchas: node ids must be kebab-case (`^[a-z][a-z0-9-]*$`); step ids must be snake_case (`^[a-z][a-z0-9_]*$`); every node needs a `side`; every cross_flow needs a `label`.
-
-Fix and re-validate until clean. Do not call `step_stop` — pr-audit's `code-review` step is intentionally not viz-gated, since the viz is optional.
-
-### 6. What the user will see
-
-The Design pill auto-lights on the PR's kanban card (the existing `_find_plans_for_card` machinery checks for the viz sibling). Clicking the pill opens the plan-detail viewer; the side-coded rendering reads as a unified diff: existing pieces dim and dashed, proposed pieces solid-bordered, shared pieces neutral, diverged pieces showing both labels.
 </step>
 
 <step name="submit_review">
@@ -414,9 +438,10 @@ Review is complete when:
 - [ ] Agent findings collected via JSONL return, deduplicated, and submitted via `finding_submit()`
 - [ ] Review UI was opened for batch triage via `review_wait()`
 - [ ] User triage decisions (accept, drop, downgrade, discuss) were applied
-- [ ] Triaged findings were written to a markdown file in `.zing/` in GFM format
+- [ ] Skeleton report markdown was written early (in `build_topology_viz`) with the PR description embedded
 - [ ] `session_update(zing_file=...)` was called with the report's absolute path
-- [ ] Topology assessed: viz JSON was written iff the PR is topology-changing; otherwise the `_no viz: topology unchanged_` note was added to the report
+- [ ] Topology assessed: viz JSON was written iff the PR is non-trivial; otherwise the `_no viz: topology unchanged_` note was added to the skeleton report
+- [ ] Final review findings were written to the same markdown file in `.zing/` in GFM format (replacing the skeleton's "review in progress" placeholder)
 - [ ] File path was shown to the user with instruction to run `/zing:plan` on it
 - [ ] PR review was submitted via GitHub API with line-level comments
 - [ ] Review body, comments, and any generated content do not mention Claude/Codex/OpenCode — only Zing attribution if any
