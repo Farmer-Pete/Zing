@@ -1,5 +1,24 @@
-<g class="viz-shape viz-shape--{{ node.shape }} viz-shape--side-{{ node.side }}" data-node="{{ node.id }}">
-  {% if node.shape == "diverged" %}
+<g class="viz-shape viz-shape--{{ node.shape }} viz-shape--side-{{ node.side }}{% if node.shape == "struct" %} viz-struct viz-struct--{{ node.kind or "struct" }}{% endif %}" data-node="{{ node.id }}">
+  {% if node.shape == "struct" %}
+    <path class="viz-shape__outline viz-struct__outline" d="{{ node.struct.outer }}" />
+    <rect class="viz-struct__header"
+          x="{{ node.struct.header_rect.x }}" y="{{ node.struct.header_rect.y }}"
+          width="{{ node.struct.header_rect.width }}" height="{{ node.struct.header_rect.height }}" />
+    <text class="viz-struct__type-name"
+          x="{{ node.struct.header_text_pos.x }}" y="{{ node.struct.header_text_pos.y }}">{{ node.label }}</text>
+    {% if node.struct.kind_badge_text %}
+      <text class="viz-struct__kind-badge"
+            x="{{ node.struct.kind_badge_pos.x }}" y="{{ node.struct.kind_badge_pos.y }}"
+            text-anchor="end">{{ node.struct.kind_badge_text }}</text>
+    {% endif %}
+    {% for row in node.struct.rows %}
+      <rect class="viz-struct__row viz-struct__row--{{ row.side }}"
+            x="{{ row.rect.x }}" y="{{ row.rect.y }}"
+            width="{{ row.rect.width }}" height="{{ row.rect.height }}" />
+      <text class="viz-struct__row-text"
+            x="{{ row.text_pos.x }}" y="{{ row.text_pos.y }}">{{ row.text }}</text>
+    {% endfor %}
+  {% elif node.shape == "diverged" %}
     <path class="viz-shape__outline" d="{{ node.diverged.outer }}" />
     <rect class="viz-shape__diverged-half viz-shape__diverged-half--today"
           x="{{ node.diverged.today_half.x }}" y="{{ node.diverged.today_half.y }}"

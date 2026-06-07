@@ -140,24 +140,69 @@ If you got here, the PR is topology-changing. Use `WebFetch` to GET `http://loca
 
 ### 5. Build the graph from the diff
 
-Sketch the topology with one step per coherent region of the system the PR touches (a module, a request path, a job pipeline, etc.). Within each step, nodes describe what's there and edges describe local flow. Use `cross_flows` whenever one step's output is consumed by another step's input.
+Sketch the topology with one step per coherent region the PR touches — a module, a request path, a job pipeline, a schema-and-its-consumers. Within each step, nodes describe what's there and edges describe local flow.
 
-For every node, pick `side` from the diff:
+Every node picks one `side` from the diff, regardless of whether it represents logic or data:
 
-- **`shared`** — code present in both base and PR; unchanged. Use this for context that helps the reviewer understand where the changes sit (e.g. an existing module the PR's new code calls into).
-- **`existing`** — code present in base, removed by the PR. The node represents what's going away.
-- **`proposed`** — code added by the PR, not present in base. The node represents what's coming in.
-- **`diverged`** — same site, behavior changes in place. Populate `today_label` (current behavior, on the base branch) and `proposed_label` (new behavior, on the PR). Reserve for in-place changes where the site keeps its identity but the semantics shift (e.g. "on_delete: CASCADE → SET_NULL", "rate-limit: 100/min → 10/min").
+- **`shared`** — present on both base and PR; unchanged. Context that helps the reviewer understand where the changes sit (e.g. an existing module the PR's new code calls into).
+- **`existing`** — present on base, removed by the PR. The node represents what's going away.
+- **`proposed`** — added by the PR, not on base. The node represents what's coming in.
+- **`diverged`** — same site, identity preserved, semantics shifted in place. Populate `today_label` and `proposed_label`. Reserve for in-place changes where the site keeps its identity but the semantics shift (e.g. `on_delete: CASCADE → SET_NULL`, `rate-limit: 100/min → 10/min`, `field type: TEXT → JSONB`).
 
-Map shapes the same way as `/zing/plan`:
+#### Logic & behaviour
+
+For nodes that represent something that *happens* — operations, decisions, boundaries — pick the shape from how it runs:
 
 - Operations → `rect`
 - Decisions / branches → `diamond`
 - Input/output boundaries → `parallelogram`
-- Pre-existing modules being referenced (not the target of the change) → `hexagon`
-- Same-site split → `diverged`
+- Pre-existing module referenced (not the target of the change) → `hexagon`
+- Same-site behavioural split → `diverged`
 
-If a step contains only `shared` nodes, it's context — include it sparingly, only when it makes the diff legible. If a step is entirely `existing` (a module being removed) or entirely `proposed` (a module being added), that's fine and expected.
+If a step contains only `shared` nodes, it's context — include it sparingly. A step entirely `existing` (a module being removed) or entirely `proposed` (one being added) is fine and expected.
+
+#### Data shapes
+
+For nodes that represent something that *exists* — a named-field structure whose internal slots are changing — use `shape: "struct"` with the `kind` discriminator:
+
+- **`kind: "struct"`** (default) — records, classes, tables, interfaces, request/response bodies, Pydantic/dataclass/Rust-struct/TS-interface. Anything with named fields that define what it *is*.
+- **`kind: "union"`** — sum types, enums, tagged unions. Slots are variants (a slot without a `type` is fine — e.g. `"click"`, `"scroll"`, `"submit"`).
+- **`kind: "collections"`** — modules/services/classes whose interesting members are containers (`List`, `Dict`, `Queue`, `Set`, `Deque`). Slots are what the scope *holds*, not what defines it.
+
+Each slot inside `fields[]` carries its own `side` (and `today`/`proposed` when diverged). A struct with mixed slot changes — one added field, one removed, one type-changed — captures three independent change marks at field granularity. The wrapper `side` describes what's happening to the struct as a whole (`proposed` if it's wholly new, `shared` if its identity is unchanged), and may NOT be `diverged` — per-field sides do the change-marking.
+
+**When NOT to use `struct`:** if a data type's change is at the outer level (added/removed wholesale, type swapped — `List[X] → Set[X]`, `Optional[User] → User`, `Dict → CaseInsensitiveDict`), reach for `rect` + `side` (or `diverged` for in-place type swaps). Reserve `struct` for cases where multiple internal slots are changing independently.
+
+#### Cross-step wiring
+
+Use `cross_flows` whenever one step's output is consumed by another step's input. Each carries a `kind` (`data`, `control`, `schema`, `queue`, `utility`, `observability`) that colours the line. A logic step producing a struct that downstream consumes is the canonical cross-axis pattern — `kind: "data"` if the wire carries values, `kind: "schema"` if it carries the shape definition itself.
+
+#### Worked example — both axes in one viz
+
+A PR adds a per-user activity feed:
+
+- **Step `ingest`** — logic-flavoured.
+  - `parse-event` (`rect`, `proposed`) — the new parser.
+  - `validate` (`diamond`, `shared`) — existing decision point.
+  - `event-payload` (`struct`, `kind: "struct"`, `shared`) — the message shape the parser produces; one diverged field (`actor_id`: `int → UUID`), one proposed field (`source: str`).
+- **Step `feed-store`** — data-flavoured.
+  - `Activity` (`struct`, `kind: "struct"`, `shared`): `id` (`shared`, note `PK`), `kind` (`diverged` → `ActivityKind`), `payload` (`proposed`), `legacy_blob` (`existing`).
+  - `ActivityKind` (`struct`, `kind: "union"`, `proposed`): variants `click`, `scroll`, `submit`.
+  - `ActivityCache` (`struct`, `kind: "collections"`, `proposed`): `recent: Deque[Activity]`, `pending_writes: List[Activity]`.
+- **Cross-flows** — `event-payload` in `ingest` → `Activity` in `feed-store`, `kind: "data"`. `ActivityKind` in `feed-store` → `parse-event` in `ingest`, `kind: "schema"`.
+
+Each step anchors one axis; the cross-flows show how they couple.
+
+#### Coverage check (mandatory before writing the file)
+
+Before you validate, walk the PR's changed-file list (`gh pr view {N} --json files --jq '.files[].path'`) and the PR description side-by-side with the viz. Confirm:
+
+- **Every changed file is representable** — as a node, as a node label, or as an edge/cross-flow label. A changed file with no presence in the viz means a missing node or a step that should be split.
+- **Every new behaviour, new data model, new failure path, and removed module mentioned in the PR description appears** as either a node or a struct field. If the description says "added X, removed Y, changed Z's behaviour" and you can't point at the X / Y / Z in the viz, the viz is incomplete.
+- **Every exception branch or outcome branch in new code is a `diamond`-rooted sub-DAG** — not a single `rect`. Exception paths are first-class topology; reviewers need to see them at a glance.
+- **A single `rect` that summarises 50+ lines of new logic is almost always too coarse.** If a new function has multiple internal decision points, multiple early returns, or multiple side-effects, give them their own nodes. Aim for ~5–8 nodes per step; if a step has more than ~10 nodes, consider splitting; if it has 1–2 nodes, it's probably context for a neighbouring step.
+
+If the coverage check surfaces gaps, go back and add nodes / split steps before writing. Don't write a viz you can't defend as covering everything the PR touches.
 
 ### 6. Write the file
 
@@ -175,7 +220,7 @@ Fix and re-validate until clean. Do not call `step_stop` — pr-audit's `code-re
 
 ### 8. What the user will see
 
-The Design pill auto-lights on the PR's kanban card (the existing `_find_plans_for_card` machinery checks for the viz sibling). Clicking the pill opens the plan-detail viewer: the left panel shows the PR description (the skeleton you wrote in sub-step 1); the right panel shows the side-coded viz. The reviewer can use this picture as context during the rest of the flow — especially the batch-triage UI in `check_and_review`.
+The Design pill auto-lights on the PR's kanban card (the existing `_find_plans_for_card` machinery checks for the viz sibling). Clicking the pill opens the plan-detail viewer: the **Visualization** tab (default) shows the side-coded viz at full width; the **Markdown** tab holds the PR description (the skeleton you wrote in sub-step 1). The reviewer can use this picture as context during the rest of the flow — especially the batch-triage UI in `check_and_review`.
 </step>
 
 <step name="big_picture">

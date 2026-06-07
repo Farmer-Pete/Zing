@@ -74,10 +74,10 @@ def rounded_rect_path(x: float, y: float, w: float, h: float, rx: float) -> str:
 
 
 def node_outline(node: dict[str, Any]) -> str:
-    """SVG ``d`` string for a non-diverged node's outline.
+    """SVG ``d`` string for a non-diverged, non-struct node's outline.
 
-    Diverged shapes raise ``ValueError`` — use ``diverged_paths(node)`` instead,
-    since they render as multiple primitives.
+    Multi-primitive shapes raise ``ValueError`` — use ``diverged_paths(node)``
+    or ``struct_paths(node)`` instead.
     """
     shape = node["shape"]
     x, y, w, h = node["x"], node["y"], node["w"], node["h"]
@@ -97,6 +97,8 @@ def node_outline(node: dict[str, Any]) -> str:
         return f"M {x + skew} {y} L {x + w} {y} L {x + w - skew} {y + h} L {x} {y + h} Z"
     if shape == "diverged":
         raise ValueError("Diverged shapes must use diverged_paths()")
+    if shape == "struct":
+        raise ValueError("Struct shapes must use struct_paths()")
     return rounded_rect_path(x, y, w, h, 3)
 
 
@@ -130,6 +132,91 @@ def diverged_paths(node: dict[str, Any]) -> DivergedLayout:
             "x": cx,
             "y": y + header_h + half_h + half_h / 2 + 8,
         },
+    }
+
+
+class _StructRow(TypedDict):
+    """One field/variant/collection row inside a struct node."""
+
+    side: str
+    rect: _BoxLayout
+    text: str
+    text_pos: Point
+
+
+class StructLayout(TypedDict):
+    """Discrete layout primitives for the struct shape.
+
+    Templates render: outer rounded rect, header strip (band + type name +
+    optional kind badge), one row per field (rect + text). Per-row ``side``
+    drives the CSS class for change marking.
+    """
+
+    outer: str
+    header_rect: _BoxLayout
+    header_text_pos: Point
+    kind_badge_pos: Point | None
+    kind_badge_text: str | None
+    rows: list[_StructRow]
+
+
+def _struct_row_text(field: Mapping[str, Any]) -> str:
+    """Render one field as `name : type` (or `name : today → proposed` when
+    diverged), with an optional trailing note. Mirrored by sizing._field_display_len
+    so width measurements line up.
+    """
+    name = field.get("name", "")
+    if field.get("side") == "diverged":
+        today = field.get("today", "")
+        proposed = field.get("proposed", "")
+        text = f"{name} : {today} → {proposed}"
+    elif field.get("type"):
+        text = f"{name} : {field['type']}"
+    else:
+        text = name
+    if field.get("note"):
+        text += f"   {field['note']}"
+    return text
+
+
+def struct_paths(node: dict[str, Any]) -> StructLayout:
+    """Discrete layout primitives for the struct shape.
+
+    Geometry constants here mirror ``sizing.STRUCT_HEADER_H`` /
+    ``STRUCT_ROW_H`` — drift means the laid-out node won't match the
+    drawn rows.
+    """
+    x, y, w, h = node["x"], node["y"], node["w"], node["h"]
+    header_h = 32
+    row_h = 22
+    fields = node.get("fields", []) or []
+    kind = node.get("kind") or "struct"
+
+    rows: list[_StructRow] = []
+    for i, f in enumerate(fields):
+        ry = y + header_h + i * row_h
+        rows.append(
+            {
+                "side": f.get("side", "shared"),
+                "rect": {"x": x + 1, "y": ry, "width": w - 2, "height": row_h},
+                "text": _struct_row_text(f),
+                "text_pos": {"x": x + 12, "y": ry + row_h / 2 + 4},
+            }
+        )
+
+    badge_pos: Point | None = None
+    badge_text: str | None = None
+    if kind != "struct":
+        badge_text = kind
+        badge_pos = {"x": x + w - 10, "y": y + 20}
+
+    return {
+        "outer": rounded_rect_path(x, y, w, h, 4),
+        "header_rect": {"x": x + 1, "y": y + 1, "width": w - 2, "height": header_h - 1},
+        "header_text_pos": {"x": x + 12, "y": y + 21},
+        "kind_badge_pos": badge_pos,
+        "kind_badge_text": badge_text,
+        "rows": rows,
     }
 
 

@@ -453,12 +453,11 @@ If you made any change to `.zing/<slug>.md` during this audit (improvements appl
 1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL stored in the zing file's frontmatter, or default to `9876`. Always refetch — the schema may have changed since the plan was first written.
 
 2. Re-derive the topology from the updated markdown and rewrite `.zing/<slug>.viz.json` end-to-end. Do not patch in place — rewrite the whole file. Pull steps, nodes, edges, and cross-flows from the current state of the markdown:
-   - every numbered step / phase → `steps[]` entry
-   - decisions / branches → `diamond`
-   - operations → `rect`
-   - input/output boundaries → `parallelogram`
-   - same-site different-behaviour → `diverged` (with `concern` / `today_label` / `proposed_label`)
-   - cross-step data/control flow → `cross_flows[]` entries
+   - **Logic & behaviour** — decisions → `diamond`; operations → `rect`; I/O boundaries → `parallelogram`; pre-existing referenced module → `hexagon`; same-site behavioural split → `diverged` (with `concern` / `today_label` / `proposed_label`).
+   - **Data shapes** — named-field structures whose internal slots are changing independently → `shape: "struct"` with `kind: "struct"` (records, classes, tables, interfaces), `"union"` (sum types/enums), or `"collections"` (scopes whose members are containers). Per-slot `side` on `fields[]`; wrapper `side` may NOT be `diverged`. For whole-type changes (collection-type swap, etc.) stay on `rect` + `diverged`.
+   - **Cross-step flow** — `cross_flows[]` entries, each with a `kind` (`data`, `control`, `schema`, `queue`, `utility`, `observability`).
+
+   **Coverage check**: after rewriting, walk the markdown and confirm every numbered plan step, every new data model / function / class / module, every new decision point or exception branch, and every same-site behavioural change appears in the viz as a node, struct field, or edge label. Exception/outcome branches should each get their own `diamond`-rooted sub-DAG, not a single `rect`. Aim for ~5–8 nodes per step; split steps with >10 nodes. Anything in the markdown that isn't representable in the viz is a coverage gap — add nodes or split steps before calling `step_stop`.
 
 3. Call `mcp__zing-ai__step_stop(session_id, plan_audit_step_id)` where `plan_audit_step_id` is `steps["plan-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and call `step_stop` again. Only proceed past this step when it returns `{"status": "ready"}`.
 

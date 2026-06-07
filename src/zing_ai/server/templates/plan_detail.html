@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set body_class = 'page-plan' %}
 {% block title %}Plan · {{ session_id }} — Zing{% endblock %}
 
 {% block extra_head %}
@@ -9,12 +10,25 @@
 {% endblock %}
 
 {% block content %}
-<main class="plan-detail">
-  <aside class="plan-md">
-    {{ rendered_markdown | safe }}
-  </aside>
-  <section class="plan-viz">
+{# View-local tab state. Viz is default so #viz-stage is visible at data-init
+   time — its gesture handler reads el.clientWidth, which is 0 on a display:none
+   element. #}
+<main class="plan-shell" data-signals='{"planTab": "viz"}'>
+  <div class="plan-tabs" role="tablist">
+    <button class="plan-tab" role="tab"
+            data-on:click="$planTab = 'viz'"
+            data-class:active="$planTab === 'viz'"
+            data-attr:aria-selected="$planTab === 'viz'">Visualization</button>
+    <button class="plan-tab" role="tab"
+            data-on:click="$planTab = 'markdown'"
+            data-class:active="$planTab === 'markdown'"
+            data-attr:aria-selected="$planTab === 'markdown'">Markdown</button>
+  </div>
+  <section class="plan-viz" data-show="$planTab === 'viz'">
     {% include "viz/_viewer.html" %}
   </section>
+  <aside class="plan-md" data-show="$planTab === 'markdown'">
+    {{ rendered_markdown | safe }}
+  </aside>
 </main>
 {% endblock %}

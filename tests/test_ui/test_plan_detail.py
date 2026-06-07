@@ -23,6 +23,13 @@ FIXTURE = (
     / "BAK-1321"
     / "BAK-1321-direct-flatten.viz.json"
 )
+MIXED_AXIS_FIXTURE = (
+    Path(__file__).parent.parent
+    / "test_viz"
+    / "fixtures"
+    / "mixed-axis-activity-feed"
+    / "activity-feed.viz.json"
+)
 
 
 def _seed_plan_session(server: _ServerInfo, tmp_path: Path, session_id: str = "plan-ui-1") -> Path:
@@ -38,6 +45,25 @@ def _seed_plan_session(server: _ServerInfo, tmp_path: Path, session_id: str = "p
     viz = work / "plan.viz.json"
     md.write_text("# Plan\n\nbody.\n")
     shutil.copyfile(FIXTURE, viz)
+    server.manager.create_session(
+        session_id=session_id,
+        title=session_id,
+        zing_file=str(md),
+        steps=["plan"],
+    )
+    return work
+
+
+def _seed_mixed_axis_session(
+    server: _ServerInfo, tmp_path: Path, session_id: str = "plan-ui-mixed"
+) -> Path:
+    """Create a session backed by the mixed-axis (logic + struct) fixture."""
+    work = tmp_path / session_id
+    work.mkdir()
+    md = work / "plan.md"
+    viz = work / "plan.viz.json"
+    md.write_text("# Activity feed\n\nMixed-axis worked example.\n")
+    shutil.copyfile(MIXED_AXIS_FIXTURE, viz)
     server.manager.create_session(
         session_id=session_id,
         title=session_id,
@@ -202,3 +228,72 @@ class TestPlanDetailViewer:
         )
         expect(page.locator("#viz-stage")).to_be_visible(timeout=5000)
         # Listener-based check happens in the console_errors fixture teardown.
+
+    def test_mixed_axis_renders_logic_and_struct_in_one_scene(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        """A viz with both logic primitives (rect, diamond) and struct primitives
+        (struct/union/collections) must render both axes correctly in the same
+        scene. The struct rendering does not erase the existing logic affordances.
+        """
+        _seed_mixed_axis_session(server, tmp_path, session_id="plan-ui-mixed")
+        page.goto(
+            f"{server.base_url}/command-center/plan-ui-mixed/plan",
+            wait_until="domcontentloaded",
+        )
+        # Logic-axis nodes still attach.
+        expect(page.locator(".viz-shape--rect").first).to_be_attached(timeout=5000)
+        expect(page.locator(".viz-shape--diamond").first).to_be_attached(timeout=2000)
+        # Struct-axis nodes attach with the wrapper class and the kind discriminator.
+        expect(page.locator(".viz-shape--struct").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct--union").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct--collections").first).to_be_attached(timeout=2000)
+        # Per-row side coding lands as class names on the row rects.
+        expect(page.locator(".viz-struct__row--proposed").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--existing").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--diverged").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--shared").first).to_be_attached(timeout=2000)
+        # Field text actually renders inside struct rows (the EventPayload struct
+        # has a diverged actor_id with today=int proposed=UUID).
+        page_text = page.locator("#viz-stage").inner_text()
+        assert "EventPayload" in page_text, "struct type name should render"
+        assert "actor_id" in page_text, "struct field name should render"
+        assert "int" in page_text and "UUID" in page_text, "diverged today/proposed should render"
+        # Click an existing rect — the logic-side focus affordance still works.
+        page.locator("#card-1").dispatch_event("click")
+        expect(page.locator("#card-1.viz-card--focused")).to_be_attached(timeout=5000)
+
+    def test_tabs_toggle_viz_and_markdown_panes(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        """Viz is default; clicking Markdown swaps panes; clicking Viz again
+        restores it and the gesture handler still works (card click focuses)."""
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-tabs")
+        page.goto(
+            f"{server.base_url}/command-center/plan-ui-tabs/plan",
+            wait_until="domcontentloaded",
+        )
+        viz = page.locator(".plan-viz")
+        md = page.locator(".plan-md")
+        expect(viz).to_be_visible(timeout=5000)
+        expect(md).to_be_hidden()
+
+        page.locator(".plan-tab", has_text="Markdown").click()
+        expect(md).to_be_visible(timeout=2000)
+        expect(viz).to_be_hidden()
+
+        page.locator(".plan-tab", has_text="Visualization").click()
+        expect(viz).to_be_visible(timeout=2000)
+        expect(md).to_be_hidden()
+
+        # After round-tripping tabs, the viz is still interactive.
+        page.locator("#card-6").dispatch_event("click")
+        expect(page.locator("#card-6.viz-card--focused")).to_be_attached(timeout=5000)

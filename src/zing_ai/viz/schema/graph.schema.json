@@ -98,16 +98,16 @@
           "description": "Slug for this node (kebab-case, e.g. \"fk-div\"). Must be unique within the parent step. Cross-flows reference this id."
         },
         "shape": {
-          "enum": ["rect", "diamond", "hexagon", "parallelogram", "diverged"],
-          "description": "Visual primitive. rect = operation; diamond = decision/branch; hexagon = pre-existing module; parallelogram = input/output boundary; diverged = same site with different behaviour today vs proposed (REQUIRES side=diverged and the today_label/proposed_label/concern fields)."
+          "enum": ["rect", "diamond", "hexagon", "parallelogram", "diverged", "struct"],
+          "description": "Visual primitive. Logic primitives — rect = operation; diamond = decision/branch; hexagon = pre-existing module; parallelogram = input/output boundary; diverged = same site with different behaviour today vs proposed (REQUIRES side=diverged and the today_label/proposed_label/concern fields). Data primitive — struct = named-field data shape (record, class, table, interface, enum, collection-bag); REQUIRES the fields[] array and side ∈ {shared, existing, proposed}. Reach for struct only when multiple internal slots are changing independently; for whole-type changes (added, removed, swapped wholesale) use rect (+ diverged for in-place type swaps)."
         },
         "side": {
           "enum": ["shared", "existing", "proposed", "diverged"],
-          "description": "Visual treatment. shared = unchanged; existing = present today, will be removed; proposed = new in this plan; diverged = same site with split behaviour (only valid with shape=diverged)."
+          "description": "Visual treatment. shared = unchanged; existing = present today, will be removed; proposed = new in this plan; diverged = same site with split behaviour (only valid with shape=diverged). For shape=struct, side may NOT be diverged — per-field sides inside fields[] carry the change marks; the wrapper side describes whether the struct as a whole is being added/removed/kept."
         },
         "label": {
           "type": "string",
-          "description": "Display text inside the shape. Keep concise (under ~60 chars). For diverged nodes, this is unused — see today_label/proposed_label."
+          "description": "Display text inside the shape. Keep concise (under ~60 chars). For diverged nodes, this is unused — see today_label/proposed_label. For struct nodes, this is the struct's type name (e.g. \"Activity\", \"users\", \"ActivityKind\")."
         },
         "concern": {
           "type": "string",
@@ -120,6 +120,16 @@
         "proposed_label": {
           "type": "string",
           "description": "REQUIRED for shape=diverged: text for the \"proposed\" half (e.g. \"SET_NULL — preserves them\"). Ignored for other shapes."
+        },
+        "kind": {
+          "enum": ["struct", "union", "collections"],
+          "description": "ONLY valid when shape=struct. Discriminator on how the struct renders. struct (default) = named fields that define what the thing IS (records, classes, tables, interfaces, request/response bodies). union = sum type / enum / tagged union; slots are variants. collections = module/service/class scope whose interesting members are containers (List, Dict, Queue, Set); slots are what the scope HOLDS. Same fields[] schema in all three cases."
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "description": "REQUIRED for shape=struct; forbidden otherwise. Each entry is one slot inside the struct (a field, a variant, or a held collection depending on `kind`). Each slot carries its own `side` so multiple internal changes can be marked independently — that is the whole reason to reach for struct instead of rect.",
+          "items": { "$ref": "#/$defs/field" }
         }
       },
       "allOf": [
@@ -131,8 +141,74 @@
           }
         },
         {
-          "if": { "properties": { "shape": { "not": { "const": "diverged" } } }, "required": ["shape"] },
-          "then": { "properties": { "side": { "not": { "const": "diverged" } } } }
+          "if": {
+            "properties": { "shape": { "enum": ["rect", "diamond", "hexagon", "parallelogram"] } },
+            "required": ["shape"]
+          },
+          "then": {
+            "properties": {
+              "side": { "not": { "const": "diverged" } },
+              "fields": false,
+              "kind": false
+            }
+          }
+        },
+        {
+          "if": { "properties": { "shape": { "const": "struct" } }, "required": ["shape"] },
+          "then": {
+            "required": ["fields"],
+            "properties": {
+              "side": { "enum": ["shared", "existing", "proposed"] }
+            }
+          }
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "side"],
+      "description": "One slot inside a struct node — a named field, a union variant, or a held collection (depending on the parent node's `kind`). Each slot carries its own `side` so multiple internal changes can be marked independently.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Slot name as it appears in source (e.g. \"user_id\", \"tags\", \"click\", \"pending_writes\"). Rendered verbatim — no canonical-form requirement."
+        },
+        "type": {
+          "type": "string",
+          "description": "Optional free-form type signature, rendered verbatim alongside the name. Examples: \"UUID NOT NULL\" (DB column), \"Optional[User]\" (Python), \"List<Tag>\" (TS), \"Deque[Event]\" (collection slot). Omit when the slot has no meaningful type (e.g. enum variants like \"click\" / \"scroll\"). The renderer does not parse this — it's display text."
+        },
+        "side": {
+          "enum": ["shared", "existing", "proposed", "diverged"],
+          "description": "Per-slot change mark. shared = unchanged; existing = present today, removed by this change; proposed = added by this change; diverged = same name kept, type or semantics shifted in place (REQUIRES today + proposed)."
+        },
+        "today": {
+          "type": "string",
+          "description": "REQUIRED when side=diverged: the slot's value on the base / current side (e.g. \"TEXT\", \"int\", \"required\", \"FIFO\"). Ignored for other sides."
+        },
+        "proposed": {
+          "type": "string",
+          "description": "REQUIRED when side=diverged: the slot's value on the proposed side (e.g. \"JSONB\", \"UUID\", \"Optional\", \"priority queue\"). Ignored for other sides."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional annotation rendered alongside name + type (e.g. \"PK\", \"FK → users.id\", \"UNIQUE\", \"@deprecated\"). Keep concise."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "side": { "const": "diverged" } }, "required": ["side"] },
+          "then": { "required": ["today", "proposed"] }
+        },
+        {
+          "if": { "properties": { "side": { "not": { "const": "diverged" } } }, "required": ["side"] },
+          "then": {
+            "properties": {
+              "today": false,
+              "proposed": false
+            }
+          }
         }
       ]
     },

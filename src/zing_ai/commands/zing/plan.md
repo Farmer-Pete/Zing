@@ -230,16 +230,35 @@ After all questions are answered, update the zing document so it can be handed t
 <step name="write_viz_graph">
 After saving the fleshed-out markdown, write the sibling visualization JSON so the plan can be rendered in the Command Center. The markdown and the JSON must stay in sync; the hard gate in `step_stop` enforces this.
 
-1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL stored in the zing file's frontmatter (extract via simple string parse), or default to `9876` if the frontmatter has no URL. The response is the full JSON Schema — read every property's `description` field; they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step").
+1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL stored in the zing file's frontmatter (extract via simple string parse), or default to `9876` if the frontmatter has no URL. Read every property's `description` field — they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step").
 
-2. Write `.zing/<plan-slug>.viz.json` (sibling to `.zing/<plan-slug>.md`) matching the schema. Pull the topology from the plan you just wrote:
-   - every numbered "Step" or phase becomes a `steps[]` entry
-   - every "if/branch" inside a step becomes a `diamond` node
-   - every operation becomes a `rect`
-   - every input/output boundary is a `parallelogram`
-   - when the same site has different behaviour today vs in the proposed plan, use a `diverged` shape (and provide `concern` / `today_label` / `proposed_label`)
+2. Write `.zing/<plan-slug>.viz.json` (sibling to `.zing/<plan-slug>.md`) matching the schema. One step per coherent region of the system the plan touches (a module, a request path, a job pipeline, a schema-and-its-consumers). Every node picks one `side` (`shared` / `existing` / `proposed` / `diverged`) regardless of whether it represents logic or data — same four values, same semantics.
 
-3. Connect steps via `cross_flows` whenever one step's output is consumed by another step's input — labelled by the kind of thing that flows (`data`, `control`, `schema`, `queue`, `utility`, `observability`).
+3. **Logic & behaviour** — nodes representing something that *happens*. Pick shape from how it runs:
+   - operations → `rect`
+   - decisions / branches → `diamond`
+   - input/output boundaries → `parallelogram`
+   - pre-existing module referenced (not the target of the change) → `hexagon`
+   - same-site behavioural split → `diverged` (provide `concern` / `today_label` / `proposed_label`)
+
+4. **Data shapes** — nodes representing something that *exists*: a named-field structure whose internal slots are changing independently. Use `shape: "struct"` with the `kind` discriminator:
+   - `kind: "struct"` (default) — records, classes, tables, interfaces, request/response bodies. Anything with named fields that define what it IS.
+   - `kind: "union"` — sum types, enums, tagged unions. Slots are variants.
+   - `kind: "collections"` — modules/services/classes whose interesting members are containers (`List`, `Dict`, `Queue`, `Set`). Slots are what the scope HOLDS.
+
+   Each slot in `fields[]` carries its own `side` (and `today`/`proposed` when diverged). The wrapper `side` describes what's happening to the struct as a whole; it may NOT be `diverged` — per-field sides do the change-marking.
+
+   **When NOT to use `struct`:** if a data type's change is at the outer level (added/removed wholesale, type swapped — `List[X] → Set[X]`, `Optional[User] → User`), reach for `rect` + `side` (or `diverged` for in-place type swaps). Reserve `struct` for cases where multiple internal slots are changing independently.
+
+5. **Cross-step wiring** — connect steps via `cross_flows` whenever one step's output is consumed by another step's input. Label each with the kind of thing that flows (`data`, `control`, `schema`, `queue`, `utility`, `observability`). A logic step producing a struct that downstream consumes is the canonical cross-axis pattern.
+
+6. **Coverage check (mandatory before validating)** — walk the action plan section step-by-step against the viz. Confirm:
+   - **Every numbered plan step appears as a `steps[]` entry** in the viz. A plan step with no `steps[]` entry is a coverage gap.
+   - **Every new data model, new function/class/module, new decision point, new boundary, and same-site behavioural change** mentioned anywhere in the plan appears as a node — or as a struct field, for per-field changes. If the plan says "add `X`, remove `Y`, change `Z`'s behaviour" and you can't point at the X / Y / Z in the viz, the viz is incomplete.
+   - **Every exception branch or outcome branch** in new code is a `diamond`-rooted sub-DAG, not a single `rect`. Exception paths are first-class topology.
+   - **A single `rect` summarising a whole new module is too coarse.** Aim for ~5–8 nodes per step; if a step has more than ~10 nodes, consider splitting; if it has 1–2 nodes, it's probably context for a neighbouring step.
+
+   If the coverage check surfaces gaps, add nodes or split steps before writing. The markdown and the JSON must stay in sync — the hard gate in `step_stop` enforces structural validity, but only this coverage check catches missing topology.
 
 The viz file's existence is what marks something as a plan. Don't try to discriminate plans from non-plans by content — every plan output by `/zing/plan` is graphable by definition.
 </step>

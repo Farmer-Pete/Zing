@@ -233,7 +233,12 @@ If you (or any earlier step in this audit) made changes to `.zing/<slug>.md` —
 
 1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL in the zing file's frontmatter, or default to `9876`. Always refetch.
 
-2. Re-derive the topology from the current state of `.zing/<slug>.md` and rewrite `.zing/<slug>.viz.json` end-to-end (not in place). Map content to shapes as described in the schema's `description` fields (rect = operation, diamond = decision, parallelogram = boundary, hexagon = pre-existing module, diverged = same-site split).
+2. Re-derive the topology from the current state of `.zing/<slug>.md` and rewrite `.zing/<slug>.viz.json` end-to-end (not in place). Map content to shapes as described in the schema's `description` fields:
+   - **Logic & behaviour** — `rect` (operation), `diamond` (decision), `parallelogram` (boundary), `hexagon` (pre-existing referenced module), `diverged` (same-site behavioural split).
+   - **Data shapes** — `struct` with `kind` ∈ {`struct`, `union`, `collections`} for named-field shapes whose internal slots change independently. Per-slot `side` on `fields[]`; whole-type changes stay on `rect` + `diverged`.
+   - **Cross-step flow** — `cross_flows[]` with `kind` ∈ {`data`, `control`, `schema`, `queue`, `utility`, `observability`}.
+
+   **Coverage check**: after rewriting, walk the markdown and confirm every numbered step, every new data model / function / class / module, every new decision point or exception branch, and every same-site behavioural change appears in the viz as a node, struct field, or edge label. Exception/outcome branches each get their own `diamond`-rooted sub-DAG, not a single `rect`. Aim for ~5–8 nodes per step; split steps with >10 nodes. Anything in the markdown that isn't representable in the viz is a coverage gap — add nodes or split steps before calling `step_stop`.
 
 3. Call `mcp__zing-ai__step_stop(session_id, build_audit_step_id)` where `build_audit_step_id` is `steps["build-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and retry until it returns `{"status": "ready"}`.
 

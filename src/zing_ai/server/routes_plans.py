@@ -83,6 +83,8 @@ def _annotate_step_geometry(step: dict[str, Any]) -> dict[str, Any]:
         annotated = dict(n)
         if n["shape"] == "diverged":
             annotated["diverged"] = geom.diverged_paths(n)
+        elif n["shape"] == "struct":
+            annotated["struct"] = geom.struct_paths(n)
         else:
             annotated["outline_path"] = geom.node_outline(n)
         new_nodes.append(annotated)

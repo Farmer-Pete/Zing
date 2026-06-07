@@ -5,21 +5,60 @@
  * in prototypes/plan-viz/.
  */
 
-/* ===== page-level split: markdown left, viewer right ===== */
-.plan-detail {
-    display: grid;
-    grid-template-columns: minmax(360px, 1fr) 2fr;
-    gap: 1rem;
-    height: calc(100vh - 160px);
+/* ===== page-level shell: tab strip on top, single pane below =====
+ * body.page-plan widens the page past the default 960px clamp so the viz
+ * tab can use the full screen width. Markdown re-centres itself inside
+ * .plan-md with its own max-width so reading margins stay sane.
+ */
+body.page-plan { max-width: none; padding: 0 1rem; }
+
+.plan-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    height: calc(100vh - 200px);
     min-height: 0;
 }
 
+.plan-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--gray-100);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px;
+    align-self: flex-start;
+}
+
+.plan-tab {
+    background: none;
+    color: var(--gray-500);
+    border: none;
+    border-radius: 4px;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    font-family: inherit;
+}
+.plan-tab:hover { color: var(--navy); }
+.plan-tab.active {
+    background: var(--white);
+    color: var(--navy);
+    box-shadow: 0 1px 2px rgba(26,23,20,0.08);
+}
+
 .plan-md {
+    flex: 1;
     overflow: auto;
     padding: 1.25rem 1.5rem;
     background: var(--white);
     border: 1px solid var(--border);
     border-radius: 6px;
+    max-width: 960px;
+    width: 100%;
+    margin: 0 auto;
 }
 
 .plan-md h1,
@@ -28,6 +67,8 @@
 
 .plan-viz {
     position: relative;
+    flex: 1;
+    width: 100%;
     min-width: 0;
     background: var(--gray-50);
     border: 1px solid var(--border);
@@ -181,6 +222,67 @@
 .viz-shape__label {
     fill: var(--text-primary);
     font: 500 11px 'Inter', system-ui, sans-serif;
+}
+
+/* ===== struct shape (data axis) =====
+ * A struct node renders as a code-block: header band (type name + optional
+ * kind discriminator badge) plus one row per field. Per-row side coding
+ * (shared/existing/proposed/diverged) reuses the same palette tokens as the
+ * existing logic-axis side coding, applied to the row background.
+ */
+.viz-struct__outline {
+    fill: var(--white);
+    stroke: var(--gray-400);
+    stroke-width: 1;
+}
+
+.viz-struct--union .viz-struct__outline,
+.viz-struct--collections .viz-struct__outline {
+    stroke-dasharray: none;
+}
+
+.viz-struct__header {
+    fill: var(--gray-100);
+}
+
+.viz-struct__type-name {
+    fill: var(--navy);
+    font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.viz-struct__kind-badge {
+    fill: var(--gray-500);
+    font: 500 9px 'Inter', system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.viz-struct__row {
+    fill: var(--white);
+    stroke: none;
+}
+
+.viz-struct__row--shared { fill: var(--white); }
+.viz-struct__row--existing {
+    fill: var(--orange-subtle);
+}
+.viz-struct__row--proposed {
+    fill: var(--orange-subtle);
+}
+.viz-struct__row--diverged {
+    fill: var(--gray-100);
+}
+
+.viz-struct__row-text {
+    fill: var(--text-primary);
+    font: 400 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Struct-wide side coding (the wrapper itself can be added/removed). */
+.viz-shape--side-proposed .viz-struct__outline { stroke: var(--orange); }
+.viz-shape--side-existing .viz-struct__outline {
+    stroke: var(--orange-border);
+    stroke-dasharray: 4 3;
 }
 
 /* diverged */
