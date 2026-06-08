@@ -45,4 +45,6 @@
             data-on:click="@post({{ ('/command-center/' ~ session_id ~ '/plan/release') | js_str }}, {contentType: 'json', payload: {viewport: {w: $viewportW, h: $viewportH}}})"
             data-attr:disabled="!$focusedStep">release</button>
   </div>
+
+  {% include "viz/_legend.html" %}
 </div>

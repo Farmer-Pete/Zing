@@ -141,6 +141,129 @@ body.page-plan { max-width: none; padding: 0 1rem; }
     cursor: default;
 }
 
+/* ===== legend (collapsible bottom-right corner) =====
+ * Discoverable key for shapes, change markers, cross-flow kinds, and focus
+ * states. Wrapper is pointer-events: none so it doesn't intercept pan/zoom
+ * gestures on the viz stage behind it; the toggle button and panel re-enable
+ * pointer-events on themselves.
+ */
+.viz-legend {
+    position: absolute;
+    bottom: 0.75rem;
+    right: 0.75rem;
+    pointer-events: none;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.5rem;
+}
+
+.viz-legend__toggle {
+    pointer-events: auto;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: inherit;
+    order: 2;
+}
+
+.viz-legend__toggle:hover {
+    background: var(--orange-subtle);
+    border-color: var(--orange-border);
+}
+
+.viz-legend__panel {
+    pointer-events: auto;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(26, 23, 20, 0.12);
+    padding: 0.75rem 0.875rem;
+    width: 320px;
+    max-height: min(70vh, 560px);
+    overflow-y: auto;
+    order: 1;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+}
+
+.viz-legend__section + .viz-legend__section {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--gray-100);
+}
+
+.viz-legend__heading {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gray-500);
+    margin-bottom: 0.4rem;
+}
+
+.viz-legend__sub {
+    font-weight: 400;
+    color: var(--gray-500);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.viz-legend__sub code {
+    background: var(--gray-100);
+    padding: 0 0.25rem;
+    border-radius: 2px;
+    font-size: 0.7rem;
+}
+
+.viz-legend__items {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.viz-legend__item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    line-height: 1.35;
+}
+
+.viz-legend__sample {
+    flex: 0 0 56px;
+    width: 56px;
+    height: 24px;
+    overflow: visible;
+}
+
+.viz-legend__sample--struct {
+    height: 36px;
+}
+
+.viz-legend__label {
+    flex: 1;
+    color: var(--text-primary);
+}
+
+.viz-legend__label strong {
+    font-weight: 600;
+    color: var(--navy);
+}
+
+.viz-legend__label .viz-legend__sub {
+    display: block;
+    font-size: 0.7rem;
+    margin-top: 0.1rem;
+}
+
 /* ===== step card frame + header ===== */
 .viz-card {
     transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1),

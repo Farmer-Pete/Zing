@@ -267,6 +267,36 @@ class TestPlanDetailViewer:
         page.locator("#card-1").dispatch_event("click")
         expect(page.locator("#card-1.viz-card--focused")).to_be_attached(timeout=5000)
 
+    def test_legend_collapses_and_expands(
+        self,
+        server: _ServerInfo,
+        page: Page,
+        console_errors: list[str],
+        tmp_path: Path,
+    ) -> None:
+        """The legend starts collapsed (only a button), expands on click,
+        and includes all four sections: shapes, sides, cross-flow lines,
+        focus states."""
+        _seed_plan_session(server, tmp_path, session_id="plan-ui-legend")
+        page.goto(
+            f"{server.base_url}/command-center/plan-ui-legend/plan",
+            wait_until="domcontentloaded",
+        )
+        toggle = page.locator(".viz-legend__toggle")
+        panel = page.locator("#viz-legend-panel")
+        expect(toggle).to_be_visible(timeout=5000)
+        expect(panel).to_be_hidden()
+
+        toggle.click()
+        expect(panel).to_be_visible(timeout=2000)
+        expect(page.locator(".viz-legend__heading", has_text="Shapes")).to_be_visible()
+        expect(page.locator(".viz-legend__heading", has_text="Change markers")).to_be_visible()
+        expect(page.locator(".viz-legend__heading", has_text="Cross-flow lines")).to_be_visible()
+        expect(page.locator(".viz-legend__heading", has_text="Focus states")).to_be_visible()
+
+        toggle.click()
+        expect(panel).to_be_hidden(timeout=2000)
+
     def test_tabs_toggle_viz_and_markdown_panes(
         self,
         server: _ServerInfo,

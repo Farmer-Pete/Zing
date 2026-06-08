@@ -1,0 +1,209 @@
+{#
+  Discoverable legend for the viz: shapes, change markers, cross-flow kinds,
+  focus states. Collapsed by default into a corner button; expanded panel
+  shows mini-SVG samples that reuse the real classes so colours stay in sync
+  with the actual rendering.
+
+  pointer-events: auto on inner buttons; the wrapper is pointer-events: none
+  so it doesn't intercept pan/zoom gestures on the viz stage behind it.
+#}
+<div class="viz-legend"
+     data-signals='{"legendOpen": false}'
+     data-class:viz-legend--open="$legendOpen">
+  <button class="viz-legend__toggle"
+          type="button"
+          data-on:click="$legendOpen = !$legendOpen"
+          data-attr:aria-expanded="$legendOpen"
+          aria-controls="viz-legend-panel">
+    <span data-text="$legendOpen ? 'Close legend' : 'Legend'"></span>
+  </button>
+
+  <div id="viz-legend-panel" class="viz-legend__panel" data-show="$legendOpen">
+    <section class="viz-legend__section">
+      <h3 class="viz-legend__heading">Shapes</h3>
+      <ul class="viz-legend__items">
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--rect viz-shape--side-shared">
+              <path class="viz-shape__outline" d="M 6 4 H 50 A 2 2 0 0 1 52 6 V 18 A 2 2 0 0 1 50 20 H 6 A 2 2 0 0 1 4 18 V 6 A 2 2 0 0 1 6 4 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>rect</strong> — operation / action</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--diamond viz-shape--side-shared">
+              <path class="viz-shape__outline" d="M 28 2 L 54 12 L 28 22 L 2 12 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>diamond</strong> — decision / branch</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--parallelogram viz-shape--side-shared">
+              <path class="viz-shape__outline" d="M 12 4 L 54 4 L 44 20 L 2 20 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>parallelogram</strong> — I/O boundary</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--hexagon viz-shape--side-shared">
+              <path class="viz-shape__outline" d="M 12 4 L 44 4 L 54 12 L 44 20 L 12 20 L 2 12 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>hexagon</strong> — pre-existing referenced module</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 28">
+            <g class="viz-shape viz-shape--diverged viz-shape--side-diverged">
+              <path class="viz-shape__outline" d="M 6 2 H 52 V 26 H 6 Z" />
+              <rect class="viz-shape__diverged-half viz-shape__diverged-half--today" x="7" y="11" width="44" height="7"/>
+              <rect class="viz-shape__diverged-half viz-shape__diverged-half--proposed" x="7" y="18" width="44" height="7"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>diverged</strong> — same site, today vs. proposed behaviour split</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample viz-legend__sample--struct" viewBox="0 0 64 36">
+            <g class="viz-shape viz-shape--struct viz-shape--side-shared">
+              <path class="viz-struct__outline" d="M 4 2 H 60 V 34 H 4 Z" />
+              <rect class="viz-struct__header" x="5" y="3" width="54" height="10"/>
+              <rect class="viz-struct__row viz-struct__row--shared" x="5" y="14" width="54" height="6"/>
+              <rect class="viz-struct__row viz-struct__row--proposed" x="5" y="20" width="54" height="6"/>
+              <rect class="viz-struct__row viz-struct__row--diverged" x="5" y="26" width="54" height="6"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label">
+            <strong>struct</strong> — named-field data shape
+            <span class="viz-legend__sub">kinds: <code>struct</code>, <code>union</code>, <code>collections</code></span>
+          </span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="viz-legend__section">
+      <h3 class="viz-legend__heading">Change markers <span class="viz-legend__sub">(side)</span></h3>
+      <ul class="viz-legend__items">
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--rect viz-shape--side-shared">
+              <path class="viz-shape__outline" d="M 6 4 H 50 A 2 2 0 0 1 52 6 V 18 A 2 2 0 0 1 50 20 H 6 A 2 2 0 0 1 4 18 V 6 A 2 2 0 0 1 6 4 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>shared</strong> — unchanged (context)</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--rect viz-shape--side-proposed">
+              <path class="viz-shape__outline" d="M 6 4 H 50 A 2 2 0 0 1 52 6 V 18 A 2 2 0 0 1 50 20 H 6 A 2 2 0 0 1 4 18 V 6 A 2 2 0 0 1 6 4 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>proposed</strong> — new in this change</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-shape viz-shape--rect viz-shape--side-existing">
+              <path class="viz-shape__outline" d="M 6 4 H 50 A 2 2 0 0 1 52 6 V 18 A 2 2 0 0 1 50 20 H 6 A 2 2 0 0 1 4 18 V 6 A 2 2 0 0 1 6 4 Z" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>existing</strong> — present today, going away (dashed)</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 28">
+            <g class="viz-shape viz-shape--diverged viz-shape--side-diverged">
+              <path class="viz-shape__outline" d="M 6 2 H 52 V 26 H 6 Z" />
+              <rect class="viz-shape__diverged-half viz-shape__diverged-half--today" x="7" y="11" width="44" height="7"/>
+              <rect class="viz-shape__diverged-half viz-shape__diverged-half--proposed" x="7" y="18" width="44" height="7"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>diverged</strong> — same site, in-place semantic shift</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="viz-legend__section">
+      <h3 class="viz-legend__heading">Cross-flow lines <span class="viz-legend__sub">(kind)</span></h3>
+      <ul class="viz-legend__items">
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--data">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>data</strong> — values flowing between steps</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--control">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>control</strong> — control flow / invocation</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--schema">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>schema</strong> — shape definition reference</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--queue">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>queue</strong> — message-bus traversal</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--utility">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>utility</strong> — shared infra / helper</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 12">
+            <g class="viz-xflow viz-xflow--observability">
+              <path class="viz-xflow__path" d="M 4 6 C 18 -2, 38 14, 52 6" />
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>observability</strong> — tracing / metrics</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="viz-legend__section">
+      <h3 class="viz-legend__heading">Focus states</h3>
+      <ul class="viz-legend__items">
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-card viz-card--focused">
+              <rect class="viz-card__frame" x="4" y="4" width="48" height="16" rx="2"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>focused</strong> — click-selected step</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-card viz-card--pred">
+              <rect class="viz-card__frame" x="4" y="4" width="48" height="16" rx="2"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>predecessor / successor</strong> — directly connected to focused</span>
+        </li>
+        <li class="viz-legend__item">
+          <svg class="viz-legend__sample" viewBox="0 0 56 24">
+            <g class="viz-card viz-card--faded">
+              <rect class="viz-card__frame" x="4" y="4" width="48" height="16" rx="2"/>
+            </g>
+          </svg>
+          <span class="viz-legend__label"><strong>faded</strong> — outside the focus cluster</span>
+        </li>
+      </ul>
+    </section>
+  </div>
+</div>
