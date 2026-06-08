@@ -53,32 +53,26 @@ def _actionable_findings(step: WorkflowStep) -> list:
 # launch.py with word boundaries and case-insensitive matching so noisy tokens
 # like ``UTF-8``/``SHA-256``/``PR-1`` don't masquerade as tickets.
 _TICKET_RE = re.compile(rf"\b{TICKET_ID_PATTERN}\b", re.IGNORECASE)
-_PR_NUMBER_RE = re.compile(r"#(\d+)\b")
 
 
 def _session_pr_number(session: Session) -> int | None:
-    """Extract a PR number from a session, if available.
+    """Return the session's explicit PR number, or None.
 
-    For ``ClaudeCodeSession``, uses the explicit ``pr_number`` field only.
-    For ``ZingSession``, parses ``#<number>`` from the title (e.g.
-    ``"PR Review — #1858 feat: ..."``) or session_id (e.g.
-    ``"pr-review-1858-..."``)
-
-    Title/ID parsing is intentionally skipped for ``ClaudeCodeSession``
-    because those sessions may carry a ``ticket_id`` that failed to match
-    a card — falling back to title parsing would incorrectly attach them
-    to an orphan PR card.
+    Both ``ZingSession`` and ``ClaudeCodeSession`` carry explicit
+    ``pr_number`` / ``pr_repo`` fields. Title/session_id regex parsing was
+    removed once those fields became canonical — without a repo, a bare PR
+    number is ambiguous across repositories and led to cross-repo card
+    collisions when two unrelated PRs shared the same number.
     """
-    if isinstance(session, ClaudeCodeSession):
-        return session.pr_number  # explicit field only, may be None
-    # ZingSession: try title first: "PR Review — #1858 ..."
-    match = _PR_NUMBER_RE.search(session.title)
-    if match:
-        return int(match.group(1))
-    # Try session_id: "pr-review-1858-..."
-    id_match = re.match(r"pr-review-(\d+)-", session.session_id)
-    if id_match:
-        return int(id_match.group(1))
+    if isinstance(session, ZingSession | ClaudeCodeSession):
+        return session.pr_number
+    return None
+
+
+def _session_pr_repo(session: Session) -> str | None:
+    """Return the session's explicit ``"owner/repo"``, or None."""
+    if isinstance(session, ZingSession | ClaudeCodeSession):
+        return session.pr_repo
     return None
 
 
@@ -296,15 +290,61 @@ def _has_unaddressed_feedback(card: KanbanCard, current_username: str) -> bool:
     return any(_pr_needs_response(card, pr, current_username) for pr in card.prs)
 
 
+_BOT_LOGINS = frozenset(
+    {
+        "github-actions",
+        "dependabot",
+        "renovate",
+        "renovate-bot",
+        "codecov",
+        "codecov-commenter",
+        "pre-commit-ci",
+    }
+)
+
+
+def _looks_like_bot(login: str) -> bool:
+    """Heuristic: GitHub bot accounts end in ``[bot]`` or match a known list."""
+    if login.endswith("[bot]"):
+        return True
+    base = login.removesuffix("[bot]").lower()
+    return base in _BOT_LOGINS or base.endswith("-bot")
+
+
+def _other_human_approved(pr: GitHubPR, current_username: str) -> bool:
+    """True if some non-bot reviewer other than *current_username* has APPROVED.
+
+    GitHub's ``latestReviews`` clears a user's prior review when the author
+    re-requests them, so any APPROVED state remaining in ``reviewer_states``
+    is a still-standing approval (not stale).
+    """
+    for login, state in pr.reviewer_states.items():
+        if state == "APPROVED" and login != current_username and not _looks_like_bot(login):
+            return True
+    return False
+
+
 def _has_pr_needing_review(card: KanbanCard, current_username: str) -> bool:
-    """Any linked PR has reviewers requested and the user is involved."""
+    """Any linked PR has reviewers requested and the user is involved.
+
+    If the current user is in ``requested_reviewers``, the card belongs in
+    needs_review regardless of overall ``reviewDecision`` — a re-request from
+    the author after a prior approval is an explicit "please look again" signal.
+
+    Exception: if another human reviewer has already approved at HEAD, the
+    review-request is treated as a courtesy ask rather than a blocker — the
+    PR's gating criteria are met without the current user's review, so the
+    card is not surfaced in needs_review.  (PR-author re-request branch is
+    unaffected; an author always wants to know reviewers are pending.)
+    """
     for pr in card.prs:
-        if (
-            pr.state == "open"
-            and pr.review_decision != "APPROVED"
-            and pr.requested_reviewers
-            and (current_username in pr.requested_reviewers or pr.author == current_username)
-        ):
+        if pr.state != "open" or not pr.requested_reviewers:
+            continue
+        if current_username in pr.requested_reviewers:
+            if _other_human_approved(pr, current_username):
+                continue
+            return True
+        if pr.author == current_username and pr.review_decision != "APPROVED":
             return True
     return False
 
@@ -345,11 +385,15 @@ def _is_recently_done(card: KanbanCard, cutoff: datetime, current_username: str 
 
 def _should_include_card(card: KanbanCard, current_username: str, cutoff: datetime) -> bool:
     """Return False when the card should be excluded from the board entirely."""
-    # Backlog tickets are deferred work — exclude regardless of any local
-    # session, audit step, or PR state.  If the user is actively working
-    # on something, the ticket should be in another state ("started",
-    # "unstarted", etc.).
-    if card.ticket is not None and card.ticket.state_type == "backlog":
+    # Backlog, triage, and duplicate tickets are deferred or resolved work —
+    # exclude regardless of any local session, audit step, or PR state.
+    # Backlog is queued-for-later by definition; triage is undecided and needs
+    # product-side attention before it belongs on an engineering board;
+    # duplicates have been resolved by merging into another ticket and should
+    # not clutter the board even if a stale session or merged PR remains.
+    # If the user is actively working on something, the ticket should be in
+    # another state ("started", "unstarted", etc.).
+    if card.ticket is not None and card.ticket.state_type in ("backlog", "triage", "duplicate"):
         return False
 
     # Orphan-PR cards where the user is neither author nor reviewer and has no session.
@@ -450,6 +494,9 @@ class CardSignals:
     ticket_started: bool
     """The linked Linear ticket has state_type 'started'."""
 
+    ticket_unstarted: bool
+    """The linked Linear ticket has state_type 'unstarted' (ready-to-pick-up todo)."""
+
 
 def _compute_signals(
     card: KanbanCard,
@@ -471,6 +518,7 @@ def _compute_signals(
         ),
         is_recently_done=_is_recently_done(card, cutoff, current_username),
         ticket_started=(card.ticket is not None and card.ticket.state_type == "started"),
+        ticket_unstarted=(card.ticket is not None and card.ticket.state_type == "unstarted"),
     )
 
 
@@ -483,7 +531,11 @@ def _classify_card(
 ) -> str | None:
     """Return the Kanban column name for *card*.
 
-    Returns ``None`` when the card should be excluded from the board.
+    Returns ``None`` when the card should be excluded from the board. Every
+    column is now keyed off a positive predicate — there is no catch-all
+    fallthrough, so cards that don't match any rule are dropped rather than
+    swept into todo. This keeps stale shapes (e.g. an old merged PR the user
+    reviewed weeks ago) from polluting todo just because no other rule fired.
 
     Decision table (first match wins):
 
@@ -497,7 +549,8 @@ def _classify_card(
     Recently done (merged / completed / reviewed)   done
     Owned + active session or open PR (no reviews)  in_progress
     Owned + ticket state is "started"               in_progress
-    Everything else                                 todo
+    Owned + ticket state is "unstarted"             todo
+    Everything else                                 ``None`` (excluded)
     =============================================  ================
 
     Pass ``trace`` (an empty list) to capture a first-match marker per
@@ -521,7 +574,8 @@ def _classify_card(
             "in_progress",
         ),
         ("owned AND ticket_started", s.owned and s.ticket_started, "in_progress"),
-        ("(default fallthrough)", True, "todo"),
+        ("owned AND ticket_unstarted", s.owned and s.ticket_unstarted, "todo"),
+        ("(default — no positive match)", True, None),
     ]
 
     chosen: str | None = None
@@ -572,17 +626,14 @@ def _assign_done_group(card: KanbanCard, current_username: str) -> str:
 def _todo_sort_key(card: KanbanCard) -> tuple:
     """Sort key for todo column.
 
-    State-type bucket: other=0 (TOP), triage=1 (BOTTOM).  Backlog tickets
-    are excluded from the board entirely (see ``_should_include_card``).
-    Within bucket: priority ascending (1=urgent first, 4=low last, 0=no priority last).
+    Priority ascending (1=urgent first, 4=low last, 0=no priority last).
+    Only ``owned`` cards with ``ticket.state_type == "unstarted"`` reach this
+    column (see ``_classify_card``), so the ticket is always present and the
+    earlier "triage bucket" disambiguation is no longer needed.
     """
-    if card.ticket is None:
-        return (0, 0)
-    bucket = 1 if card.ticket.state_type == "triage" else 0
-    priority = card.ticket.priority
-    # 0 = no priority → sort last within bucket
-    effective_priority = priority if priority != 0 else 5
-    return (bucket, effective_priority)
+    priority = card.ticket.priority if card.ticket is not None else 0
+    # 0 = no priority → sort last
+    return (priority if priority != 0 else 5,)
 
 
 def aggregate(
@@ -658,12 +709,14 @@ def aggregate(
                 orphan_prs.append(pr)
 
     # -----------------------------------------------------------------------
-    # 4. Attach sessions; skip standalone sessions (no ticket_id and no pr_number)
+    # 4. Attach sessions; defer PR-only sessions to step 5 once orphan cards exist
     # -----------------------------------------------------------------------
-    # Sessions that have a pr_number but no ticket_id will be attached to
-    # orphan PR cards (keyed as "pr-{number}") in step 5 below.
+    # Standalone sessions (no ticket_id, no pr_number/pr_repo) and sessions
+    # carrying a pr_number without a pr_repo are dropped — without a repo a
+    # bare PR number is ambiguous across repositories and cannot be safely
+    # attached. Sessions with both pr_number and pr_repo attach to whichever
+    # card (ticket or orphan) owns that PR.
     pr_sessions: list[Session] = []
-    # Index ticket cards by PR number for fallback matching.
     _card_by_pr: dict[tuple[str, int], KanbanCard] = {}
     for card in cards.values():
         for pr in card.prs:
@@ -677,25 +730,20 @@ def aggregate(
                 for step in session.steps:
                     if step.step_name in AUDIT_STEP_NAMES:
                         cards[session.ticket_id].audit_steps.append(step)
-        elif _session_pr_number(session) is not None:
-            # Try matching to a ticket card by PR number before deferring to orphan.
-            pr_num = _session_pr_number(session)
-            pr_repo = getattr(session, "pr_repo", None) or ""
-            matched_card = _card_by_pr.get((pr_repo, pr_num))  # type: ignore[arg-type]
-            # Fallback: when pr_repo is empty (e.g. ZingSession), match by number only.
-            if matched_card is None and not pr_repo:
-                for (_repo, _num), card_candidate in _card_by_pr.items():
-                    if _num == pr_num:
-                        matched_card = card_candidate
-                        break
-            if matched_card is not None:
-                matched_card.sessions.append(session)
-                if isinstance(session, ZingSession):
-                    for step in session.steps:
-                        if step.step_name in AUDIT_STEP_NAMES:
-                            matched_card.audit_steps.append(step)
-            else:
-                pr_sessions.append(session)
+            continue
+        pr_num = _session_pr_number(session)
+        pr_repo = _session_pr_repo(session)
+        if pr_num is None or not pr_repo:
+            continue  # standalone or under-specified — cannot attach
+        matched_card = _card_by_pr.get((pr_repo, pr_num))
+        if matched_card is not None:
+            matched_card.sessions.append(session)
+            if isinstance(session, ZingSession):
+                for step in session.steps:
+                    if step.step_name in AUDIT_STEP_NAMES:
+                        matched_card.audit_steps.append(step)
+        else:
+            pr_sessions.append(session)
 
     # -----------------------------------------------------------------------
     # 5. Orphan PR cards (no matching ticket)
@@ -709,19 +757,16 @@ def aggregate(
             prs=[pr],
         )
 
-    # Attach sessions that matched by PR number (from step 4).
-    # ClaudeCodeSession has pr_repo for exact matching; ZingSession falls back
-    # to matching by PR number suffix across all orphan card keys.
+    # Attach sessions deferred from step 4. Both pr_repo and pr_number are
+    # required: a bare number could collide with an unrelated repo's PR of
+    # the same number, so sessions missing pr_repo are silently dropped.
     for session in pr_sessions:
         pr_num = _session_pr_number(session)
-        pr_repo = getattr(session, "pr_repo", None) or ""
-        key = f"pr-{pr_repo}-{pr_num}" if pr_repo else None
-        if key and key in orphan_cards:
-            target_card = orphan_cards[key]
-        else:
-            # Fallback: match by PR number suffix (for ZingSessions without repo info)
-            suffix = f"-{pr_num}"
-            target_card = next((c for k, c in orphan_cards.items() if k.endswith(suffix)), None)
+        pr_repo = _session_pr_repo(session)
+        if pr_num is None or not pr_repo:
+            continue
+        key = f"pr-{pr_repo}-{pr_num}"
+        target_card = orphan_cards.get(key)
         if target_card is not None:
             target_card.sessions.append(session)
             if isinstance(session, ZingSession):

@@ -52,8 +52,19 @@ def _slugify(text: str) -> str:
 
 
 @mcp_server.tool()
-async def session_create(title: str, steps: list[str] | None = None) -> dict:
-    """Create a new session with pre-defined steps. Returns session_id and step IDs."""
+async def session_create(
+    title: str,
+    steps: list[str] | None = None,
+    pr_number: int | None = None,
+    pr_repo: str | None = None,
+) -> dict:
+    """Create a new session with pre-defined steps. Returns session_id and step IDs.
+
+    For PR review sessions, pass both ``pr_number`` and ``pr_repo`` (as
+    ``"owner/repo"``) so the Command Center can attach the session to the
+    correct PR card. Passing only ``pr_number`` is not enough — PR numbers
+    are not unique across repositories.
+    """
     sm = _get_session_manager()
     step_names = steps if steps is not None else _DEFAULT_STEPS
     slug = _slugify(title)
@@ -63,6 +74,8 @@ async def session_create(title: str, steps: list[str] | None = None) -> dict:
             session_id=session_id,
             title=title,
             steps=step_names,
+            pr_number=pr_number,
+            pr_repo=pr_repo,
         )
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}

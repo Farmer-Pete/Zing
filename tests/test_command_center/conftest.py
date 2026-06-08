@@ -101,6 +101,8 @@ def make_session(
     session_id: str = "sess-1",
     title: str = "Session 1",
     ticket_id: str | None = None,
+    pr_number: int | None = None,
+    pr_repo: str | None = None,
     steps: list[WorkflowStep] | None = None,
 ) -> Session:
     """Build a :class:`Session` with sensible defaults for tests."""
@@ -108,6 +110,8 @@ def make_session(
         session_id=session_id,
         title=title,
         ticket_id=ticket_id,
+        pr_number=pr_number,
+        pr_repo=pr_repo,
         steps=steps or [],
     )
 

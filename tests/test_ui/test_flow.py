@@ -57,10 +57,14 @@ class TestFlowGoldenPath:
         # Palette open button is visible (clickable ⌘K entry point)
         expect(page.locator("#flow-palette-open-btn")).to_be_visible(timeout=3000)
 
-        # Step 3 — toolbar is present
+        # Step 3 — toolbar is present.  The seeded fixture is a findings step,
+        # so the toolbar shows Prev / Skip / Done (the orange ``flow-toolbar-next``
+        # only appears for terminal/attach steps).
         expect(page.locator(".flow-toolbar")).to_be_visible(timeout=5000)
         expect(page.locator(".flow-toolbar-board")).to_contain_text("← Board", timeout=3000)
-        expect(page.locator(".flow-toolbar-next")).to_be_visible(timeout=3000)
+        expect(page.locator(".flow-toolbar-skip")).to_be_visible(timeout=3000)
+        expect(page.locator(".flow-toolbar-done")).to_be_visible(timeout=3000)
+        expect(page.locator(".flow-toolbar-next")).to_have_count(0)
 
         # Step 4 — main body fragment is present
         body = page.locator("#flow-body")
@@ -288,8 +292,9 @@ class TestFlowGoldenPath:
     # ``test_submit_and_next_navigates_to_next_item``, and the
     # ``TestFlowSignalHoisting`` class with ``test_flow_responses_survive_across_modes``
     # used to live here.  All were removed as the Flow toolbar evolved past the
-    # ``btn-primary`` "Submit & Next ▸" button — the toolbar now exposes Prev,
-    # Next, and ✓ Done (see ``flow_toolbar.html``).  The underlying behaviour is
+    # ``btn-primary`` "Submit & Next ▸" button — the toolbar now exposes Prev
+    # plus either Next (terminal/attach steps) or Skip + ✓ Done (findings /
+    # questions steps); see ``flow_toolbar.html``.  The underlying behaviour is
     # more reliably tested at lower layers:
     # - The Submit-&-Next navigation case is exercised at the route level by
     #   ``TestFlowNext.test_submit_and_next_signals_envelope_navigates`` in
