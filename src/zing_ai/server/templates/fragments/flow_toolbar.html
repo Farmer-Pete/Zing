@@ -21,14 +21,19 @@
   <div class="flow-toolbar-right">
     <button type="button" class="flow-toolbar-btn"{% if not active %} disabled{% endif %}
             data-on:click="document.getElementById('flow-action-prev').click()">← Prev</button>
-    <button type="button" class="flow-toolbar-btn flow-toolbar-next"{% if not active %} disabled{% endif %}
-            data-on:click="document.getElementById('flow-action-next').click()">
-      Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% else %} ▸{% endif %}
-    </button>
     {% if active and active.action_type in ('findings', 'questions') %}
+    <button type="button" class="flow-toolbar-btn flow-toolbar-skip"
+            data-on:click="document.getElementById('flow-action-next').click()">
+      Skip
+    </button>
     <button type="button" class="flow-toolbar-btn flow-toolbar-done"
             data-on:click="document.getElementById('flow-action-next').click()">
       ✓ Done
+    </button>
+    {% else %}
+    <button type="button" class="flow-toolbar-btn flow-toolbar-next"{% if not active %} disabled{% endif %}
+            data-on:click="document.getElementById('flow-action-next').click()">
+      Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% else %} ▸{% endif %}
     </button>
     {% endif %}
   </div>

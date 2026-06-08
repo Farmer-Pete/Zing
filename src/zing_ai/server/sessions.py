@@ -161,6 +161,8 @@ class SessionManager:
         zing_file: str | None = None,
         steps: list[str] | None = None,
         *,
+        pr_number: int | None = None,
+        pr_repo: str | None = None,
         created_at: datetime | None = None,
     ) -> ZingSession:
         """Create a new review session.
@@ -170,6 +172,10 @@ class SessionManager:
             title: Human-readable title for the session.
             zing_file: Absolute path to the zing file, or None if no zing doc.
             steps: Optional list of step names to pre-create as PENDING steps.
+            pr_number: GitHub PR number this session targets, or None.
+            pr_repo: GitHub repo as ``"owner/repo"``, or None. Both must be set
+                for the session to attach to a PR-keyed card; without ``pr_repo``
+                the PR number alone is ambiguous across repositories.
             created_at: Optional override for the session's ``created_at`` /
                 pre-created steps' ``created_at``. Tests use this to seed
                 deterministically-ordered fixtures without relying on
@@ -195,12 +201,16 @@ class SessionManager:
                 logger.warning("Rejected zing_file (not markdown): %s", zing_file)
                 msg = f"zing_file must be a markdown file (.md), got: {zing_file}"
                 raise ValueError(msg)
+        kwargs: dict[str, Any] = {
+            "session_id": session_id,
+            "title": title,
+            "zing_file": zing_file,
+            "pr_number": pr_number,
+            "pr_repo": pr_repo,
+        }
         if created_at is not None:
-            session = ZingSession(
-                session_id=session_id, title=title, zing_file=zing_file, created_at=created_at
-            )
-        else:
-            session = ZingSession(session_id=session_id, title=title, zing_file=zing_file)
+            kwargs["created_at"] = created_at
+        session = ZingSession(**kwargs)
         if steps:
             for i, step_name in enumerate(steps):
                 if created_at is not None:

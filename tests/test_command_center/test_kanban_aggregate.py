@@ -155,6 +155,87 @@ class TestAggregateGrouping(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# PR-session attachment by (pr_repo, pr_number)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionPRAttachment(unittest.TestCase):
+    """ZingSessions only attach to the PR matching both pr_number AND pr_repo.
+
+    Regression test: PR numbers are not unique across repositories, so a
+    session for ``frontend-v1#175`` must never attach to
+    ``turngate-integrations#175`` (and vice versa). Without explicit
+    pr_repo the session does not attach at all.
+    """
+
+    def test_session_attaches_to_matching_repo_orphan_pr(self) -> None:
+        pr = _make_pr(number=175, head_ref="feature/no-ticket", repo="org/frontend")
+        session = _make_session(
+            session_id="pr-review-175-feature-abc123",
+            ticket_id=None,
+            pr_number=175,
+            pr_repo="org/frontend",
+        )
+        view = _agg(prs=[pr], sessions=[session])
+        cards = _all_cards(view)
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(len(cards[0].sessions), 1)
+        self.assertEqual(cards[0].sessions[0].session_id, "pr-review-175-feature-abc123")
+
+    def test_session_does_not_cross_attach_to_different_repo_with_same_pr_number(
+        self,
+    ) -> None:
+        """A session for ``org/frontend#175`` must NOT attach to ``org/backend#175``."""
+        pr = _make_pr(number=175, head_ref="feature/no-ticket", repo="org/backend")
+        session = _make_session(
+            session_id="pr-review-175-frontend-stuff",
+            ticket_id=None,
+            pr_number=175,
+            pr_repo="org/frontend",
+        )
+        view = _agg(prs=[pr], sessions=[session])
+        cards = _all_cards(view)
+        # The orphan PR card exists with NO sessions attached, and because
+        # the user isn't involved with that PR (default username 'octocat')
+        # the card is filtered out entirely.
+        for card in cards:
+            self.assertEqual(card.sessions, [])
+
+    def test_legacy_session_without_pr_repo_does_not_attach(self) -> None:
+        """ZingSessions with pr_number but no pr_repo are dropped, not cross-attached.
+
+        Pre-fix, these would attach to any orphan PR card whose key ended
+        in ``-{pr_number}`` — leaking sessions across repos.
+        """
+        pr = _make_pr(number=175, head_ref="feature/no-ticket", repo="org/backend")
+        session = _make_session(
+            session_id="pr-review-175-old-session",
+            ticket_id=None,
+            pr_number=175,
+            pr_repo=None,  # legacy: no repo recorded
+        )
+        view = _agg(prs=[pr], sessions=[session])
+        for card in _all_cards(view):
+            self.assertEqual(card.sessions, [])
+
+    def test_session_attaches_to_ticket_card_pr_with_matching_repo(self) -> None:
+        """When a ticket card carries the PR, the session still requires repo match."""
+        issue = _make_issue(identifier="BAK-1")
+        pr = _make_pr(number=42, head_ref="BAK-1/feature", repo="org/backend")
+        session = _make_session(
+            session_id="pr-review-42-bak-1",
+            ticket_id=None,
+            pr_number=42,
+            pr_repo="org/backend",
+        )
+        view = _agg(issues=[issue], prs=[pr], sessions=[session])
+        cards = _all_cards(view)
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0].key, "BAK-1")
+        self.assertEqual(len(cards[0].sessions), 1)
+
+
+# ---------------------------------------------------------------------------
 # Column classification
 # ---------------------------------------------------------------------------
 
@@ -215,6 +296,75 @@ class TestColumnClassification(unittest.TestCase):
         view = _agg(issues=[issue], prs=[pr])
         self.assertEqual(len(view.needs_review), 1)
 
+    def test_needs_review_when_re_requested_after_prior_approval(self) -> None:
+        """Re-request after approval surfaces the card in needs_review.
+
+        Scenario: PR was approved by reviewer A, author then re-requests
+        review from the current user (B).  GitHub keeps ``reviewDecision``
+        as ``APPROVED`` even though B is now in ``requested_reviewers`` and
+        has not submitted a review.  The card must land in ``needs_review``
+        rather than vanishing — being explicitly re-requested is a "please
+        look again" signal that overrides the overall approval status.
+        """
+        pr = _make_pr(
+            number=295,
+            head_ref="some-branch",
+            state="open",
+            author="someone-else",
+            requested_reviewers=["octocat"],
+            reviewers=[],
+            review_decision="APPROVED",
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr])
+        self.assertEqual(len(view.needs_review), 1)
+        self.assertEqual(len(view.done), 0)
+
+    def test_not_needs_review_when_another_human_already_approved(self) -> None:
+        """User is in requested_reviewers but a co-reviewer has already approved.
+
+        Scenario (PR turngate/frontend-v2#327): author requests two reviewers
+        (the current user + one other), a third human approves first, the
+        author leaves both requests in place because the approver isn't a
+        codeowner.  Branch protection's "1 approving review" rule is already
+        satisfied by the third human; the request from the current user is a
+        courtesy ask, not a blocker.  Card must NOT land in needs_review.
+        """
+        pr = _make_pr(
+            number=327,
+            head_ref="some-branch",
+            state="open",
+            author="some-author",
+            requested_reviewers=["octocat", "another-reviewer"],
+            reviewers=["kyle"],
+            reviewer_states={"kyle": "APPROVED"},
+            review_decision=None,
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr])
+        self.assertEqual(len(view.needs_review), 0)
+
+    def test_needs_review_when_only_bot_approved(self) -> None:
+        """A bot approval does not demote a real review request.
+
+        The "other human approved" exception must skip bot accounts so that
+        a Renovate / dependabot auto-approval doesn't suppress a legitimate
+        human review request from the current user.
+        """
+        pr = _make_pr(
+            number=42,
+            head_ref="renovate/some-dep",
+            state="open",
+            author="some-author",
+            requested_reviewers=["octocat"],
+            reviewers=["renovate[bot]"],
+            reviewer_states={"renovate[bot]": "APPROVED"},
+            review_decision=None,
+            updated_at=RECENT,
+        )
+        view = _agg(prs=[pr])
+        self.assertEqual(len(view.needs_review), 1)
+
     def test_done_when_ticket_completed_recently(self) -> None:
         """Ticket with state_type='completed' updated within 7 days → done."""
         issue = _make_issue(
@@ -226,17 +376,22 @@ class TestColumnClassification(unittest.TestCase):
         self.assertEqual(len(view.done), 1)
         self.assertEqual(len(view.todo), 0)
 
-    def test_todo_when_ticket_completed_but_old(self) -> None:
-        """Ticket with state_type='completed' updated > 7 days ago → todo (not done)."""
+    def test_excluded_when_ticket_completed_but_old(self) -> None:
+        """Ticket with state_type='completed' updated > 7 days ago → excluded.
+
+        No positive rule fires for an old completed ticket (not unstarted,
+        not started, not recently_done), so it falls out of the board
+        entirely rather than being swept into todo.
+        """
         issue = _make_issue(
             identifier="BAK-1",
             state_type="completed",
             updated_at=OLD,
         )
         view = _agg(issues=[issue])
-        # Old completed ticket falls out of done window → goes to todo
         self.assertEqual(len(view.done), 0)
-        self.assertEqual(len(view.todo), 1)
+        self.assertEqual(len(view.todo), 0)
+        self.assertEqual(len(_all_cards(view)), 0)
 
     def test_done_when_pr_merged_recently(self) -> None:
         """A card with a recently merged PR → done."""
@@ -514,30 +669,29 @@ class TestColumnPriorityRule(unittest.TestCase):
 
 
 class TestTodoSortOrder(unittest.TestCase):
-    """To Do column: state_type bucket (other=0, triage=1), then priority asc.
+    """To Do column: only unstarted tickets land here, sorted by priority asc.
 
-    Backlog tickets are excluded from the board entirely; see
-    ``TestBacklogExclusion`` for that behaviour.
+    Triage and backlog tickets are excluded from the board entirely; see
+    ``TestBacklogExclusion`` and ``TestTriageExclusion`` for those behaviours.
     """
 
-    def test_other_bucket_before_triage(self) -> None:
-        """'other' state_type (bucket 0) sorts before 'triage' (bucket 1)."""
+    def test_triage_ticket_is_excluded_not_sorted(self) -> None:
+        """Triage tickets are not in todo at all — they're excluded."""
         unstarted = _make_issue(identifier="BAK-1", state_type="unstarted", priority=0)
         triage = _make_issue(identifier="BAK-2", state_type="triage", priority=0)
         view = _agg(issues=[unstarted, triage])
-        self.assertEqual(view.todo[0].key, "BAK-1")
-        self.assertEqual(view.todo[1].key, "BAK-2")
+        self.assertEqual([c.key for c in view.todo], ["BAK-1"])
 
-    def test_priority_within_bucket_urgent_first(self) -> None:
-        """Within same bucket, priority=1 (urgent) sorts before priority=4 (low)."""
+    def test_priority_urgent_first(self) -> None:
+        """priority=1 (urgent) sorts before priority=4 (low)."""
         urgent = _make_issue(identifier="BAK-1", state_type="unstarted", priority=1)
         low = _make_issue(identifier="BAK-2", state_type="unstarted", priority=4)
         view = _agg(issues=[urgent, low])
         self.assertEqual(view.todo[0].key, "BAK-1")  # urgent first
         self.assertEqual(view.todo[1].key, "BAK-2")
 
-    def test_no_priority_sorts_last_within_bucket(self) -> None:
-        """priority=0 (no priority) sorts after priority=4 (low) within same bucket."""
+    def test_no_priority_sorts_last(self) -> None:
+        """priority=0 (no priority) sorts after priority=4 (low)."""
         no_priority = _make_issue(identifier="BAK-1", state_type="unstarted", priority=0)
         low = _make_issue(identifier="BAK-2", state_type="unstarted", priority=4)
         view = _agg(issues=[no_priority, low])
@@ -571,6 +725,110 @@ class TestBacklogExclusion(unittest.TestCase):
         pr = _make_pr(number=1, state="open", head_ref="bak-1-feature")
         backlog = _make_issue(identifier="BAK-1", state_type="backlog")
         view = _agg(issues=[backlog], prs=[pr])
+        self.assertEqual(_all_cards(view), [])
+
+
+# ---------------------------------------------------------------------------
+# Triage exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestTriageExclusion(unittest.TestCase):
+    """Triage tickets are excluded from the board regardless of attached state.
+
+    Triage means the ticket is undecided — it still needs product-side
+    attention before it belongs on an engineering board. Symmetric to the
+    backlog exclusion.
+    """
+
+    def test_plain_triage_ticket_excluded(self) -> None:
+        triage = _make_issue(identifier="BAK-1", state_type="triage")
+        view = _agg(issues=[triage])
+        self.assertEqual(_all_cards(view), [])
+
+    def test_triage_ticket_with_open_pr_excluded(self) -> None:
+        """An open PR linked to a triage ticket does not pull the card onto the board."""
+        pr = _make_pr(number=1, state="open", head_ref="bak-1-feature")
+        triage = _make_issue(identifier="BAK-1", state_type="triage")
+        view = _agg(issues=[triage], prs=[pr])
+        self.assertEqual(_all_cards(view), [])
+
+
+# ---------------------------------------------------------------------------
+# Duplicate exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateExclusion(unittest.TestCase):
+    """Duplicate tickets are excluded from the board regardless of attached state.
+
+    Duplicates are resolved by merging into another ticket. A stale session or
+    a merged PR linked to the duplicate must not bring it back onto the board.
+    """
+
+    def test_plain_duplicate_ticket_excluded(self) -> None:
+        dup = _make_issue(identifier="BAK-1", state_type="duplicate")
+        view = _agg(issues=[dup])
+        self.assertEqual(_all_cards(view), [])
+
+    def test_duplicate_ticket_with_active_session_excluded(self) -> None:
+        """Stale started session on a duplicate ticket does not bring it back."""
+        active_step = _make_workflow_step(step_name="build", state=SessionState.STARTED)
+        session = _make_session(session_id="s1", ticket_id="BAK-1", steps=[active_step])
+        dup = _make_issue(identifier="BAK-1", state_type="duplicate")
+        view = _agg(issues=[dup], sessions=[session])
+        self.assertEqual(_all_cards(view), [])
+
+    def test_duplicate_ticket_with_open_pr_excluded(self) -> None:
+        """An open PR linked to a duplicate ticket does not pull the card onto the board."""
+        pr = _make_pr(number=1, state="open", head_ref="bak-1-feature")
+        dup = _make_issue(identifier="BAK-1", state_type="duplicate")
+        view = _agg(issues=[dup], prs=[pr])
+        self.assertEqual(_all_cards(view), [])
+
+
+# ---------------------------------------------------------------------------
+# Catch-all exclusion (no positive column rule fires)
+# ---------------------------------------------------------------------------
+
+
+class TestNoPositiveMatchExcluded(unittest.TestCase):
+    """Cards that don't match any positive column rule are dropped (no fallthrough).
+
+    Regression: previously these landed in todo via a default fallthrough,
+    polluting the column with stale shapes.
+    """
+
+    def test_orphan_merged_pr_user_reviewed_outside_window_excluded(self) -> None:
+        """The PR #1938 case: merged orphan PR user reviewed, merged_at > 7 days ago."""
+        pr = _make_pr(
+            number=1938,
+            head_ref="kyle/feature",
+            state="merged",
+            author="someone-else",
+            reviewers=["octocat"],
+            reviewer_states={"octocat": "DISMISSED"},
+            review_decision="REVIEW_REQUIRED",
+            updated_at=OLD,
+            merged_at=OLD,
+        )
+        view = _agg(prs=[], recent_prs=[pr], current_username="octocat")
+        self.assertEqual(_all_cards(view), [])
+
+    def test_orphan_closed_not_merged_pr_excluded(self) -> None:
+        """A closed-not-merged orphan PR authored by the user is excluded.
+
+        Not in todo (no ticket), not in any other column. Used to fall
+        through to todo as a catch-all.
+        """
+        pr = _make_pr(
+            number=42,
+            head_ref="abandoned",
+            state="closed",
+            author="octocat",
+            updated_at=OLD,
+        )
+        view = _agg(prs=[pr], current_username="octocat")
         self.assertEqual(_all_cards(view), [])
 
 
@@ -772,14 +1030,16 @@ class TestShouldIncludeCardReviewers(unittest.TestCase):
 
 
 class TestSessionPrNumberLinking(unittest.TestCase):
-    """Sessions should link to orphan PR cards by PR number."""
+    """Sessions link to orphan PR cards by explicit (pr_repo, pr_number)."""
 
-    def test_zing_session_linked_by_title(self) -> None:
-        """ZingSession with '#42' in title attaches to orphan PR card."""
+    def test_zing_session_linked_by_explicit_pr_fields(self) -> None:
+        """ZingSession with explicit pr_number + pr_repo attaches to orphan PR card."""
         pr = _make_pr(number=42, head_ref="feat/thing", author="octocat")
         session = _make_session(
             session_id="pr-review-42-feat-thing-abc123",
             title="PR Review \u2014 #42 feat: thing",
+            pr_number=42,
+            pr_repo="org/repo",
         )
         view = _agg(prs=[pr], sessions=[session], current_username="octocat")
         cards_with_sessions = [c for c in _all_cards(view) if c.sessions]

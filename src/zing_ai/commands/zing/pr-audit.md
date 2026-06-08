@@ -23,9 +23,11 @@ gh pr view {number} --json number,headRefName,baseRefName,title,url,body
 
 Store the PR number, head branch, base branch, title, body/description, and URL for later use. Read the PR body carefully — it contains the author's intent, context, and any testing notes that inform the review.
 
+Also extract the `owner/repo` from the URL — it is the path segment between `https://github.com/` and `/pull/{number}` (e.g., for `https://github.com/turngate/backend-v1/pull/42` the repo is `turngate/backend-v1`). Store it for the next step.
+
 ### Session setup
 
-After resolving the PR, call `session_create(title="PR Review — #{number} {title}", steps=["code-review"])` to get a new session ID and step IDs.
+After resolving the PR, call `session_create(title="PR Review — #{number} {title}", steps=["code-review"], pr_number={number}, pr_repo="{owner/repo}")` to get a new session ID and step IDs. Passing both `pr_number` and `pr_repo` is required so the Command Center attaches the session to the correct PR card — PR numbers are not unique across repositories.
 
 {% if git.workflow_mode == "worktree" or git.workflow_mode == "ask" -%}
 If the zing file's frontmatter contains a `worktree_path:` entry, `cd` to that path before running any subsequent `git` or `gh` commands.

@@ -338,6 +338,8 @@ class ZingSession(SessionBase):
 
     session_type: Literal["zing"] = "zing"
     zing_file: str | None = None
+    pr_number: int | None = None
+    pr_repo: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     notifications: list[Notification] = Field(default_factory=list)
 
