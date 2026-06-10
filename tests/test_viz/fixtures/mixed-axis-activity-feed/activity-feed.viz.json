@@ -79,7 +79,7 @@
           "id": "activity",
           "shape": "struct",
           "kind": "struct",
-          "side": "diverged",
+          "side": "unchanged",
           "label": "Activity",
           "fields": [
             {

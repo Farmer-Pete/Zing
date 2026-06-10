@@ -177,7 +177,7 @@ def test_non_struct_shape_with_fields_is_rejected(mixed_graph: dict) -> None:
     """A rect / diamond / etc. node must not carry fields[]."""
     g = copy.deepcopy(mixed_graph)
     rect_idx = next(i for i, n in enumerate(g["steps"][0]["nodes"]) if n["shape"] == "rect")
-    g["steps"][0]["nodes"][rect_idx]["fields"] = [{"name": "stowaway", "side": "shared"}]
+    g["steps"][0]["nodes"][rect_idx]["fields"] = [{"name": "stowaway", "side": "unchanged"}]
     issues = validate(g)
     assert issues
 
@@ -231,8 +231,8 @@ def test_non_diverged_field_with_today_is_rejected(mixed_graph: dict) -> None:
     """today/proposed are only valid when side=diverged."""
     g = copy.deepcopy(mixed_graph)
     payload = next(n for n in g["steps"][0]["nodes"] if n["id"] == "event-payload")
-    shared_field = next(f for f in payload["fields"] if f["side"] == "shared")
-    shared_field["today"] = "stowaway"
+    unchanged_field = next(f for f in payload["fields"] if f["side"] == "unchanged")
+    unchanged_field["today"] = "stowaway"
     issues = validate(g)
     assert issues
 

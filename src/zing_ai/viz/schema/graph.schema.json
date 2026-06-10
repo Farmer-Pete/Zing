@@ -107,7 +107,7 @@
         },
         "side": {
           "enum": ["unchanged", "added", "removed", "diverged"],
-          "description": "Per-node change mark. unchanged = present on both base and PR; nothing is changing about this element. added = new in this change. removed = present on base, going away in this change. diverged = same site, identity preserved, semantics shifted in place (only valid with shape=diverged or shape=struct). For shape=struct, the wrapper side describes what's happening to the struct as a whole — added/removed/unchanged when wholly new/gone/stable; diverged when the struct name is preserved but its internal fields are substantially churned."
+          "description": "Per-node change mark. unchanged = present on both base and PR; nothing is changing about this element. added = new in this change. removed = present on base, going away in this change. diverged = same site, identity preserved, semantics shifted in place — only valid with shape=diverged. For shape=struct, the wrapper side must be unchanged/added/removed (wholly stable/new/gone) — per-field sides on fields[] do the within-struct change-marking. diverged at the struct wrapper level is rejected."
         },
         "label": {
           "type": "string",
@@ -160,7 +160,10 @@
         {
           "if": { "properties": { "shape": { "const": "struct" } }, "required": ["shape"] },
           "then": {
-            "required": ["fields"]
+            "required": ["fields"],
+            "properties": {
+              "side": { "not": { "const": "diverged" } }
+            }
           }
         }
       ]
