@@ -11,14 +11,33 @@
       {% if active.action_type == 'findings' %}<b>{{ active_findings | length }} findings</b>
       {% elif active.action_type == 'questions' %}<b>{{ active_findings | length }} questions</b>
       {% elif active.action_type == 'attach' %}<b>terminal</b>
+      {% elif active.action_type == 'viz_preview' %}<b>viz preview</b>
       {% else %}<b>item</b>{% endif %}
       {% if active.ticket_id %}<span class="flow-toolbar-sep">·</span><span class="flow-toolbar-ticket">{{ active.ticket_id }}</span>{% endif %}
-      {% if active.step_name %}<span class="flow-toolbar-step-pill">{{ active.step_name }}</span>{% endif %}
+      {% if active.step_name and active.action_type != 'viz_preview' %}<span class="flow-toolbar-step-pill">{{ active.step_name }}</span>{% endif %}
     {% else %}
       Queue is empty <span class="flow-toolbar-sep">·</span> Claude will surface new items here
     {% endif %}
   </div>
   <div class="flow-toolbar-right">
+    {% if active and active.action_type == 'viz_preview' %}
+    {# Viz preview gate: Prev/Next swap out for Reject/Skip/Accept. Skip uses
+       the existing flow-action-next path — preview stays queued and the user
+       moves to the next item without resolving. Reject and Accept resolve
+       the preview with the comment payload. #}
+    <button type="button" class="flow-toolbar-btn flow-toolbar-reject"
+            data-on:click="document.getElementById('flow-action-viz-reject').click()">
+      Reject
+    </button>
+    <button type="button" class="flow-toolbar-btn flow-toolbar-skip"
+            data-on:click="document.getElementById('flow-action-next').click()">
+      Skip
+    </button>
+    <button type="button" class="flow-toolbar-btn flow-toolbar-done"
+            data-on:click="document.getElementById('flow-action-viz-accept').click()">
+      ✓ Accept
+    </button>
+    {% else %}
     <button type="button" class="flow-toolbar-btn"{% if not active %} disabled{% endif %}
             data-on:click="document.getElementById('flow-action-prev').click()">← Prev</button>
     {% if active and active.action_type in ('findings', 'questions') %}
@@ -35,6 +54,7 @@
             data-on:click="document.getElementById('flow-action-next').click()">
       Next{% if next_ticket_id %} ▸ {{ next_ticket_id }}{% else %} ▸{% endif %}
     </button>
+    {% endif %}
     {% endif %}
   </div>
 </footer>

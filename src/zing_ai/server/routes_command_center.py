@@ -1582,3 +1582,79 @@ async def flow_prev(payload: dict[str, Any], request: Request):  # noqa: ANN201
             yield ev
 
     return _stream()
+
+
+async def _flow_resolve_viz_preview(
+    request: Request,
+    payload: dict[str, Any],
+    decision: str,
+) -> AsyncIterator[Any]:
+    """Shared body for /flow/viz-preview/accept and /reject.
+
+    Resolves the pending viz preview with the user's decision + comments,
+    unblocks any ``viz_preview_wait`` caller, then navigates forward in the
+    Flow queue. The card is removed from the queue on the next rebuild
+    because ``pending_viz_preview`` is now ``None``.
+    """
+    manager = request.app.state.session_manager
+    session_id = payload.get("session_id") or ""
+    comments = (payload.get("comments") or "").strip()
+    try:
+        manager.resolve_viz_preview(session_id, decision, comments)
+    except (KeyError, ValueError) as exc:
+        logger.warning(
+            "flow_viz_preview_resolve_failed",
+            extra={
+                "event": "flow_viz_preview_resolve_failed",
+                "session_id": session_id,
+                "decision": decision,
+                "error": str(exc),
+            },
+        )
+        yield _sse_toast(f"{decision.capitalize()} failed: {exc}", "err")
+        return
+
+    queue = build_attention_queue(manager.list_sessions(), datetime.now(UTC))
+    target_item = next_in_queue(queue, session_id, direction="next")
+    if target_item is None:
+        url = "/command-center/flow?cursor=end"
+    else:
+        url = (
+            f"/command-center/flow"
+            f"?session_id={target_item.session_id}"
+            f"&step_id={target_item.step_id or ''}"
+        )
+    logger.info(
+        "flow_viz_preview_resolved",
+        extra={
+            "event": "flow_viz_preview_resolved",
+            "session_id": session_id,
+            "decision": decision,
+            "comments_len": len(comments),
+        },
+    )
+    yield _navigate(url)
+
+
+@router.post("/command-center/flow/viz-preview/accept")
+@datastar_response
+async def flow_viz_preview_accept(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Accept the pending viz preview with optional comments, advance the queue."""
+
+    async def _stream():  # noqa: ANN202
+        async for ev in _flow_resolve_viz_preview(request, payload, decision="accept"):
+            yield ev
+
+    return _stream()
+
+
+@router.post("/command-center/flow/viz-preview/reject")
+@datastar_response
+async def flow_viz_preview_reject(payload: dict[str, Any], request: Request):  # noqa: ANN201
+    """Reject the pending viz preview with optional comments, advance the queue."""
+
+    async def _stream():  # noqa: ANN202
+        async for ev in _flow_resolve_viz_preview(request, payload, decision="reject"):
+            yield ev
+
+    return _stream()

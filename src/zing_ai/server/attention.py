@@ -14,7 +14,7 @@ from zing_ai.server.models import ClaudeCodeSession, Session, SessionState, Zing
 class AttentionItem:
     """An item requiring user attention in the Command Center."""
 
-    action_type: Literal["findings", "attach", "questions"]
+    action_type: Literal["findings", "attach", "questions", "viz_preview"]
     session_id: str
     ticket_id: str | None
     title: str
@@ -49,10 +49,30 @@ def build_attention_queue(sessions: list[Session], now: datetime) -> list[Attent
 
     for session in sessions:
         if isinstance(session, ZingSession):
+            preview = session.pending_viz_preview
+            if preview is not None:
+                wait_seconds = int((now - _ensure_utc(preview.requested_at)).total_seconds())
+                items.append(
+                    AttentionItem(
+                        action_type="viz_preview",
+                        session_id=session.session_id,
+                        ticket_id=session.ticket_id,
+                        title=session.title,
+                        description=preview.gate_label,
+                        step_name=preview.gate_label,
+                        finding_count=0,
+                        wait_seconds=wait_seconds,
+                        card_key=session.session_id,
+                        pinned=False,
+                        has_urgency=True,
+                        step_id=f"viz_preview:{session.session_id}",
+                        created_at=_ensure_utc(preview.requested_at),
+                    )
+                )
             for step in session.steps:
                 if step.state == SessionState.READY:
                     wait_seconds = int((now - _ensure_utc(step.created_at)).total_seconds())
-                    action_type: Literal["findings", "attach", "questions"] = (
+                    action_type: Literal["findings", "attach", "questions", "viz_preview"] = (
                         "questions" if step.step_name == "plan" else "findings"
                     )
                     finding_count = len(step.findings)

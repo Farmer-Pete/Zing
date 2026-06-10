@@ -313,6 +313,29 @@ class WorkflowStep(BaseModel):
         return data
 
 
+class VizPreview(BaseModel):
+    """A pending viz+markdown preview awaiting human accept/reject in the Flow.
+
+    Set by ``viz_preview_request`` MCP tool; cleared on accept/reject. Only
+    one pending preview per session at a time — re-requests replace any
+    earlier pending preview and resolve its waiter as a reject so the skill
+    can recover.
+    """
+
+    viz_path: str
+    md_path: str
+    gate_label: str
+    iteration: int = 1
+    requested_at: datetime = Field(default_factory=datetime.now)
+
+
+class VizPreviewDecision(BaseModel):
+    """Result of a viz preview gate, returned by ``viz_preview_wait``."""
+
+    decision: Literal["accept", "reject"]
+    comments: str = ""
+
+
 class SessionBase(BaseModel):
     """Shared base for all session types."""
 
@@ -342,6 +365,7 @@ class ZingSession(SessionBase):
     pr_repo: str | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     notifications: list[Notification] = Field(default_factory=list)
+    pending_viz_preview: VizPreview | None = None
 
     @model_validator(mode="before")
     @classmethod

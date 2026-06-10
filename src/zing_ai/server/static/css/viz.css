@@ -326,18 +326,18 @@ body.page-plan { max-width: none; padding: 0 1rem; }
     stroke-width: 1;
 }
 
-.viz-shape--side-existing .viz-shape__outline {
+.viz-shape--side-removed .viz-shape__outline {
     fill: var(--orange-subtle);
     stroke: var(--orange-border);
     stroke-dasharray: 4 3;
 }
 
-.viz-shape--side-proposed .viz-shape__outline {
+.viz-shape--side-added .viz-shape__outline {
     fill: var(--white);
     stroke: var(--orange);
 }
 
-.viz-shape--side-shared .viz-shape__outline {
+.viz-shape--side-unchanged .viz-shape__outline {
     fill: var(--white);
     stroke: var(--gray-400);
 }
@@ -350,8 +350,8 @@ body.page-plan { max-width: none; padding: 0 1rem; }
 /* ===== struct shape (data axis) =====
  * A struct node renders as a code-block: header band (type name + optional
  * kind discriminator badge) plus one row per field. Per-row side coding
- * (shared/existing/proposed/diverged) reuses the same palette tokens as the
- * existing logic-axis side coding, applied to the row background.
+ * (unchanged/added/removed/diverged) reuses the same palette tokens as the
+ * logic-axis side coding, applied to the row background.
  */
 .viz-struct__outline {
     fill: var(--white);
@@ -385,11 +385,11 @@ body.page-plan { max-width: none; padding: 0 1rem; }
     stroke: none;
 }
 
-.viz-struct__row--shared { fill: var(--white); }
-.viz-struct__row--existing {
+.viz-struct__row--unchanged { fill: var(--white); }
+.viz-struct__row--removed {
     fill: var(--orange-subtle);
 }
-.viz-struct__row--proposed {
+.viz-struct__row--added {
     fill: var(--orange-subtle);
 }
 .viz-struct__row--diverged {
@@ -402,8 +402,8 @@ body.page-plan { max-width: none; padding: 0 1rem; }
 }
 
 /* Struct-wide side coding (the wrapper itself can be added/removed). */
-.viz-shape--side-proposed .viz-struct__outline { stroke: var(--orange); }
-.viz-shape--side-existing .viz-struct__outline {
+.viz-shape--side-added .viz-struct__outline { stroke: var(--orange); }
+.viz-shape--side-removed .viz-struct__outline {
     stroke: var(--orange-border);
     stroke-dasharray: 4 3;
 }

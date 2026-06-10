@@ -4,6 +4,13 @@
 
 {% block title %}Flow — Command Center{% endblock %}
 
+{% block extra_head %}
+  {# Loaded for viz_preview action_type. Cost is small when no preview is
+     active; keeps the loader logic out of conditional body markup. #}
+  <link rel="stylesheet" href="/static/css/viz.css?v={{ asset_version() }}">
+  <script src="/static/js/viz-gestures.js?v={{ asset_version() }}"></script>
+{% endblock %}
+
 {% block command_center_toggle %}
 {% include 'fragments/_flow_board_toggle.html' %}
 {% endblock %}
@@ -15,7 +22,8 @@
        "step_id": "{{ active.step_id if active else '' }}",
        "activeSessionId": "{{ active.session_id if active else '' }}",
        "paletteOpen": false,
-       "paletteQuery": ""
+       "paletteQuery": "",
+       "vizPreviewComment": ""
      }'
      data-on:keydown__window="(evt.key === 'Escape' && ($paletteOpen = false)) || (evt.metaKey && evt.key === 'j' && !evt.shiftKey && (document.getElementById('flow-action-next').click(), evt.preventDefault())) || (evt.metaKey && evt.shiftKey && evt.key === 'J' && (document.getElementById('flow-action-prev').click(), evt.preventDefault())) || (evt.metaKey && evt.key === 'k' && ($paletteOpen = !$paletteOpen, evt.preventDefault())) || (evt.metaKey && evt.key === 'b' && (window.location = '/command-center')) || (evt.metaKey && evt.key === 'p' && (document.getElementById('flow-action-pin').click(), evt.preventDefault()))"
      data-init="@get('/command-center/flow/events?session_id={{ active.session_id if active else '' }}', {filterSignals: {include: /^$/}})">
@@ -28,6 +36,10 @@
           data-on:click="@post('/command-center/flow/prev', {payload: {session_id: $activeSessionId}})">Prev</button>
   <button id="flow-action-pin" type="button" hidden
           data-on:click="@post('/command-center/flow/pin', {payload: {session_id: $activeSessionId}})">Pin</button>
+  <button id="flow-action-viz-accept" type="button" hidden
+          data-on:click="@post('/command-center/flow/viz-preview/accept', {payload: {session_id: $activeSessionId, comments: $vizPreviewComment}})">Accept</button>
+  <button id="flow-action-viz-reject" type="button" hidden
+          data-on:click="@post('/command-center/flow/viz-preview/reject', {payload: {session_id: $activeSessionId, comments: $vizPreviewComment}})">Reject</button>
   {% include 'fragments/flow_progress_strip.html' %}
   <main id="flow-body" class="flow-body">
     {% if active is none %}
@@ -38,6 +50,8 @@
       {% include 'fragments/flow_body_findings.html' %}
     {% elif active.action_type == 'questions' %}
       {% include 'fragments/flow_body_question.html' %}
+    {% elif active.action_type == 'viz_preview' %}
+      {% include 'fragments/flow_body_viz_preview.html' %}
     {% endif %}
   </main>
   {% include 'fragments/flow_toolbar.html' %}

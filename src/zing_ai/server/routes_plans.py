@@ -58,6 +58,33 @@ _LAYOUT_CACHE: OrderedDict[tuple[str, int], dict[str, Any]] = OrderedDict()
 _LAYOUT_CACHE_MAX = 10
 
 
+def _resolve_plan_artifacts(session_id: str, sm: Any) -> tuple[str, dict[str, Any], Path]:
+    """Return ``(markdown_text, viz_graph, viz_path)`` preferring a pending preview.
+
+    When the session has a ``pending_viz_preview``, read the artifacts at the
+    preview's explicit paths — that's the viz the user is currently looking at
+    in the Flow drawer, and it may not match ``session.zing_file``'s sibling
+    rule. Without this, focus/release clicks inside the preview hit the wrong
+    viz (or 404) and the click silently does nothing.
+
+    Falls back to ``load_plan_for_session`` for the regular plan-detail page.
+    """
+    sess = sm.get_session(session_id)
+    if sess is not None and getattr(sess, "pending_viz_preview", None) is not None:
+        preview = sess.pending_viz_preview
+        viz_path = Path(preview.viz_path)
+        md_path = Path(preview.md_path)
+        if viz_path.exists() and md_path.exists():
+            import json as _json
+
+            return (
+                md_path.read_text(encoding="utf-8"),
+                _json.loads(viz_path.read_text(encoding="utf-8")),
+                viz_path,
+            )
+    return load_plan_for_session(session_id, sm)
+
+
 def _laid_out_graph(viz_path: Path, graph: dict[str, Any]) -> dict[str, Any]:
     """Return *graph* with per-step Graphviz layout applied; LRU-cached by mtime.
 
@@ -260,7 +287,7 @@ async def plan_focus(session_id: str, payload: dict[str, Any], request: Request)
     async def _stream():  # noqa: ANN202
         try:
             sm = request.app.state.session_manager
-            _, graph, viz_path = load_plan_for_session(session_id, sm)
+            _, graph, viz_path = _resolve_plan_artifacts(session_id, sm)
             laid_out = _laid_out_graph(viz_path, graph)
             focused_step = int(payload["step"])
             viewport_w = float(payload.get("viewport", {}).get("w") or 1600)
@@ -312,7 +339,7 @@ async def plan_release(session_id: str, payload: dict[str, Any], request: Reques
     async def _stream():  # noqa: ANN202
         try:
             sm = request.app.state.session_manager
-            _, graph, viz_path = load_plan_for_session(session_id, sm)
+            _, graph, viz_path = _resolve_plan_artifacts(session_id, sm)
             laid_out = _laid_out_graph(viz_path, graph)
             positions = focus_layout_mod.default_grid(laid_out)
             context = _build_render_context(laid_out, positions, focused_step=None)

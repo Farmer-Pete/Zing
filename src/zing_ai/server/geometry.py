@@ -197,7 +197,7 @@ def struct_paths(node: dict[str, Any]) -> StructLayout:
         ry = y + header_h + i * row_h
         rows.append(
             {
-                "side": f.get("side", "shared"),
+                "side": f.get("side", "unchanged"),
                 "rect": {"x": x + 1, "y": ry, "width": w - 2, "height": row_h},
                 "text": _struct_row_text(f),
                 "text_pos": {"x": x + 12, "y": ry + row_h / 2 + 4},

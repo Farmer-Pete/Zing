@@ -138,73 +138,15 @@ Do not write a `.viz.json` and skip the rest of this step. The Design pill won't
 
 ### 4. Fetch the schema
 
-If you got here, the PR is topology-changing. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Default `{port}` to `9876` if you don't know it. Read every property's `description` field — they tell you exactly how to populate each field, including cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step", node ids are kebab-case, step ids are snake_case).
+If you got here, the PR is topology-changing. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Default `{port}` to `9876` if you don't know it. Read every property's `description` field — they carry cross-reference rules that aren't structurally enforceable (e.g. "from_node MUST resolve to a node id in the matching step", node ids are kebab-case, step ids are snake_case).
 
 ### 5. Build the graph from the diff
 
-Sketch the topology with one step per coherent region the PR touches — a module, a request path, a job pipeline, a schema-and-its-consumers. Within each step, nodes describe what's there and edges describe local flow.
+Read the shared viz-authoring reference at `~/.claude/commands/zing/_shared/viz-authoring.md` using the Read tool. It covers side values, logic shape mapping, struct + kind discriminator, cross-flow kinds, a worked example, and the coverage check.
 
-Every node picks one `side` from the diff, regardless of whether it represents logic or data:
+Sketch the topology with one step per coherent region the PR touches — a module, a request path, a job pipeline, a schema-and-its-consumers. Within each step, nodes describe what's there and edges describe local flow. Follow viz-authoring for the rest.
 
-- **`shared`** — present on both base and PR; unchanged. Context that helps the reviewer understand where the changes sit (e.g. an existing module the PR's new code calls into).
-- **`existing`** — present on base, removed by the PR. The node represents what's going away.
-- **`proposed`** — added by the PR, not on base. The node represents what's coming in.
-- **`diverged`** — same site, identity preserved, semantics shifted in place. Populate `today_label` and `proposed_label`. Reserve for in-place changes where the site keeps its identity but the semantics shift (e.g. `on_delete: CASCADE → SET_NULL`, `rate-limit: 100/min → 10/min`, `field type: TEXT → JSONB`).
-
-#### Logic & behaviour
-
-For nodes that represent something that *happens* — operations, decisions, boundaries — pick the shape from how it runs:
-
-- Operations → `rect`
-- Decisions / branches → `diamond`
-- Input/output boundaries → `parallelogram`
-- Pre-existing module referenced (not the target of the change) → `hexagon`
-- Same-site behavioural split → `diverged`
-
-If a step contains only `shared` nodes, it's context — include it sparingly. A step entirely `existing` (a module being removed) or entirely `proposed` (one being added) is fine and expected.
-
-#### Data shapes
-
-For nodes that represent something that *exists* — a named-field structure whose internal slots are changing — use `shape: "struct"` with the `kind` discriminator:
-
-- **`kind: "struct"`** (default) — records, classes, tables, interfaces, request/response bodies, Pydantic/dataclass/Rust-struct/TS-interface. Anything with named fields that define what it *is*.
-- **`kind: "union"`** — sum types, enums, tagged unions. Slots are variants (a slot without a `type` is fine — e.g. `"click"`, `"scroll"`, `"submit"`).
-- **`kind: "collections"`** — modules/services/classes whose interesting members are containers (`List`, `Dict`, `Queue`, `Set`, `Deque`). Slots are what the scope *holds*, not what defines it.
-
-Each slot inside `fields[]` carries its own `side` (and `today`/`proposed` when diverged). A struct with mixed slot changes — one added field, one removed, one type-changed — captures three independent change marks at field granularity. The wrapper `side` describes what's happening to the struct as a whole (`proposed` if it's wholly new, `shared` if its identity is unchanged), and may NOT be `diverged` — per-field sides do the change-marking.
-
-**When NOT to use `struct`:** if a data type's change is at the outer level (added/removed wholesale, type swapped — `List[X] → Set[X]`, `Optional[User] → User`, `Dict → CaseInsensitiveDict`), reach for `rect` + `side` (or `diverged` for in-place type swaps). Reserve `struct` for cases where multiple internal slots are changing independently.
-
-#### Cross-step wiring
-
-Use `cross_flows` whenever one step's output is consumed by another step's input. Each carries a `kind` (`data`, `control`, `schema`, `queue`, `utility`, `observability`) that colours the line. A logic step producing a struct that downstream consumes is the canonical cross-axis pattern — `kind: "data"` if the wire carries values, `kind: "schema"` if it carries the shape definition itself.
-
-#### Worked example — both axes in one viz
-
-A PR adds a per-user activity feed:
-
-- **Step `ingest`** — logic-flavoured.
-  - `parse-event` (`rect`, `proposed`) — the new parser.
-  - `validate` (`diamond`, `shared`) — existing decision point.
-  - `event-payload` (`struct`, `kind: "struct"`, `shared`) — the message shape the parser produces; one diverged field (`actor_id`: `int → UUID`), one proposed field (`source: str`).
-- **Step `feed-store`** — data-flavoured.
-  - `Activity` (`struct`, `kind: "struct"`, `shared`): `id` (`shared`, note `PK`), `kind` (`diverged` → `ActivityKind`), `payload` (`proposed`), `legacy_blob` (`existing`).
-  - `ActivityKind` (`struct`, `kind: "union"`, `proposed`): variants `click`, `scroll`, `submit`.
-  - `ActivityCache` (`struct`, `kind: "collections"`, `proposed`): `recent: Deque[Activity]`, `pending_writes: List[Activity]`.
-- **Cross-flows** — `event-payload` in `ingest` → `Activity` in `feed-store`, `kind: "data"`. `ActivityKind` in `feed-store` → `parse-event` in `ingest`, `kind: "schema"`.
-
-Each step anchors one axis; the cross-flows show how they couple.
-
-#### Coverage check (mandatory before writing the file)
-
-Before you validate, walk the PR's changed-file list (`gh pr view {N} --json files --jq '.files[].path'`) and the PR description side-by-side with the viz. Confirm:
-
-- **Every changed file is representable** — as a node, as a node label, or as an edge/cross-flow label. A changed file with no presence in the viz means a missing node or a step that should be split.
-- **Every new behaviour, new data model, new failure path, and removed module mentioned in the PR description appears** as either a node or a struct field. If the description says "added X, removed Y, changed Z's behaviour" and you can't point at the X / Y / Z in the viz, the viz is incomplete.
-- **Every exception branch or outcome branch in new code is a `diamond`-rooted sub-DAG** — not a single `rect`. Exception paths are first-class topology; reviewers need to see them at a glance.
-- **A single `rect` that summarises 50+ lines of new logic is almost always too coarse.** If a new function has multiple internal decision points, multiple early returns, or multiple side-effects, give them their own nodes. Aim for ~5–8 nodes per step; if a step has more than ~10 nodes, consider splitting; if it has 1–2 nodes, it's probably context for a neighbouring step.
-
-If the coverage check surfaces gaps, go back and add nodes / split steps before writing. Don't write a viz you can't defend as covering everything the PR touches.
+**Run the coverage check against the PR specifically** — walk the PR's changed-file list (`gh pr view {N} --json files --jq '.files[].path'`) and the PR description side-by-side with the viz. Every changed file should be representable as a node, a node label, or an edge/cross-flow label; every "added X / removed Y / changed Z's behaviour" claim in the description should point at concrete X / Y / Z in the viz.
 
 ### 6. Write the file
 
@@ -223,6 +165,16 @@ Fix and re-validate until clean. Do not call `step_stop` — pr-audit's `code-re
 ### 8. What the user will see
 
 The Design pill auto-lights on the PR's kanban card (the existing `_find_plans_for_card` machinery checks for the viz sibling). Clicking the pill opens the plan-detail viewer: the **Visualization** tab (default) shows the side-coded viz at full width; the **Markdown** tab holds the PR description (the skeleton you wrote in sub-step 1). The reviewer can use this picture as context during the rest of the flow — especially the batch-triage UI in `check_and_review`.
+</step>
+
+<step name="viz_preview_gate_topology">
+
+If `build_topology_viz` skipped the viz (PR was structurally trivial — no `.viz.json` was written), **skip this gate entirely** and proceed to `big_picture`.
+
+Otherwise, follow the procedure in `~/.claude/commands/zing/_shared/viz-preview-gate.md` with `gate_label="Topology review"`. Pass the absolute paths to the viz JSON and the skeleton markdown that you wrote in `build_topology_viz`. The user is reviewing the topology you proposed before you spend the time on the deep dive — small tweaks to node naming or split/merge of steps land here, before findings work begins.
+
+After the gate resolves, continue to `big_picture`.
+
 </step>
 
 <step name="big_picture">

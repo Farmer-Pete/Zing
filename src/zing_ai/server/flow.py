@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import Any
 
 from zing_ai.server.attention import AttentionItem
 from zing_ai.server.models import ClaudeCodeSession, ZingSession
 from zing_ai.server.sessions import SessionManager
+
+logger = logging.getLogger("zing_ai.server.flow")
 
 # ---------------------------------------------------------------------------
 # Queue helpers
@@ -86,6 +91,7 @@ _BODY_FRAGMENTS: dict[str, str] = {
     "findings": "fragments/flow_body_findings.html",
     "questions": "fragments/flow_body_question.html",
     "attach": "fragments/flow_body_attach.html",
+    "viz_preview": "fragments/flow_body_viz_preview.html",
 }
 
 
@@ -99,6 +105,49 @@ def _body_fragment_for(active: AttentionItem | None) -> str:
 # ---------------------------------------------------------------------------
 # Template context builder
 # ---------------------------------------------------------------------------
+
+
+def _load_viz_preview_context(session: ZingSession) -> dict[str, Any]:
+    """Read the pending viz+md off disk and lay them out for rendering.
+
+    Returns the keys the ``flow_body_viz_preview.html`` template expects:
+    ``rendered_markdown``, ``steps``, ``cross_flows``, ``kinds``, ``focused_step``,
+    ``default_pan_y``, ``default_scale``, ``viz_preview`` (the VizPreview model).
+    Returns an empty dict on any IO/parse error after logging — the body
+    fragment renders a fallback when these keys are missing.
+    """
+    preview = session.pending_viz_preview
+    if preview is None:
+        return {}
+
+    # Import locally to keep flow.py's module-load cheap (graphviz layout is heavy).
+    from zing_ai.server import focus_layout as focus_layout_mod
+    from zing_ai.server.routes_plans import _build_render_context, _laid_out_graph
+    from zing_ai.server.templates import render_markdown
+
+    viz_path = Path(preview.viz_path)
+    md_path = Path(preview.md_path)
+    try:
+        graph = json.loads(viz_path.read_text(encoding="utf-8"))
+        md_text = md_path.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load viz preview for %s: %s", session.session_id, exc)
+        return {"viz_preview": preview}
+
+    laid_out = _laid_out_graph(viz_path, graph)
+    positions = focus_layout_mod.default_grid(laid_out)
+    context = _build_render_context(laid_out, positions, focused_step=None)
+    return {
+        **context,
+        "rendered_markdown": render_markdown(md_text),
+        "default_pan_y": focus_layout_mod.DEFAULT_PAN_Y,
+        "default_scale": focus_layout_mod.DEFAULT_SCALE,
+        "viz_preview": preview,
+        # _viewer.html and _card.html build their @post URLs from {{ session_id }}.
+        # Without this, card clicks hit "/command-center//plan/focus" and silently
+        # do nothing — symptom: clicking a step does not zoom in the preview drawer.
+        "session_id": session.session_id,
+    }
 
 
 def build_flow_context(
@@ -125,9 +174,14 @@ def build_flow_context(
     active_session: ClaudeCodeSession | None = None
     active_findings: list[Any] = []
     initial_responses: dict[str, str] = {}
+    viz_preview_context: dict[str, Any] = {}
 
     if active is not None:
-        if active.action_type == "attach":
+        if active.action_type == "viz_preview":
+            session = manager.get_session(active.session_id)
+            if isinstance(session, ZingSession):
+                viz_preview_context = _load_viz_preview_context(session)
+        elif active.action_type == "attach":
             session = manager.get_session(active.session_id)
             if isinstance(session, ClaudeCodeSession):
                 active_session = session
@@ -195,4 +249,5 @@ def build_flow_context(
         "active_findings": active_findings,
         "initial_responses": initial_responses,
         "next_ticket_id": next_ticket_id,
+        **viz_preview_context,
     }

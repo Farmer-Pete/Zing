@@ -2,9 +2,15 @@
   "$schema": "https://zing.example/schemas/graph.json",
   "title": "Activity feed (mixed-axis worked example)",
   "kinds": {
-    "data": {"label": "data flow"},
-    "schema": {"label": "schema dependency"},
-    "control": {"label": "control"}
+    "data": {
+      "label": "data flow"
+    },
+    "schema": {
+      "label": "schema dependency"
+    },
+    "control": {
+      "label": "control"
+    }
   },
   "steps": [
     {
@@ -13,25 +19,55 @@
       "title": "Ingest events",
       "concern": "Parse and validate incoming activity events.",
       "nodes": [
-        {"id": "parse-event", "shape": "rect", "side": "proposed", "label": "parse_event(raw)"},
-        {"id": "validate", "shape": "diamond", "side": "shared", "label": "schema valid?"},
+        {
+          "id": "parse-event",
+          "shape": "rect",
+          "side": "added",
+          "label": "parse_event(raw)"
+        },
+        {
+          "id": "validate",
+          "shape": "diamond",
+          "side": "unchanged",
+          "label": "schema valid?"
+        },
         {
           "id": "event-payload",
           "shape": "struct",
           "kind": "struct",
-          "side": "shared",
+          "side": "unchanged",
           "label": "EventPayload",
           "fields": [
-            {"name": "actor_id", "side": "diverged", "today": "int", "proposed": "UUID"},
-            {"name": "source", "type": "str", "side": "proposed"},
-            {"name": "timestamp", "type": "datetime", "side": "shared"}
+            {
+              "name": "actor_id",
+              "side": "diverged",
+              "today": "int",
+              "proposed": "UUID"
+            },
+            {
+              "name": "source",
+              "type": "str",
+              "side": "added"
+            },
+            {
+              "name": "timestamp",
+              "type": "datetime",
+              "side": "unchanged"
+            }
           ]
         }
       ],
       "edges": [
-        {"from": "parse-event", "to": "validate"},
-        {"from": "validate", "to": "event-payload"}
-      ]
+        {
+          "from": "parse-event",
+          "to": "validate"
+        },
+        {
+          "from": "validate",
+          "to": "event-payload"
+        }
+      ],
+      "side": "diverged"
     },
     {
       "step": 2,
@@ -43,55 +79,101 @@
           "id": "activity",
           "shape": "struct",
           "kind": "struct",
-          "side": "shared",
+          "side": "diverged",
           "label": "Activity",
           "fields": [
-            {"name": "id", "type": "UUID", "side": "shared", "note": "PK"},
-            {"name": "kind", "side": "diverged", "today": "TEXT", "proposed": "ActivityKind"},
-            {"name": "payload", "type": "JSONB", "side": "proposed"},
-            {"name": "legacy_blob", "type": "bytes", "side": "existing"}
+            {
+              "name": "id",
+              "type": "UUID",
+              "side": "unchanged",
+              "note": "PK"
+            },
+            {
+              "name": "kind",
+              "side": "diverged",
+              "today": "TEXT",
+              "proposed": "ActivityKind"
+            },
+            {
+              "name": "payload",
+              "type": "JSONB",
+              "side": "added"
+            },
+            {
+              "name": "legacy_blob",
+              "type": "bytes",
+              "side": "removed"
+            }
           ]
         },
         {
           "id": "activity-kind",
           "shape": "struct",
           "kind": "union",
-          "side": "proposed",
+          "side": "added",
           "label": "ActivityKind",
           "fields": [
-            {"name": "click", "side": "proposed"},
-            {"name": "scroll", "side": "proposed"},
-            {"name": "submit", "side": "proposed"}
+            {
+              "name": "click",
+              "side": "added"
+            },
+            {
+              "name": "scroll",
+              "side": "added"
+            },
+            {
+              "name": "submit",
+              "side": "added"
+            }
           ]
         },
         {
           "id": "activity-cache",
           "shape": "struct",
           "kind": "collections",
-          "side": "proposed",
+          "side": "added",
           "label": "ActivityCache",
           "fields": [
-            {"name": "recent", "type": "Deque[Activity]", "side": "proposed"},
-            {"name": "pending_writes", "type": "List[Activity]", "side": "proposed"}
+            {
+              "name": "recent",
+              "type": "Deque[Activity]",
+              "side": "added"
+            },
+            {
+              "name": "pending_writes",
+              "type": "List[Activity]",
+              "side": "added"
+            }
           ]
         }
       ],
       "edges": [
-        {"from": "activity", "to": "activity-kind"},
-        {"from": "activity-cache", "to": "activity"}
-      ]
+        {
+          "from": "activity",
+          "to": "activity-kind"
+        },
+        {
+          "from": "activity-cache",
+          "to": "activity"
+        }
+      ],
+      "side": "added"
     }
   ],
   "cross_flows": [
     {
-      "from_step": 1, "from_node": "event-payload",
-      "to_step": 2, "to_node": "activity",
+      "from_step": 1,
+      "from_node": "event-payload",
+      "to_step": 2,
+      "to_node": "activity",
       "label": "EventPayload → Activity",
       "kind": "data"
     },
     {
-      "from_step": 2, "from_node": "activity-kind",
-      "to_step": 1, "to_node": "parse-event",
+      "from_step": 2,
+      "from_node": "activity-kind",
+      "to_step": 1,
+      "to_node": "parse-event",
       "label": "variants known at parse",
       "kind": "schema"
     }

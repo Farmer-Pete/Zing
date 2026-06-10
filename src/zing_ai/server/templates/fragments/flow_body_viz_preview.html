@@ -1,0 +1,55 @@
+{# Pending viz+markdown preview awaiting human accept/reject.
+   Mirrors plan_detail.html's tabbed Visualization/Markdown viewer.
+   The comment box binds to $vizPreviewComment (declared on flow.html); the
+   toolbar's visible Accept/Reject buttons click the hidden flow-action-viz-*
+   buttons, which @post to the resolve endpoints with the comment payload. #}
+<div class="flow-body-viz-preview" data-signals='{"vizPreviewTab": "viz"}'>
+  {% if viz_preview %}
+    <header class="viz-preview-header">
+      <span class="viz-preview-gate">{{ viz_preview.gate_label }}</span>
+      {% if viz_preview.iteration > 1 %}
+        <span class="viz-preview-iteration">Round {{ viz_preview.iteration }}</span>
+      {% endif %}
+    </header>
+  {% endif %}
+
+  {% if steps %}
+    <div class="plan-tabs viz-preview-tabs" role="tablist">
+      <button class="plan-tab" type="button" role="tab"
+              data-on:click="$vizPreviewTab = 'viz'"
+              data-class:active="$vizPreviewTab === 'viz'"
+              data-attr:aria-selected="$vizPreviewTab === 'viz'">Visualization</button>
+      <button class="plan-tab" type="button" role="tab"
+              data-on:click="$vizPreviewTab = 'markdown'"
+              data-class:active="$vizPreviewTab === 'markdown'"
+              data-attr:aria-selected="$vizPreviewTab === 'markdown'">Markdown</button>
+    </div>
+    <section class="viz-preview-viz plan-viz" data-show="$vizPreviewTab === 'viz'">
+      {% include "viz/_viewer.html" %}
+    </section>
+    <aside class="viz-preview-md plan-md" data-show="$vizPreviewTab === 'markdown'">
+      {{ rendered_markdown | safe }}
+    </aside>
+  {% else %}
+    <div class="viz-preview-fallback">
+      <p>Could not load viz preview artifacts.</p>
+      {% if viz_preview %}
+        <p class="viz-preview-fallback-paths">
+          <code>{{ viz_preview.viz_path }}</code><br>
+          <code>{{ viz_preview.md_path }}</code>
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <label class="viz-preview-comments">
+    <span class="viz-preview-comments-label">
+      Comments
+      <span class="viz-preview-comments-hint">— sent back to Claude with your decision</span>
+    </span>
+    <textarea data-bind="vizPreviewComment"
+              class="viz-preview-comments-input"
+              rows="3"
+              placeholder="What should change? (Accept applies these tweaks; Reject opens discussion in Claude Code.)"></textarea>
+  </label>
+</div>

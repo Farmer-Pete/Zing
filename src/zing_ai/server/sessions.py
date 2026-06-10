@@ -32,7 +32,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -49,6 +49,8 @@ from zing_ai.server.models import (
     Session,
     SessionState,
     UserResponse,
+    VizPreview,
+    VizPreviewDecision,
     WorkflowStep,
     ZingSession,
 )
@@ -85,6 +87,8 @@ class SessionManager:
         self._steps_by_id: dict[str, tuple[str, int]] = {}
         self._listeners: list[Callable[[str, str], None]] = []
         self._auto_completed_steps: set[str] = set()
+        self._viz_preview_events: dict[str, asyncio.Event] = {}
+        self._viz_preview_decisions: dict[str, VizPreviewDecision] = {}
         self._load_existing_sessions()
 
     def add_listener(self, callback: Callable[[str, str], None]) -> None:
@@ -849,6 +853,136 @@ class SessionManager:
             auto_completed=was_auto_completed,
         )
 
+    # ------------------------------------------------------------------
+    # Viz preview gate (Flow-based human approval of audit/plan artifacts)
+    # ------------------------------------------------------------------
+
+    def set_viz_preview(
+        self,
+        session_id: str,
+        viz_path: str,
+        md_path: str,
+        gate_label: str,
+    ) -> VizPreview:
+        """Set or replace the pending viz preview for a ZingSession.
+
+        If a pending preview already exists, its waiter (if any) is resolved
+        as a reject with a "superseded" note so the calling skill can recover
+        instead of hanging. The new preview's iteration counter is incremented.
+
+        Raises:
+            KeyError: session does not exist.
+            ValueError: session is not a ZingSession.
+        """
+        session = self._get_session_or_raise(session_id)
+        if not isinstance(session, ZingSession):
+            msg = f"Session {session_id!r} is not a ZingSession"
+            raise ValueError(msg)
+
+        iteration = 1
+        if session.pending_viz_preview is not None:
+            iteration = session.pending_viz_preview.iteration + 1
+            self._resolve_viz_preview_event(
+                session_id,
+                VizPreviewDecision(
+                    decision="reject",
+                    comments="(superseded by a new viz_preview_request)",
+                ),
+            )
+
+        preview = VizPreview(
+            viz_path=viz_path,
+            md_path=md_path,
+            gate_label=gate_label,
+            iteration=iteration,
+        )
+        session.pending_viz_preview = preview
+        self._persist(session)
+        self._notify("viz_preview_requested", session_id)
+        logger.info(
+            "Viz preview requested for session %s (iteration=%d, gate=%s)",
+            session_id,
+            iteration,
+            gate_label,
+        )
+        return preview
+
+    def resolve_viz_preview(
+        self,
+        session_id: str,
+        decision: Literal["accept", "reject"],
+        comments: str = "",
+    ) -> VizPreviewDecision:
+        """Resolve the pending viz preview with a user decision.
+
+        Clears ``pending_viz_preview`` on the session, stores the decision
+        for the blocked ``wait_for_viz_preview`` caller, and sets the event.
+
+        Raises:
+            KeyError: session does not exist.
+            ValueError: session is not a ZingSession, or has no pending preview.
+        """
+        session = self._get_session_or_raise(session_id)
+        if not isinstance(session, ZingSession):
+            msg = f"Session {session_id!r} is not a ZingSession"
+            raise ValueError(msg)
+        if session.pending_viz_preview is None:
+            msg = f"Session {session_id!r} has no pending viz preview"
+            raise ValueError(msg)
+
+        result = VizPreviewDecision(decision=decision, comments=comments)
+        session.pending_viz_preview = None
+        self._persist(session)
+        self._resolve_viz_preview_event(session_id, result)
+        self._notify("viz_preview_resolved", session_id)
+        logger.info(
+            "Viz preview for session %s resolved: %s (comments_len=%d)",
+            session_id,
+            decision,
+            len(comments),
+        )
+        return result
+
+    def _resolve_viz_preview_event(
+        self,
+        session_id: str,
+        decision: VizPreviewDecision,
+    ) -> None:
+        """Store the decision and unblock the wait_for_viz_preview caller."""
+        self._viz_preview_decisions[session_id] = decision
+        event = self._viz_preview_events.get(session_id)
+        if event:
+            event.set()
+
+    async def wait_for_viz_preview(self, session_id: str) -> VizPreviewDecision:
+        """Block until the pending viz preview is resolved, return the decision.
+
+        If a decision is already pending (e.g. the user resolved before the
+        skill started waiting), returns it immediately.
+
+        Raises:
+            KeyError: session does not exist, or session was cleaned up while
+                waiting.
+        """
+        self._get_session_or_raise(session_id)
+        if session_id in self._viz_preview_decisions:
+            return self._viz_preview_decisions.pop(session_id)
+
+        if session_id not in self._viz_preview_events:
+            self._viz_preview_events[session_id] = asyncio.Event()
+        await self._viz_preview_events[session_id].wait()
+        self._viz_preview_events[session_id].clear()
+
+        decision = self._viz_preview_decisions.pop(session_id, None)
+        if decision is None:
+            # No decision → session was cleaned up while waiting (cleanup_session
+            # sets the event to unblock). Raise KeyError so the MCP caller can
+            # detect session loss and surface it.
+            self._get_session_or_raise(session_id)
+            msg = f"viz preview wait unblocked without a decision for session {session_id!r}"
+            raise KeyError(msg)
+        return decision
+
     def get_session(self, session_id: str) -> Session | None:
         """Return a session by ID, or None if not found."""
         return self._sessions.get(session_id)
@@ -871,6 +1005,10 @@ class SessionManager:
                 event = self._events.pop(key, None)
                 if event:
                     event.set()  # unblock any wait_for_review callers
+        viz_event = self._viz_preview_events.pop(session_id, None)
+        if viz_event:
+            viz_event.set()  # unblock any wait_for_viz_preview callers
+        self._viz_preview_decisions.pop(session_id, None)
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()

@@ -2018,3 +2018,119 @@ a.strip-ci-dot[href] { cursor: pointer; }
     border-top: 1px solid var(--navy-mid);
     text-align: center;
 }
+
+/* ---- Viz preview gate (Flow drawer body + Reject button) ----------------- */
+
+.flow-toolbar-reject {
+    background: rgba(232, 68, 48, 0.08);
+    border-color: rgba(232, 68, 48, 0.3);
+    color: var(--red-orange);
+}
+
+.flow-toolbar-reject:hover:not(:disabled) {
+    background: rgba(232, 68, 48, 0.15);
+    border-color: var(--red-orange);
+    color: var(--red-orange);
+}
+
+.flow-body-viz-preview {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    gap: 0.75rem;
+}
+
+.viz-preview-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--gray-200);
+}
+
+.viz-preview-gate {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--navy);
+}
+
+.viz-preview-iteration {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    background: var(--orange-subtle);
+    color: var(--orange-hover);
+    border: 1px solid var(--orange-border);
+}
+
+.viz-preview-tabs {
+    flex-shrink: 0;
+}
+
+.viz-preview-viz {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+}
+
+.viz-preview-md {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 0.75rem 1rem;
+}
+
+.viz-preview-fallback {
+    flex: 1 1 auto;
+    padding: 1rem;
+    color: var(--gray-700);
+}
+
+.viz-preview-fallback-paths code {
+    font-size: 0.78rem;
+    color: var(--gray-500);
+}
+
+.viz-preview-comments {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.5rem 0.75rem 0.25rem;
+    border-top: 1px solid var(--gray-200);
+}
+
+.viz-preview-comments-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--gray-700);
+}
+
+.viz-preview-comments-hint {
+    font-weight: 400;
+    color: var(--gray-500);
+}
+
+.viz-preview-comments-input {
+    width: 100%;
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--gray-200);
+    border-radius: 5px;
+    resize: vertical;
+    min-height: 3rem;
+    background: #fff;
+    color: var(--gray-700);
+}
+
+.viz-preview-comments-input:focus {
+    outline: none;
+    border-color: var(--orange);
+    box-shadow: 0 0 0 2px var(--orange-glow);
+}

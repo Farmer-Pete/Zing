@@ -233,16 +233,25 @@ If you (or any earlier step in this audit) made changes to `.zing/<slug>.md` —
 
 1. Use `WebFetch` to GET `http://localhost:{port}/viz/schema.json` from the running Zing server. Resolve `{port}` from the session URL in the zing file's frontmatter, or default to `9876`. Always refetch.
 
-2. Re-derive the topology from the current state of `.zing/<slug>.md` and rewrite `.zing/<slug>.viz.json` end-to-end (not in place). Map content to shapes as described in the schema's `description` fields:
-   - **Logic & behaviour** — `rect` (operation), `diamond` (decision), `parallelogram` (boundary), `hexagon` (pre-existing referenced module), `diverged` (same-site behavioural split).
-   - **Data shapes** — `struct` with `kind` ∈ {`struct`, `union`, `collections`} for named-field shapes whose internal slots change independently. Per-slot `side` on `fields[]`; whole-type changes stay on `rect` + `diverged`.
-   - **Cross-step flow** — `cross_flows[]` with `kind` ∈ {`data`, `control`, `schema`, `queue`, `utility`, `observability`}.
+2. Read the shared viz-authoring reference at `~/.claude/commands/zing/_shared/viz-authoring.md` using the Read tool — it covers side values, logic shape mapping, struct + kind discriminator, cross-flow kinds, and the coverage check.
 
-   **Coverage check**: after rewriting, walk the markdown and confirm every numbered step, every new data model / function / class / module, every new decision point or exception branch, and every same-site behavioural change appears in the viz as a node, struct field, or edge label. Exception/outcome branches each get their own `diamond`-rooted sub-DAG, not a single `rect`. Aim for ~5–8 nodes per step; split steps with >10 nodes. Anything in the markdown that isn't representable in the viz is a coverage gap — add nodes or split steps before calling `step_stop`.
+3. Re-derive the topology from the current state of `.zing/<slug>.md` and rewrite `.zing/<slug>.viz.json` end-to-end (not in place). Follow viz-authoring; the audit-specific note is that the **coverage source is the post-build `.zing/<slug>.md`** — every numbered step, every new data model / function / class / module, every new decision point or behavioural change captured in the markdown must surface in the viz before you call `step_stop`.
 
-3. Call `mcp__zing-ai__step_stop(session_id, build_audit_step_id)` where `build_audit_step_id` is `steps["build-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and retry until it returns `{"status": "ready"}`.
+4. Call `mcp__zing-ai__step_stop(session_id, build_audit_step_id)` where `build_audit_step_id` is `steps["build-audit"]` from the zing file's frontmatter. If validation fails, fix the JSON and retry until it returns `{"status": "ready"}`.
 
 If `.zing/<slug>.md` was not edited during this audit, you may still call `step_stop` — the validator checks the current state of the JSON, not whether the markdown changed. Skip this step entirely only if you are confident no markdown edits occurred.
+</step>
+
+<step name="viz_preview_gate">
+
+If `sync_viz_graph` did not rewrite the viz (no markdown edits were made during this audit), **skip this gate entirely** and proceed to `create_pr`.
+
+Otherwise, follow the procedure in `~/.claude/commands/zing/_shared/viz-preview-gate.md` with `gate_label="Build audit review"`. Pass the absolute paths to `.zing/<slug>.viz.json` and `.zing/<slug>.md`. The user is reviewing the post-build plan + viz before a PR gets opened — this is the last chance to amend the plan/topology to reflect what was actually built.
+
+If the user requests changes via Reject and the discussion concludes with edits to the plan markdown that affect topology, **also update the viz** before re-submitting for another review round so the two stay in sync.
+
+After the gate resolves, continue to `create_pr`.
+
 </step>
 
 <step name="create_pr">

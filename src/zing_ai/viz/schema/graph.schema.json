@@ -51,7 +51,7 @@
     "step": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["step", "id", "title", "nodes", "edges"],
+      "required": ["step", "id", "title", "side", "nodes", "edges"],
       "description": "One numbered step in the plan. Renders as a single card in the viewer with its own internal DAG.",
       "properties": {
         "step": {
@@ -68,6 +68,10 @@
           "type": "string",
           "minLength": 1,
           "description": "Short human-readable step title shown in the card header."
+        },
+        "side": {
+          "enum": ["unchanged", "added", "removed", "diverged"],
+          "description": "Step-level change marker. unchanged = this region exists in both base and PR; its identity and external interface are stable; internal changes are described by per-node sides (the most common value). added = entire step's concept (subsystem, pipeline, sub-flow) didn't exist before this change — renders a 'NEW' pill. removed = entire step's concept is going away — renders a 'REMOVED' pill plus dashed border. diverged = step concept preserved but internals substantially reworked — use ONLY when more than half the step's nodes carry non-unchanged sides AND the step's external interface is roughly unchanged; renders a 'REWORKED' pill."
         },
         "concern": {
           "type": "string",
@@ -99,11 +103,11 @@
         },
         "shape": {
           "enum": ["rect", "diamond", "hexagon", "parallelogram", "diverged", "struct"],
-          "description": "Visual primitive. Logic primitives — rect = operation; diamond = decision/branch; hexagon = pre-existing module; parallelogram = input/output boundary; diverged = same site with different behaviour today vs proposed (REQUIRES side=diverged and the today_label/proposed_label/concern fields). Data primitive — struct = named-field data shape (record, class, table, interface, enum, collection-bag); REQUIRES the fields[] array and side ∈ {shared, existing, proposed}. Reach for struct only when multiple internal slots are changing independently; for whole-type changes (added, removed, swapped wholesale) use rect (+ diverged for in-place type swaps)."
+          "description": "Visual primitive. Logic primitives — rect = operation; diamond = decision/branch; hexagon = pre-existing module; parallelogram = input/output boundary; diverged = same site with different behaviour today vs proposed (REQUIRES side=diverged and the today_label/proposed_label/concern fields). Data primitive — struct = named-field data shape (record, class, table, interface, enum, collection-bag); REQUIRES the fields[] array. Reach for struct only when multiple internal slots are changing independently; for whole-type changes (added, removed, swapped wholesale) use rect (+ diverged for in-place type swaps)."
         },
         "side": {
-          "enum": ["shared", "existing", "proposed", "diverged"],
-          "description": "Visual treatment. shared = unchanged; existing = present today, will be removed; proposed = new in this plan; diverged = same site with split behaviour (only valid with shape=diverged). For shape=struct, side may NOT be diverged — per-field sides inside fields[] carry the change marks; the wrapper side describes whether the struct as a whole is being added/removed/kept."
+          "enum": ["unchanged", "added", "removed", "diverged"],
+          "description": "Per-node change mark. unchanged = present on both base and PR; nothing is changing about this element. added = new in this change. removed = present on base, going away in this change. diverged = same site, identity preserved, semantics shifted in place (only valid with shape=diverged or shape=struct). For shape=struct, the wrapper side describes what's happening to the struct as a whole — added/removed/unchanged when wholly new/gone/stable; diverged when the struct name is preserved but its internal fields are substantially churned."
         },
         "label": {
           "type": "string",
@@ -156,10 +160,7 @@
         {
           "if": { "properties": { "shape": { "const": "struct" } }, "required": ["shape"] },
           "then": {
-            "required": ["fields"],
-            "properties": {
-              "side": { "enum": ["shared", "existing", "proposed"] }
-            }
+            "required": ["fields"]
           }
         }
       ]
@@ -180,8 +181,8 @@
           "description": "Optional free-form type signature, rendered verbatim alongside the name. Examples: \"UUID NOT NULL\" (DB column), \"Optional[User]\" (Python), \"List<Tag>\" (TS), \"Deque[Event]\" (collection slot). Omit when the slot has no meaningful type (e.g. enum variants like \"click\" / \"scroll\"). The renderer does not parse this — it's display text."
         },
         "side": {
-          "enum": ["shared", "existing", "proposed", "diverged"],
-          "description": "Per-slot change mark. shared = unchanged; existing = present today, removed by this change; proposed = added by this change; diverged = same name kept, type or semantics shifted in place (REQUIRES today + proposed)."
+          "enum": ["unchanged", "added", "removed", "diverged"],
+          "description": "Per-slot change mark. unchanged = present on both base and PR; nothing is changing about this slot. added = new in this change. removed = present on base, going away in this change. diverged = same name kept, type or semantics shifted in place (REQUIRES today + proposed)."
         },
         "today": {
           "type": "string",

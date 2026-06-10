@@ -1,6 +1,6 @@
 {
   "$schema": "https://zing.example/schemas/graph.json",
-  "title": "BAK-1321 \u00b7 DirectFlatten pipeline",
+  "title": "BAK-1321 · DirectFlatten pipeline",
   "ticket": "BAK-1321",
   "kinds": {
     "data": {
@@ -33,58 +33,58 @@
           "id": "in",
           "shape": "parallelogram",
           "label": "depends_on 0134",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "atomic",
           "shape": "rect",
           "label": "atomic = False",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "fk",
           "shape": "rect",
-          "label": "AlterField \u00b7 raw_activity",
-          "side": "shared"
+          "label": "AlterField · raw_activity",
+          "side": "unchanged"
         },
         {
           "id": "fk-div",
           "shape": "diverged",
           "side": "diverged",
           "concern": "on_delete behaviour",
-          "today_label": "CASCADE \u2014 wipes activities",
-          "proposed_label": "SET_NULL \u2014 preserves them",
+          "today_label": "CASCADE — wipes activities",
+          "proposed_label": "SET_NULL — preserves them",
           "label": "on_delete behaviour"
         },
         {
           "id": "col",
           "shape": "rect",
-          "label": "RunSQL \u00b7 ADD COLUMN flatten_status",
-          "side": "proposed"
+          "label": "RunSQL · ADD COLUMN flatten_status",
+          "side": "added"
         },
         {
           "id": "state",
           "shape": "rect",
           "label": "state_operations=[AddField(...)]",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "idx",
           "shape": "rect",
-          "label": "RunSQL \u00b7 CREATE INDEX CONCURRENTLY",
-          "side": "proposed"
+          "label": "RunSQL · CREATE INDEX CONCURRENTLY",
+          "side": "added"
         },
         {
           "id": "idx-detail",
           "shape": "rect",
           "label": "WHERE flatten_status = 0  (partial)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "done",
           "shape": "parallelogram",
           "label": "0135 applied to all leaf partitions",
-          "side": "shared"
+          "side": "unchanged"
         }
       ],
       "edges": [
@@ -131,7 +131,8 @@
           "from": "idx-detail",
           "to": "done"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 2,
@@ -143,25 +144,25 @@
           "id": "toml",
           "shape": "parallelogram",
           "label": "agility.toml",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "add",
           "shape": "rect",
           "label": "append \"DIRECT_FLATTEN_PIPELINE\"",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "default",
           "shape": "rect",
-          "label": "default OFF \u00b7 org-scoped",
-          "side": "proposed"
+          "label": "default OFF · org-scoped",
+          "side": "added"
         },
         {
           "id": "consume",
           "shape": "rect",
           "label": "Step 11 reads via flag_enabled(...)",
-          "side": "proposed"
+          "side": "added"
         }
       ],
       "edges": [
@@ -178,25 +179,26 @@
           "to": "consume",
           "style": "soft"
         }
-      ]
+      ],
+      "side": "added"
     },
     {
       "step": 3,
       "id": "timer_relocation",
-      "title": "TimerGroup \u2192 utils/perf.py \u00b7 rename Timer \u2192 MetricLogger",
+      "title": "TimerGroup → utils/perf.py · rename Timer → MetricLogger",
       "concern": "Both ETL paths need TimerGroup. Existing utils.perf.Timer has the wrong shape (logger-based per-call). Rename to free the name; lift TimerGroup + ctx-mgr Timer.",
       "nodes": [
         {
           "id": "src",
           "shape": "rect",
-          "label": "flattener_task.py \u00b7 Timer / TimerGroup (inline)",
-          "side": "existing"
+          "label": "flattener_task.py · Timer / TimerGroup (inline)",
+          "side": "removed"
         },
         {
           "id": "old-perf",
           "shape": "rect",
-          "label": "utils/perf.py \u00b7 Timer (logger-based)",
-          "side": "existing"
+          "label": "utils/perf.py · Timer (logger-based)",
+          "side": "removed"
         },
         {
           "id": "rename",
@@ -210,26 +212,26 @@
         {
           "id": "new-perf",
           "shape": "rect",
-          "label": "utils/perf.py \u00b7 + Timer ctx-mgr + TimerGroup",
-          "side": "proposed"
+          "label": "utils/perf.py · + Timer ctx-mgr + TimerGroup",
+          "side": "added"
         },
         {
           "id": "delete",
           "shape": "rect",
-          "label": "flattener_task.py \u00b7 delete inline Timer/TimerGroup",
-          "side": "proposed"
+          "label": "flattener_task.py · delete inline Timer/TimerGroup",
+          "side": "added"
         },
         {
           "id": "import",
           "shape": "rect",
           "label": "import from utils.perf",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "consumer",
           "shape": "rect",
-          "label": "4 consumer sites \u00b7 Timer \u2192 MetricLogger",
-          "side": "proposed"
+          "label": "4 consumer sites · Timer → MetricLogger",
+          "side": "added"
         }
       ],
       "edges": [
@@ -259,19 +261,20 @@
           "to": "consumer",
           "style": "soft"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 4,
       "id": "hashed_row",
-      "title": "HashReader \u00b7 yield tuple \u2192 HashedRow dataclass",
-      "concern": "DirectFlattenETL._parse needs raw JSON text alongside dict. HashReader already computes the canonical text for hashing \u2014 reuse it.",
+      "title": "HashReader · yield tuple → HashedRow dataclass",
+      "concern": "DirectFlattenETL._parse needs raw JSON text alongside dict. HashReader already computes the canonical text for hashing — reuse it.",
       "nodes": [
         {
           "id": "reader",
           "shape": "rect",
           "label": "HashReader.__iter__",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "yield",
@@ -286,13 +289,13 @@
           "id": "src1",
           "shape": "parallelogram",
           "label": "raw_activity.py:40,54 (only consumer)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "src2",
           "shape": "parallelogram",
           "label": "+ direct_flatten.py._parse (new consumer)",
-          "side": "proposed"
+          "side": "added"
         }
       ],
       "edges": [
@@ -310,7 +313,8 @@
           "to": "src2",
           "from_side": "right"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 5,
@@ -322,37 +326,37 @@
           "id": "caller",
           "shape": "parallelogram",
           "label": "_publish_failed (per FAILED row)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "fn",
           "shape": "rect",
           "label": "publish_celery_task_to_dlq(task, args, kwargs)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "send",
           "shape": "rect",
           "label": "current_app.send_task(...)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "kombu",
           "shape": "rect",
           "label": "kombu builds protocol-v2 envelope",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "queue",
           "shape": "rect",
           "label": "queue = settings.PIPELINE_SQS_DLQ_NAME",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "sqs",
           "shape": "parallelogram",
           "label": "SQS DLQ",
-          "side": "shared"
+          "side": "unchanged"
         }
       ],
       "edges": [
@@ -376,7 +380,8 @@
           "from": "queue",
           "to": "sqs"
         }
-      ]
+      ],
+      "side": "added"
     },
     {
       "step": 7,
@@ -388,56 +393,56 @@
           "id": "in",
           "shape": "parallelogram",
           "label": "data, struct_type",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "convert",
           "shape": "rect",
           "label": "msgspec.convert",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "branch",
           "shape": "diamond",
           "label": "exception?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "validation",
           "shape": "rect",
           "label": "ValidationError",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "other",
           "shape": "rect",
           "label": "Exception",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "ok",
           "shape": "rect",
           "label": "no exception",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "sentry-v",
           "shape": "rect",
           "label": "Sentry capture",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "sentry-e",
           "shape": "rect",
           "label": "Sentry capture",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "out-v",
           "shape": "diverged",
           "side": "diverged",
           "concern": "outcome on validation",
-          "today_label": "drop row \u00b7 skip_record(VALIDATION)",
+          "today_label": "drop row · skip_record(VALIDATION)",
           "proposed_label": "return (None, 'VALIDATION')",
           "label": "outcome on validation"
         },
@@ -446,7 +451,7 @@
           "shape": "diverged",
           "side": "diverged",
           "concern": "outcome on exception",
-          "today_label": "drop row \u00b7 skip_record(UNKNOWN)",
+          "today_label": "drop row · skip_record(UNKNOWN)",
           "proposed_label": "return (None, 'UNKNOWN')",
           "label": "outcome on exception"
         },
@@ -504,43 +509,44 @@
           "from": "ok",
           "to": "out-ok"
         }
-      ]
+      ],
+      "side": "unchanged"
     },
     {
       "step": 6,
       "id": "parse_google_unpack",
-      "title": "_parse \u00b7 multi-event unpacking",
+      "title": "_parse · multi-event unpacking",
       "concern": "How do JSON lines become flatten-able records, and how is each one identified?",
       "nodes": [
         {
           "id": "input",
           "shape": "parallelogram",
           "label": "JSONL input",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "iter",
           "shape": "hexagon",
           "label": "for each line",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "branch",
           "shape": "diamond",
           "label": "is_google?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "g-loop",
           "shape": "hexagon",
           "label": "for each event",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "g-merge",
           "shape": "rect",
           "label": "merge top + event",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "g-fileoff",
@@ -555,19 +561,19 @@
           "id": "g-yield",
           "shape": "parallelogram",
           "label": "produce record",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "g-repair",
           "shape": "hexagon",
           "label": "for each Activity in DB",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "g-pair",
           "shape": "rect",
           "label": "pair (Activity, event_data)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "ng-fileoff",
@@ -582,19 +588,19 @@
           "id": "ng-yield",
           "shape": "parallelogram",
           "label": "produce record",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "helper-iu",
           "shape": "rect",
           "label": "self._integration_unique(...)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "helper-ts",
           "shape": "rect",
           "label": "self._extract_timestamp(...)",
-          "side": "proposed"
+          "side": "added"
         }
       ],
       "edges": [
@@ -650,79 +656,80 @@
           "to": "helper-ts",
           "style": "dashed"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 8,
       "id": "flatten_failure_capture",
-      "title": "_flatten \u00b7 failure capture per row",
-      "concern": "JsonFlattener may succeed, return unflattenable paths, or raise. Each row is captured independently \u2014 failures don't poison the batch.",
+      "title": "_flatten · failure capture per row",
+      "concern": "JsonFlattener may succeed, return unflattenable paths, or raise. Each row is captured independently — failures don't poison the batch.",
       "nodes": [
         {
           "id": "in",
           "shape": "parallelogram",
           "label": "ParsedRow",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "call",
           "shape": "rect",
           "label": "JsonFlattener(slug).flatten(...)",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "branch",
           "shape": "diamond",
           "label": "result?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "ok",
           "shape": "rect",
           "label": "result_node, no unflattenable",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "unflat",
           "shape": "rect",
           "label": "unflattenable list returned",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "exc",
           "shape": "rect",
           "label": "Exception raised",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "ok-set",
           "shape": "rect",
-          "label": "row.flatten_status = OK \u00b7 flattened_data = result",
-          "side": "proposed"
+          "label": "row.flatten_status = OK · flattened_data = result",
+          "side": "added"
         },
         {
           "id": "unflat-set",
           "shape": "rect",
-          "label": "FAILED \u00b7 type=unflattenable \u00b7 detail=paths",
-          "side": "proposed"
+          "label": "FAILED · type=unflattenable · detail=paths",
+          "side": "added"
         },
         {
           "id": "exc-sentry",
           "shape": "rect",
           "label": "Sentry capture (fingerprint=direct-flatten-failed)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "exc-set",
           "shape": "rect",
-          "label": "FAILED \u00b7 type=exception \u00b7 detail=traceback",
-          "side": "proposed"
+          "label": "FAILED · type=exception · detail=traceback",
+          "side": "added"
         },
         {
           "id": "out",
           "shape": "parallelogram",
           "label": "row mutated in place",
-          "side": "proposed"
+          "side": "added"
         }
       ],
       "edges": [
@@ -777,55 +784,56 @@
           "from": "exc-set",
           "to": "out"
         }
-      ]
+      ],
+      "side": "added"
     },
     {
       "step": 9,
       "id": "copy_activity",
-      "title": "_copy_activity \u00b7 COPY harness with inline tsvector",
+      "title": "_copy_activity · COPY harness with inline tsvector",
       "concern": "Build temp_activity, COPY rows in, INSERT INTO core_activity with inline to_tsvector. Replaces today's separate temp_search_vector JOIN.",
       "nodes": [
         {
           "id": "rows",
           "shape": "parallelogram",
           "label": "ParsedRow list",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "create",
           "shape": "rect",
           "label": "CREATE TEMP TABLE temp_activity",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "tsv-col",
           "shape": "rect",
           "label": "+ tsvector_source TEXT NOT NULL column",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "tsv-pick",
           "shape": "diamond",
           "label": "row.flatten_status?",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "tsv-ok",
           "shape": "rect",
           "label": "tsv_source = json.encode(flattened_data)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "tsv-fail",
           "shape": "rect",
           "label": "tsv_source = row.raw_json_text",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "copy",
           "shape": "rect",
           "label": "COPY temp_activity FROM STDIN (tab-delim)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "insert-div",
@@ -839,8 +847,8 @@
         {
           "id": "out",
           "shape": "parallelogram",
-          "label": "core_activity rows \u00b7 raw_activity_id = NULL",
-          "side": "proposed"
+          "label": "core_activity rows · raw_activity_id = NULL",
+          "side": "added"
         }
       ],
       "edges": [
@@ -882,46 +890,47 @@
           "from": "insert-div",
           "to": "out"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 10,
       "id": "copy_flattened",
-      "title": "_copy_flattened \u00b7 WHERE NOT EXISTS dedup",
+      "title": "_copy_flattened · WHERE NOT EXISTS dedup",
       "concern": "INSERT one row per record. Avoid duplicates on SQS redelivery.",
       "nodes": [
         {
           "id": "in",
           "shape": "parallelogram",
           "label": "rows to insert",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "build",
           "shape": "rect",
           "label": "build temp_flatten",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "key",
           "shape": "diverged",
           "side": "diverged",
           "concern": "dedup-key shape (file_offset)",
-          "today_label": "32-char xxh128 hex (GW) \u00b7 str(raw_id) (rest)",
-          "proposed_label": "L{line}.{rec} (GW) \u00b7 L{line} (rest)",
+          "today_label": "32-char xxh128 hex (GW) · str(raw_id) (rest)",
+          "proposed_label": "L{line}.{rec} (GW) · L{line} (rest)",
           "label": "dedup-key shape (file_offset)"
         },
         {
           "id": "where",
           "shape": "rect",
           "label": "WHERE NOT EXISTS",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "insert",
           "shape": "parallelogram",
           "label": "INSERT new rows",
-          "side": "shared"
+          "side": "unchanged"
         }
       ],
       "edges": [
@@ -941,55 +950,56 @@
           "from": "where",
           "to": "insert"
         }
-      ]
+      ],
+      "side": "unchanged"
     },
     {
       "step": 11,
       "id": "sqs_dispatch",
-      "title": "sqs_message_handler \u00b7 flag-gated dispatch",
+      "title": "sqs_message_handler · flag-gated dispatch",
       "concern": "Pick the new path or the old path based on the org-scoped flag.",
       "nodes": [
         {
           "id": "msg",
           "shape": "parallelogram",
-          "label": "SQS message \u00b7 activity branch",
-          "side": "shared"
+          "label": "SQS message · activity branch",
+          "side": "unchanged"
         },
         {
           "id": "flag",
           "shape": "diamond",
           "label": "flag_enabled(DIRECT_FLATTEN_PIPELINE, org)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "new",
           "shape": "rect",
           "label": "DirectFlattenETL(ds, key).execute(data)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "old1",
           "shape": "rect",
           "label": "RawActivityETL(ds, key).execute(data)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "old2",
           "shape": "rect",
           "label": "handler.activity(...).execute(raws)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "old3",
           "shape": "rect",
           "label": "flatten_activity_batch.delay(...)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "stub",
           "shape": "rect",
-          "label": "RAW_DATA_PROCESSING stub branch \u00b7 DELETED",
-          "side": "existing"
+          "label": "RAW_DATA_PROCESSING stub branch · DELETED",
+          "side": "removed"
         }
       ],
       "edges": [
@@ -1015,85 +1025,86 @@
           "from": "old2",
           "to": "old3"
         }
-      ]
+      ],
+      "side": "diverged"
     },
     {
       "step": 12,
       "id": "flatten_retry_one",
-      "title": "flatten_retry_one \u00b7 per-row DLQ retry task",
+      "title": "flatten_retry_one · per-row DLQ retry task",
       "concern": "Re-flatten a single FAILED FlattenedActivity row. Status-guarded UPDATE makes re-drives idempotent.",
       "nodes": [
         {
           "id": "deliver",
           "shape": "parallelogram",
-          "label": "celery task \u00b7 args=[flat_id, org_id, slug]",
-          "side": "proposed"
+          "label": "celery task · args=[flat_id, org_id, slug]",
+          "side": "added"
         },
         {
           "id": "rls-gap",
           "shape": "rect",
           "label": "set_rls(org_id) wrapper",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "fetch",
           "shape": "rect",
           "label": "FlattenedActivity.objects.get(id, org_id)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "missing",
           "shape": "diamond",
           "label": "row exists?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "noop1",
           "shape": "rect",
           "label": "log + return 'noop'",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "status",
           "shape": "diamond",
           "label": "row.flatten_status?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "noop2",
           "shape": "rect",
-          "label": "already OK \u00b7 return 'noop'",
-          "side": "proposed"
+          "label": "already OK · return 'noop'",
+          "side": "added"
         },
         {
           "id": "flatten",
           "shape": "rect",
           "label": "JsonFlattener(slug).flatten(json_data)",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "result",
           "shape": "diamond",
           "label": "result?",
-          "side": "shared"
+          "side": "unchanged"
         },
         {
           "id": "raise1",
           "shape": "rect",
-          "label": "exception \u00b7 re-raise \u2192 DLQ",
-          "side": "proposed"
+          "label": "exception · re-raise → DLQ",
+          "side": "added"
         },
         {
           "id": "raise2",
           "shape": "rect",
-          "label": "still unflattenable \u00b7 re-raise",
-          "side": "proposed"
+          "label": "still unflattenable · re-raise",
+          "side": "added"
         },
         {
           "id": "update",
           "shape": "rect",
-          "label": "UPDATE WHERE flatten_status=FAILED \u00b7 status guard",
-          "side": "proposed"
+          "label": "UPDATE WHERE flatten_status=FAILED · status guard",
+          "side": "added"
         }
       ],
       "edges": [
@@ -1148,55 +1159,56 @@
           "to": "update",
           "from_side": "right"
         }
-      ]
+      ],
+      "side": "added"
     },
     {
       "step": 13,
       "id": "sentry_cleanup",
-      "title": "Sentry \u00b7 functions_to_trace + sample_map",
+      "title": "Sentry · functions_to_trace + sample_map",
       "concern": "Phantom trace entries removed; new tracing for the direct-flatten path added.",
       "nodes": [
         {
           "id": "old",
           "shape": "rect",
-          "label": "functions_to_trace \u00b7 before",
-          "side": "existing"
+          "label": "functions_to_trace · before",
+          "side": "removed"
         },
         {
           "id": "ph",
           "shape": "rect",
           "label": "7 phantom entries (integrations.task_helpers.*)",
-          "side": "existing"
+          "side": "removed"
         },
         {
           "id": "remove",
           "shape": "rect",
-          "label": "remove \u00b7 7 entries gone",
-          "side": "proposed"
+          "label": "remove · 7 entries gone",
+          "side": "added"
         },
         {
           "id": "keep",
           "shape": "rect",
-          "label": "keep \u00b7 create_event_types",
-          "side": "shared"
+          "label": "keep · create_event_types",
+          "side": "unchanged"
         },
         {
           "id": "add1",
           "shape": "rect",
           "label": "+ DirectFlattenETL.execute @ 0.005",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "add2",
           "shape": "rect",
           "label": "+ flatten_retry_one @ 0.1 (low volume)",
-          "side": "proposed"
+          "side": "added"
         },
         {
           "id": "merge",
           "shape": "rect",
-          "label": "functions_to_trace \u00b7 after",
-          "side": "proposed"
+          "label": "functions_to_trace · after",
+          "side": "added"
         }
       ],
       "edges": [
@@ -1229,7 +1241,8 @@
           "from": "add2",
           "to": "merge"
         }
-      ]
+      ],
+      "side": "diverged"
     }
   ],
   "cross_flows": [
@@ -1302,7 +1315,7 @@
       "from_node": "idx-detail",
       "to_step": 12,
       "to_node": "fetch",
-      "label": "partial idx \u00b7 WHERE flatten_status = 0",
+      "label": "partial idx · WHERE flatten_status = 0",
       "kind": "schema"
     },
     {
@@ -1318,7 +1331,7 @@
       "from_node": "sqs",
       "to_step": 12,
       "to_node": "deliver",
-      "label": "DLQ \u2192 re-drive",
+      "label": "DLQ → re-drive",
       "kind": "queue"
     },
     {

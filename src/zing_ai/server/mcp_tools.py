@@ -274,6 +274,91 @@ async def step_log(session_id: str, step_id: str, agent_name: str, message: str)
 
 
 @mcp_server.tool()
+async def viz_preview_request(
+    session_id: str,
+    viz_path: str,
+    md_path: str,
+    gate_label: str,
+) -> dict:
+    """Surface a viz+markdown pair in the Command Center Flow for human review.
+
+    Validates the viz JSON against the schema before queueing. If validation
+    fails, the preview is NOT queued — the caller must fix the file and retry.
+
+    ``gate_label`` is shown in the Flow card and the drawer header (e.g.
+    "Topology review (round 1)" or "Final audit review"). Replacing an
+    existing pending preview resolves its waiter as a reject so the prior
+    skill cycle can recover instead of hanging.
+
+    After this returns ``{"status": "requested"}``, call ``viz_preview_wait``
+    to block until the user clicks Accept or Reject.
+    """
+    from zing_ai.viz.validate import validate as viz_validate
+
+    sm = _get_session_manager()
+    viz = Path(viz_path)
+    md = Path(md_path)
+    if not viz.exists():
+        return {"error": f"viz file not found: {viz_path}"}
+    if not md.exists():
+        return {"error": f"markdown file not found: {md_path}"}
+    try:
+        graph = json.loads(viz.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": f"failed to read viz JSON: {exc}"}
+
+    issues = viz_validate(graph)
+    if issues:
+        return {
+            "error": "viz validation failed",
+            "issues": [
+                {
+                    "pointer": i.pointer,
+                    "message": i.message,
+                    "available": i.available,
+                    "suggestion": i.suggestion,
+                }
+                for i in issues
+            ],
+        }
+
+    try:
+        preview = sm.set_viz_preview(session_id, str(viz), str(md), gate_label)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
+
+    sm.add_notification(
+        session_id,
+        title="Viz preview ready",
+        body=f"{gate_label} — review viz + markdown before submitting.",
+        url=f"http://localhost:{_port}/command-center?session={session_id}",
+    )
+
+    return {
+        "status": "requested",
+        "iteration": preview.iteration,
+        "review_url": f"http://localhost:{_port}/command-center?session={session_id}",
+    }
+
+
+@mcp_server.tool()
+async def viz_preview_wait(session_id: str) -> dict:
+    """Block until the user accepts or rejects the pending viz preview.
+
+    Returns ``{"decision": "accept"|"reject", "comments": str}``. Comments may
+    be empty. On reject, read the comments and discuss with the user in the
+    Claude Code session before editing the artifact and (optionally) calling
+    ``viz_preview_request`` again for another review round.
+    """
+    sm = _get_session_manager()
+    try:
+        decision = await sm.wait_for_viz_preview(session_id)
+    except KeyError as exc:
+        return {"error": str(exc)}
+    return {"decision": decision.decision, "comments": decision.comments}
+
+
+@mcp_server.tool()
 async def notification_send(
     session_id: str,
     title: str,
