@@ -253,10 +253,10 @@ class TestPlanDetailViewer:
         expect(page.locator(".viz-struct--union").first).to_be_attached(timeout=2000)
         expect(page.locator(".viz-struct--collections").first).to_be_attached(timeout=2000)
         # Per-row side coding lands as class names on the row rects.
-        expect(page.locator(".viz-struct__row--proposed").first).to_be_attached(timeout=2000)
-        expect(page.locator(".viz-struct__row--existing").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--added").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--removed").first).to_be_attached(timeout=2000)
         expect(page.locator(".viz-struct__row--diverged").first).to_be_attached(timeout=2000)
-        expect(page.locator(".viz-struct__row--shared").first).to_be_attached(timeout=2000)
+        expect(page.locator(".viz-struct__row--unchanged").first).to_be_attached(timeout=2000)
         # Field text actually renders inside struct rows (the EventPayload struct
         # has a diverged actor_id with today=int proposed=UUID).
         page_text = page.locator("#viz-stage").inner_text()
