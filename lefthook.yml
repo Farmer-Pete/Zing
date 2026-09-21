@@ -1,0 +1,31 @@
+# Git hooks for Zing, run by lefthook (https://lefthook.dev).
+# Wire into this clone with: make hooks-install
+#
+# Every check is a Makefile target so the hooks and CI run the same commands.
+# pre-commit stays fast and offline. Slow or networked checks live in pre-push.
+
+pre-commit:
+  parallel: false # format mutates files, so read-only jobs must run after it
+  commands:
+    01_format:
+      glob: "*.go"
+      run: make fmt
+      stage_fixed: true # re-stage files the formatter rewrote
+    02_lint:
+      glob: "*.go"
+      run: make lint
+    03_build:
+      glob: "*.go"
+      run: make build
+    04_secrets:
+      run: make secrets-staged
+
+pre-push:
+  parallel: true
+  commands:
+    test-race:
+      run: make test-race
+    tidy-check:
+      run: make tidy-check
+    vuln:
+      run: make vuln
