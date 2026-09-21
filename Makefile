@@ -28,10 +28,10 @@ test:
 test-race:
 	go test -race ./...
 
-# Fail if go.mod or go.sum are not tidy.
+# Fail if go.mod or go.sum are not tidy. Read-only: it never rewrites the module files,
+# so it also catches a go.sum that go mod tidy would create but git has never tracked.
 tidy-check:
-	go mod tidy
-	git diff --exit-code -- go.mod go.sum
+	go mod tidy -diff
 
 vuln:
 	govulncheck ./...

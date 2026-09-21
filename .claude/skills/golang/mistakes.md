@@ -20,7 +20,7 @@ Every mistake from the 100 Go Mistakes book, grouped by its chapter, with a one-
 | 12 | Project misorganization | Organize packages by domain; avoid premature sub-packaging. | depguard (once a scheme is set) |
 | 13 | Creating utility packages | Name packages for what they provide; never common, util, or shared. | review |
 | 14 | Ignoring package name collisions | Alias imports so a package name never collides with a local variable. | gocritic importShadow |
-| 15 | Missing code documentation | Document each exported identifier with a sentence starting with its name. | revive exported |
+| 15 | Missing code documentation | Document each exported identifier with a sentence starting with its name. | review (revive's exported rule is not enabled here) |
 | 16 | Not using linters | Run golangci-lint. | this is the setup |
 
 ## Data types
@@ -79,7 +79,7 @@ Every mistake from the 100 Go Mistakes book, grouped by its chapter, with a one-
 | # | Title | Fix | Detector |
 | --- | --- | --- | --- |
 | 48 | Panicking | Reserve panic for unrecoverable conditions; return errors otherwise. | forbidigo (configurable) |
-| 49 | Ignoring when to wrap an error | Use %w to preserve the chain for Is and As; use %v to decouple. | errorlint errorf; wrapcheck |
+| 49 | Ignoring when to wrap an error | Use %w to preserve the chain for Is and As; use %v to decouple. | errorlint errorf; review (wrapcheck is not enabled here) |
 | 50 | Comparing an error type inaccurately | Use errors.As, not a type assertion or switch. | errorlint asserts |
 | 51 | Comparing an error value inaccurately | Use errors.Is, not ==. | errorlint comparison |
 | 52 | Handling an error twice | Handle once: log it or return it, not both. | review |
@@ -149,7 +149,7 @@ Every mistake from the 100 Go Mistakes book, grouped by its chapter, with a one-
 | 91 | Not understanding CPU caches | Favor contiguous, unit-stride access over pointer chasing. | pprof, benchmarks |
 | 92 | False sharing | Pad hot fields written by different goroutines onto separate cache lines. | pprof, benchmarks |
 | 93 | Ignoring instruction-level parallelism | Reduce data hazards between adjacent instructions. | benchmarks |
-| 94 | Not being aware of data alignment | Order struct fields largest to smallest to cut padding. | fieldalignment |
+| 94 | Not being aware of data alignment | Order struct fields largest to smallest to cut padding. | review (fieldalignment is not enabled here) |
 | 95 | Not understanding stack vs heap | Avoid gratuitous sharing up; inspect with go build -gcflags=-m. | go build -gcflags -m |
 | 96 | Not knowing how to reduce allocations | Reuse buffers, use m[string(b)] lookups, use sync.Pool. | prealloc (partial) |
 | 97 | Not relying on inlining | Keep the fast path small; move rare branches to their own function. | go build -gcflags -m |

@@ -10,7 +10,8 @@
 # Test and coverage output
 *.test
 *.out
-coverage.*
+coverage.out
+coverage.html
 
 # Go workspace file
 go.work
@@ -28,6 +29,10 @@ go.work.sum
 .idea/
 .vscode/
 .DS_Store
+*.swp
+*.swo
+*~
+.#*
 
 # lefthook local overrides
 lefthook-local.yml

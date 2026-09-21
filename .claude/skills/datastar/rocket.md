@@ -77,7 +77,7 @@ The full setup context is `{ $$, props, $, host, effect, cleanup, observeProps, 
 
 ## Reacting imperatively
 
-To react to prop changes without a full re-render, use `observeProps((props, changes) => { if ('src' in changes) { refs.video.src = props.src } }, 'src')`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
+To react to prop changes without a full re-render, use `observeProps((props, changes) => { if ('src' in changes) { host.querySelector('video').src = props.src } }, 'src')`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
 
 ## Events
 

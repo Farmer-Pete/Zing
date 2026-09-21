@@ -56,7 +56,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("listening", "addr", addr)
+	slog.Info("starting", "addr", addr)
 
 	select {
 	case err := <-errCh:

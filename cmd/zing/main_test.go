@@ -10,10 +10,12 @@ import (
 func TestIndex(t *testing.T) {
 	t.Parallel()
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", index)
+
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-
-	index(rec, req)
+	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

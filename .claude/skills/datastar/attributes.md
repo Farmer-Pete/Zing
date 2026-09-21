@@ -120,6 +120,10 @@ Chain modifiers by appending `__name` or `__name.arg` segments in any order, sep
 | Modifier | Effect | Applies to |
 | --- | --- | --- |
 | __once | Fire once, then detach | data-on, data-on-intersect |
+| __exit | Fire when the element exits the viewport instead of entering | data-on-intersect |
+| __half | Fire at 50 percent visible | data-on-intersect |
+| __full | Fire at 100 percent visible | data-on-intersect |
+| __threshold.25 | Fire at a custom visibility fraction | data-on-intersect |
 | __passive | Skip preventDefault, built-in DOM events only | data-on |
 | __capture | Listen in the capture phase, built-in events only | data-on |
 | __prevent | Call event.preventDefault() | data-on |
@@ -131,7 +135,9 @@ Chain modifiers by appending `__name` or `__name.arg` segments in any order, sep
 | __throttle.500ms | Throttle, with `.noleading` and `.trailing` options | data-on, data-on-intersect, data-on-signal-patch |
 | __delay.500ms | Delay the handler | data-init, data-on, data-on-intersect, data-on-signal-patch |
 | __viewtransition | Wrap the DOM effect in document.startViewTransition() | data-init, data-on, data-on-intersect, data-on-interval, data-on-signal-patch |
+| __duration.500ms | Set the timer period; append `.leading` to also fire immediately on load | data-on-interval |
 | __case.camel | Override signal or key casing | data-bind, data-class, data-computed, data-indicator, data-on, data-ref, data-signals |
+| __ifmissing | Set a signal only when it does not already exist | data-signals |
 | __self | Restrict ignore scope to the element only | data-ignore |
 | __terse | Compact JSON output | data-json-signals |
 

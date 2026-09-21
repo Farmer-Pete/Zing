@@ -26,9 +26,9 @@ The Makefile is the single source of truth. The git hooks and CI call these same
 | `make test-race` | Run the unit tests with the race detector |
 | `make tidy-check` | Fail if `go.mod` or `go.sum` are not tidy |
 | `make vuln` | Scan for reachable known vulnerabilities |
-| `make pre-commit` | What the pre-commit hook checks: fmt-check, lint, build |
+| `make pre-commit` | What the pre-commit hook checks, minus the staged secret scan: fmt-check, lint, build |
 | `make pre-push` | What the pre-push hook checks: test-race, tidy-check, vuln |
-| `make ci` | Everything CI runs: pre-commit, vet, pre-push |
+| `make ci` | What the CI checks job runs: pre-commit, vet, pre-push |
 | `go run ./cmd/zing` | Start the server on `:8080` (override with `ZING_ADDR`) |
 
 ## Git hooks
