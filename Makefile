@@ -1,10 +1,16 @@
 # Single source of truth for checks. The git hooks (lefthook.yml) and CI
 # (.github/workflows/ci.yml) both call these targets, so they cannot drift.
-.PHONY: fmt fmt-check lint build vet test test-race tidy-check vuln secrets-staged hooks-install pre-commit pre-push ci
+.PHONY: fmt fmt-staged fmt-check lint build vet test test-race tidy-check vuln secrets-staged hooks-install pre-commit pre-push ci
 
 # Rewrite files with the golangci-lint v2 formatters (gofumpt + gci).
 fmt:
 	golangci-lint fmt
+
+# Format only the Go files staged in git. The pre-commit hook uses this so unrelated
+# dirty files stay untouched; lefthook then re-stages what was rewritten.
+fmt-staged:
+	@files=$$(git diff --cached --name-only --diff-filter=ACMR -- '*.go'); \
+	[ -z "$$files" ] || golangci-lint fmt $$files
 
 # Fail if any file would be rewritten by fmt. Used by CI, where nothing may be mutated.
 fmt-check:
