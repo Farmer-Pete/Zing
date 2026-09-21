@@ -1,0 +1,119 @@
+# golangci-lint v2 config. Schema: https://github.com/golangci/golangci-lint/blob/main/.golangci.reference.yml
+# Strict-but-sane set for a new Go + Datastar service. Each non-obvious linter notes the
+# "100 Go Mistakes" (https://100go.co/) class it guards. Validate with: golangci-lint config verify
+version: "2"
+
+run:
+  timeout: 5m
+
+issues:
+  uniq-by-line: false # report every issue on a line, not just the first; generated code often stacks several
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose # unclosed http.Response.Body (#79)
+    - containedctx # context.Context stored in a struct field (#61)
+    - contextcheck # a non-inherited context is used instead of the caller's (#60)
+    - copyloopvar # redundant v := v copies now that Go 1.22 scopes loop vars per iteration (#30/#32/#63)
+    - depguard # disallowed or deprecated imports (io/ioutil, pkg/errors)
+    - durationcheck # multiplying two time.Duration values (#75)
+    - errorlint # use errors.Is/As and %w instead of ==, type assert, or %v (#49/#50/#51)
+    - fatcontext # context repeatedly nested inside a loop (#61)
+    - forbidigo # fmt.Print* used as logging instead of log/slog
+    - gochecknoinits # init() functions (#3)
+    - goconst # repeated string literals that should be constants
+    - gocritic # broad diagnostics: deferInLoop (#35), octalLiteral (#17), rangeValCopy (#30), appendAssign (#25)
+    - gosec # security issues: G115 integer overflow (#18), G112 missing server timeout (#81)
+    - ireturn # returning an interface instead of a concrete type (#7)
+    - modernize # outdated idioms: interface{} -> any, min/max, slices/maps helpers
+    - nilerr # returning nil after checking err != nil (common LLM scaffolding bug)
+    - nilnil # returning nil, nil for a (pointer, error) pair (#45)
+    - noctx # HTTP request built without a context.Context (#81)
+    - perfsprint # fmt.Sprintf where a cheaper call exists (#96 adjacent)
+    - prealloc # slice grown by append that could be pre-sized (#21)
+    - predeclared # shadowing a predeclared identifier such as len or error (#1 adjacent)
+    - revive # style rules incl. defer-in-loop, context-as-argument, early return
+    - rowserrcheck # missing rows.Err() after a sql.Rows loop (#78)
+    - sloglint # log/slog misuse such as mismatched key/value args
+    - sqlclosecheck # unclosed sql.Rows / sql.Stmt (#79)
+    - thelper # test helpers missing t.Helper()
+    - tparallel # incorrect t.Parallel() usage
+    - unconvert # unnecessary type conversions
+    - unparam # unused function parameters and results
+    - usetesting # use t.Context / t.Setenv / t.TempDir in tests
+
+  settings:
+    errcheck:
+      check-type-assertions: true # flag ignored ok in x := y.(T)
+      check-blank: true # flag _ = f() that silently drops an error (#53)
+    govet:
+      enable:
+        - shadow # best-effort shadowed err/variable detection (#1); analyzer is upstream best-effort
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - hugeParam # noisy on value-receiver structs
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^fmt\.Print(|f|ln)$
+          msg: do not log with fmt; use log/slog
+    depguard:
+      rules:
+        main:
+          list-mode: lax # allow everything except the denied packages below
+          deny:
+            - pkg: io/ioutil
+              desc: deprecated since Go 1.16; use io or os
+            - pkg: github.com/pkg/errors
+              desc: use the stdlib errors package with fmt.Errorf(%w)
+    ireturn:
+      allow:
+        - error
+        - empty
+        - stdlib
+        - generic
+    revive:
+      rules:
+        - name: context-as-argument # ctx must be the first parameter (#60)
+        - name: context-keys-type # no basic types as context keys (#60)
+        - name: defer
+          arguments:
+            - [call-chain, loop, method-call, recover, return] # defer-in-loop and related gotchas (#35/#47)
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: indent-error-flow # drop else after a returning if (#2)
+        - name: superfluous-else # (#2)
+        - name: unreachable-code
+        - name: unused-parameter
+
+  exclusions:
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+
+formatters:
+  enable:
+    - gofumpt # stricter superset of gofmt
+    - gci # deterministic import grouping
+  settings:
+    gofumpt:
+      module-path: zing
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(zing)
+      custom-order: true

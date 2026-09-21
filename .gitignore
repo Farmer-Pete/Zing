@@ -1,0 +1,33 @@
+# Binaries and build output
+/zing
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directory (only if you vendor)
+/vendor/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# lefthook local overrides
+lefthook-local.yml
