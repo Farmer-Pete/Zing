@@ -9,8 +9,8 @@ fmt:
 # Format only the Go files staged in git. The pre-commit hook uses this so unrelated
 # dirty files stay untouched; lefthook then re-stages what was rewritten.
 fmt-staged:
-	@files=$$(git diff --cached --name-only --diff-filter=ACMR -- '*.go'); \
-	[ -z "$$files" ] || golangci-lint fmt $$files
+	@git diff --cached --name-only --diff-filter=ACMR -- '*.go' | \
+	while IFS= read -r f; do golangci-lint fmt "$$f"; done
 
 # Fail if any file would be rewritten by fmt. Used by CI, where nothing may be mutated.
 fmt-check:
