@@ -38,3 +38,7 @@ The Makefile is the single source of truth. The git hooks and CI call these same
 ## Agent skills
 
 `.claude/skills/golang` and `.claude/skills/datastar` hold the coding rules, the 100 Go mistakes with the linter that catches each, and the Datastar attribute, Rocket, and Go SDK references.
+
+## License
+
+MIT. See LICENSE.
