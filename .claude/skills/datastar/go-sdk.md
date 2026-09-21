@@ -80,7 +80,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if err := sse.PatchElements(fmt.Sprintf(`<div id="count">%d</div>`, store.Count)); err != nil {
 		return
 	}
-	sse.MarshalAndPatchSignals(store)
+	if err := sse.MarshalAndPatchSignals(store); err != nil {
+		return
+	}
 }
 ```
 
