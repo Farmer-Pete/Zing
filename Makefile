@@ -10,7 +10,7 @@ fmt:
 # dirty files stay untouched; lefthook then re-stages what was rewritten.
 fmt-staged:
 	@git diff --cached --name-only --diff-filter=ACMR -- '*.go' | \
-	while IFS= read -r f; do golangci-lint fmt "$$f"; done
+	while IFS= read -r f; do golangci-lint fmt "$$f" || exit 1; done
 
 # Fail if any file would be rewritten by fmt. Used by CI, where nothing may be mutated.
 fmt-check:
