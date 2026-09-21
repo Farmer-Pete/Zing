@@ -102,7 +102,6 @@ linters:
       - path: _test\.go
         linters:
           - gosec
-          - errcheck
 
 formatters:
   enable:

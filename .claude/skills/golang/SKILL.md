@@ -35,10 +35,15 @@ Set `go 1.27` in go.mod and omit the `toolchain` line; when omitted it tracks th
 Install golangci-lint from a pinned version, not `go install`, so the local binary matches the pre-commit hook. Current stable is v2.13.2.
 
 ```bash
+# Pin exactly, so the local binary matches the pre-commit hook. The script URL is
+# pinned to the v2.13.2 commit, so a moved redirect cannot change what runs; the
+# script then verifies the binary tarball against the release checksums.
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/27774aaf853a4fd21f1dd5e69439459dc1b26e68/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.13.2
+# or, while brew's stable release is still v2.13.2:
 brew install golangci-lint
-# or pin exactly:
-curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.13.2
 ```
+
+When bumping the version, update the tag, the commit in the script URL, and `GOLANGCI_LINT_VERSION` plus `GOLANGCI_LINT_COMMIT` in .github/workflows/ci.yml together.
 
 The golangci-lint v2 config lives in .golangci.yml, starts with `version: "2"`, and moves formatters into a top-level `formatters` block. That config and the lefthook hooks are separate repository files this skill relies on; it does not restate them.
 

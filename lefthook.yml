@@ -9,7 +9,7 @@ pre-commit:
   commands:
     01_format:
       glob: "*.go"
-      run: make fmt
+      run: make fmt-staged
       stage_fixed: true # re-stage files the formatter rewrote
     02_lint:
       glob: "*.go"

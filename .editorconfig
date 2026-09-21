@@ -8,7 +8,8 @@ trim_trailing_whitespace = true
 
 [*.go]
 indent_style = tab
-indent_size = 4
+indent_size = tab
+tab_width = 8
 
 [*.{yml,yaml,json,toml,md}]
 indent_style = space

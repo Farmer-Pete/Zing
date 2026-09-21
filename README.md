@@ -26,9 +26,9 @@ The Makefile is the single source of truth. The git hooks and CI call these same
 | `make test-race` | Run the unit tests with the race detector |
 | `make tidy-check` | Fail if `go.mod` or `go.sum` are not tidy |
 | `make vuln` | Scan for reachable known vulnerabilities |
-| `make pre-commit` | What the pre-commit hook checks: fmt-check, lint, build |
+| `make pre-commit` | What the pre-commit hook's lint and build steps check, plus a whole-tree `fmt-check`; excludes the staged secret scan and the hook's own staged-only format rewrite |
 | `make pre-push` | What the pre-push hook checks: test-race, tidy-check, vuln |
-| `make ci` | Everything CI runs: pre-commit, vet, pre-push |
+| `make ci` | What the CI checks job runs: pre-commit, vet, pre-push |
 | `go run ./cmd/zing` | Start the server on `:8080` (override with `ZING_ADDR`) |
 
 ## Git hooks
@@ -38,3 +38,7 @@ The Makefile is the single source of truth. The git hooks and CI call these same
 ## Agent skills
 
 `.claude/skills/golang` and `.claude/skills/datastar` hold the coding rules, the 100 Go mistakes with the linter that catches each, and the Datastar attribute, Rocket, and Go SDK references.
+
+## License
+
+MIT. See LICENSE.

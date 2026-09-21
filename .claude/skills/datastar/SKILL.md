@@ -22,7 +22,12 @@ The backend drives the frontend by patching. A handler streams `datastar-patch-e
 The SDK is router agnostic and takes a plain `http.ResponseWriter` and `*http.Request`.
 
 ```go
-import "github.com/starfederation/datastar-go/datastar"
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/starfederation/datastar-go/datastar"
+)
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	type Store struct {

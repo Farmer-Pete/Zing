@@ -77,7 +77,16 @@ The full setup context is `{ $$, props, $, host, effect, cleanup, observeProps, 
 
 ## Reacting imperatively
 
-To react to prop changes without a full re-render, use `observeProps((props, changes) => { if ('src' in changes) { refs.video.src = props.src } }, 'src')`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
+To react to a prop change without a full re-render, two settings work together. `renderOnPropChange` decides whether a prop change re-renders; by default every change does, so an observer alone still re-renders. Set it to a function that returns false for the prop you handle by hand, then call `observeProps` from `onFirstRender`, where refs are available:
+
+```javascript
+render: ({ html, props }) => html`<video data-ref:video src="${props.src}"></video>`,
+renderOnPropChange: ({ changes }) => !('src' in changes),
+onFirstRender: ({ refs, observeProps }) =>
+  observeProps((props, changes) => { if ('src' in changes) refs.video.src = props.src }, 'src'),
+```
+
+The template binds the initial value, because `observeProps` fires only on later changes and `onFirstRender` runs after the first render. The `renderOnPropChange` function receives `{ host, props, changes }`, where `changes` holds only the props that changed. Do not use `host.querySelector` for this: it cannot cross into a shadow root in `open` or `closed` mode, so it throws on `null` for any component that isn't `mode: 'light'`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
 
 ## Events
 
