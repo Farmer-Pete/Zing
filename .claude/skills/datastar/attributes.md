@@ -156,7 +156,7 @@ The options object supports these keys.
 | Option | Meaning | Default |
 | --- | --- | --- |
 | contentType | 'json' or 'form' | 'json' |
-| filterSignals | {include: RegExp, exclude: RegExp} for which signals to send | include /.*/, exclude /(^_\|\._).*/ |
+| filterSignals | {include: RegExp, exclude: RegExp} for which signals to send | `include /.*/, exclude /(^_|\._).*/` |
 | selector | CSS selector for form targeting when contentType is 'form' | none |
 | headers | Custom HTTP headers object | none |
 | openWhenHidden | Keep the SSE connection open when the tab is hidden | false |

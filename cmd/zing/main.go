@@ -73,7 +73,7 @@ func newMux() *http.ServeMux {
 
 // newServer builds the HTTP server with its timeouts and graceful-drain wiring.
 //
-// Shutdown closes listeners and waits for handlers, but net/http never cancels
+// Shutdown closes listeners and waits for handlers, but it does not cancel
 // request contexts on its own. Every request context here derives from a drain
 // context that is cancelled when Shutdown begins, so long-lived SSE handlers that
 // select on r.Context().Done() exit instead of holding Shutdown until its deadline.

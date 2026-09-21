@@ -15,8 +15,7 @@ import (
 func TestIndex(t *testing.T) {
 	t.Parallel()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", index)
+	mux := newMux()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -42,7 +41,9 @@ func TestShutdownCancelsRequests(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		http.NewResponseController(w).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			return
+		}
 		<-r.Context().Done()
 		close(released)
 	})
