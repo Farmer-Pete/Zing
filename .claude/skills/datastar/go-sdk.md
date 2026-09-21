@@ -102,7 +102,7 @@ if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 
 At scale, set `WriteTimeout: 0` on the server and apply a per-request deadline via ResponseController in a middleware on the non-streaming routes only, excluding SSE routes. `ReadHeaderTimeout` is safe to keep on SSE routes; it only bounds header reads.
 
-The handler must exit on disconnect and shutdown. A blocking send loop leaks a goroutine when the browser navigates away or the server drains. Select on the request context and return promptly. net/http cancels that context on client disconnect only; `Server.Shutdown` by itself waits for handlers and never cancels them. This repo closes that gap in `cmd/zing/main.go`: every request context derives from a drain context through `Server.BaseContext`, and a `RegisterOnShutdown` callback cancels it the moment Shutdown begins. Keep that wiring when you touch the server setup, or SSE handlers will hold Shutdown until its deadline.
+The handler must exit on disconnect and shutdown. A blocking send loop leaks a goroutine when the browser navigates away or the server drains. Select on the request context and return promptly. net/http cancels that context when the client's connection closes, when the request is canceled over HTTP/2, or when the handler's own ServeHTTP method returns; `Server.Shutdown` by itself waits for handlers and never cancels them. This repo closes the shutdown gap in `cmd/zing/main.go`: every request context derives from a drain context through `Server.BaseContext`, and a `RegisterOnShutdown` callback cancels it the moment Shutdown begins. Keep that wiring when you touch the server setup, or SSE handlers will hold Shutdown until its deadline.
 
 ```go
 for {

@@ -77,7 +77,7 @@ The full setup context is `{ $$, props, $, host, effect, cleanup, observeProps, 
 
 ## Reacting imperatively
 
-To react to prop changes without a full re-render, use `observeProps((props, changes) => { if ('src' in changes) { host.querySelector('video').src = props.src } }, 'src')`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
+To react to prop changes without a full re-render, call `observeProps` from `onFirstRender`, where refs are available: `onFirstRender: ({ refs, observeProps }) => observeProps((props, changes) => { if ('src' in changes) refs.video.src = props.src }, 'src')`, with `<video data-ref:video>` in the render output. Do not use `host.querySelector` for this: it cannot cross into a shadow root in `open` or `closed` mode, so it throws on `null` for any component that isn't `mode: 'light'`. To react to local signal changes, use `effect(() => { if ($$.count > 10) console.log('too high') })`.
 
 ## Events
 
