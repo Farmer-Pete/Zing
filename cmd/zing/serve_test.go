@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,20 +69,27 @@ func freeLoopbackPort(t *testing.T) int {
 // 7.1's table drives the fixture ticket through, queued to done.
 var stateSequenceWant = []string{"planning", "building", "reviewing", "judging", "shipping", "done"}
 
-// TestServe_SilentRingToDoneThenCleanShutdown is the silent-ring integration
-// test (PKG3-PLAN.md section 12 row 5, section 6.10): zing serve, run
-// end-to-end against a temp config and a temp database, carries the one
-// fixture ticket from queued to done with no question, in the order design
-// section 7.1's state table lists; ctx cancellation then drains the
-// dispatcher and closes the store, and serve returns nil.
-func TestServe_SilentRingToDoneThenCleanShutdown(t *testing.T) {
+// TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown is the
+// end-to-end integration test (PKG3-PLAN.md section 12 rows 5 and 7, section
+// 6.10): zing serve, run against a temp config and a temp database, carries
+// the one fixture ticket from queued into planning, where it waits on the
+// one fixture question; this test answers it through a real POST /answer
+// against the running server, exactly as the browser's chip click would,
+// and the dispatcher resumes and carries the ticket the rest of the way to
+// done, in the order design section 7.1's state table lists. ctx
+// cancellation then drains the dispatcher and closes the store, and serve
+// returns nil.
+func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "zing.toml")
 	dbPath := filepath.Join(dir, "zing.db")
 
-	doc := fmt.Sprintf(testZingTOMLFormat, freeLoopbackPort(t))
+	port := freeLoopbackPort(t)
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	doc := fmt.Sprintf(testZingTOMLFormat, port)
 	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
 	}
@@ -105,8 +114,15 @@ func TestServe_SilentRingToDoneThenCleanShutdown(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
 
+	ticketID, questionID := waitForOpenQuestion(t, dbPath, serveDone)
+	answerQuestion(t, baseURL, ticketID, questionID, "b")
+
 	ticket := waitForDoneTicket(t, dbPath, serveDone)
+	if ticket.ID != ticketID {
+		t.Fatalf("done ticket id = %d, want the same ticket that asked the question (%d)", ticket.ID, ticketID)
+	}
 	assertStateSequence(t, dbPath, ticket.ID)
+	assertExactlyOneQuestionAnswered(t, dbPath, ticket.ID)
 
 	cancel()
 
@@ -117,6 +133,78 @@ func TestServe_SilentRingToDoneThenCleanShutdown(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return within the drain window after ctx cancel")
+	}
+}
+
+// waitForOpenQuestion polls a second store.Open on dbPath until the one
+// fixture ticket is in planning, waiting on "questions", with at least one
+// open question message, and returns the ticket id and that question's
+// message id, so the test can answer it (design section 6.6, first entry).
+func waitForOpenQuestion(t *testing.T, dbPath string, serveDone <-chan error) (ticketID, questionID int64) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	st := openStoreWithRetry(ctx, t, dbPath)
+	defer func() { _ = st.Close() }()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("ticket did not reach an open question within the poll deadline")
+		case err := <-serveDone:
+			t.Fatalf("serve exited early: %v", err)
+		case <-ticker.C:
+			tickets, err := st.ListAllTickets(ctx)
+			if err != nil {
+				t.Fatalf("ListAllTickets: %v", err)
+			}
+			if len(tickets) != 1 {
+				continue
+			}
+			ticket := tickets[0]
+			if ticket.State != "planning" || ticket.WaitingOn == nil || *ticket.WaitingOn != "questions" {
+				continue
+			}
+			open, err := st.QuestionsByState(ctx, ticket.ID, "open")
+			if err != nil {
+				t.Fatalf("QuestionsByState(open): %v", err)
+			}
+			if len(open) == 0 {
+				continue
+			}
+			return ticket.ID, open[0].ID
+		}
+	}
+}
+
+// answerQuestion POSTs the console's $answer signal to /answer on the
+// running server at baseURL, the same JSON shape and header a browser's chip
+// click sends (design section 6.9): {"answer":{"ticket","question","option"}}
+// with the Datastar-Request header. It fails the test on anything but 204.
+func answerQuestion(t *testing.T, baseURL string, ticketID, questionID int64, option string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":%q}}`, ticketID, questionID, option)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/answer", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST /answer request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /answer: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /answer: status = %d, want 204", resp.StatusCode)
 	}
 }
 
@@ -221,5 +309,34 @@ func assertStateSequence(t *testing.T, dbPath string, ticketID int64) {
 		if got[i] != want {
 			t.Fatalf("state sequence = %v, want %v", got, stateSequenceWant)
 		}
+	}
+}
+
+// assertExactlyOneQuestionAnswered reads ticketID's messages through a fresh
+// store handle and asserts exactly one "answer" message was recorded, so the
+// POST /answer this test drove is the only one that landed.
+func assertExactlyOneQuestionAnswered(t *testing.T, dbPath string, ticketID int64) {
+	t.Helper()
+
+	ctx := t.Context()
+	st, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("fourth store.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	messages, err := st.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+
+	var answers int
+	for i := range messages {
+		if messages[i].Type == "answer" {
+			answers++
+		}
+	}
+	if answers != 1 {
+		t.Errorf("answer messages = %d, want 1", answers)
 	}
 }

@@ -1,57 +1,10 @@
-<zing job="planning" outcome="ready">
-  <claims>
-    <claim kind="code" verdict="true" evidence="cmd/zing/main.go:60">newMux only registers GET /{$}; there is no /hello route today.</claim>
-  </claims>
-  <scenarios>
-    <scenario id="s1" kind="behavior" check="curl -sf localhost:8080/hello">
-      <given>the server is running</given>
-      <when>a client sends GET /hello</when>
-      <then>the response is 200 with body "hello, world"</then>
-    </scenario>
-    <scenario id="s2" kind="negative">
-      <given>the server is running</given>
-      <when>a client sends POST /hello</when>
-      <then>the response is 405, since only GET is registered for the route</then>
-    </scenario>
-  </scenarios>
-  <plan>
-    <overview>
-      <objective>Add a hello endpoint so a caller can get a plain-text greeting back over HTTP.</objective>
-      <context>cmd/zing/main.go builds the HTTP server and its routes in newMux; this adds one more GET route beside the existing index handler.</context>
-      <problem>Nothing today answers a plain greeting request, so there is no minimal route that shows the server responding with dynamic text.</problem>
-      <goals>
-        <goal>GET /hello returns 200 with the text "hello, world" when the process is running</goal>
-      </goals>
-      <nongoals>
-        <nongoal>Accepting a name parameter or personalizing the greeting is out of scope; this is a fixed-text route, not a templated one</nongoal>
-      </nongoals>
-    </overview>
-    <design>
-      <demo cmd="go run ./cmd/zing serve &amp; curl -sf localhost:8080/hello">Starting the server and curling /hello prints "hello, world" with a 200 status, showing the route is live end to end.</demo>
-      <shape>newMux gains one more route, `GET /hello`, registered beside the existing `GET /{$}` route. Its handler writes a 200 status and a fixed "hello, world" body; it needs no dependencies, so it stays a package-level function like index.</shape>
-      <migrations none="true"></migrations>
-    </design>
-    <delivery>
-      <files>
-        <file path="cmd/zing/main.go" action="modify">register the /hello route in newMux and add its handler</file>
-        <file path="cmd/zing/main_test.go" action="modify">add TestHello covering GET and the POST 405 case</file>
-      </files>
-      <deletions none="true"></deletions>
-      <tests>
-        <test name="TestHello" seam="newMux" kind="integration" mocks="">GET /hello returns 200 and body "hello, world"; POST /hello returns 405</test>
-      </tests>
-      <tasks>
-        <task n="1" test="TestHello" demo="true">Add the /hello handler and register it in newMux so the demo command above returns 200.</task>
-      </tasks>
-    </delivery>
-    <review>
-      <trust_root>none</trust_root>
-      <alternatives>
-        <alternative>Reuse the index handler for /hello too: rejected, since a plain-text greeting route should not depend on the same path or body as the human-facing page.</alternative>
-      </alternatives>
-      <risks>
-        <risk>A caller expecting a JSON body instead of plain text would need to parse it differently; call this out in the PR description.</risk>
-      </risks>
-    </review>
-  </plan>
+<zing job="planning" outcome="question">
+  <question key="Q1">
+    <title>How should the greeting read?</title>
+    <body>Pick the greeting style for GET /hello.</body>
+    <option key="a">Plain hello</option>
+    <option key="b">hello, world</option>
+    <recommended>b</recommended>
+  </question>
+  <progress>Asked one question before drafting the plan.</progress>
 </zing>

@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,6 +36,9 @@ const (
 
 	testOwner      = "test-host-1"
 	testFixtureRef = "fake#1" // fixtures/tickets.toml's one ticket
+
+	testWaitingQuestions = "questions"
+	testQuestionOpen     = "open"
 )
 
 var testProject = store.Project{
@@ -127,28 +131,76 @@ func getTicket(t *testing.T, s *store.Store, id int64) store.Ticket {
 // internal/job/skeleton_test.go's advanceThroughStates.
 func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, states ...string) {
 	t.Helper()
-	reg := job.Registry()
 	for _, state := range states {
 		ticket := getTicket(t, s, ticketID)
 		if ticket.State != state {
 			t.Fatalf("advanceTicket(%s): ticket state = %q, want %q", state, ticket.State, state)
 		}
-		owner := fmt.Sprintf("advance-%d-%s", ticketID, state)
-		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
-		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
-		if err != nil || !claimed {
-			t.Fatalf("advanceTicket(%s): claim: claimed=%v err=%v", state, claimed, err)
+		runHandlerOnce(t, s, rt, ticketID, state)
+		// Planning is two-phase (section 6.6): the first entry posts a
+		// question and waits, and the resume advances only after the batch
+		// is answered. Answer it and re-run planning so this helper leaves
+		// the ticket in building, as its callers expect.
+		if state == testStatePlanning {
+			after := getTicket(t, s, ticketID)
+			if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
+				answerOpenQuestion(t, s, ticketID)
+				runHandlerOnce(t, s, rt, ticketID, state)
+			}
 		}
-		commit, err := reg[state].Run(t.Context(), ticket, job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires})
-		if err != nil {
-			t.Fatalf("advanceTicket(%s) Run: %v", state, err)
+	}
+}
+
+// runHandlerOnce claims the ticket, runs its state's handler once, and applies
+// the resulting commit directly against s, bypassing the dispatcher.
+func runHandlerOnce(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, state string) {
+	t.Helper()
+	ticket := getTicket(t, s, ticketID)
+	owner := fmt.Sprintf("advance-%d-%s", ticketID, state)
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("advanceTicket(%s): claim: claimed=%v err=%v", state, claimed, err)
+	}
+	commit, err := job.Registry()[state].Run(t.Context(), ticket, job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires})
+	if err != nil {
+		t.Fatalf("advanceTicket(%s) Run: %v", state, err)
+	}
+	if err = job.ValidateCommit(ticket, commit); err != nil {
+		t.Fatalf("advanceTicket(%s) ValidateCommit: %v", state, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), commit)
+	if err != nil || !applied {
+		t.Fatalf("advanceTicket(%s) CommitHandlerResult: applied=%v err=%v", state, applied, err)
+	}
+}
+
+// answerOpenQuestion answers every open question on the ticket with its first
+// offered option, so the planning batch is fully answered and the resume can
+// run.
+func answerOpenQuestion(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, testQuestionOpen)
+	if err != nil {
+		t.Fatalf("answerOpenQuestion: QuestionsByState: %v", err)
+	}
+	if len(open) == 0 {
+		t.Fatalf("answerOpenQuestion: ticket %d has no open question", ticketID)
+	}
+	for i := range open {
+		q := &open[i]
+		var payload response.QuestionPayload
+		if err := json.Unmarshal(q.Payload, &payload); err != nil {
+			t.Fatalf("answerOpenQuestion: unmarshal payload: %v", err)
 		}
-		if err = job.ValidateCommit(ticket, commit); err != nil {
-			t.Fatalf("advanceTicket(%s) ValidateCommit: %v", state, err)
+		if len(payload.Options) == 0 {
+			t.Fatalf("answerOpenQuestion: question %d has no options", q.ID)
 		}
-		applied, err := s.CommitHandlerResult(t.Context(), commit)
-		if err != nil || !applied {
-			t.Fatalf("advanceTicket(%s) CommitHandlerResult: applied=%v err=%v", state, applied, err)
+		res, err := s.AnswerQuestion(t.Context(), store.AnswerInput{
+			TicketID: ticketID, QuestionID: q.ID, Option: payload.Options[0].Key,
+		})
+		if err != nil || !res.Accepted {
+			t.Fatalf("answerOpenQuestion: AnswerQuestion: accepted=%v conflict=%q err=%v", res.Accepted, res.Conflict, err)
 		}
 	}
 }
