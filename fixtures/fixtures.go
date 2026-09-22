@@ -1,11 +1,12 @@
 // Package fixtures embeds the repo-owned fixtures: the tracker's intake
-// tickets and, in a later task, the fake runtime's scripts.
+// tickets and the fake runtime's scripts.
 package fixtures
 
 import "embed"
 
 // FS is the embedded fixtures tree. The tracker fixture reads tickets.toml
-// from it; a later task widens this embed to include scripts/.
+// from it; the fake runtime reads its scripts from the scripts/ subtree
+// (fs.Sub(FS, "scripts")).
 //
-//go:embed tickets.toml
+//go:embed tickets.toml scripts
 var FS embed.FS

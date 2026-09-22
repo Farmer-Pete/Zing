@@ -1,0 +1,12 @@
+<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>cmd/zing/main.go</path>
+      <path>cmd/zing/main_test.go</path>
+    </files_changed>
+    <test_exit>0</test_exit>
+    <lint_exit>0</lint_exit>
+  </claims>
+  <report>Added the /hello handler and registered it in newMux; TestHello covers both the 200 and the 405 cases.</report>
+  <notes></notes>
+</zing>
