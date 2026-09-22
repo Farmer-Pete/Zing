@@ -1,0 +1,6 @@
+<zing job="planning" outcome="nothing_to_do">
+  <claims>
+    <claim kind="code" verdict="false" evidence="cmd/zing/main.go:96">newMux already registers GET /healthz alongside the index route, with a handler that returns 200 and body "ok".</claim>
+  </claims>
+  <notes>TestHealthz in cmd/zing/main_test.go already covers the 200 and 405 cases the ticket asks for; there is nothing left to build.</notes>
+</zing>

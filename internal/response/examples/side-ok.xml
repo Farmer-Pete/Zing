@@ -1,0 +1,3 @@
+<zing job="side" outcome="ok">
+  <answer>newMux registers routes with net/http.ServeMux's method-and-path pattern syntax, added in Go 1.22; GET /healthz would sit beside the existing GET /{$} entry.</answer>
+</zing>

@@ -1,0 +1,3 @@
+<zing job="classify" outcome="feature">
+  <reason>The ticket asks for a health check endpoint that does not exist anywhere in the codebase today.</reason>
+</zing>

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"testing/fstest"
 
+	"zing/internal/response"
 	"zing/internal/schemagen"
 )
 
@@ -41,5 +43,64 @@ func TestSchemagenDiff_CatchesTamperedSchema(t *testing.T) {
 	}
 	if len(diffs) != 1 || diffs[0] != tamperedPath {
 		t.Errorf("Diff(tampered) = %v, want [%s]", diffs, tamperedPath)
+	}
+}
+
+// TestCheckResponseTemplates_RendersEveryRegisteredPair proves the pair
+// list task 6 hardcodes (registeredPairs) actually renders end to end: an
+// unregistered or misnamed pair here would make RenderTemplate error.
+func TestCheckResponseTemplates_RendersEveryRegisteredPair(t *testing.T) {
+	if err := checkResponseTemplates(); err != nil {
+		t.Errorf("checkResponseTemplates() = %v, want nil", err)
+	}
+}
+
+// TestCheckResponseExamples_RealExamplesPass proves the real embedded
+// examples (internal/response/examples/*.xml) all parse and validate, the
+// same check selftest itself runs.
+func TestCheckResponseExamples_RealExamplesPass(t *testing.T) {
+	if err := checkResponseExamples(response.ExampleFS); err != nil {
+		t.Errorf("checkResponseExamples(response.ExampleFS) = %v, want nil", err)
+	}
+}
+
+// TestCheckResponseExamples_CatchesTamperedExample proves the
+// parse-and-validate step selftest runs over response.ExampleFS actually
+// detects a broken example, using an in-memory copy so the real committed
+// files stay untouched.
+func TestCheckResponseExamples_CatchesTamperedExample(t *testing.T) {
+	files, err := response.ExampleFiles()
+	if err != nil {
+		t.Fatalf("ExampleFiles: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("ExampleFiles returned none")
+	}
+
+	tampered := make(fstest.MapFS, len(files))
+	for _, name := range files {
+		data, err := response.ExampleFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", name, err)
+		}
+		tampered[name] = &fstest.MapFile{Data: data}
+	}
+
+	// A well-formed <zing> element that fails Validate: classify/bug
+	// requires a non-empty <reason>, which this omits.
+	tampered[files[0]] = &fstest.MapFile{Data: []byte(`<zing job="classify" outcome="bug"></zing>`)}
+
+	gotErr := checkResponseExamples(tampered)
+	if gotErr == nil {
+		t.Fatal("checkResponseExamples(tampered) = nil, want an error")
+	}
+	// Tie the failure to the planted file and to the mechanism under test
+	// (Validate rejecting the missing <reason>), so a regression that fails
+	// for some other reason cannot quietly satisfy this test.
+	if !strings.Contains(gotErr.Error(), files[0]) {
+		t.Errorf("error %q does not name the tampered example %s", gotErr, files[0])
+	}
+	if !strings.Contains(gotErr.Error(), "reason: missing required element") {
+		t.Errorf("error %q is not the expected missing-reason validation error", gotErr)
 	}
 }

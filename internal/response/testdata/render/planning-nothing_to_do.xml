@@ -1,0 +1,6 @@
+<zing job="planning" outcome="nothing_to_do"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <claims>
+    <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more, every code claim is false; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
+  </claims>
+  <notes>...</notes> <!-- string, why there is nothing to build -->
+</zing>

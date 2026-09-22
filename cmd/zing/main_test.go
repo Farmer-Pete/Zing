@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,7 @@ const (
 	argv0           = "zing"
 	cmdServe        = "serve"
 	cmdSelftest     = "selftest"
+	cmdValidate     = "validate"
 	cmdUnrecognized = "bogus"
 )
 
@@ -125,6 +127,23 @@ func TestDispatch_Selftest(t *testing.T) {
 
 	if got := dispatch([]string{argv0, cmdSelftest}); got != 0 {
 		t.Errorf("dispatch(selftest) = %d, want 0", got)
+	}
+}
+
+// TestDispatch_Validate proves dispatch routes "validate" to runValidate
+// with the arguments after the subcommand name, on top of validate_test.go's
+// own direct coverage of runValidate's behavior.
+func TestDispatch_Validate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "doc.xml")
+	doc := `<zing job="classify" outcome="bug"><reason>it crashes</reason></zing>`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := dispatch([]string{argv0, cmdValidate, path}); got != 0 {
+		t.Errorf("dispatch(validate, %s) = %d, want 0", path, got)
 	}
 }
 

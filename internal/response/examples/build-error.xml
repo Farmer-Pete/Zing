@@ -1,0 +1,7 @@
+<zing job="build" outcome="error">
+  <error code="cannot_run">
+    <what>The task's test suite cannot run: go test fails immediately with a missing go.sum entry for the sqlite driver.</what>
+    <why>go mod tidy was never run after the driver was added to go.mod, so the build fails before any test executes.</why>
+    <tried>Ran go mod tidy locally, which needs network access this sandbox does not have.</tried>
+  </error>
+</zing>

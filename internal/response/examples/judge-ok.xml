@@ -1,0 +1,8 @@
+<zing job="judge" outcome="ok">
+  <verdict scenario="s1" result="pass">
+    <evidence>curl -sf localhost:8080/healthz printed "ok" with a 200 status.</evidence>
+  </verdict>
+  <verdict scenario="s2" result="pass">
+    <evidence>curl -X POST localhost:8080/healthz returned 405, since only GET is registered for the route.</evidence>
+  </verdict>
+</zing>

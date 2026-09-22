@@ -1,0 +1,7 @@
+<zing job="planreview" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <finding lens="..." severity="..." location="..."> <!-- Finding, optional, zero or more; lens: Lens, one of: problem | simplification | correctness | security | fidelity | tests | quality | observability; severity: Severity, one of: blocker | major | minor | nit; location: string, plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff -->
+    <text>...</text> <!-- string, what is wrong or unanswered -->
+    <fix>...</fix> <!-- string, what to change -->
+    <plan_ref>...</plan_ref> <!-- string, optional, code review, fidelity lens only: the plan element -->
+  </finding>
+</zing>

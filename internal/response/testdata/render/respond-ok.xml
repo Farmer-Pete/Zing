@@ -1,0 +1,3 @@
+<zing job="respond" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <thread id="..." action="...">...</thread> <!-- ThreadAction, one or more, exactly one per unresolved review thread; id: string, the review thread id from the inputs; action: ThreadVerb, one of: fix | reply | addressed -->
+</zing>

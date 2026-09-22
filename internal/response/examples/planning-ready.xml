@@ -1,0 +1,57 @@
+<zing job="planning" outcome="ready">
+  <claims>
+    <claim kind="code" verdict="true" evidence="cmd/zing/main.go:60">newMux only registers GET /{$}; there is no /healthz route today.</claim>
+  </claims>
+  <scenarios>
+    <scenario id="s1" kind="behavior" check="curl -sf localhost:8080/healthz">
+      <given>the server is running</given>
+      <when>a client sends GET /healthz</when>
+      <then>the response is 200 with body "ok"</then>
+    </scenario>
+    <scenario id="s2" kind="negative">
+      <given>the server is running</given>
+      <when>a client sends POST /healthz</when>
+      <then>the response is 405, since only GET is registered for the route</then>
+    </scenario>
+  </scenarios>
+  <plan>
+    <overview>
+      <objective>Add a health check endpoint so a load balancer can tell when Zing is ready to take traffic.</objective>
+      <context>cmd/zing/main.go builds the HTTP server and its routes in newMux; this adds one more GET route beside the existing index handler.</context>
+      <problem>Nothing today answers a liveness probe, so an operator has no cheap way to ask "is this process up."</problem>
+      <goals>
+        <goal>GET /healthz returns 200 with a short body when the process is running</goal>
+      </goals>
+      <nongoals>
+        <nongoal>Checking downstream dependencies (database, disk) is out of scope; this is a process liveness check, not a readiness check</nongoal>
+      </nongoals>
+    </overview>
+    <design>
+      <demo cmd="go run ./cmd/zing serve &amp; curl -sf localhost:8080/healthz">Starting the server and curling /healthz prints "ok" with a 200 status, showing the route is live end to end.</demo>
+      <shape>newMux gains one more route, `GET /healthz`, registered beside the existing `GET /{$}` route. Its handler writes a 200 status and a fixed "ok" body; it needs no dependencies, so it stays a package-level function like index.</shape>
+      <migrations none="true"></migrations>
+    </design>
+    <delivery>
+      <files>
+        <file path="cmd/zing/main.go" action="modify">register the /healthz route in newMux and add its handler</file>
+        <file path="cmd/zing/main_test.go" action="modify">add TestHealthz covering GET and the POST 405 case</file>
+      </files>
+      <deletions none="true"></deletions>
+      <tests>
+        <test name="TestHealthz" seam="newMux" kind="integration" mocks="">GET /healthz returns 200 and body "ok"; POST /healthz returns 405</test>
+      </tests>
+      <tasks>
+        <task n="1" test="TestHealthz" demo="true">Add the /healthz handler and register it in newMux so the demo command above returns 200.</task>
+      </tasks>
+    </delivery>
+    <review>
+      <trust_root>none</trust_root>
+      <alternatives>
+        <alternative>Reuse the index handler for /healthz too: rejected, since a load balancer probe should not depend on the same path or body as the human-facing page.</alternative>
+      </alternatives>
+      <risks>
+        <risk>A load balancer configured to expect a different status code or body would need reconfiguring; call this out in the PR description.</risk>
+      </risks>
+    </review>
+  </plan>
+</zing>
