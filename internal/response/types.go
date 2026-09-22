@@ -262,7 +262,6 @@ type BuildResponse struct { // outcome ok
 
 type BuildClaims struct {
 	FilesChanged []string `xml:"files_changed>path" json:"files_changed" jsonschema:"minItems=1" doc:"every changed path; the program diffs the tree"`
-	TestsAdded   int      `xml:"tests_added"        json:"tests_added"   jsonschema:"minimum=0"`
 	TestExit     int      `xml:"test_exit"          json:"test_exit"     doc:"the program re-runs the command"`
 	LintExit     int      `xml:"lint_exit"          json:"lint_exit"     doc:"the program re-runs the command"`
 }

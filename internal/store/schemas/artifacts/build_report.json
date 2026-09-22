@@ -11,10 +11,6 @@
       "type": "array",
       "minItems": 1
     },
-    "tests_added": {
-      "type": "integer",
-      "minimum": 0
-    },
     "test_exit": {
       "type": "integer"
     },
@@ -30,7 +26,6 @@
   "required": [
     "task_n",
     "files_changed",
-    "tests_added",
     "test_exit",
     "lint_exit",
     "report"
