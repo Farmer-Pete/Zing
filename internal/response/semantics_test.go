@@ -1,6 +1,9 @@
 package response
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCheckNoneUnion_TrueWithItemsFails(t *testing.T) {
 	t.Parallel()
@@ -174,6 +177,32 @@ func TestCheckChildrenDAG_MissingKeySkipsDuplicateAndDependencyChecks(t *testing
 	errs := checkChildrenDAG(children, map[string]bool{})
 	if len(errs) != 0 {
 		t.Fatalf("checkChildrenDAG = %v, want no errors: neither child's key is present", dumpErrs(errs))
+	}
+}
+
+// TestCheckChildrenDAG_MissingKeyDoesNotProduceSpuriousCycle proves
+// findDependencyCycle no longer treats a missing-key child's zero-value
+// Key ("") as a real graph node. child[0]'s key never decoded, so it
+// depends on child[1] ("c2") under a name Layer 1 already reports
+// missing; child[1] in turn carries an empty <depends_on> entry, which
+// legitimately draws its own "unknown key" error (that key really does
+// not belong to any present child) but must not also let the DFS walk
+// child[0] -> c2 -> "" and report a phantom cycle built from nothing but
+// two absent keys.
+func TestCheckChildrenDAG_MissingKeyDoesNotProduceSpuriousCycle(t *testing.T) {
+	t.Parallel()
+
+	children := []Child{
+		{Title: "t", Body: "b", DependsOn: []string{"c2"}}, // key missing
+		{Key: "c2", Title: "t", Body: "b", DependsOn: []string{""}},
+	}
+	present := map[string]bool{"child[1]/key": true}
+
+	errs := checkChildrenDAG(children, present)
+	for _, e := range errs {
+		if strings.Contains(e.Msg, "dependency cycle") {
+			t.Fatalf("checkChildrenDAG = %v, must not report a dependency cycle: child[0]'s key is absent, not a real graph node", dumpErrs(errs))
+		}
 	}
 }
 

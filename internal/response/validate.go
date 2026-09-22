@@ -177,7 +177,8 @@ func layer2Ready(r *ReadyResponse, ctx ValidateContext, present map[string]bool)
 	if !present["plan"] {
 		return errs
 	}
-	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists, present["plan/overview/problem"])...)
+	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists,
+		present["plan/overview/problem"], present["plan/delivery/tests/test[0]/kind"])...)
 
 	if present["plan/design/migrations"] {
 		m := r.Plan.Design.Migrations

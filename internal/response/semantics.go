@@ -73,7 +73,7 @@ func checkChildrenDAG(children []Child, present map[string]bool) []*PathError {
 		}
 	}
 
-	if cycle := findDependencyCycle(children); cycle != nil {
+	if cycle := findDependencyCycle(children, keyPresent); cycle != nil {
 		errs = append(errs, &PathError{Path: "children", Msg: "dependency cycle " + strings.Join(cycle, " -> ")})
 	}
 
@@ -86,10 +86,20 @@ func checkChildrenDAG(children []Child, present map[string]bool) []*PathError {
 // A self-dependency edge is excluded from the graph, since checkChildrenDAG
 // already reports it as its own rule; an edge to an unknown key is
 // excluded too, since there is no node to walk into.
-func findDependencyCycle(children []Child) []string {
+//
+// keyPresent, indexed the same as children, excludes a missing-key child
+// from the graph entirely: byKey is built only from children whose own key
+// actually decoded, so a zero-value Key ("") is never treated as a real
+// node, and an edge naming it (whether from another missing-key child, or
+// a genuine "unknown key" reference from a present-key child) simply finds
+// no node to walk into, the same as any other unknown key, rather than
+// silently reusing another absent child's identity.
+func findDependencyCycle(children []Child, keyPresent []bool) []string {
 	byKey := make(map[string]Child, len(children))
-	for _, c := range children {
-		byKey[c.Key] = c
+	for i, c := range children {
+		if keyPresent[i] {
+			byKey[c.Key] = c
+		}
 	}
 
 	const (
@@ -127,8 +137,8 @@ func findDependencyCycle(children []Child) []string {
 		return nil
 	}
 
-	for _, c := range children {
-		if state[c.Key] == unvisited {
+	for i, c := range children {
+		if keyPresent[i] && state[c.Key] == unvisited {
 			if cycle := visit(c.Key); cycle != nil {
 				return cycle
 			}

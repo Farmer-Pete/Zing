@@ -94,8 +94,10 @@ func proseElements(p Plan) []proseElem {
 // tuning checklists.toml actually changes what CheckPlan flags.
 // problemPresent reports whether the document's <problem> element was
 // actually present, gating the bug-shape checks that read it (see
-// checkBugShape); it is meaningless, and ignored, when bug is false.
-func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problemPresent bool) []*PathError {
+// checkBugShape). firstTestKindPresent reports whether the first test's
+// kind attribute was actually present, gating the first-test-kind check
+// the same way. Both are meaningless, and ignored, when bug is false.
+func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problemPresent, firstTestKindPresent bool) []*PathError {
 	var errs []*PathError
 
 	elems := proseElements(p)
@@ -109,7 +111,7 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problem
 	errs = append(errs, checkScenarioLeaks(elems, scenarios)...)
 
 	if bug {
-		errs = append(errs, checkBugShape(p, problemPresent)...)
+		errs = append(errs, checkBugShape(p, problemPresent, firstTestKindPresent)...)
 	}
 
 	return errs
@@ -126,9 +128,15 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problem
 // already reported missing at plan/overview/problem, and reading Loop,
 // Repro, and Hypotheses off that zero value would only add a second,
 // redundant set of errors at paths nested under the one already reported
-// missing. The first-test-kind check does not read Problem at all, so it
-// is unaffected by problemPresent.
-func checkBugShape(p Plan, problemPresent bool) []*PathError {
+// missing.
+//
+// firstTestKindPresent reports whether the first test's kind attribute
+// actually decoded: when it did not, Tests[0].Kind is a zero value ("")
+// Layer 1 already reported missing at plan/delivery/tests/test[0]/kind,
+// and comparing that zero value against TestKindRegression would add a
+// second, redundant error at the same path. This check does not read
+// Problem at all, so it is unaffected by problemPresent, and vice versa.
+func checkBugShape(p Plan, problemPresent, firstTestKindPresent bool) []*PathError {
 	var errs []*PathError
 
 	if problemPresent {
@@ -142,7 +150,7 @@ func checkBugShape(p Plan, problemPresent bool) []*PathError {
 			errs = append(errs, &PathError{Path: "plan/overview/problem/hypotheses", Msg: "bug plan needs three to five hypotheses"})
 		}
 	}
-	if len(p.Delivery.Tests) > 0 && p.Delivery.Tests[0].Kind != TestKindRegression {
+	if firstTestKindPresent && len(p.Delivery.Tests) > 0 && p.Delivery.Tests[0].Kind != TestKindRegression {
 		errs = append(errs, &PathError{Path: "plan/delivery/tests/test[0]/kind", Msg: "first test must be kind regression"})
 	}
 

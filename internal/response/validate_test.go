@@ -2,6 +2,7 @@ package response
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -409,6 +410,54 @@ func TestValidate_ReadyResponse_BugPlanMissingProblem_NoCascade(t *testing.T) {
 	}
 }
 
+// TestValidate_ReadyResponse_BugPlanFirstTestMissingKind_NoCascade proves
+// that when the first test's required kind attribute is entirely absent,
+// a bug-kind run gets only Layer 1's "missing required element" for
+// plan/delivery/tests/test[0]/kind, not also Layer 2's "first test must be
+// kind regression" read off the zero-value TestKind Layer 1 already
+// flagged as missing. Problem is fully bug-shape-valid, so it has nothing
+// to add.
+func TestValidate_ReadyResponse_BugPlanFirstTestMissingKind_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLBugValidFirstTest("") +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{Kind: KindBug})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "plan/delivery/tests/test[0]/kind: missing required element"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ReadyResponse_BugPlanFirstTestKindUnit_StillFlagged proves
+// the presence gate only suppresses the check when kind is truly absent:
+// a present kind="unit" still draws "first test must be kind regression".
+func TestValidate_ReadyResponse_BugPlanFirstTestKindUnit_StillFlagged(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLBugValidFirstTest("unit") +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{Kind: KindBug})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "plan/delivery/tests/test[0]/kind: first test must be kind regression"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
 // TestValidate_ChildrenResponse_MissingKey_NoCascade proves a child with a
 // missing key attribute (a zero-value Key, and a zero-value depends_on
 // entry that would otherwise equal it) does not generate a spurious
@@ -430,6 +479,34 @@ func TestValidate_ChildrenResponse_MissingKey_NoCascade(t *testing.T) {
 	want := "child[0]/key: missing required element"
 	if got := firstErrString(errs); got != want {
 		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ChildrenResponse_MissingKeyDependencyDoesNotCascadeIntoCycle
+// proves a missing key does not additionally let findDependencyCycle treat
+// its zero-value identity as a real graph node: child[0]'s key is absent
+// and it depends on child[1] ("c2"); child[1] carries an empty
+// <depends_on> entry, which legitimately targets no present key ("unknown
+// key"), but must not also produce a phantom "dependency cycle" built
+// from two absent keys colliding at "".
+func TestValidate_ChildrenResponse_MissingKeyDependencyDoesNotCascadeIntoCycle(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="children">` +
+		`<child><title>t1</title><body>b1</body><depends_on>c2</depends_on></child>` +
+		`<child key="c2"><title>t2</title><body>b2</body><depends_on></depends_on></child>` +
+		`<notes>shared shape</notes>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+
+	if !containsErr(errs, "child[0]/key: missing required element") {
+		t.Errorf("Validate = %v, want to contain the missing-key error", dumpErrs(errs))
+	}
+	for _, e := range errs {
+		if strings.Contains(e.Msg, "dependency cycle") {
+			t.Fatalf("Validate = %v, must not report a dependency cycle: child[0]'s key is absent, not a real graph node", dumpErrs(errs))
+		}
 	}
 }
 
@@ -646,6 +723,50 @@ func planXMLNoProblem() string {
 		`<files><file path="a.go" action="create">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="regression" mocks="">asserts</test></tests>` +
+		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+// planXMLBugValidFirstTest is planXML with a full bug-shape-valid
+// <problem> (a loop, a repro, three hypotheses), so a bug-kind Validate
+// call has nothing to say about problem at all; the first test's kind
+// attribute is set from testKindAttr verbatim, letting a caller omit it
+// (pass "") or set it to something other than regression, to isolate the
+// first-test-kind check.
+func planXMLBugValidFirstTest(testKindAttr string) string {
+	kindAttr := ""
+	if testKindAttr != "" {
+		kindAttr = ` kind="` + testKindAttr + `"`
+	}
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text` +
+		`<loop cmd="` + testBugLoopCmd + `">fails</loop>` +
+		`<repro>steps</repro>` +
+		`<hypotheses>` +
+		`<hypothesis rank="1"><cause>c1</cause><prediction>p1</prediction></hypothesis>` +
+		`<hypothesis rank="2"><cause>c2</cause><prediction>p2</prediction></hypothesis>` +
+		`<hypothesis rank="3"><cause>c3</cause><prediction>p3</prediction></hypothesis>` +
+		`</hypotheses>` +
+		`</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create">why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s"` + kindAttr + ` mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
 		`</delivery>` +
 		`<review>` +
