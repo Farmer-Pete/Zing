@@ -79,7 +79,7 @@ CREATE TABLE artifacts (
     run_id    INTEGER REFERENCES runs(id),
     type      TEXT NOT NULL CHECK (type IN
                 ('claims','scenario','plan','planreview','children','file','fence','task','build_report','finding','verdict','respond')),
-    version   INTEGER NOT NULL DEFAULT 1,
+    version   INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
     payload   TEXT NOT NULL,
     sealed_at TEXT
 );

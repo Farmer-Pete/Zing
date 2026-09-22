@@ -140,26 +140,40 @@ lint = "golangci-lint run"
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Console.Port != 8080 {
-		t.Errorf("Console.Port = %d, want 8080", cfg.Console.Port)
+	want := &Config{
+		User: testUser,
+		Console: Console{
+			Bind:      []string{"127.0.0.1"},
+			Port:      8080,
+			PushToken: "explicit-token",
+		},
+		Models: Models{
+			Sonnet: "custom-sonnet",
+			Opus:   "custom-opus",
+			Fable:  "custom-fable",
+			Codex:  "custom-codex",
+		},
+		Dispatch: Dispatch{IntervalSeconds: 60, MaxParallel: 4},
+		Budget:   Budget{AgentMinutesPerTicket: 120, UsageHoldPercent: 50},
+		Review:   Review{Floor: "blocker"},
+		Merge: Merge{
+			Auto:            true,
+			Method:          "merge",
+			ManualPaths:     []string{"a/**"},
+			DependencyFiles: []string{"go.mod"},
+		},
+		Projects: []Project{
+			{
+				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
+				Self:     true,
+				Intake:   Intake{AssignedTo: "someone-else"},
+				Commands: Commands{Test: "go test ./...", Lint: "golangci-lint run"},
+			},
+		},
 	}
-	if cfg.Console.PushToken != "explicit-token" {
-		t.Errorf("Console.PushToken = %q, want explicit-token (not regenerated)", cfg.Console.PushToken)
-	}
-	if cfg.Review.Floor != "blocker" {
-		t.Errorf("Review.Floor = %q, want blocker", cfg.Review.Floor)
-	}
-	if cfg.Merge.Method != "merge" {
-		t.Errorf("Merge.Method = %q, want merge", cfg.Merge.Method)
-	}
-	if cfg.Budget.UsageHoldPercent != 50 {
-		t.Errorf("Budget.UsageHoldPercent = %d, want 50", cfg.Budget.UsageHoldPercent)
-	}
-	if !cfg.Projects[0].Self {
-		t.Error("Projects[0].Self = false, want true")
-	}
-	if cfg.Projects[0].Intake.AssignedTo != "someone-else" {
-		t.Errorf("Projects[0].Intake.AssignedTo = %q, want someone-else", cfg.Projects[0].Intake.AssignedTo)
+
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}
 }
 

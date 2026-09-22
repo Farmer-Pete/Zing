@@ -56,6 +56,37 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 }
 
+// TestLoad_UnknownKeyIsRejected proves the machine.toml unknown-key check
+// (mirroring config.go's) rejects a misspelled key, and does not
+// false-positive on a job's well-formed "prompt" table.
+func TestLoad_UnknownKeyIsRejected(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		machineTOMLPath: &fstest.MapFile{Data: []byte(`version = 1
+
+[jobs.test]
+model = "sonnet"
+runtime = "claude"
+tools = ["read"]
+prompt = "classify.md"
+timeout_minutes = 5
+max_resume = 30
+
+[states]
+order = ["queued"]
+terminal = ["done"]
+`)},
+		stubPromptPath: &fstest.MapFile{Data: []byte("stub\n")},
+	}
+
+	_, err := Load(fsys, machineTOMLPath)
+	want := "machine.toml: unknown key jobs.test.max_resume"
+	if err == nil || err.Error() != want {
+		t.Errorf("Load() = %v, want %q", err, want)
+	}
+}
+
 // validJobFragment is a minimal, fully valid job body. A test appends one
 // more line to exercise a single validation rule that runs after every
 // field validJobFragment already sets.

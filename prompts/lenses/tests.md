@@ -9,5 +9,5 @@ Check:
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A
-mock inside a cut point is a finding. A test that would pass with the
+mock anywhere but at a cut point is a finding. A test that would pass with the
 code removed is a finding.

@@ -2,17 +2,20 @@ package store
 
 import (
 	"testing"
+
+	"zing/internal/schemagen"
 )
 
-func TestLoadSchemas_CompilesAll16(t *testing.T) {
+func TestLoadSchemas_CompilesAllRegistered(t *testing.T) {
 	t.Parallel()
 
 	schemas, err := loadSchemas()
 	if err != nil {
 		t.Fatalf("loadSchemas: %v", err)
 	}
-	if got := len(schemas.compiled); got != 16 {
-		t.Fatalf("compiled %d schemas, want 16", got)
+	want := len(schemagen.Registry())
+	if got := len(schemas.compiled); got != want {
+		t.Fatalf("compiled %d schemas, want %d (len(schemagen.Registry()))", got, want)
 	}
 }
 

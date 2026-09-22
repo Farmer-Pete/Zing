@@ -134,22 +134,59 @@ func Generate() (map[string][]byte, error) {
 	return out, nil
 }
 
-// Diff returns the relative paths whose committed bytes in committed differ
-// from Generate()'s output, sorted. An unreadable or missing committed file
-// counts as a difference.
+// Diff returns the relative paths that differ between committed and
+// Generate()'s output, sorted. This is bidirectional: a path is reported
+// both when its committed bytes differ from (or are missing from)
+// Generate(), and when it exists in committed with no Registry() entry to
+// generate it (an orphan schema with no generator source).
 func Diff(committed fs.FS) ([]string, error) {
 	generated, err := Generate()
 	if err != nil {
 		return nil, err
 	}
 
-	var diffs []string
+	diffSet := make(map[string]bool)
 	for relpath, want := range generated {
 		got, readErr := fs.ReadFile(committed, relpath)
 		if readErr != nil || !bytes.Equal(got, want) {
-			diffs = append(diffs, relpath)
+			diffSet[relpath] = true
 		}
+	}
+
+	orphans, err := committedRelpaths(committed)
+	if err != nil {
+		return nil, err
+	}
+	for _, relpath := range orphans {
+		if _, ok := generated[relpath]; !ok {
+			diffSet[relpath] = true
+		}
+	}
+
+	diffs := make([]string, 0, len(diffSet))
+	for relpath := range diffSet {
+		diffs = append(diffs, relpath)
 	}
 	sort.Strings(diffs)
 	return diffs, nil
+}
+
+// committedRelpaths walks committed and returns every regular file's path,
+// relative to committed's root, so Diff can find a committed schema no
+// Registry() entry generates.
+func committedRelpaths(committed fs.FS) ([]string, error) {
+	var paths []string
+	err := fs.WalkDir(committed, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk committed schemas: %w", err)
+	}
+	return paths, nil
 }

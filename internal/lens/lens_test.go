@@ -142,6 +142,21 @@ func TestParseLens_Fixtures(t *testing.T) {
 	}
 }
 
+// TestLoad_EmptyDirIsAnError proves Load returns an error, not a nil error
+// with zero lenses, when dir holds no *.md files.
+func TestLoad_EmptyDirIsAnError(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		lensesDir + "/.keep": &fstest.MapFile{Data: []byte("")},
+	}
+	_, err := Load(fsys, lensesDir)
+	want := "lens: no lens files in " + lensesDir
+	if err == nil || err.Error() != want {
+		t.Errorf("Load(empty dir) = %v, want %q", err, want)
+	}
+}
+
 func TestParseLens_LeadingBlankLinesAllowedBeforeFirstHeading(t *testing.T) {
 	t.Parallel()
 

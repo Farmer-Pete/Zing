@@ -93,6 +93,10 @@ func Load(fsys fs.FS, path string) (*Machine, error) {
 		return nil, fmt.Errorf("machine.toml: %w", err)
 	}
 
+	if err := checkUnknownKeys(md); err != nil {
+		return nil, err
+	}
+
 	if err := validateTopLevel(m); err != nil {
 		return nil, err
 	}
@@ -110,6 +114,24 @@ func Load(fsys fs.FS, path string) (*Machine, error) {
 	}
 
 	return &m, nil
+}
+
+// checkUnknownKeys mirrors config.go's check: after decode, collect
+// md.Undecoded()'s dotted paths, sort them, and if any remain report the
+// first. PromptRef.UnmarshalTOML marks the "prompt" value itself decoded, and
+// an unknown key inside a {feature,bug} table is caught by PromptRef.bad, so
+// this check does not false-positive on a job's prompt key.
+func checkUnknownKeys(md toml.MetaData) error {
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	keys := make([]string, len(undecoded))
+	for i, k := range undecoded {
+		keys[i] = k.String()
+	}
+	sort.Strings(keys)
+	return fmt.Errorf("machine.toml: unknown key %s", keys[0])
 }
 
 func sortedJobNames(jobs map[string]Job) []string {

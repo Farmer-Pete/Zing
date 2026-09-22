@@ -397,6 +397,28 @@ func TestStore_ArtifactWholeDocUniqueIndex(t *testing.T) {
 	}
 }
 
+// TestStore_ArtifactsVersionCheck proves artifacts.version CHECK (version >=
+// 1) rejects a version of 0 at the SQL layer, bypassing the Go normalizer in
+// InsertArtifact (which turns 0 into 1) by inserting directly through s.db.
+func TestStore_ArtifactsVersionCheck(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	scenario := []byte(`{"id":"s1","kind":"behavior","check_cmd":"go test","given":"g","when":"w","then":"t"}`)
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO artifacts (ticket_id, type, version, payload) VALUES (1, ?, 0, ?)`,
+		testTypeScenario, string(scenario))
+	if err == nil {
+		t.Error("raw insert with version = 0: want error, got nil")
+	}
+}
+
 // TestStore_TicketsWaitingOnCheck proves tickets.waiting_on rejects a value
 // outside its closed set.
 func TestStore_TicketsWaitingOnCheck(t *testing.T) {

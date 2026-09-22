@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 
 	"zing/internal/response"
 )
@@ -73,6 +74,63 @@ func TestGenerate_MatchesCommitted(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s: committed schema differs from Generate() output; run with -update", relpath)
 		}
+	}
+
+	// Bidirectional: fail if a committed schema file exists that Generate()
+	// did not produce (an orphan with no Registry() source).
+	walkErr := filepath.WalkDir(schemaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(schemaDir, path)
+		if err != nil {
+			return err
+		}
+		relpath := filepath.ToSlash(rel)
+		if _, ok := generated[relpath]; !ok {
+			t.Errorf("%s: committed schema file has no Registry() entry to generate it", relpath)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", schemaDir, walkErr)
+	}
+}
+
+// TestDiff_DetectsOrphanFile proves Diff reports a committed schema file that
+// exists on disk but has no Registry() entry to generate it, in addition to
+// the byte-mismatch case TestGenerate_MatchesCommitted already covers.
+func TestDiff_DetectsOrphanFile(t *testing.T) {
+	t.Parallel()
+
+	generated, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	committed := fstest.MapFS{}
+	for relpath, b := range generated {
+		committed[relpath] = &fstest.MapFile{Data: b}
+	}
+	const orphan = "artifacts/orphan.json"
+	committed[orphan] = &fstest.MapFile{Data: []byte("{}\n")}
+
+	diffs, err := Diff(committed)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	found := false
+	for _, d := range diffs {
+		if d == orphan {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Diff(committed with orphan file) = %v, want it to include %q", diffs, orphan)
 	}
 }
 

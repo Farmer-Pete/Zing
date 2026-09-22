@@ -47,6 +47,10 @@ func Load(fsys fs.FS, dir string) ([]Lens, error) {
 		lenses = append(lenses, l)
 	}
 
+	if len(lenses) == 0 {
+		return nil, fmt.Errorf("lens: no lens files in %s", dir)
+	}
+
 	sort.Slice(lenses, func(i, j int) bool { return lenses[i].Name < lenses[j].Name })
 	return lenses, nil
 }
