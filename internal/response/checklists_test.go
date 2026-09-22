@@ -50,6 +50,33 @@ extra = ["not a recognized key"]
 	}
 }
 
+func TestParseChecklists_RejectsMissingOrEmptyList(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		data string
+		want string
+	}{
+		{"missing units", "placeholders = [\"TODO\"]\nvague = [\"slow\"]\n", "units"},
+		{"empty units", "placeholders = [\"TODO\"]\nvague = [\"slow\"]\nunits = []\n", "units"},
+		{"empty placeholders", "placeholders = []\nvague = [\"slow\"]\nunits = [\"ms\"]\n", "placeholders"},
+		{"empty vague", "placeholders = [\"TODO\"]\nvague = []\nunits = [\"ms\"]\n", "vague"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseChecklists(tc.data)
+			if err == nil {
+				t.Fatalf("parseChecklists = nil error, want an error naming %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("parseChecklists error = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseChecklists_LowercasesVague(t *testing.T) {
 	t.Parallel()
 

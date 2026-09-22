@@ -2,6 +2,7 @@ package response
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,6 +48,18 @@ func parseChecklists(data string) (Checklists, error) {
 	}
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		return Checklists{}, fmt.Errorf("checklists: unknown key %q", undecoded[0].String())
+	}
+
+	// Every list gates a plan-checker rule, so a missing or empty one in the
+	// trust-root file would silently disable that rule. Fail fast instead.
+	if len(f.Placeholders) == 0 {
+		return Checklists{}, errors.New("checklists: placeholders must be a non-empty list")
+	}
+	if len(f.Vague) == 0 {
+		return Checklists{}, errors.New("checklists: vague must be a non-empty list")
+	}
+	if len(f.Units) == 0 {
+		return Checklists{}, errors.New("checklists: units must be a non-empty list")
 	}
 
 	vague := make([]string, len(f.Vague))
