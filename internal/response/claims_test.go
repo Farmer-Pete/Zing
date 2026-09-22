@@ -1,6 +1,8 @@
 package response
 
 import (
+	"io/fs"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -104,6 +106,35 @@ func TestCheckCodeClaims_IgnoresEnvClaims(t *testing.T) {
 	errs := CheckCodeClaims(claims, fsys)
 	if len(errs) != 0 {
 		t.Fatalf("CheckCodeClaims = %v, want no errors: env claims are never path-checked", dumpErrs(errs))
+	}
+}
+
+// permDeniedFS is an fs.FS whose Stat fails with a non-missing error, to
+// exercise CheckCodeClaims' handling of an inspection failure that is not
+// fs.ErrNotExist.
+type permDeniedFS struct{}
+
+func (permDeniedFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+}
+
+func (permDeniedFS) Stat(name string) (fs.FileInfo, error) {
+	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+}
+
+func TestCheckCodeClaims_NonMissingStatErrorReported(t *testing.T) {
+	t.Parallel()
+
+	claims := []Claim{
+		{Kind: ClaimKindCode, Verdict: ClaimVerdictTrue, Evidence: "internal/foo.go:10"},
+	}
+	errs := CheckCodeClaims(claims, permDeniedFS{})
+	if len(errs) != 1 {
+		t.Fatalf("CheckCodeClaims = %v, want exactly one error", dumpErrs(errs))
+	}
+	msg := errs[0].Error()
+	if !strings.Contains(msg, "cannot inspect") || strings.Contains(msg, "no such file") {
+		t.Errorf("error = %q, want a 'cannot inspect' message, not 'no such file'", msg)
 	}
 }
 

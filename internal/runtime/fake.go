@@ -53,6 +53,12 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// Re-check after the lock: ctx may have been cancelled while Run waited
+	// on f.mu, and a cancelled request must consume no scripted turn.
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
+
 	sessionID, sess, isNew, err := f.resolveSessionLocked(req)
 	if err != nil {
 		return RunResult{}, err

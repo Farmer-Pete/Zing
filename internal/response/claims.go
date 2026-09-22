@@ -1,6 +1,7 @@
 package response
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"slices"
@@ -86,11 +87,16 @@ func CheckCodeClaims(claims []Claim, fsys fs.FS) []*PathError {
 			continue
 		}
 		path, _, _ := strings.Cut(c.Evidence, ":")
-		if info, err := fs.Stat(fsys, path); err != nil || info.IsDir() {
-			errs = append(errs, &PathError{
-				Path: claimPath(i, "evidence"),
-				Msg:  "no such file " + path,
-			})
+		info, err := fs.Stat(fsys, path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			errs = append(errs, &PathError{Path: claimPath(i, "evidence"), Msg: "no such file " + path})
+		case err != nil:
+			// A non-missing inspection failure (permission, I/O) is a real
+			// error, not a claim that the path is absent; report it as itself.
+			errs = append(errs, &PathError{Path: claimPath(i, "evidence"), Msg: "cannot inspect " + path + ": " + err.Error()})
+		case info.IsDir():
+			errs = append(errs, &PathError{Path: claimPath(i, "evidence"), Msg: "no such file " + path})
 		}
 	}
 	return errs
