@@ -8,6 +8,11 @@ import (
 const (
 	wantReason         = "it crashes"
 	wellFormedClassify = `<zing job="classify" outcome="bug"><reason>` + wantReason + `</reason></zing>`
+
+	// classifyReadyUnregisteredErr is classify/ready's exact Lookup error:
+	// classify only registers bug and feature, so ready is unregistered.
+	// Shared across parse_test.go and registry_test.go.
+	classifyReadyUnregisteredErr = "no response for job classify outcome ready"
 )
 
 func TestParse_AfterLogTextWithRawAngleAndAmpersand(t *testing.T) {
@@ -101,13 +106,46 @@ func TestParse_UnknownPairAfterMalformedCandidate(t *testing.T) {
 	t.Parallel()
 
 	// The first candidate is malformed (unclosed). The second is
-	// well-formed but names an unregistered pair. Both are failures for
-	// extraction purposes, so the exact string still wins.
+	// well-formed but names an unregistered pair: Parse must still report
+	// the specific "no response for..." error, not the generic catch-all,
+	// since the second candidate is otherwise well formed.
 	input := `<zing job="classify" outcome="bug"><reason>oops` +
 		`<zing job="classify" outcome="ready"><reason>x</reason></zing>`
 	_, err := Parse([]byte(input))
-	if err == nil {
-		t.Fatal("Parse succeeded, want an error")
+	want := classifyReadyUnregisteredErr
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+func TestParse_WellFormedUnknownPairReturnsExactError(t *testing.T) {
+	t.Parallel()
+
+	input := `<zing job="classify" outcome="ready"><reason>x</reason></zing>`
+	_, err := Parse([]byte(input))
+	want := classifyReadyUnregisteredErr
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+func TestParse_MalformedUnknownPairThenValidKnownPairParsesTheValidOne(t *testing.T) {
+	t.Parallel()
+
+	// The first candidate names an unregistered pair AND is malformed
+	// (unclosed): it must not be remembered as "well formed but
+	// unregistered". The second candidate is well formed and registered,
+	// so Parse must return it, not the first candidate's absence of a
+	// lookup error.
+	input := `<zing job="classify" outcome="ready"><reason>oops` +
+		wellFormedClassify
+	doc, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cr, ok := doc.Response.(*ClassifyResponse)
+	if !ok || cr.Reason != wantReason {
+		t.Fatalf("Parse matched the wrong candidate: %#v", doc.Response)
 	}
 }
 
@@ -126,6 +164,48 @@ func TestParse_FirstCandidateWins(t *testing.T) {
 	}
 	if cr.Reason != "first" {
 		t.Errorf("Reason = %q, want %q (the first candidate)", cr.Reason, "first")
+	}
+}
+
+func TestParse_UnmatchedCommentOpenerDoesNotExcludeLaterZing(t *testing.T) {
+	t.Parallel()
+
+	input := "log <!-- unfinished\n" + wellFormedClassify
+	doc, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cr, ok := doc.Response.(*ClassifyResponse)
+	if !ok || cr.Reason != wantReason {
+		t.Fatalf("Parse did not find the valid document past the unmatched comment opener: %#v", doc.Response)
+	}
+}
+
+func TestParse_UnmatchedCDATAOpenerDoesNotExcludeLaterZing(t *testing.T) {
+	t.Parallel()
+
+	input := "log <![CDATA[ unfinished\n" + wellFormedClassify
+	doc, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cr, ok := doc.Response.(*ClassifyResponse)
+	if !ok || cr.Reason != wantReason {
+		t.Fatalf("Parse did not find the valid document past the unmatched CDATA opener: %#v", doc.Response)
+	}
+}
+
+func TestParse_UnmatchedPIOpenerDoesNotExcludeLaterZing(t *testing.T) {
+	t.Parallel()
+
+	input := "log <?php unfinished\n" + wellFormedClassify
+	doc, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cr, ok := doc.Response.(*ClassifyResponse)
+	if !ok || cr.Reason != wantReason {
+		t.Fatalf("Parse did not find the valid document past the unmatched PI opener: %#v", doc.Response)
 	}
 }
 

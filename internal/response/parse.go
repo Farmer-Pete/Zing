@@ -31,13 +31,21 @@ type Document struct {
 // Parse returns the exact string "no zing element in final message".
 func Parse(input []byte) (*Document, error) {
 	excluded := excludedRanges(input)
+	var firstLookupErr error
 	for _, offset := range candidateOffsets(input) {
 		if inRanges(offset, excluded) {
 			continue
 		}
-		if doc, ok := tryDecode(input, offset); ok {
+		doc, err := tryDecode(input, offset)
+		if doc != nil {
 			return doc, nil
 		}
+		if err != nil && !errors.Is(err, errMalformedCandidate) && firstLookupErr == nil {
+			firstLookupErr = err
+		}
+	}
+	if firstLookupErr != nil {
+		return nil, firstLookupErr
 	}
 	return nil, errors.New("no zing element in final message")
 }
@@ -69,6 +77,12 @@ func candidateOffsets(input []byte) []int {
 // or '&'). A candidate offset inside one of these is log commentary about
 // zing syntax, not a document, and must not match (design section 6.3: the
 // scan "skips comments and CDATA and PIs").
+//
+// An opener with no matching closer is not a delimited range at all: it is
+// arbitrary log text that happens to start with "<!--", "<![CDATA[", or
+// "<?" and never closes. Excluding "the rest of input" for it would hide
+// any real <zing> document that follows, so an unmatched opener is simply
+// skipped past (not recorded) and the scan continues right after it.
 func excludedRanges(input []byte) [][2]int {
 	var ranges [][2]int
 	for i := 0; i < len(input); {
@@ -79,8 +93,8 @@ func excludedRanges(input []byte) [][2]int {
 		}
 		end := bytes.Index(input[i+len(openTag):], []byte(closeTag))
 		if end < 0 {
-			ranges = append(ranges, [2]int{i, len(input)})
-			return ranges
+			i += len(openTag)
+			continue
 		}
 		stop := i + len(openTag) + end + len(closeTag)
 		ranges = append(ranges, [2]int{i, stop})
@@ -120,39 +134,57 @@ func isNameBoundary(b byte) bool {
 	}
 }
 
-// tryDecode attempts to extract a Document starting at offset. It reports
-// success only when the start element is exactly "zing" in no namespace,
-// carries both a job and an outcome attribute naming a registered pair,
-// and decodes cleanly.
-func tryDecode(input []byte, offset int) (*Document, bool) {
+// errMalformedCandidate is tryDecode's internal sentinel for "this
+// candidate is not well formed", letting Parse tell a malformed candidate
+// apart from one that is well formed but names an unregistered pair
+// (which reports Lookup's own error instead). It never escapes this
+// package.
+var errMalformedCandidate = errors.New("malformed zing candidate")
+
+// tryDecode attempts to extract a Document starting at offset. It returns
+// a non-nil Document only when the start element is exactly "zing" in no
+// namespace, carries both a job and an outcome attribute naming a
+// registered pair, and decodes cleanly.
+//
+// When the pair is not registered, tryDecode still skips the whole element
+// to confirm it is otherwise well formed: on success it returns Lookup's
+// own error (nil Document, non-nil error), so Parse can keep scanning for
+// a later candidate whose pair does resolve before falling back to this
+// one. A malformed candidate (any decode failure, including one with an
+// unregistered pair) returns errMalformedCandidate instead, so it never
+// contributes a lookup error of its own.
+func tryDecode(input []byte, offset int) (*Document, error) {
 	dec := xml.NewDecoder(bytes.NewReader(input[offset:]))
 
 	tok, err := dec.Token()
 	if err != nil {
-		return nil, false
+		return nil, errMalformedCandidate
 	}
 	start, ok := tok.(xml.StartElement)
 	if !ok || start.Name.Local != "zing" || start.Name.Space != "" {
-		return nil, false
+		return nil, errMalformedCandidate
 	}
 
 	job, outcome, ok := headerAttrs(start.Attr)
 	if !ok {
-		return nil, false
+		return nil, errMalformedCandidate
 	}
 
 	r, err := Lookup(job, outcome)
 	if err != nil {
-		return nil, false
+		if skipErr := dec.Skip(); skipErr != nil {
+			return nil, errMalformedCandidate
+		}
+		return nil, err
 	}
 
 	if err := dec.DecodeElement(r, &start); err != nil {
-		return nil, false
+		return nil, errMalformedCandidate
 	}
 
 	//nolint:gosec // dec.InputOffset() is bounded by len(input[offset:]), which fits in an int already.
 	end := offset + int(dec.InputOffset())
-	return &Document{Response: r, Elem: input[offset:end]}, true
+	return &Document{Response: r, Elem: input[offset:end]}, nil
 }
 
 func headerAttrs(attrs []xml.Attr) (job Job, outcome Outcome, ok bool) {

@@ -53,7 +53,7 @@ func TestCheckPlan_PlaceholderAnywhereFails(t *testing.T) {
 	p := cleanPlan()
 	p.Design.Shape += " TODO: flesh this out."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := `plan/design/shape: placeholder "TODO" not allowed`
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
@@ -68,10 +68,39 @@ func TestCheckPlan_PlaceholderInsideFencedCodeStillFails(t *testing.T) {
 	p := cleanPlan()
 	p.Design.Shape += "\n```go\n// TBD: fill in\n```\n"
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := `plan/design/shape: placeholder "TBD" not allowed`
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestCheckPlan_PlaceholdersComeFromChecklistsNotAHardcodedList(t *testing.T) {
+	t.Parallel()
+
+	custom := Checklists{
+		Placeholders: []string{"FIXME_LATER"},
+		Vague:        planChecklists.Vague,
+		Units:        planChecklists.Units,
+	}
+
+	// A word in the custom list must be flagged.
+	flagged := cleanPlan()
+	flagged.Design.Shape += " FIXME_LATER: revisit this."
+	errs := CheckPlan(flagged, cleanScenarios(), false, custom, true)
+	want := `plan/design/shape: placeholder "FIXME_LATER" not allowed`
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckPlan(custom checklist) = %v, want to contain %q", dumpErrs(errs), want)
+	}
+
+	// TODO is not in the custom list, so tuning the checklist actually
+	// changed what is flagged, rather than the hardcoded default list
+	// still being consulted underneath.
+	notFlagged := cleanPlan()
+	notFlagged.Design.Shape += " TODO: not in the custom list."
+	errs = CheckPlan(notFlagged, cleanScenarios(), false, custom, true)
+	if containsErr(errs, `plan/design/shape: placeholder "TODO" not allowed`) {
+		t.Fatalf("CheckPlan(custom checklist) = %v, must not flag TODO: it is not in the custom placeholder list", dumpErrs(errs))
 	}
 }
 
@@ -81,7 +110,7 @@ func TestCheckPlan_VagueWordOutsideFenceFails(t *testing.T) {
 	p := cleanPlan()
 	p.Overview.Context += " This is a fast implementation."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := `plan/overview/context: vague word "fast"; give a concrete threshold`
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
@@ -94,7 +123,7 @@ func TestCheckPlan_VagueWordInsideFencePasses(t *testing.T) {
 	p := cleanPlan()
 	p.Design.Shape += "\n```go\n// this cache is fast on the happy path\n```\n"
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	if containsErr(errs, `plan/design/shape: vague word "fast"; give a concrete threshold`) {
 		t.Fatalf("CheckPlan = %v, want no vague-word error: the word is inside a fenced code block", dumpErrs(errs))
 	}
@@ -106,7 +135,7 @@ func TestCheckPlan_PerformanceWithoutMeasurementFails(t *testing.T) {
 	p := cleanPlan()
 	p.Delivery.Tasks[0].Text += " Optimize the lookup path."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := "plan/delivery/tasks/task[0]: mentions performance without a measurement"
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
@@ -119,9 +148,23 @@ func TestCheckPlan_PerformanceWithMeasurementPasses(t *testing.T) {
 	p := cleanPlan()
 	p.Delivery.Tasks[0].Text += " Optimize the lookup path to run under 50ms."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	if containsErr(errs, "plan/delivery/tasks/task[0]: mentions performance without a measurement") {
 		t.Fatalf("CheckPlan = %v, want no performance error: 50ms is a measurement", dumpErrs(errs))
+	}
+}
+
+func TestCheckPlan_PerformanceWithPercentMeasurementPasses(t *testing.T) {
+	t.Parallel()
+
+	// "%" is not a word character, so a trailing \b never matches right
+	// after it: this is the exact case the plain \b boundary misses.
+	p := cleanPlan()
+	p.Delivery.Tasks[0].Text += " Optimize until usage is under 50%."
+
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
+	if containsErr(errs, "plan/delivery/tasks/task[0]: mentions performance without a measurement") {
+		t.Fatalf("CheckPlan = %v, want no performance error: 50%% is a measurement", dumpErrs(errs))
 	}
 }
 
@@ -131,7 +174,7 @@ func TestCheckPlan_OptimisticDoesNotMatchPerformanceWord(t *testing.T) {
 	p := cleanPlan()
 	p.Delivery.Tasks[0].Text += " We are optimistic this will land cleanly."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	if containsErr(errs, "plan/delivery/tasks/task[0]: mentions performance without a measurement") {
 		t.Fatalf("CheckPlan = %v, want no performance error: \"optimistic\" is not \"optimize\"", dumpErrs(errs))
 	}
@@ -146,7 +189,7 @@ func TestCheckPlan_PerformanceWordInChangeIsNotChecked(t *testing.T) {
 	p := cleanPlan()
 	p.Design.Changes[0].Callers += " Optimize this later."
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	if containsErr(errs, "plan/design/changes/change[0]/callers: mentions performance without a measurement") {
 		t.Fatalf("CheckPlan = %v, want no performance error on a change field", dumpErrs(errs))
 	}
@@ -158,7 +201,7 @@ func TestCheckPlan_ScenarioLeakFails(t *testing.T) {
 	p := cleanPlan()
 	p.Overview.Context += " the response is 200 with body ok"
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := "plan/overview/context: repeats scenario s1 then-text; the plan must not restate acceptance"
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
@@ -174,7 +217,7 @@ func TestCheckPlan_ScenarioLeakAcrossLineBreakFails(t *testing.T) {
 	p := cleanPlan()
 	p.Overview.Context += "\nthe response is 200\nwith body ok"
 
-	errs := CheckPlan(p, cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), false, planChecklists, true)
 	want := "plan/overview/context: repeats scenario s1 then-text; the plan must not restate acceptance"
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
@@ -184,7 +227,7 @@ func TestCheckPlan_ScenarioLeakAcrossLineBreakFails(t *testing.T) {
 func TestCheckPlan_NoLeakPasses(t *testing.T) {
 	t.Parallel()
 
-	errs := CheckPlan(cleanPlan(), cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(cleanPlan(), cleanScenarios(), false, planChecklists, true)
 	if containsErr(errs, "plan/overview/context: repeats scenario s1 then-text; the plan must not restate acceptance") {
 		t.Fatalf("CheckPlan = %v, want no scenario-leak error on the clean plan", dumpErrs(errs))
 	}
@@ -200,34 +243,57 @@ func bugShapePlan() Plan {
 	return p
 }
 
+// The four design section 6.6 bug-plan-shape messages, shared by every
+// test below that checks for their presence or absence.
+const (
+	bugShapeLoopErr       = "plan/overview/problem/loop: bug plan needs a loop"
+	bugShapeReproErr      = "plan/overview/problem/repro: bug plan needs a repro"
+	bugShapeHypothesesErr = "plan/overview/problem/hypotheses: bug plan needs three to five hypotheses"
+	bugShapeTestKindErr   = "plan/delivery/tests/test[0]/kind: first test must be kind regression"
+)
+
 func TestCheckPlan_BugPlanMissingShapeFailsOnlyUnderBugKind(t *testing.T) {
 	t.Parallel()
 
 	p := bugShapePlan()
 	lists := planChecklists
+	bugShapeErrs := []string{bugShapeLoopErr, bugShapeReproErr, bugShapeHypothesesErr, bugShapeTestKindErr}
 
-	featureErrs := CheckPlan(p, cleanScenarios(), false, lists)
-	for _, want := range []string{
-		"plan/overview/problem/loop: bug plan needs a loop",
-		"plan/overview/problem/repro: bug plan needs a repro",
-		"plan/overview/problem/hypotheses: bug plan needs three to five hypotheses",
-		"plan/delivery/tests/test[0]/kind: first test must be kind regression",
-	} {
+	featureErrs := CheckPlan(p, cleanScenarios(), false, lists, true)
+	for _, want := range bugShapeErrs {
 		if containsErr(featureErrs, want) {
 			t.Errorf("CheckPlan(bug=false) = %v, must not contain %q: bug-shape rules are bug-only", dumpErrs(featureErrs), want)
 		}
 	}
 
-	bugErrs := CheckPlan(p, cleanScenarios(), true, lists)
-	for _, want := range []string{
-		"plan/overview/problem/loop: bug plan needs a loop",
-		"plan/overview/problem/repro: bug plan needs a repro",
-		"plan/overview/problem/hypotheses: bug plan needs three to five hypotheses",
-		"plan/delivery/tests/test[0]/kind: first test must be kind regression",
-	} {
+	bugErrs := CheckPlan(p, cleanScenarios(), true, lists, true)
+	for _, want := range bugShapeErrs {
 		if !containsErr(bugErrs, want) {
 			t.Errorf("CheckPlan(bug=true) = %v, want to contain %q", dumpErrs(bugErrs), want)
 		}
+	}
+}
+
+// TestCheckPlan_ProblemNotPresentSkipsProblemChecksButKeepsTestKindCheck
+// proves problemPresent=false suppresses the loop/repro/hypotheses checks
+// (which would otherwise fire off Problem's zero value) while the
+// first-test-kind check, which does not read Problem at all, still runs
+// (design MAJOR finding 2).
+func TestCheckPlan_ProblemNotPresentSkipsProblemChecksButKeepsTestKindCheck(t *testing.T) {
+	t.Parallel()
+
+	p := cleanPlan()
+	p.Overview.Problem = Problem{} // as if <problem> never decoded
+	p.Delivery.Tests[0].Kind = TestKindIntegration
+
+	errs := CheckPlan(p, cleanScenarios(), true, planChecklists, false)
+	for _, notWant := range []string{bugShapeLoopErr, bugShapeReproErr, bugShapeHypothesesErr} {
+		if containsErr(errs, notWant) {
+			t.Errorf("CheckPlan(problemPresent=false) = %v, must not contain %q", dumpErrs(errs), notWant)
+		}
+	}
+	if !containsErr(errs, bugShapeTestKindErr) {
+		t.Errorf("CheckPlan(problemPresent=false) = %v, want to contain %q: it does not depend on problem", dumpErrs(errs), bugShapeTestKindErr)
 	}
 }
 
@@ -244,7 +310,7 @@ func TestCheckPlan_FullBugPlanPasses(t *testing.T) {
 	}
 	p.Delivery.Tests[0].Kind = TestKindRegression
 
-	errs := CheckPlan(p, cleanScenarios(), true, planChecklists)
+	errs := CheckPlan(p, cleanScenarios(), true, planChecklists, true)
 	if len(errs) != 0 {
 		t.Fatalf("CheckPlan = %v, want no errors: a full bug plan satisfies every bug-shape rule", dumpErrs(errs))
 	}
@@ -253,7 +319,7 @@ func TestCheckPlan_FullBugPlanPasses(t *testing.T) {
 func TestCheckPlan_CleanFeaturePlanPasses(t *testing.T) {
 	t.Parallel()
 
-	errs := CheckPlan(cleanPlan(), cleanScenarios(), false, planChecklists)
+	errs := CheckPlan(cleanPlan(), cleanScenarios(), false, planChecklists, true)
 	if len(errs) != 0 {
 		t.Fatalf("CheckPlan = %v, want no errors", dumpErrs(errs))
 	}

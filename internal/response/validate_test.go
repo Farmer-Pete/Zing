@@ -15,11 +15,14 @@ func mustParse(t *testing.T, xmlDoc string) *Document {
 	return doc
 }
 
-func errString(errs []*PathError, i int) string {
-	if i >= len(errs) {
+// firstErrString renders errs[0] as Path + ": " + Msg, the form every
+// "exactly one error, and it is this one" assertion in this file checks
+// against.
+func firstErrString(errs []*PathError) string {
+	if len(errs) == 0 {
 		return "<missing>"
 	}
-	return errs[i].Path + ": " + errs[i].Msg
+	return errs[0].Path + ": " + errs[0].Msg
 }
 
 const classifyOK = `<zing job="classify" outcome="bug"><reason>it crashes</reason></zing>`
@@ -48,7 +51,7 @@ func TestValidate_MissingRequiredElement_NoCascade(t *testing.T) {
 		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
 	}
 	want := "claims/test_exit: missing required element"
-	if got := errString(errs, 0); got != want {
+	if got := firstErrString(errs); got != want {
 		t.Errorf("errs[0] = %q, want %q", got, want)
 	}
 }
@@ -330,7 +333,102 @@ func TestValidate_ReadyResponse_MissingPlanSkipsLayer2NoCrash(t *testing.T) {
 		t.Fatalf("Validate = %v, want exactly 1 error (plan missing), got %d", dumpErrs(errs), len(errs))
 	}
 	want := "plan: missing required element"
-	if got := errString(errs, 0); got != want {
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_NothingToDoResponse_MissingVerdict_NoCascade proves a
+// missing verdict attribute yields only Layer 1's "missing required
+// element", not also Layer 2's CheckNothingToDoClaims error at the same
+// path (design MAJOR finding 2).
+func TestValidate_NothingToDoResponse_MissingVerdict_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="nothing_to_do">` +
+		`<claims><claim kind="code" evidence="a.go:1">already exists</claim></claims>` +
+		`<notes>nothing to do</notes>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "claims/claim[0]/verdict: missing required element"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ReadyResponse_CodeClaimMissingEvidence_NoCascade proves a
+// missing evidence attribute yields only Layer 1's "missing required
+// element", not also Layer 2's CheckCodeClaims "no such file" error at the
+// same path.
+func TestValidate_ReadyResponse_CodeClaimMissingEvidence_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXML() +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{FS: fstest.MapFS{}})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "claims/claim[0]/evidence: missing required element"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ReadyResponse_BugPlanMissingProblem_NoCascade proves that
+// when the required <problem> element is entirely absent, a bug-kind run
+// gets only Layer 1's "missing required element" for plan/overview/problem,
+// not also Layer 2's loop/repro/hypotheses bug-shape errors read off the
+// zero-value Problem Layer 1 already flagged as missing. The plan's first
+// test is kind regression, so the (problem-independent) first-test-kind
+// bug-shape check has nothing to add either.
+func TestValidate_ReadyResponse_BugPlanMissingProblem_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLNoProblem() +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{Kind: KindBug})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "plan/overview/problem: missing required element"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ChildrenResponse_MissingKey_NoCascade proves a child with a
+// missing key attribute (a zero-value Key, and a zero-value depends_on
+// entry that would otherwise equal it) does not generate a spurious
+// self-dependency error off those zero values, on top of Layer 1's own
+// "missing required element".
+func TestValidate_ChildrenResponse_MissingKey_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="children">` +
+		`<child><title>t1</title><body>b1</body><depends_on></depends_on></child>` +
+		`<child key="c2"><title>t2</title><body>b2</body></child>` +
+		`<notes>shared shape</notes>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "child[0]/key: missing required element"
+	if got := firstErrString(errs); got != want {
 		t.Errorf("errs[0] = %q, want %q", got, want)
 	}
 }
@@ -381,6 +479,42 @@ func TestValidate_QuestionResponse_OptionCardinalityWired(t *testing.T) {
 	want := "question[0]/options: give none, or two to four"
 	if !containsErr(errs, want) {
 		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+// TestValidate_QuestionResponse_FiveOptionsExactlyOneCardinalityError proves
+// a count over four produces exactly one cardinality complaint: Layer 1's
+// own maxItems=4 error at "question[0]/option" ("option", the XML child
+// name), not also Layer 2's "give none, or two to four" at
+// "question[0]/options" (the design section 7.2 path, one letter longer,
+// for the same underlying problem).
+func TestValidate_QuestionResponse_FiveOptionsExactlyOneCardinalityError(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="questions">` +
+		`<question key="q1"><title>t</title><body>b</body>` +
+		`<option key="a">1</option><option key="b">2</option><option key="c">3</option>` +
+		`<option key="d">4</option><option key="e">5</option>` +
+		`<recommended>a</recommended></question>` +
+		`<progress>p</progress>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+
+	count := 0
+	for _, e := range errs {
+		if e.Msg == "at most 4 allowed" || e.Msg == "give none, or two to four" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 cardinality error, got %d", dumpErrs(errs), count)
+	}
+	if !containsErr(errs, "question[0]/option: at most 4 allowed") {
+		t.Errorf("Validate = %v, want to contain the Layer 1 maxItems error", dumpErrs(errs))
+	}
+	if containsErr(errs, "question[0]/options: give none, or two to four") {
+		t.Errorf("Validate = %v, must not also contain Layer 2's cardinality error for n>4", dumpErrs(errs))
 	}
 }
 
@@ -483,6 +617,35 @@ func planXMLWithMigrationsNoneFalse() string {
 		`<files><file path="a.go" action="create">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+// planXMLNoProblem is planXML with the required <problem> element omitted
+// entirely, and its first test kind regression, so under bug kind the only
+// possible error is Layer 1's own "missing required element" for
+// plan/overview/problem.
+func planXMLNoProblem() string {
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create">why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="regression" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
 		`</delivery>` +
 		`<review>` +

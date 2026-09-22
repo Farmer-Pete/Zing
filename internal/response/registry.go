@@ -1,6 +1,10 @@
 package response
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 // registryKey is a (job, outcome) pair, the lookup key design section 7.1
 // maps to a concrete response type.
@@ -36,6 +40,31 @@ func buildRegistry() map[registryKey]func() Response {
 		m[registryKey{job, OutcomeError}] = func() Response { return &ErrorResponse{} }
 	}
 	return m
+}
+
+// RegisteredPair is one (job, outcome) pair the registry recognizes.
+type RegisteredPair struct {
+	Job     Job
+	Outcome Outcome
+}
+
+// RegisteredPairs returns every (job, outcome) pair the registry
+// recognizes, derived straight from the registry map so it can never drift
+// from what Lookup actually accepts, sorted for a deterministic result.
+// This is the single source of truth for enumerating the registry;
+// cmd/zing's selftest uses it instead of keeping its own copy.
+func RegisteredPairs() []RegisteredPair {
+	pairs := make([]RegisteredPair, 0, len(registry))
+	for k := range registry {
+		pairs = append(pairs, RegisteredPair(k))
+	}
+	slices.SortFunc(pairs, func(a, b RegisteredPair) int {
+		if c := strings.Compare(string(a.Job), string(b.Job)); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.Outcome), string(b.Outcome))
+	})
+	return pairs
 }
 
 // Lookup returns a fresh pointer for the response type registered to

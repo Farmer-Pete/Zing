@@ -57,6 +57,18 @@ func TestCheckNoneUnion_AbsentWithItemsPasses(t *testing.T) {
 	}
 }
 
+// allKeysPresent returns a presence map marking every one of n children's
+// own key attribute present, the ordinary case these direct
+// checkChildrenDAG tests build (each Child literal already carries a real
+// key).
+func allKeysPresent(n int) map[string]bool {
+	m := make(map[string]bool, n)
+	for i := range n {
+		m[indexedName("child", i)+"/key"] = true
+	}
+	return m
+}
+
 func TestCheckChildrenDAG_DuplicateKey(t *testing.T) {
 	t.Parallel()
 
@@ -64,7 +76,7 @@ func TestCheckChildrenDAG_DuplicateKey(t *testing.T) {
 		{Key: "c1", Title: "t", Body: "b"},
 		{Key: "c1", Title: "t", Body: "b"},
 	}
-	errs := checkChildrenDAG(children)
+	errs := checkChildrenDAG(children, allKeysPresent(len(children)))
 	want := "child[1]/key: duplicate key c1"
 	if !containsErr(errs, want) {
 		t.Fatalf("checkChildrenDAG = %v, want to contain %q", dumpErrs(errs), want)
@@ -77,7 +89,7 @@ func TestCheckChildrenDAG_UnknownDep(t *testing.T) {
 	children := []Child{
 		{Key: "c1", Title: "t", Body: "b", DependsOn: []string{"c9"}},
 	}
-	errs := checkChildrenDAG(children)
+	errs := checkChildrenDAG(children, allKeysPresent(len(children)))
 	want := "child[0]/depends_on: unknown key c9"
 	if !containsErr(errs, want) {
 		t.Fatalf("checkChildrenDAG = %v, want to contain %q", dumpErrs(errs), want)
@@ -90,7 +102,7 @@ func TestCheckChildrenDAG_SelfDependency(t *testing.T) {
 	children := []Child{
 		{Key: "c1", Title: "t", Body: "b", DependsOn: []string{"c1"}},
 	}
-	errs := checkChildrenDAG(children)
+	errs := checkChildrenDAG(children, allKeysPresent(len(children)))
 	want := "child[0]/depends_on: self-dependency"
 	if !containsErr(errs, want) {
 		t.Fatalf("checkChildrenDAG = %v, want to contain %q", dumpErrs(errs), want)
@@ -105,7 +117,7 @@ func TestCheckChildrenDAG_Cycle(t *testing.T) {
 		{Key: "c1", Title: "t", Body: "b", DependsOn: []string{"c2"}},
 		{Key: "c2", Title: "t", Body: "b", DependsOn: []string{"c1"}},
 	}
-	errs := checkChildrenDAG(children)
+	errs := checkChildrenDAG(children, allKeysPresent(len(children)))
 	want := "children: dependency cycle c1 -> c2 -> c1"
 	if !containsErr(errs, want) {
 		t.Fatalf("checkChildrenDAG = %v, want to contain %q", dumpErrs(errs), want)
@@ -125,8 +137,9 @@ func TestCheckChildrenDAG_CyclePathIsDeterministic(t *testing.T) {
 		{Key: "c4", Title: "t", Body: "b"},
 	}
 	want := "children: dependency cycle c1 -> c2 -> c3 -> c1"
+	present := allKeysPresent(len(children))
 	for range 20 {
-		errs := checkChildrenDAG(children)
+		errs := checkChildrenDAG(children, present)
 		if !containsErr(errs, want) {
 			t.Fatalf("checkChildrenDAG = %v, want to contain %q", dumpErrs(errs), want)
 		}
@@ -140,9 +153,27 @@ func TestCheckChildrenDAG_NoIssuesPasses(t *testing.T) {
 		{Key: "c1", Title: "t", Body: "b"},
 		{Key: "c2", Title: "t", Body: "b", DependsOn: []string{"c1"}},
 	}
-	errs := checkChildrenDAG(children)
+	errs := checkChildrenDAG(children, allKeysPresent(len(children)))
 	if len(errs) != 0 {
 		t.Fatalf("checkChildrenDAG = %v, want no errors", dumpErrs(errs))
+	}
+}
+
+// TestCheckChildrenDAG_MissingKeySkipsDuplicateAndDependencyChecks proves
+// a child whose key never decoded (present says so) does not contribute
+// its zero-value Key to the duplicate-key check, and its own depends_on is
+// not checked either, so a zero-value depends_on entry cannot spuriously
+// "self-depend" on a zero-value key.
+func TestCheckChildrenDAG_MissingKeySkipsDuplicateAndDependencyChecks(t *testing.T) {
+	t.Parallel()
+
+	children := []Child{
+		{Title: "t", Body: "b", DependsOn: []string{""}},
+		{Title: "t", Body: "b"},
+	}
+	errs := checkChildrenDAG(children, map[string]bool{})
+	if len(errs) != 0 {
+		t.Fatalf("checkChildrenDAG = %v, want no errors: neither child's key is present", dumpErrs(errs))
 	}
 }
 
@@ -183,5 +214,17 @@ func TestCheckQuestionCardinality_ThreePasses(t *testing.T) {
 	errs := checkQuestionCardinality(questionsWithOptionCounts(3))
 	if len(errs) != 0 {
 		t.Fatalf("checkQuestionCardinality = %v, want no errors", dumpErrs(errs))
+	}
+}
+
+// TestCheckQuestionCardinality_FiveOptionsNotFlaggedHere proves this
+// function no longer duplicates Layer 1's own maxItems=4 error: a count
+// over four is Layer 1's job alone (design section 6.6).
+func TestCheckQuestionCardinality_FiveOptionsNotFlaggedHere(t *testing.T) {
+	t.Parallel()
+
+	errs := checkQuestionCardinality(questionsWithOptionCounts(5))
+	if len(errs) != 0 {
+		t.Fatalf("checkQuestionCardinality = %v, want no errors: maxItems=4 is Layer 1's own check", dumpErrs(errs))
 	}
 }

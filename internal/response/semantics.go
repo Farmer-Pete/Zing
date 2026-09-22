@@ -33,21 +33,35 @@ func checkNoneUnion(path string, nonePresent, none bool, itemCount int) *PathErr
 // checkChildrenDAG checks a ChildrenResponse's children (design section
 // 6.6): every key is unique, every depends_on names an existing key with
 // no self-dependency, and the depends_on edges form no cycle.
-func checkChildrenDAG(children []Child) []*PathError {
+//
+// present gates every check that reads a child's own Key on that child's
+// "child[i]/key" attribute actually being in the document: a child whose
+// key never decoded (Layer 1 already reports it missing) has a zero-value
+// Key, "", and comparing that zero value against another child's zero
+// value (or against a zero-value depends_on entry) would produce a
+// duplicate-key or self-dependency error that has nothing to do with the
+// document, only with two absent fields matching each other.
+func checkChildrenDAG(children []Child, present map[string]bool) []*PathError {
 	var errs []*PathError
 
 	seen := make(map[string]bool, len(children))
+	keyPresent := make([]bool, len(children))
 	for i, c := range children {
+		path := indexedName("child", i) + "/key"
+		if !present[path] {
+			continue
+		}
+		keyPresent[i] = true
 		if seen[c.Key] {
-			errs = append(errs, &PathError{
-				Path: indexedName("child", i) + "/key",
-				Msg:  "duplicate key " + c.Key,
-			})
+			errs = append(errs, &PathError{Path: path, Msg: "duplicate key " + c.Key})
 		}
 		seen[c.Key] = true
 	}
 
 	for i, c := range children {
+		if !keyPresent[i] {
+			continue
+		}
 		path := indexedName("child", i) + "/depends_on"
 		for _, dep := range c.DependsOn {
 			switch {
@@ -125,13 +139,13 @@ func findDependencyCycle(children []Child) []string {
 
 // checkQuestionCardinality enforces each question's option count (design
 // section 6.6): none, or two to four. Layer 1's maxItems=4 constraint
-// already flags a count over four with its own message; this is the rule
-// that catches exactly one, the shape that constraint alone cannot name.
+// already flags a count over four with its own message, so this checks
+// only n == 1, the shape that constraint alone cannot name; flagging n > 4
+// here too would just repeat Layer 1's error under a second message.
 func checkQuestionCardinality(questions []Question) []*PathError {
 	var errs []*PathError
 	for i, q := range questions {
-		n := len(q.Options)
-		if n == 1 || n > 4 {
+		if len(q.Options) == 1 {
 			errs = append(errs, &PathError{
 				Path: indexedName("question", i) + "/options",
 				Msg:  "give none, or two to four",

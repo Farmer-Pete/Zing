@@ -120,9 +120,14 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 	case *ReadyResponse:
 		return layer2Ready(r, ctx, present)
 	case *NothingToDoResponse:
-		return CheckNothingToDoClaims(r.Claims)
+		// filterPresent drops a claim's "nothing_to_do needs every code
+		// claim false" when that same claim's verdict never decoded
+		// (Layer 1 already reports claims/claim[i]/verdict missing), so a
+		// missing verdict does not also draw a Layer 2 error at the same
+		// path.
+		return filterPresent(CheckNothingToDoClaims(r.Claims), present)
 	case *ChildrenResponse:
-		return checkChildrenDAG(r.Children)
+		return checkChildrenDAG(r.Children, present)
 	case *QuestionResponse:
 		return checkQuestionCardinality(r.Questions)
 	case *BuildResponse, *JudgeResponse:
@@ -134,6 +139,25 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 	}
 }
 
+// filterPresent keeps only the errs whose own Path Layer 1 found present in
+// the document. It is safe exactly when a checker's error path is the same
+// required field whose absence would trigger it (a claim's verdict or
+// evidence attribute, here): Layer 1 already reports that same path
+// missing, so dropping the Layer 2 duplicate leaves exactly one error
+// instead of two at the same location. It must not be used for a check
+// whose error path names an optional field whose very absence is the
+// condition being tested (see checkBugShape's own problemPresent gate
+// instead, where this shortcut would wrongly suppress a legitimate error).
+func filterPresent(errs []*PathError, present map[string]bool) []*PathError {
+	kept := errs[:0]
+	for _, e := range errs {
+		if present[e.Path] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
 // layer2Ready runs a ReadyResponse's three Layer 2 checks: the code-claim
 // path check (only when the caller supplied a filesystem), the plan
 // checker, and the plan's two none-union checks. The plan checks all run
@@ -143,13 +167,17 @@ func layer2Ready(r *ReadyResponse, ctx ValidateContext, present map[string]bool)
 	var errs []*PathError
 
 	if ctx.FS != nil && present["claims"] {
-		errs = append(errs, CheckCodeClaims(r.Claims, ctx.FS)...)
+		// filterPresent: a claim whose evidence attribute never decoded
+		// (Layer 1 already reports claims/claim[i]/evidence missing) must
+		// not also draw CheckCodeClaims' "no such file" for the same
+		// zero-value path.
+		errs = append(errs, filterPresent(CheckCodeClaims(r.Claims, ctx.FS), present)...)
 	}
 
 	if !present["plan"] {
 		return errs
 	}
-	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists)...)
+	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists, present["plan/overview/problem"])...)
 
 	if present["plan/design/migrations"] {
 		m := r.Plan.Design.Migrations

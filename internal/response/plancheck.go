@@ -86,21 +86,21 @@ func proseElements(p Plan) []proseElem {
 	return out
 }
 
-// placeholderTokens are the literal, case-sensitive strings design section
-// 6.6 forbids anywhere in prose (no code-block exemption), checked in this
-// order.
-var placeholderTokens = []string{"TODO", "TBD", "handle appropriately"}
-
 // CheckPlan applies every design section 6.6 plan-checker rule to p: the
 // placeholder, vague-qualifier, performance-without-measurement, and
 // scenario-leak rules over its prose, plus (when bug) the bug-plan-shape
-// rules. Every path is prefixed "plan".
-func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists) []*PathError {
+// rules. Every path is prefixed "plan". lists.Placeholders, lists.Vague,
+// and lists.Units are the sole source of their respective word lists, so
+// tuning checklists.toml actually changes what CheckPlan flags.
+// problemPresent reports whether the document's <problem> element was
+// actually present, gating the bug-shape checks that read it (see
+// checkBugShape); it is meaningless, and ignored, when bug is false.
+func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problemPresent bool) []*PathError {
 	var errs []*PathError
 
 	elems := proseElements(p)
 	for _, el := range elems {
-		errs = append(errs, checkPlaceholders(el)...)
+		errs = append(errs, checkPlaceholders(el, lists.Placeholders)...)
 		errs = append(errs, checkVague(el, lists.Vague)...)
 		if el.task {
 			errs = append(errs, checkPerformance(el, lists.Units)...)
@@ -109,7 +109,7 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists) []*Path
 	errs = append(errs, checkScenarioLeaks(elems, scenarios)...)
 
 	if bug {
-		errs = append(errs, checkBugShape(p)...)
+		errs = append(errs, checkBugShape(p, problemPresent)...)
 	}
 
 	return errs
@@ -120,17 +120,27 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists) []*Path
 // plan's own fields (design section 10). It guards the first-test index
 // with len(Tests) > 0 so a plan that also fails Layer 1's minItems=1 on
 // tests cannot index past an empty slice.
-func checkBugShape(p Plan) []*PathError {
+//
+// problemPresent reports whether the document actually carried a <problem>
+// element: when it did not, p.Overview.Problem is a zero value Layer 1
+// already reported missing at plan/overview/problem, and reading Loop,
+// Repro, and Hypotheses off that zero value would only add a second,
+// redundant set of errors at paths nested under the one already reported
+// missing. The first-test-kind check does not read Problem at all, so it
+// is unaffected by problemPresent.
+func checkBugShape(p Plan, problemPresent bool) []*PathError {
 	var errs []*PathError
 
-	if p.Overview.Problem.Loop == nil {
-		errs = append(errs, &PathError{Path: "plan/overview/problem/loop", Msg: "bug plan needs a loop"})
-	}
-	if p.Overview.Problem.Repro == "" {
-		errs = append(errs, &PathError{Path: "plan/overview/problem/repro", Msg: "bug plan needs a repro"})
-	}
-	if n := len(p.Overview.Problem.Hypotheses); n < 3 || n > 5 {
-		errs = append(errs, &PathError{Path: "plan/overview/problem/hypotheses", Msg: "bug plan needs three to five hypotheses"})
+	if problemPresent {
+		if p.Overview.Problem.Loop == nil {
+			errs = append(errs, &PathError{Path: "plan/overview/problem/loop", Msg: "bug plan needs a loop"})
+		}
+		if p.Overview.Problem.Repro == "" {
+			errs = append(errs, &PathError{Path: "plan/overview/problem/repro", Msg: "bug plan needs a repro"})
+		}
+		if n := len(p.Overview.Problem.Hypotheses); n < 3 || n > 5 {
+			errs = append(errs, &PathError{Path: "plan/overview/problem/hypotheses", Msg: "bug plan needs three to five hypotheses"})
+		}
 	}
 	if len(p.Delivery.Tests) > 0 && p.Delivery.Tests[0].Kind != TestKindRegression {
 		errs = append(errs, &PathError{Path: "plan/delivery/tests/test[0]/kind", Msg: "first test must be kind regression"})
@@ -193,6 +203,15 @@ func checkPerformance(el proseElem, units []string) []*PathError {
 // at most one space) followed by one of units, as a whole unit token. The
 // unit alternation is sorted longest-first so a short unit (s) cannot
 // pre-empt a longer one that starts the same way (ms).
+//
+// The trailing boundary cannot be a plain \b: a unit such as "%" ends on a
+// non-word byte, and \b never matches between two non-word bytes (the
+// symbol and, say, a following space or end of string), so "under 50%"
+// would never match. Go's regexp (RE2) also has no lookahead to express
+// "not followed by a letter or digit" directly. Instead, require the unit
+// be followed by either the end of text or a non-word rune: that consumes
+// one trailing rune when present, which MatchString does not mind, and it
+// is unit-aware in exactly the way a fixed \b is not.
 func hasMeasurement(text string, units []string) bool {
 	sorted := slices.Clone(units)
 	slices.SortFunc(sorted, func(a, b string) int { return len(b) - len(a) })
@@ -200,13 +219,13 @@ func hasMeasurement(text string, units []string) bool {
 	for _, u := range sorted {
 		alt = append(alt, regexp.QuoteMeta(u))
 	}
-	pattern := `\d+(\.\d+)? ?(?:` + strings.Join(alt, "|") + `)\b`
+	pattern := `\d+(\.\d+)? ?(?:` + strings.Join(alt, "|") + `)(?:$|[^\p{L}\p{N}_])`
 	return regexp.MustCompile(pattern).MatchString(text)
 }
 
-func checkPlaceholders(el proseElem) []*PathError {
+func checkPlaceholders(el proseElem, tokens []string) []*PathError {
 	var errs []*PathError
-	for _, tok := range placeholderTokens {
+	for _, tok := range tokens {
 		if strings.Contains(el.text, tok) {
 			errs = append(errs, &PathError{Path: el.path, Msg: `placeholder "` + tok + `" not allowed`})
 		}

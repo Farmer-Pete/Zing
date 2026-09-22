@@ -82,57 +82,14 @@ func selftest() error {
 	return nil
 }
 
-// registryPair is one (job, outcome) pair the response registry
-// recognizes.
-type registryPair struct {
-	Job     response.Job
-	Outcome response.Outcome
-}
-
-// registeredPairs is the same (job, outcome) set internal/response's own
-// registry builds (design section 7.1). It is listed here rather than read
-// off that private map, since this task's file perimeter does not modify
-// internal/response (design section 5); internal/response/registry_test.go
-// carries this exact list too, independently, for the same reason: a
-// second, hand-checked reader of the registry catches a pair that silently
-// stops resolving.
-var registeredPairs = buildRegisteredPairs()
-
-func buildRegisteredPairs() []registryPair {
-	named := []registryPair{
-		{response.JobClassify, response.OutcomeBug},
-		{response.JobClassify, response.OutcomeFeature},
-		{response.JobPlanning, response.OutcomeQuestions},
-		{response.JobPlanning, response.OutcomeReady},
-		{response.JobPlanning, response.OutcomeChildren},
-		{response.JobPlanning, response.OutcomeNothingToDo},
-		{response.JobPlanreview, response.OutcomeOk},
-		{response.JobBuild, response.OutcomeOk},
-		{response.JobPerimeter, response.OutcomeOk},
-		{response.JobReview, response.OutcomeOk},
-		{response.JobJudge, response.OutcomeOk},
-		{response.JobRespond, response.OutcomeOk},
-		{response.JobSide, response.OutcomeOk},
-	}
-
-	jobs := response.Job("").Values()
-	pairs := make([]registryPair, 0, len(named)+len(jobs)*2)
-	pairs = append(pairs, named...)
-	for _, j := range jobs {
-		job := response.Job(j)
-		pairs = append(pairs,
-			registryPair{job, response.OutcomeQuestion},
-			registryPair{job, response.OutcomeError},
-		)
-	}
-	return pairs
-}
-
 // checkResponseTemplates renders every registered (job, outcome) pair's
 // annotated template, failing on the first error (design section 6.10):
 // a template exists for exactly the pairs the parser accepts.
+// response.RegisteredPairs is internal/response's own single source of
+// truth for that enumeration, so this can never drift from what Parse
+// actually accepts.
 func checkResponseTemplates() error {
-	for _, p := range registeredPairs {
+	for _, p := range response.RegisteredPairs() {
 		if _, err := response.RenderTemplate(p.Job, p.Outcome); err != nil {
 			return fmt.Errorf("render %s/%s: %w", p.Job, p.Outcome, err)
 		}
