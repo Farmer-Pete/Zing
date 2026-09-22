@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "threads": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "fix",
+              "reply",
+              "addressed"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "action",
+          "text"
+        ]
+      },
+      "type": "array",
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "threads"
+  ]
+}

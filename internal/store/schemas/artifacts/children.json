@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "items": {
+    "properties": {
+      "key": {
+        "type": "string",
+        "pattern": "^c[0-9]+$"
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1
+      },
+      "body": {
+        "type": "string",
+        "minLength": 1
+      },
+      "depends_on": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+      "key",
+      "title",
+      "body",
+      "depends_on"
+    ]
+  },
+  "type": "array",
+  "minItems": 2
+}

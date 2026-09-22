@@ -77,6 +77,12 @@ Import these. Reach for an alternative only under the stated condition. Record a
 | go-cmp | `github.com/google/go-cmp/cmp` | deep equality with readable diffs | comparing structs in tests, over reflect.DeepEqual |
 | goleak | `go.uber.org/goleak` | goroutine leak detection | tests for code that spawns goroutines |
 | chi | `github.com/go-chi/chi/v5` | HTTP router with route groups | only when net/http.ServeMux cannot express the routing, such as nested groups or per-subtree middleware |
+| modernc sqlite | `modernc.org/sqlite` | pure-Go SQLite driver (no cgo), driver name `sqlite` | the store's only driver |
+| BurntSushi toml | `github.com/BurntSushi/toml` | TOML decode with `MetaData.Undecoded()` for unknown-key detection | `zing.toml` and `machine.toml` |
+| invopop jsonschema | `github.com/invopop/jsonschema` | reflect Go structs into draft 2020-12 JSON Schema | schema generation only |
+| santhosh-tekuri jsonschema | `github.com/santhosh-tekuri/jsonschema/v6` | validate a JSON payload against a schema | per-write payload validation |
+| adlio schema | `github.com/adlio/schema` | embed.FS migration runner over a caller `*sql.DB` | the migration runner |
+| x/text | `golang.org/x/text` | `message`/`language` for the validation-error printer | format a jsonschema/v6 error reason |
 
 Alternatives to hold in reserve. Use zerolog or zap only if profiling proves slog is a logging bottleneck. Use viper only if config later needs multi-format files or a remote store. `go.uber.org/automaxprocs` is unnecessary on Go 1.25 and later, which sets GOMAXPROCS from the container quota already.
 

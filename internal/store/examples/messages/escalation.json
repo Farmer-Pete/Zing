@@ -1,0 +1,7 @@
+{
+  "code": "plan_gap",
+  "what": "the plan does not cover the empty-cart case",
+  "why": "checkout crashes when cart.Items is nil",
+  "tried": "re-read plan section 5; no mention of empty carts",
+  "options": ["planning"]
+}

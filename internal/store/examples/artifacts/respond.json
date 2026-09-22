@@ -1,0 +1,9 @@
+{
+  "threads": [
+    {
+      "id": "t1",
+      "action": "fix",
+      "text": "renamed the variable per review"
+    }
+  ]
+}

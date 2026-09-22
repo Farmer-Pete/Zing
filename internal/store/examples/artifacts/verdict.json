@@ -1,0 +1,5 @@
+{
+  "scenario_id": "s1",
+  "result": "pass",
+  "evidence": "go test ./internal/cart/... -run TestEmptyCart: PASS"
+}

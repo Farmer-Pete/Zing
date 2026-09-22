@@ -1,0 +1,14 @@
+[
+  {
+    "key": "c1",
+    "title": "Extract the cart validator",
+    "body": "Move validation into its own function so checkout and admin share it.",
+    "depends_on": []
+  },
+  {
+    "key": "c2",
+    "title": "Wire the validator into checkout",
+    "body": "Call the extracted validator from checkout before charging.",
+    "depends_on": ["c1"]
+  }
+]

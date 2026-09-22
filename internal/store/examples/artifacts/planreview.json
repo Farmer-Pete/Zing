@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {
+      "lens": "correctness",
+      "severity": "major",
+      "location": "plan/delivery/tasks/task[1]",
+      "text": "the task does not say which constructors besides NewCart build a Cart",
+      "fix": "list every Cart constructor the task must fix"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "option": {
+      "type": "string",
+      "pattern": "^[a-z]$"
+    },
+    "items": {
+      "additionalProperties": {
+        "type": "string",
+        "enum": [
+          "accept",
+          "reject",
+          "drop",
+          "discuss"
+        ]
+      },
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}

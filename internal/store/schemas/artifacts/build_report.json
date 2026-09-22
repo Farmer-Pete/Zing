@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "task_n": {
+      "type": "integer"
+    },
+    "files_changed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "minItems": 1
+    },
+    "tests_added": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "test_exit": {
+      "type": "integer"
+    },
+    "lint_exit": {
+      "type": "integer"
+    },
+    "report": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "task_n",
+    "files_changed",
+    "tests_added",
+    "test_exit",
+    "lint_exit",
+    "report"
+  ]
+}

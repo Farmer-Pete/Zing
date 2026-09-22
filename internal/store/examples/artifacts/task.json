@@ -1,0 +1,9 @@
+{
+  "n": 1,
+  "test": "TestEmptyCart_ReturnsEmptyOrder",
+  "demo": true,
+  "text": "Initialize cart.Items to an empty slice in NewCart.",
+  "title": "Fix empty cart crash",
+  "state": "done",
+  "commit_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+}
