@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	zing "zing"
+	"zing/internal/lens"
 	"zing/internal/machine"
 	"zing/internal/schemagen"
 	"zing/internal/store"
@@ -48,8 +49,16 @@ func selftest() error {
 		return fmt.Errorf("committed schema differs from the generator: %s", diffs[0])
 	}
 
-	if _, err := machine.Load(zing.Assets, "machine.toml"); err != nil {
+	if _, err = machine.Load(zing.Assets, "machine.toml"); err != nil {
 		return err
+	}
+
+	lenses, err := lens.Load(zing.Assets, "prompts/lenses")
+	if err != nil {
+		return err
+	}
+	if len(lenses) != 8 {
+		return fmt.Errorf("expected 8 lenses, found %d", len(lenses))
 	}
 
 	if err := s.ValidateExamples(); err != nil {
