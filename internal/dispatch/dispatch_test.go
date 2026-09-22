@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	zing "zing"
@@ -594,6 +596,94 @@ func TestTick_StaleOwnerCommitFailsClosedWithNoRedrive(t *testing.T) {
 	}
 	if got := counting.calls.Load(); got != 1 {
 		t.Errorf("runtime calls after the second tick = %d, want still 1 (no re-drive)", got)
+	}
+}
+
+// --- the minimal error path (design section 6.7) --------------------------
+
+// errorScriptXML is a minimal, valid RunError document for the planning job:
+// a universal error outcome with a code from the closed ErrorCode set. It is
+// wired into an inline fstest.MapFS fake runtime, never added to the real
+// fixtures/scripts tree, because the plan says the skeleton's real scripts
+// never error (design section 6.7, section 12 task 8).
+const errorScriptXML = `<zing job="planning" outcome="error">
+  <error code="cannot_run">
+    <what>The planning job's environment cannot run.</what>
+    <why>The sandbox has no network access to reach the model.</why>
+    <tried>Retried once; same failure.</tried>
+  </error>
+</zing>
+`
+
+// TestTick_ErrorOutcomeEscalates drives a ticket already claimed into
+// planning against a fake runtime whose one scripted turn returns the
+// universal error outcome, and proves the dispatcher applies the section
+// 6.7 error-branch commit end to end: the ticket stays in its state,
+// waiting on "error", with one escalation message authored "zing" whose
+// EscalationPayload.Code is the script's RunError.Code (one of the four
+// ErrorCode values) and whose Options are the fixed local
+// retry/planning/abandon set.
+func TestTick_ErrorOutcomeEscalates(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued) // queued -> planning, no session opened yet
+
+	errFS := fstest.MapFS{"planning/1.xml": &fstest.MapFile{Data: []byte(errorScriptXML)}}
+	errRT := runtime.NewFake(errFS)
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), errRT, nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStatePlanning {
+		t.Errorf("final ticket state = %q, want unchanged planning (no Next on the error branch)", final.State)
+	}
+	if final.WaitingOn == nil || *final.WaitingOn != "error" {
+		t.Errorf("final ticket waiting_on = %v, want error", final.WaitingOn)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (cleared by the commit)", *final.ClaimOwner)
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var escalation *store.MessageRow
+	for i := range msgs {
+		if msgs[i].Type == "escalation" {
+			escalation = &msgs[i]
+		}
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message persisted")
+	}
+	if escalation.Author != "zing" {
+		t.Errorf("escalation message author = %q, want zing", escalation.Author)
+	}
+
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(escalation.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	validCodes := map[string]bool{
+		string(response.ErrorCodePlanGap): true, string(response.ErrorCodeCannotRun): true,
+		string(response.ErrorCodeEnvironment): true, string(response.ErrorCodeOther): true,
+	}
+	if !validCodes[payload.Code] {
+		t.Errorf("escalation payload.Code = %q, want one of the four RunError.Code values", payload.Code)
+	}
+	if payload.Code != string(response.ErrorCodeCannotRun) {
+		t.Errorf("escalation payload.Code = %q, want %q (the script's RunError.Code)", payload.Code, response.ErrorCodeCannotRun)
+	}
+	wantOptions := []string{"retry", "planning", "abandon"}
+	if !slices.Equal(payload.Options, wantOptions) {
+		t.Errorf("escalation payload.Options = %v, want %v", payload.Options, wantOptions)
 	}
 }
 

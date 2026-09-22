@@ -114,8 +114,16 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		return err
 	}
 
-	dispDone := make(chan error, 1)
-	go func() { dispDone <- d.Run(dispCtx) }()
+	// dispDone signals (by closing) once d.Run's goroutine has returned;
+	// dispErr holds its return value, safe to read once dispDone has closed,
+	// because the close happens-after the assignment in the same goroutine
+	// and happens-before any receive of it (design section 6.10).
+	dispDone := make(chan struct{})
+	var dispErr error
+	go func() {
+		dispErr = d.Run(dispCtx)
+		close(dispDone)
+	}()
 
 	addr := net.JoinHostPort(cfg.Console.Bind[0], strconv.Itoa(cfg.Console.Port))
 	srv := newServer(ctx, addr, console.New(st, b))
@@ -130,61 +138,89 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 	case <-ctx.Done():
 	}
 
-	return shutdown(ctx, st, srv, errCh, serveErr, dispDone, cancelDisp)
+	return shutdown(ctx, st, srv, errCh, serveErr, dispDone, func() error { return dispErr }, cancelDisp)
 }
 
 // shutdown runs the drain-then-close sequence (design section 6.10 step
-// 10): mark the store draining, wait for the dispatcher to join (forcing it
-// past drainDeadline if needed), shut the HTTP server down, and only then
-// close the store. It returns the first real error among the console
-// listener, Shutdown, and the store close; a dispatcher error from the
-// forced-cancel path is logged, not returned, since it is an expected
-// consequence of shutdown rather than a serve failure.
+// 10) through drainAndShutdown, then folds in the two things that sequence
+// does not carry through its channel-of-struct{} and closure shape: the
+// dispatcher's own returned error (logged, not returned: an expected
+// consequence of a forced shutdown, not a serve failure) and the console
+// listener's error from errCh. It returns the first real error among the
+// console listener, Shutdown, and the store close.
 func shutdown(
 	ctx context.Context, st *store.Store, srv *http.Server,
-	errCh <-chan error, serveErr error, dispDone <-chan error, cancelDisp context.CancelFunc,
+	errCh <-chan error, serveErr error, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
 ) error {
-	if err := st.SetDraining(context.WithoutCancel(ctx), true); err != nil {
-		slog.Error("set draining", "err", err)
+	err := drainAndShutdown(
+		ctx, drainDeadline,
+		func() error { return st.SetDraining(context.WithoutCancel(ctx), true) },
+		dispDone,
+		cancelDisp,
+		func(parent context.Context) error {
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), shutdownTimeout)
+			defer cancel()
+			return srv.Shutdown(shutdownCtx)
+		},
+		st.Close,
+	)
+
+	// dispDone is guaranteed closed by the time drainAndShutdown returns, so
+	// dispErr() is safe to read here.
+	if de := dispErr(); de != nil && !errors.Is(de, context.Canceled) {
+		slog.Error("dispatcher stopped", "err", de)
 	}
 
-	if dispErr := drainDispatcher(dispDone, cancelDisp); dispErr != nil && !errors.Is(dispErr, context.Canceled) {
-		slog.Error("dispatcher stopped", "err", dispErr)
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && serveErr == nil {
+	if serveErr == nil {
 		serveErr = err
 	}
 	if serveErr == nil {
-		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr = err
+		if e := <-errCh; e != nil && !errors.Is(e, http.ErrServerClosed) {
+			serveErr = e
 		}
-	}
-
-	if err := st.Close(); err != nil && serveErr == nil {
-		serveErr = err
 	}
 	return serveErr
 }
 
-// drainDispatcher waits for the dispatcher's Run goroutine to exit, bounded
-// by drainDeadline. In normal operation SetDraining(true) makes Run return
-// nil after its current tick. If it has not exited in time, this logs
-// "drain timed out", cancels dispCtx to force the in-flight handler to
-// return, and waits again without a bound, because the store must not close
-// under a live handler (design section 6.10).
-func drainDispatcher(dispDone <-chan error, cancelDisp context.CancelFunc) error {
-	select {
-	case err := <-dispDone:
-		return err
-	case <-time.After(drainDeadline):
+// drainAndShutdown runs the section 6.10 drain-then-close sequence, decoupled
+// from *store.Store and *http.Server so it can be driven directly in a test:
+// it marks the system draining, waits for the dispatcher to signal dispDone,
+// bounded by drainDeadline; if dispDone has not closed by then, it logs
+// "drain timed out", calls forceDisp to cancel the dispatcher's own context,
+// and waits again without a bound, because the store must never close while
+// a handler may still be running. Only once dispDone has closed does it call
+// shutdown and, last, closeStore. It returns the first error from shutdown or
+// closeStore; a setDraining error is logged, not returned, since drain and
+// join must proceed regardless (design section 6.10).
+func drainAndShutdown(
+	ctx context.Context,
+	drainDeadline time.Duration,
+	setDraining func() error,
+	dispDone <-chan struct{},
+	forceDisp context.CancelFunc,
+	shutdown func(context.Context) error,
+	closeStore func() error,
+) error {
+	if err := setDraining(); err != nil {
+		slog.Error("set draining", "err", err)
 	}
 
-	slog.Error("drain timed out")
-	cancelDisp()
-	return <-dispDone
+	select {
+	case <-dispDone:
+	case <-time.After(drainDeadline):
+		slog.Error("drain timed out")
+		forceDisp()
+		<-dispDone
+	}
+
+	var err error
+	if shutErr := shutdown(ctx); shutErr != nil {
+		err = shutErr
+	}
+	if closeErr := closeStore(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // ensureBindings ensures a store project for every configured project and
