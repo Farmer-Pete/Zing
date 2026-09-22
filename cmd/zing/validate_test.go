@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,16 +22,32 @@ func captureStderr(t *testing.T, fn func() int) (code int, stderr string) {
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = orig })
 
+	// Drain the pipe in a goroutine started before fn runs. Without a
+	// concurrent reader, a write in fn large enough to fill the OS pipe
+	// buffer (~64 KB) would block forever, since io.ReadAll only ran after
+	// fn returned; the read end was also never closed.
+	captured := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			// t.Fatal is unsafe off the test goroutine; surface the error
+			// through the channel so the caller's assertion fails visibly.
+			captured <- "captureStderr: io.Copy: " + err.Error()
+			return
+		}
+		captured <- buf.String()
+	}()
+
 	code = fn()
 
 	if closeErr := w.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	out, readErr := io.ReadAll(r)
-	if readErr != nil {
-		t.Fatal(readErr)
+	stderr = <-captured
+	if closeErr := r.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
-	return code, string(out)
+	return code, stderr
 }
 
 const validExample = `<zing job="classify" outcome="bug"><reason>it crashes on empty input</reason></zing>`

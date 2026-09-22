@@ -54,7 +54,8 @@ const zingMarker = "<zing"
 
 // candidateOffsets returns every byte offset in input where the literal
 // <zing is immediately followed by a name-boundary byte (space, tab,
-// newline, '>', or '/'), in order, so "<zinger>" never matches.
+// carriage return, newline, '>', or '/'), in order, so "<zinger>" never
+// matches.
 func candidateOffsets(input []byte) []int {
 	var offsets []int
 	for i := 0; ; {
@@ -127,7 +128,10 @@ func inRanges(offset int, ranges [][2]int) bool {
 
 func isNameBoundary(b byte) bool {
 	switch b {
-	case ' ', '\t', '\n', '>', '/':
+	// The whitespace set is XML's (space, tab, carriage return, line feed;
+	// XML 1.0 section 2.3) plus the two tag terminators, so a CRLF-formatted
+	// "<zing\r\n job=...>" tag is recognised, not skipped.
+	case ' ', '\t', '\r', '\n', '>', '/':
 		return true
 	default:
 		return false

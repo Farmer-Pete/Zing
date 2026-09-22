@@ -20,8 +20,8 @@ type BuildObservation struct {
 
 // CheckBuildClaims compares a build's claims against what was actually
 // observed (design section 6.5). BuildClaims carries no tests_added field
-// (decision Q-b), so this checks only files_changed, test_exit, and
-// lint_exit, in that order.
+// (decision Q-b), so this checks only test_exit, lint_exit, and
+// files_changed, in that order (design section 6.5).
 func CheckBuildClaims(c BuildClaims, o BuildObservation) []*PathError {
 	var errs []*PathError
 	if o.TestExit != c.TestExit {
@@ -76,7 +76,9 @@ func claimPath(i int, field string) string {
 
 // CheckCodeClaims checks every Kind == "code" claim's evidence path against
 // fsys (design section 6.5). Evidence is "<path>:<line>" for a code claim;
-// only the path before the first ':' is checked.
+// only the path before the first ':' is checked. The path must resolve to a
+// file: a code claim cites a file and a line, so a directory (which has no
+// line) does not satisfy it and draws the same "no such file" error.
 func CheckCodeClaims(claims []Claim, fsys fs.FS) []*PathError {
 	var errs []*PathError
 	for i, c := range claims {
@@ -84,7 +86,7 @@ func CheckCodeClaims(claims []Claim, fsys fs.FS) []*PathError {
 			continue
 		}
 		path, _, _ := strings.Cut(c.Evidence, ":")
-		if _, err := fs.Stat(fsys, path); err != nil {
+		if info, err := fs.Stat(fsys, path); err != nil || info.IsDir() {
 			errs = append(errs, &PathError{
 				Path: claimPath(i, "evidence"),
 				Msg:  "no such file " + path,

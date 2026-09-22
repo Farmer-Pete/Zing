@@ -213,10 +213,17 @@ func TestValidate_OutcomeIllegalForJob(t *testing.T) {
 func TestValidate_OrderIsStable(t *testing.T) {
 	t.Parallel()
 
-	xmlDoc := `<zing job="classify" outcome="bug"><reason></reason></zing>`
+	// An empty ready document is missing several required members at once
+	// (claims, scenarios, plan), so it yields errors at multiple distinct
+	// paths; that is what lets the cross-run comparison below actually
+	// exercise ordering rather than trivially match a one-element slice.
+	xmlDoc := `<zing job="planning" outcome="ready"></zing>`
 	doc := mustParse(t, xmlDoc)
 	a := Validate(doc, ValidateContext{})
 	b := Validate(doc, ValidateContext{})
+	if len(a) < 2 {
+		t.Fatalf("Validate returned %d error(s); need >= 2 distinct paths to test ordering: %v", len(a), dumpErrs(a))
+	}
 	if len(a) != len(b) {
 		t.Fatalf("non-deterministic error count: %d vs %d", len(a), len(b))
 	}

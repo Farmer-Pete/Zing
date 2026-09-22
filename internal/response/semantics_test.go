@@ -204,6 +204,12 @@ func TestCheckChildrenDAG_MissingKeyDoesNotProduceSpuriousCycle(t *testing.T) {
 			t.Fatalf("checkChildrenDAG = %v, must not report a dependency cycle: child[0]'s key is absent, not a real graph node", dumpErrs(errs))
 		}
 	}
+	// child[1]'s empty depends_on entry names no present key, so it must
+	// still draw its own unknown-key error. Asserting it keeps this test
+	// from passing if a regression made checkChildrenDAG drop every error.
+	if !containsErr(errs, "child[1]/depends_on: unknown key ") {
+		t.Errorf("checkChildrenDAG = %v, want child[1]'s empty depends_on to draw an unknown-key error", dumpErrs(errs))
+	}
 }
 
 func questionsWithOptionCounts(counts ...int) []Question {
