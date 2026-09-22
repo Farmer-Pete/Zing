@@ -1,0 +1,6 @@
+project = "zing"
+
+[[ticket]]
+ref = "fake#1"
+title = "Add a hello endpoint"
+body = "Serve GET /hello with a plain-text greeting."
