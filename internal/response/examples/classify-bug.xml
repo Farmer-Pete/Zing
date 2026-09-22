@@ -1,0 +1,3 @@
+<zing job="classify" outcome="bug">
+  <reason>The stack trace in the ticket shows a nil pointer dereference in the checkout handler, which only happens on a code path that already exists.</reason>
+</zing>

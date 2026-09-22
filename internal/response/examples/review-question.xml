@@ -1,0 +1,8 @@
+<zing job="review" outcome="question">
+  <question key="q1">
+    <title>Should the fix touch the generated schema file?</title>
+    <body>internal/store/schemas/build.ok.json is produced by go generate from the BuildResponse type; the lint failure the review flagged lives inside it, and a hand edit would be overwritten on the next generate.</body>
+    <recommended>Skip it: fix the source type instead and regenerate, in a follow-up commit.</recommended>
+  </question>
+  <progress>Reviewed every changed file except the generated one.</progress>
+</zing>

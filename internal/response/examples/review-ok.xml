@@ -1,0 +1,6 @@
+<zing job="review" outcome="ok">
+  <finding lens="correctness" severity="major" location="cmd/zing/main.go:96">
+    <text>The new handler ignores the request context, so a client disconnect never cancels the health check.</text>
+    <fix>Thread r.Context() through to the handler body, or leave a comment explaining why the context is not needed here.</fix>
+  </finding>
+</zing>

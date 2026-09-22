@@ -1,0 +1,6 @@
+<zing job="planreview" outcome="ok">
+  <finding lens="fidelity" severity="minor" location="plan/delivery/tasks/task[0]">
+    <text>Task 1 does not mention updating the OpenAPI spec, even though the design section changes the response shape the spec describes.</text>
+    <fix>Add a line to task 1 covering the spec update, or add a second task for it.</fix>
+  </finding>
+</zing>

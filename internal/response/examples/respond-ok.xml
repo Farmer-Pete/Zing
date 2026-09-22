@@ -1,0 +1,3 @@
+<zing job="respond" outcome="ok">
+  <thread id="t1" action="fix">Moved the context check into the handler body and added a case for it in TestHealthz.</thread>
+</zing>

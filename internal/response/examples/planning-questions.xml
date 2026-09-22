@@ -1,0 +1,10 @@
+<zing job="planning" outcome="questions">
+  <question key="q1">
+    <title>Which datastore backs the new session cache?</title>
+    <body>The design needs to pick between Redis and the existing Postgres connection pool, since the two have different client interfaces to code against.</body>
+    <option key="a">Redis</option>
+    <option key="b">Postgres</option>
+    <recommended>a: Redis already runs in every environment and needs no new schema.</recommended>
+  </question>
+  <progress>Read the ticket and the existing session code; blocked on the datastore choice before the plan can name concrete types.</progress>
+</zing>

@@ -1,0 +1,3 @@
+<zing job="perimeter" outcome="ok">
+  <reason>The change only adds a new route handler; it touches no existing endpoint, no stored data, and no external dependency.</reason>
+</zing>

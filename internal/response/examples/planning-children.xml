@@ -1,0 +1,12 @@
+<zing job="planning" outcome="children">
+  <child key="c1">
+    <title>Add the /healthz route</title>
+    <body>Register GET /healthz in newMux and write its handler; this piece has no dependency on the metrics work below and can be built and verified alone.</body>
+  </child>
+  <child key="c2">
+    <title>Add session cache hit and miss metrics</title>
+    <body>Emit a counter for cache hits and misses from the existing session lookup path, verified with its own test against a fake counter.</body>
+    <depends_on>c1</depends_on>
+  </child>
+  <notes>Both children touch cmd/zing/main.go, but in separate functions, so c2 can land any time after c1 merges.</notes>
+</zing>
