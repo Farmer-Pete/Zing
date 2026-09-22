@@ -1,0 +1,12 @@
+<zing job="build" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <claims> <!-- BuildClaims -->
+    <files_changed>
+      <path>...</path> <!-- string, one or more, every changed path; the program diffs the tree -->
+    </files_changed>
+    <test_exit>...</test_exit> <!-- int, the program re-runs the command -->
+    <lint_exit>...</lint_exit> <!-- int, the program re-runs the command -->
+  </claims>
+  <fence path="..." symbol="...">...</fence> <!-- Fence, optional, zero or more, one per deletion this task made; path: string; symbol: string -->
+  <report>...</report> <!-- string, what was built, what was decided, markdown -->
+  <notes>...</notes> <!-- string, anything the owner must know -->
+</zing>

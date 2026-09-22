@@ -51,6 +51,17 @@ type node struct {
 	Pattern      string
 	Enum         bool
 
+	// Doc is the field's doc struct tag, verbatim. Empty when the field
+	// carries none. Read by the renderer (render.go); Layer 1 validation
+	// does not use it.
+	Doc string
+	// GoType is the field's own value type: the attribute or chardata
+	// field's type, or an element field's (slice-)element type, always
+	// dereferenced through a pointer. Nil for a kindWrapper node, which
+	// has no value of its own. Read by the renderer to print a field's
+	// type name (string, int, bool, or an enum or struct name).
+	GoType reflect.Type
+
 	Children []*node
 	Get      func(reflect.Value) reflect.Value
 }
@@ -162,12 +173,12 @@ func fieldNode(f reflect.StructField, tag string) *node {
 
 	switch {
 	case hasOpt(opts, "attr"):
-		n := &node{Kind: kindAttr, Name: name, Required: !hasOpt(opts, "omitempty")}
+		n := &node{Kind: kindAttr, Name: name, Required: !hasOpt(opts, "omitempty"), Doc: f.Tag.Get("doc"), GoType: f.Type}
 		applyConstraints(n, f)
 		n.Enum = hasValuesMethod(f.Type)
 		return n
 	case name == "" && hasOpt(opts, "chardata"):
-		n := &node{Kind: kindChardata, Required: !hasOpt(opts, "omitempty")}
+		n := &node{Kind: kindChardata, Required: !hasOpt(opts, "omitempty"), Doc: f.Tag.Get("doc"), GoType: f.Type}
 		applyConstraints(n, f)
 		return n
 	default:
@@ -192,7 +203,7 @@ func elementNode(name string, f reflect.StructField) *node {
 		elemType = elemType.Elem()
 	}
 
-	n := &node{Kind: kindElement, Name: name, Slice: slice}
+	n := &node{Kind: kindElement, Name: name, Slice: slice, Doc: f.Tag.Get("doc"), GoType: elemType}
 	if elemType.Kind() == reflect.Struct {
 		n.Children = buildChildren(elemType)
 	}

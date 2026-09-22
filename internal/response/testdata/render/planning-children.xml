@@ -1,0 +1,8 @@
+<zing job="planning" outcome="children"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <child key="..."> <!-- Child, at least two, tickets that can each be built and verified alone; key: string -->
+    <title>...</title> <!-- string -->
+    <body>...</body> <!-- string, specific enough to build alone, markdown -->
+    <depends_on>...</depends_on> <!-- string, optional, zero or more, keys of other children; no cycles -->
+  </child>
+  <notes>...</notes> <!-- string, the shared architecture, markdown -->
+</zing>

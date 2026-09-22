@@ -1,0 +1,7 @@
+<zing job="perimeter" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <error code="..."> <!-- RunError; code: ErrorCode, one of: plan_gap | cannot_run | environment | other -->
+    <what>...</what> <!-- string, what could not be done -->
+    <why>...</why> <!-- string, why, with evidence -->
+    <tried>...</tried> <!-- string, what was tried -->
+  </error>
+</zing>

@@ -1,0 +1,9 @@
+<zing job="side" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
+    <title>...</title> <!-- string, short -->
+    <body>...</body> <!-- string, what you need to know and why, markdown -->
+    <option key="...">...</option> <!-- Option, none, or two to four; key: string -->
+    <recommended>...</recommended> <!-- string, an option key or free text, with the reason -->
+  </question>
+  <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
+</zing>

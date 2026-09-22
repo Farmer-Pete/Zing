@@ -1,0 +1,88 @@
+<zing job="planning" outcome="ready"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <claims>
+    <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
+  </claims>
+  <scenarios>
+    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, optional: one command whose exit code decides it -->
+      <given>...</given> <!-- string, the starting state -->
+      <when>...</when> <!-- string, the action -->
+      <then>...</then> <!-- string, what a stranger would observe, from outside the code -->
+    </scenario>
+  </scenarios>
+  <plan> <!-- Plan -->
+    <overview> <!-- Overview, for the owner first; a reader with no prior context must follow it -->
+      <objective>...</objective> <!-- string, one sentence a non-engineer could read -->
+      <context>...</context> <!-- string, the part of the system this change lands in, markdown -->
+      <problem> <!-- Problem -->
+        ...
+        <loop cmd="...">...</loop> <!-- Loop, optional, bug only: one command that goes red on this bug; cmd: string -->
+        <repro>...</repro> <!-- string, optional, bug only: the minimised reproduction, every element load bearing -->
+        <hypotheses>
+          <hypothesis rank="..."> <!-- Hypothesis, at most five, bug only: three to five, ranked; rank: int -->
+            <cause>...</cause> <!-- string, what is wrong -->
+            <prediction>...</prediction> <!-- string, if this is the cause, then changing X makes the bug disappear -->
+          </hypothesis>
+        </hypotheses>
+      </problem>
+      <goals>
+        <goal>...</goal> <!-- string, one or more, specific and testable -->
+      </goals>
+      <nongoals>
+        <nongoal>...</nongoal> <!-- string, one or more, what the 80/20 version leaves out, and what this change will never do -->
+      </nongoals>
+    </overview>
+    <design> <!-- Design -->
+      <demo cmd="...">...</demo> <!-- Demo; cmd: string, the command that shows it -->
+      <shape>...</shape> <!-- string, components, interfaces, data flow, lifecycles; markdown with at least one mermaid block -->
+      <changes>
+        <change path="..." symbol="..." kind="..."> <!-- Change, optional, zero or more, one per new or changed function or type, so the reader sees how it fits with the code around it; path: string; symbol: string; kind: ChangeKind, one of: new | modified -->
+          <callers>...</callers> <!-- string, what calls it, by name -->
+          <callees>...</callees> <!-- string, what it calls, by name -->
+          <before>...</before> <!-- string, the code today, or none -->
+          <after>...</after> <!-- string, the code after -->
+          <simple_call>...</simple_call> <!-- string, optional, one line showing the simple case; required for a public function -->
+        </change>
+      </changes>
+      <types>
+        <type name="..." file="..." kind="..."> <!-- TypeDef, optional, zero or more, every new or changed type; name: string; file: string; kind: ChangeKind, one of: new | modified -->
+          <field name="..." type="..." required="..." default="..." constraints="..."/> <!-- Field, one or more, every field with exact type, format, and constraints; name: string; type: string; required: bool; default: string, empty when none; constraints: string, allowed values, min, max, format -->
+          <transition from="..." to="..." when="..."/> <!-- Transition, optional, zero or more, every valid transition, for any state field; from: string; to: string; when: string, the event that causes it -->
+        </type>
+      </types>
+      <migrations none="true"/> <!-- write none="true" when there are no migrations -->
+      <migrations>
+        <migration file="..."> <!-- Migration, one or more, one per migration, each in full; file: string -->
+          <schema>...</schema> <!-- string, the DDL: tables, columns, indexes, constraints, defaults, enums -->
+          <backfill>...</backfill> <!-- string, any data transform and the rows it touches, or none -->
+          <locks>...</locks> <!-- string, lock scope, long index builds, hot tables, rollout effects -->
+          <compat>...</compat> <!-- string, forward and backward compatibility during a rolling deploy -->
+          <rollback>...</rollback> <!-- string, how to undo it -->
+        </migration>
+      </migrations>
+    </design>
+    <delivery> <!-- Delivery -->
+      <files>
+        <file path="..." action="...">...</file> <!-- FileChange, one or more, every path the build will create, modify, or delete; this is the perimeter; path: string; action: FileAction, one of: create | modify | delete -->
+      </files>
+      <deletions none="true"/> <!-- write none="true" when nothing is removed -->
+      <deletions>
+        <fence path="..." symbol="...">...</fence> <!-- Fence, one or more, one per removed function, file, flag, or behavior; Chesterton's fence; path: string; symbol: string -->
+      </deletions>
+      <tests>
+        <test name="..." seam="..." kind="..." mocks="...">...</test> <!-- TestCase, one or more, integration tests at every new or changed cut point first; unit tests only for parsers and pure functions; for a bug, the regression test first; name: string; seam: string, the cut point or unit it sits at; kind: TestKind, one of: integration | unit | regression | e2e; mocks: string, cut points mocked, by name, or empty -->
+      </tests>
+      <tasks>
+        <task n="..." test="..." demo="...">...</task> <!-- Task, one to 12, in build order; the working demo's tasks first; n: int; test: string, the test written before this task; demo: bool, true for the working demo's tasks -->
+      </tasks>
+    </delivery>
+    <review> <!-- Review -->
+      <trust_root>...</trust_root> <!-- string, which trust-root or style-guide paths are in files, and why, or none -->
+      <alternatives>
+        <alternative>...</alternative> <!-- string, one or more, an approach that was on the table, and why the plan does not use it -->
+      </alternatives>
+      <risks>
+        <risk>...</risk> <!-- string, one or more, a risk or open question -->
+      </risks>
+    </review>
+  </plan>
+</zing>

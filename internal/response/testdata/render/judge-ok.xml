@@ -1,0 +1,5 @@
+<zing job="judge" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+  <verdict scenario="..." result="..."> <!-- Verdict, one or more, exactly one per scenario id; scenario: string; result: Result, one of: pass | fail -->
+    <evidence>...</evidence> <!-- string, the command you ran and what you observed -->
+  </verdict>
+</zing>
