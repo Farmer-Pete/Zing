@@ -1,7 +1,6 @@
-// Package console serves the SILENT-RING console (design section 6.9): a
-// ticket list and one ticket's messages, live over two Server-Sent Events
-// streams. It shows work; it takes no decisions here. The question-and-answer
-// block and POST /answer are Task 6, built on top of this package later.
+// Package console serves the console (design section 6.9): a ticket list
+// and one ticket's messages, live over two Server-Sent Events streams, plus
+// the open-question block and POST /answer for recording a chosen option.
 package console
 
 import (
@@ -36,11 +35,12 @@ type console struct {
 	bus   *bus.Broker
 }
 
-// New builds the silent-ring console and returns it as an http.Handler:
+// New builds the console and returns it as an http.Handler:
 //
 //	GET  /                   the shell page
 //	GET  /updates             the ticket-list SSE stream
 //	GET  /thread?id=<n>       one ticket's message-thread SSE stream
+//	POST /answer              record the chosen option for an open question
 //	GET  /static/datastar.js  the vendored Datastar bundle
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
@@ -53,6 +53,7 @@ func New(st *store.Store, b *bus.Broker) http.Handler {
 	mux.HandleFunc("GET /{$}", c.handleIndex)
 	mux.HandleFunc("GET /updates", c.handleUpdates)
 	mux.HandleFunc("GET /thread", c.handleThread)
+	mux.HandleFunc("POST /answer", c.handleAnswer)
 	mux.HandleFunc("GET /static/datastar.js", handleStatic)
 	return mux
 }

@@ -156,3 +156,43 @@ func (c *console) patchThreadFragment(sse *datastar.ServerSentEventGenerator, ti
 	}
 	return sse.PatchElements(fragment) == nil
 }
+
+// answerSignals is the shape POST /answer reads from the client's $answer
+// signal: a chip's data-on:click sets $answer to exactly this nested object
+// before @post('/answer') sends it (design section 6.9).
+type answerSignals struct {
+	Answer struct {
+		Ticket   int64  `json:"ticket"`
+		Question int64  `json:"question"`
+		Option   string `json:"option"`
+	} `json:"answer"`
+}
+
+// handleAnswer reads $answer, records it through store.AnswerQuestion, and
+// reports the outcome: 204 and a bus publish when it is accepted, 409 with
+// the named conflict reason when it is rejected (no publish, since nothing
+// changed), and 500 on any other error (design section 6.9, section 6.3).
+func (c *console) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	var sig answerSignals
+	if err := datastar.ReadSignals(r, &sig); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	result, err := c.store.AnswerQuestion(r.Context(), store.AnswerInput{
+		TicketID:   sig.Answer.Ticket,
+		QuestionID: sig.Answer.Question,
+		Option:     sig.Answer.Option,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !result.Accepted {
+		http.Error(w, result.Conflict, http.StatusConflict)
+		return
+	}
+
+	c.bus.Publish()
+	w.WriteHeader(http.StatusNoContent)
+}
