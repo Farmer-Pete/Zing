@@ -41,15 +41,19 @@ func NewFake(fsys fs.FS) *Fake {
 	return &Fake{fsys: fsys, sessions: make(map[string]*fakeSession)}
 }
 
-// Run implements Runtime: it resolves req's session (minting a new one, or
-// resuming an existing one), reads and parses that session's next turn's
-// script, and, only once that succeeds, advances the session's turn
-// (design section 6.9).
-func (f *Fake) Run(_ context.Context, req RunRequest) (RunResult, error) {
+// Run implements Runtime: it honors ctx cancellation, resolves req's session
+// (minting a new one, or resuming an existing one), reads and parses that
+// session's next turn's script, and, only once that succeeds, advances the
+// session's turn and commits a newly minted session (design section 6.9).
+func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	sessionID, sess, err := f.resolveSessionLocked(req)
+	sessionID, sess, isNew, err := f.resolveSessionLocked(req)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -63,33 +67,41 @@ func (f *Fake) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
 
 	sess.nextTurn++
+	if isNew {
+		// Commit a new session only after its first turn read and parsed, so
+		// a failed first turn leaves no unreachable session in the map.
+		f.sessions[sessionID] = sess
+	}
 	return RunResult{Response: doc.Response, SessionID: sessionID}, nil
 }
 
-// resolveSessionLocked mints a new session for an empty req.SessionID, or
-// looks up and validates an existing one for a resume. Callers must hold
-// f.mu.
-func (f *Fake) resolveSessionLocked(req RunRequest) (string, *fakeSession, error) {
+// resolveSessionLocked mints a new session for an empty req.SessionID (the
+// caller commits it to the map only after a successful first turn), or looks
+// up and validates an existing one for a resume. The bool result reports
+// whether the session is newly minted. Callers must hold f.mu.
+func (f *Fake) resolveSessionLocked(req RunRequest) (id string, sess *fakeSession, isNew bool, err error) {
 	if req.SessionID == "" {
-		id := fmt.Sprintf("fake-%d", fakeSessionCounter.Add(1))
-		sess := &fakeSession{job: req.Job, label: req.Label, nextTurn: 1}
-		f.sessions[id] = sess
-		return id, sess, nil
+		id = fmt.Sprintf("fake-%d", fakeSessionCounter.Add(1))
+		sess = &fakeSession{job: req.Job, label: req.Label, nextTurn: 1}
+		return id, sess, true, nil
 	}
 
-	sess, ok := f.sessions[req.SessionID]
+	found, ok := f.sessions[req.SessionID]
 	if !ok {
-		return "", nil, fmt.Errorf("fake: unknown session %s", req.SessionID)
+		return "", nil, false, fmt.Errorf("fake: unknown session %s", req.SessionID)
 	}
-	if sess.job != req.Job || sess.label != req.Label {
-		return "", nil, fmt.Errorf(
+	if found.job != req.Job || found.label != req.Label {
+		return "", nil, false, fmt.Errorf(
 			"fake: session %s is (%s, %s), resume asked for (%s, %s)",
-			req.SessionID, sess.job, sess.label, req.Job, req.Label,
+			req.SessionID, found.job, found.label, req.Job, req.Label,
 		)
 	}
-	return req.SessionID, sess, nil
+	return req.SessionID, found, false, nil
 }
 
 // scriptKey builds the fake-runtime script key for turn of (job, label):

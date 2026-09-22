@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -63,6 +64,37 @@ func TestFake_FirstTurnMintsIDAndServesTurnOne(t *testing.T) {
 	}
 	if res.SessionID == "" {
 		t.Fatal("Run returned an empty SessionID")
+	}
+}
+
+func TestFake_HonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	f := NewFake(newClassifyFS())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := f.Run(ctx, RunRequest{Job: response.JobClassify})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run with a cancelled context = %v, want context.Canceled", err)
+	}
+	if len(f.sessions) != 0 {
+		t.Errorf("a cancelled Run left %d sessions; want 0 (no turn consumed)", len(f.sessions))
+	}
+}
+
+func TestFake_FailedFirstTurnLeavesNoSession(t *testing.T) {
+	t.Parallel()
+
+	f := NewFake(newClassifyFS())
+	// classify/broken/1.xml holds a non-zing document, so the first turn's
+	// parse fails; the minted session must not be committed to the map.
+	_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "broken"})
+	if err == nil {
+		t.Fatal("Run on a broken first-turn script returned a nil error")
+	}
+	if len(f.sessions) != 0 {
+		t.Errorf("a failed first turn left %d sessions; want 0", len(f.sessions))
 	}
 }
 
