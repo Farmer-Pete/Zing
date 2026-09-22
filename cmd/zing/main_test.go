@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -86,5 +87,73 @@ func TestShutdownCancelsRequests(t *testing.T) {
 	}
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("Serve returned %v, want http.ErrServerClosed", err)
+	}
+}
+
+const (
+	argv0           = "zing"
+	cmdServe        = "serve"
+	cmdSelftest     = "selftest"
+	cmdUnrecognized = "bogus"
+)
+
+func TestCommandName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no argument defaults to serve", []string{argv0}, cmdServe},
+		{"explicit serve", []string{argv0, cmdServe}, cmdServe},
+		{"selftest", []string{argv0, cmdSelftest}, cmdSelftest},
+		{"unrecognized command passes through", []string{argv0, cmdUnrecognized}, cmdUnrecognized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := commandName(tt.args); got != tt.want {
+				t.Errorf("commandName(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDispatch_Selftest(t *testing.T) {
+	t.Parallel()
+
+	if got := dispatch([]string{argv0, cmdSelftest}); got != 0 {
+		t.Errorf("dispatch(selftest) = %d, want 0", got)
+	}
+}
+
+// TestDispatch_UnknownCommand cannot run in parallel: it swaps the process
+// os.Stderr to capture dispatch's error message.
+func TestDispatch_UnknownCommand(t *testing.T) {
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
+
+	got := dispatch([]string{argv0, cmdUnrecognized})
+
+	if closeErr := w.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got != 2 {
+		t.Errorf("dispatch(bogus) = %d, want 2", got)
+	}
+	want := "zing: unknown command \"bogus\"\n"
+	if string(out) != want {
+		t.Errorf("stderr = %q, want %q", out, want)
 	}
 }
