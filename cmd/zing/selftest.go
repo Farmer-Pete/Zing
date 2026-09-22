@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
+	zing "zing"
+	"zing/internal/machine"
 	"zing/internal/schemagen"
 	"zing/internal/store"
 )
@@ -44,6 +46,10 @@ func selftest() error {
 	}
 	if len(diffs) > 0 {
 		return fmt.Errorf("committed schema differs from the generator: %s", diffs[0])
+	}
+
+	if _, err := machine.Load(zing.Assets, "machine.toml"); err != nil {
+		return err
 	}
 
 	if err := s.ValidateExamples(); err != nil {

@@ -1,0 +1,85 @@
+version = 1
+
+[jobs.classify]
+model = "sonnet"
+runtime = "claude"
+tools = ["read", "grep", "glob"]
+prompt = "prompts/classify.md"
+timeout_minutes = 5
+outcomes = ["bug", "feature"]
+
+[jobs.planning]
+model = "fable"
+runtime = "claude"
+session = "long"                     # the one long-lived session
+tools = ["read", "grep", "glob", "bash_readonly"]
+prompt = { feature = "prompts/planning-feature.md", bug = "prompts/planning-bug.md" }
+style = ["prompts/style/prose.md", "prompts/style/agent-docs.md"]
+timeout_minutes = 60
+max_resumes = 12
+outcomes = ["questions", "ready", "children", "nothing_to_do"]
+
+[jobs.planreview]
+model = "codex"
+runtime = "codex"
+tools = ["read", "grep", "glob", "bash_readonly"]
+prompt = "prompts/planreview.md"
+lenses = ["problem", "simplification", "correctness", "security", "fidelity", "tests", "quality", "observability"]
+timeout_minutes = 20
+max_loops = 2
+
+[jobs.build]
+model = "sonnet"
+runtime = "claude"
+per = "task"                         # one fresh run per task, one commit per task
+tools = ["read", "grep", "glob", "edit", "write", "bash"]
+prompt = "prompts/build.md"
+timeout_minutes = 45
+max_resumes = 3
+worktree = "sparse"
+outcomes = ["ok"]
+
+[jobs.perimeter]
+model = "sonnet"
+runtime = "claude"
+tools = ["read"]
+prompt = "prompts/perimeter.md"
+timeout_minutes = 3
+outcomes = ["ok"]
+
+[jobs.review]
+model = "sonnet"
+runtime = "claude"
+per = "lens"                         # one fresh run per lens, in parallel
+tools = ["read", "grep", "glob", "bash_readonly"]
+prompt = "prompts/review.md"
+lenses = ["simplification", "correctness", "security", "fidelity", "tests", "quality", "observability"]
+timeout_minutes = 30
+max_loops = 2
+
+[jobs.judge]
+model = "codex"
+runtime = "codex"
+tools = ["read", "grep", "glob", "bash"]
+prompt = "prompts/judge.md"
+timeout_minutes = 45
+max_loops = 2
+
+[jobs.respond]
+model = "sonnet"
+runtime = "claude"
+tools = ["read", "grep", "glob", "bash_readonly"]
+prompt = "prompts/respond.md"
+timeout_minutes = 15
+outcomes = ["ok"]
+
+[jobs.side]
+model = "sonnet"
+runtime = "claude"
+tools = ["read", "grep", "glob"]
+prompt = "prompts/side.md"
+timeout_minutes = 5
+
+[states]
+order = ["queued", "planning", "building", "reviewing", "judging", "shipping", "done"]
+terminal = ["done", "escalated", "abandoned"]
