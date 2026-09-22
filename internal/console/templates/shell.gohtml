@@ -1,0 +1,14 @@
+{{define "shell"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zing</title>
+</head>
+<body data-signals="{open: 0}" data-init="@get('/updates')">
+{{template "ticketsFragment" .Tickets}}
+<main id="thread"><p class="empty">Select a ticket.</p></main>
+<span data-effect="$open && @get('/thread?id=' + $open)" style="display:none"></span>
+<script type="module" src="/static/datastar.js"></script>
+</body>
+</html>
+{{end}}

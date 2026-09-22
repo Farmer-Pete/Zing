@@ -1,0 +1,10 @@
+{{define "threadFragment"}}<main id="thread">
+{{if .Ticket}}<h2>{{.Ticket.Title}}</h2>
+{{range .Messages}}<div class="message message-{{.Type}}">
+<div class="meta"><span class="type">{{.Type}}</span> <span class="author">{{.Author}}</span></div>
+<div class="body">{{.Body}}</div>
+</div>
+{{else}}<p class="empty">No messages yet.</p>
+{{end}}{{else}}<p class="empty">Ticket not found.</p>
+{{end}}</main>
+{{end}}
