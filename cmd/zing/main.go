@@ -46,6 +46,8 @@ func dispatch(args []string) int {
 	switch cmd := commandName(args); cmd {
 	case "selftest":
 		return runSelftest()
+	case "validate":
+		return runValidate(args[2:])
 	case "serve":
 		if err := run(); err != nil {
 			slog.Error("server stopped", "err", err)
