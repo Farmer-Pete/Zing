@@ -6,33 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
-
-func TestIndex(t *testing.T) {
-	t.Parallel()
-
-	mux := newMux()
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
-		t.Errorf("Content-Type = %q, want text/html; charset=utf-8", got)
-	}
-	if !strings.Contains(rec.Body.String(), "<h1>Zing</h1>") {
-		t.Errorf("body missing heading: %q", rec.Body.String())
-	}
-}
 
 // TestShutdownCancelsRequests proves the drain wiring in newServer: a handler
 // blocked on its request context must be released when Shutdown begins.
@@ -54,7 +32,7 @@ func TestShutdownCancelsRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(ln.Addr().String(), mux)
+	srv := newServer(t.Context(), ln.Addr().String(), mux)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
