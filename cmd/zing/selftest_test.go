@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -89,7 +90,17 @@ func TestCheckResponseExamples_CatchesTamperedExample(t *testing.T) {
 	// requires a non-empty <reason>, which this omits.
 	tampered[files[0]] = &fstest.MapFile{Data: []byte(`<zing job="classify" outcome="bug"></zing>`)}
 
-	if err := checkResponseExamples(tampered); err == nil {
+	gotErr := checkResponseExamples(tampered)
+	if gotErr == nil {
 		t.Fatal("checkResponseExamples(tampered) = nil, want an error")
+	}
+	// Tie the failure to the planted file and to the mechanism under test
+	// (Validate rejecting the missing <reason>), so a regression that fails
+	// for some other reason cannot quietly satisfy this test.
+	if !strings.Contains(gotErr.Error(), files[0]) {
+		t.Errorf("error %q does not name the tampered example %s", gotErr, files[0])
+	}
+	if !strings.Contains(gotErr.Error(), "reason: missing required element") {
+		t.Errorf("error %q is not the expected missing-reason validation error", gotErr)
 	}
 }

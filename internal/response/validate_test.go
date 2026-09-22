@@ -181,10 +181,16 @@ func TestValidate_RunningJobMismatch(t *testing.T) {
 func TestValidate_QuestionOutcomeLegalForEveryJob(t *testing.T) {
 	t.Parallel()
 
-	doc := mustParse(t, `<zing job="build" outcome="question"><question key="q1"><title>t</title><body>b</body><recommended>r</recommended></question><progress>p</progress></zing>`)
-	errs := Validate(doc, ValidateContext{})
-	if len(errs) != 0 {
-		t.Fatalf("Validate = %v, want no errors: question is legal for every job", dumpErrs(errs))
+	for _, j := range Job("").Values() {
+		job := Job(j)
+		t.Run(string(job), func(t *testing.T) {
+			t.Parallel()
+			doc := mustParse(t, `<zing job="`+string(job)+`" outcome="question"><question key="q1"><title>t</title><body>b</body><recommended>r</recommended></question><progress>p</progress></zing>`)
+			errs := Validate(doc, ValidateContext{})
+			if len(errs) != 0 {
+				t.Fatalf("Validate = %v, want no errors: question is legal for job %s", dumpErrs(errs), job)
+			}
+		})
 	}
 }
 
