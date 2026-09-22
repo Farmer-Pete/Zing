@@ -221,21 +221,31 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	return validatePaths(fsys, jobErr, job)
 }
 
+// validateOutcomes checks the outcomes list against the reason-table
+// precedence in plan section 7.3-7.5: empty, then unknown, then duplicate,
+// then universal. Each check walks the whole list in order and reports its
+// first offender, so the reported error depends on the check's rank, not on
+// which element happens to come first in the list.
 func validateOutcomes(jobErr func(field, reason string) error, outcomes []string) error {
 	if len(outcomes) == 0 {
 		return jobErr("outcomes", "must not be empty")
 	}
+	for _, v := range outcomes {
+		if !isOutcome(v) {
+			return jobErr("outcomes", "unknown outcome "+v)
+		}
+	}
 	seen := make(map[string]bool, len(outcomes))
 	for _, v := range outcomes {
-		switch {
-		case v == "question" || v == "error":
-			return jobErr("outcomes", "question and error are universal, not listed")
-		case !isOutcome(v):
-			return jobErr("outcomes", "unknown outcome "+v)
-		case seen[v]:
+		if seen[v] {
 			return jobErr("outcomes", "duplicate "+v)
 		}
 		seen[v] = true
+	}
+	for _, v := range outcomes {
+		if v == "question" || v == "error" {
+			return jobErr("outcomes", "question and error are universal, not listed")
+		}
 	}
 	return nil
 }

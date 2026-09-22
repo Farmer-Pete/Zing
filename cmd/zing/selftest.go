@@ -41,6 +41,10 @@ func selftest() error {
 	}
 	defer func() { _ = s.Close() }()
 
+	if err = s.VerifyTables(ctx); err != nil {
+		return fmt.Errorf("verify tables: %w", err)
+	}
+
 	diffs, err := schemagen.Diff(store.SchemaFS())
 	if err != nil {
 		return fmt.Errorf("schema drift: %w", err)

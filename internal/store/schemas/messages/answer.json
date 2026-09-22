@@ -19,8 +19,5 @@
     }
   },
   "additionalProperties": false,
-  "type": "object",
-  "required": [
-    "option"
-  ]
+  "type": "object"
 }

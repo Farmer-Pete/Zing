@@ -63,7 +63,7 @@ func TestValidate_BadPayloads(t *testing.T) {
 		{
 			name:    "minItems violation",
 			table:   testTableArtifacts,
-			typ:     "claims",
+			typ:     testTypeClaims,
 			payload: `[]`,
 			want:    "payload does not match schema claims: /: minItems: got 0, want 1",
 		},
@@ -84,7 +84,7 @@ func TestValidate_BadPayloads(t *testing.T) {
 		{
 			name:    "instance location with slash and tilde is escaped per RFC 6901",
 			table:   testTableMessages,
-			typ:     "answer",
+			typ:     testTypeAnswer,
 			payload: `{"option":"a","items":{"a/b~c":"bogus"}}`,
 			want:    "payload does not match schema answer: /items/a~1b~0c: value must be one of 'accept', 'reject', 'drop', 'discuss'",
 		},
@@ -165,6 +165,77 @@ func TestClaimsAndChildren_EmptyArrayIsTheOnlyValidEmptyShape(t *testing.T) {
 	}
 }
 
+// TestValidate_OptionAndCommitSHAAreOptional proves Fix 1: an answer payload
+// with no "option" key, and a task artifact payload with no "commit_sha"
+// key, both validate. Before the omitempty fix, the missing key failed as a
+// missing required property.
+func TestValidate_OptionAndCommitSHAAreOptional(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	t.Run("answer with no option validates", func(t *testing.T) {
+		t.Parallel()
+		if err := schemas.validate(testTableMessages, testTypeAnswer, []byte(`{}`)); err != nil {
+			t.Errorf("validate(answer, no option) = %v, want nil", err)
+		}
+	})
+
+	t.Run("answer with option a validates", func(t *testing.T) {
+		t.Parallel()
+		if err := schemas.validate(testTableMessages, testTypeAnswer, []byte(`{"option":"a"}`)); err != nil {
+			t.Errorf("validate(answer, option a) = %v, want nil", err)
+		}
+	})
+
+	t.Run("answer with two-char option fails the pattern", func(t *testing.T) {
+		t.Parallel()
+		err := schemas.validate(testTableMessages, testTypeAnswer, []byte(`{"option":"ab"}`))
+		if err == nil {
+			t.Fatal("validate(answer, option ab) = nil, want error")
+		}
+		want := "payload does not match schema answer: /option: 'ab' does not match pattern '^[a-z]$'"
+		if err.Error() != want {
+			t.Errorf("validate(answer, option ab) = %q, want %q", err.Error(), want)
+		}
+	})
+
+	taskPayload := func(extra string) string {
+		return `{"n":1,"test":"t","demo":true,"text":"x","title":"y","state":"pending"` + extra + `}`
+	}
+
+	t.Run("task with no commit_sha validates", func(t *testing.T) {
+		t.Parallel()
+		if err := schemas.validate(testTableArtifacts, "task", []byte(taskPayload(""))); err != nil {
+			t.Errorf("validate(task, no commit_sha) = %v, want nil", err)
+		}
+	})
+
+	t.Run("task with 40-hex commit_sha validates", func(t *testing.T) {
+		t.Parallel()
+		sha := `,"commit_sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"`
+		if err := schemas.validate(testTableArtifacts, "task", []byte(taskPayload(sha))); err != nil {
+			t.Errorf("validate(task, 40-hex commit_sha) = %v, want nil", err)
+		}
+	})
+
+	t.Run("task with short commit_sha fails", func(t *testing.T) {
+		t.Parallel()
+		short := `,"commit_sha":"deadbeef"`
+		err := schemas.validate(testTableArtifacts, "task", []byte(taskPayload(short)))
+		if err == nil {
+			t.Fatal("validate(task, short commit_sha) = nil, want error")
+		}
+		want := "payload does not match schema task: /commit_sha: 'deadbeef' does not match pattern '^[0-9a-f]{40}$'"
+		if err.Error() != want {
+			t.Errorf("validate(task, short commit_sha) = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 func TestInsertMessage_PayloadRules(t *testing.T) {
 	t.Parallel()
 
@@ -179,7 +250,7 @@ func TestInsertMessage_PayloadRules(t *testing.T) {
 
 	// A payload-less type (followup) inserts with NULL payload.
 	id, err := s.InsertMessage(ctx, Message{
-		TicketID: 1, Type: "followup", Author: "you", Body: "any update?",
+		TicketID: 1, Type: "followup", Author: testAuthorYou, Body: "any update?",
 	})
 	if err != nil {
 		t.Fatalf("InsertMessage(followup, no payload): %v", err)
@@ -194,7 +265,7 @@ func TestInsertMessage_PayloadRules(t *testing.T) {
 
 	// A payload-less type rejects a supplied payload.
 	_, err = s.InsertMessage(ctx, Message{
-		TicketID: 1, Type: "followup", Author: "you", Body: "x", Payload: []byte(`{"a":1}`),
+		TicketID: 1, Type: "followup", Author: testAuthorYou, Body: "x", Payload: []byte(`{"a":1}`),
 	})
 	wantErr := "message type followup takes no payload"
 	if err == nil || err.Error() != wantErr {

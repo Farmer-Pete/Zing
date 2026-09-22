@@ -319,8 +319,8 @@ type Item struct {
 }
 
 type AnswerPayload struct {
-	Option *string             `json:"option"          jsonschema:"pattern=^[a-z]$"`
-	Items  map[string]Decision `json:"items,omitempty" doc:"ref to decision, for perimeter and review"`
+	Option *string             `json:"option,omitempty" jsonschema:"pattern=^[a-z]$"`
+	Items  map[string]Decision `json:"items,omitempty"  doc:"ref to decision, for perimeter and review"`
 }
 
 type EscalationPayload struct {
@@ -349,7 +349,7 @@ type TaskArtifact struct {
 	Task
 	Title     string    `json:"title"`
 	State     TaskState `json:"state"`
-	CommitSHA *string   `json:"commit_sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	CommitSHA *string   `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
 }
 
 type BuildReport struct {

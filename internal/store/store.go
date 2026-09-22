@@ -80,6 +80,27 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return &Store{db: db, schemas: schemas}, nil
 }
 
+// coreTables are the eight tables migration 0001_init.sql creates. Selftest
+// asserts each exists (plan section 6.9 step 2).
+var coreTables = []string{
+	"projects", "tickets", "sessions", "runs", "messages",
+	"artifacts", "push_subscriptions", "settings",
+}
+
+// VerifyTables confirms every one of the eight core tables exists, querying
+// sqlite_master directly rather than trusting that the migration ran clean.
+func (s *Store) VerifyTables(ctx context.Context) error {
+	for _, table := range coreTables {
+		var name string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name)
+		if err != nil {
+			return fmt.Errorf("table %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	if err := s.db.Close(); err != nil {

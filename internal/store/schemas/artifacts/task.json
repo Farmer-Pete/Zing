@@ -42,7 +42,6 @@
     "demo",
     "text",
     "title",
-    "state",
-    "commit_sha"
+    "state"
   ]
 }
