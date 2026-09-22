@@ -510,6 +510,59 @@ func TestValidate_ChildrenResponse_MissingKeyDependencyDoesNotCascadeIntoCycle(t
 	}
 }
 
+// TestValidate_ReadyResponse_ScenarioLeakSkippedWhenIDMissing_NoCascade
+// proves a scenario missing its required id attribute yields only Layer
+// 1's "missing required element" for scenarios/scenario[0]/id, not also
+// the Layer 2 scenario-leak check firing with a blank id interpolated,
+// even though that scenario's then-text is repeated verbatim in plan
+// prose.
+func TestValidate_ReadyResponse_ScenarioLeakSkippedWhenIDMissing_NoCascade(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` +
+		`<scenario kind="behavior"><given>g</given><when>w</when><then>the response is 200 with body ok</then></scenario>` +
+		scenarioXML("s2") +
+		`</scenarios>` +
+		planXMLWithShape("shape text: the response is 200 with body ok") +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "scenarios/scenario[0]/id: missing required element"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidate_ReadyResponse_ScenarioLeakStillFiresWhenIDPresent proves
+// the presence gate only suppresses the check when id is truly absent: a
+// present id still draws the scenario-leak error, with that id filled in.
+func TestValidate_ReadyResponse_ScenarioLeakStillFiresWhenIDPresent(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` +
+		scenarioXML("s1") +
+		scenarioXML("s2") +
+		`</scenarios>` +
+		planXMLWithShape("shape text: s1 then") +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+	}
+	want := "plan/design/shape: repeats scenario s1 then-text; the plan must not restate acceptance"
+	if got := firstErrString(errs); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
 func TestValidate_NothingToDoResponse_ClaimCheckWired(t *testing.T) {
 	t.Parallel()
 

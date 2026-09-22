@@ -92,12 +92,16 @@ func proseElements(p Plan) []proseElem {
 // rules. Every path is prefixed "plan". lists.Placeholders, lists.Vague,
 // and lists.Units are the sole source of their respective word lists, so
 // tuning checklists.toml actually changes what CheckPlan flags.
-// problemPresent reports whether the document's <problem> element was
-// actually present, gating the bug-shape checks that read it (see
-// checkBugShape). firstTestKindPresent reports whether the first test's
-// kind attribute was actually present, gating the first-test-kind check
-// the same way. Both are meaningless, and ignored, when bug is false.
-func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problemPresent, firstTestKindPresent bool) []*PathError {
+//
+// present is the document's Layer 1 presence set (design section 6.4): the
+// same map Validate already builds, gating every check below that would
+// otherwise read a field Layer 1 already reported missing off its zero
+// value. plan/overview/problem gates the bug-shape checks in checkBugShape
+// that read <problem>; plan/delivery/tests/test[0]/kind gates its
+// first-test-kind check the same way; each scenario's own
+// scenarios/scenario[i]/id gates checkScenarioLeaks reading that
+// scenario's id.
+func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, present map[string]bool) []*PathError {
 	var errs []*PathError
 
 	elems := proseElements(p)
@@ -108,10 +112,10 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, problem
 			errs = append(errs, checkPerformance(el, lists.Units)...)
 		}
 	}
-	errs = append(errs, checkScenarioLeaks(elems, scenarios)...)
+	errs = append(errs, checkScenarioLeaks(elems, scenarios, present)...)
 
 	if bug {
-		errs = append(errs, checkBugShape(p, problemPresent, firstTestKindPresent)...)
+		errs = append(errs, checkBugShape(p, present["plan/overview/problem"], present["plan/delivery/tests/test[0]/kind"])...)
 	}
 
 	return errs
@@ -162,11 +166,21 @@ func checkBugShape(p Plan, problemPresent, firstTestKindPresent bool) []*PathErr
 // trimmed, with every run of whitespace (including a line break)
 // collapsed to one space (design section 6.6). An empty Then is skipped;
 // Layer 1's minLength constraint on Then already reports it.
-func checkScenarioLeaks(elems []proseElem, scenarios []Scenario) []*PathError {
+//
+// present gates each scenario on its own scenarios/scenario[i]/id
+// actually being in the document: a scenario whose id never decoded
+// (Layer 1 already reports it missing) has a zero-value ID, "", and the
+// message would otherwise interpolate that blank id instead of skipping
+// the scenario, cascading a second error off the one Layer 1 already
+// reported.
+func checkScenarioLeaks(elems []proseElem, scenarios []Scenario, present map[string]bool) []*PathError {
 	var errs []*PathError
 	for _, el := range elems {
 		normEl := normalizeWhitespace(el.text)
-		for _, sc := range scenarios {
+		for i, sc := range scenarios {
+			if !present["scenarios/"+indexedName("scenario", i)+"/id"] {
+				continue
+			}
 			then := normalizeWhitespace(sc.Then)
 			if then == "" {
 				continue
