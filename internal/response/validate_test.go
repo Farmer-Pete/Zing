@@ -3,6 +3,7 @@ package response
 import (
 	"strconv"
 	"testing"
+	"testing/fstest"
 )
 
 func mustParse(t *testing.T, xmlDoc string) *Document {
@@ -249,6 +250,140 @@ func dumpErrs(errs []*PathError) []string {
 	return out
 }
 
+func TestValidate_ReadyResponse_CodeClaimEvidenceChecked(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXML() +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{FS: fstest.MapFS{}})
+	want := "claims/claim[0]/evidence: no such file a.go"
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestValidate_ReadyResponse_NoFSSkipsCodeClaimCheck(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXML() +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	if len(errs) != 0 {
+		t.Fatalf("Validate = %v, want no errors: ctx.FS is nil, so the code-claim check is skipped", dumpErrs(errs))
+	}
+}
+
+func TestValidate_ReadyResponse_PlanCheckerWired(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLWithShape("shape text TODO: fill in") +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := `plan/design/shape: placeholder "TODO" not allowed`
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestValidate_ReadyResponse_NoneUnionWired(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLWithMigrationsNoneFalse() +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := `plan/design/migrations: none must be "true" when present`
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestValidate_ReadyResponse_MissingPlanSkipsLayer2NoCrash(t *testing.T) {
+	t.Parallel()
+
+	// The whole <plan> element is absent: Layer 1 reports it missing and
+	// suppresses its descendants, so Layer 2's plan-related checks (which
+	// index into Delivery.Tests[0] under bug rules, among other things)
+	// must not run over the zero-value Plan at all.
+	xmlDoc := `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{Kind: KindBug})
+	if len(errs) != 1 {
+		t.Fatalf("Validate = %v, want exactly 1 error (plan missing), got %d", dumpErrs(errs), len(errs))
+	}
+	want := "plan: missing required element"
+	if got := errString(errs, 0); got != want {
+		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+func TestValidate_NothingToDoResponse_ClaimCheckWired(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="nothing_to_do">` +
+		`<claims>` +
+		`<claim kind="code" verdict="true" evidence="a.go:1">already exists</claim>` +
+		`<claim kind="env" verdict="true" evidence="go is installed">checked</claim>` +
+		`</claims>` +
+		`<notes>nothing to do</notes>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := "claims/claim[0]/verdict: nothing_to_do needs every code claim false"
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestValidate_ChildrenResponse_DAGCheckWired(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="children">` +
+		`<child key="c1"><title>t1</title><body>b1</body></child>` +
+		`<child key="c1"><title>t2</title><body>b2</body></child>` +
+		`<notes>shared shape</notes>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := "child[1]/key: duplicate key c1"
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestValidate_QuestionResponse_OptionCardinalityWired(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="questions">` +
+		`<question key="q1"><title>t</title><body>b</body><option key="a">only one</option><recommended>a</recommended></question>` +
+		`<progress>p</progress>` +
+		`</zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := "question[0]/options: give none, or two to four"
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
 func scenarioXML(id string) string {
 	return `<scenario id="` + id + `" kind="behavior"><given>g</given><when>w</when><then>` + id + ` then</then></scenario>`
 }
@@ -291,6 +426,58 @@ func planXMLWithHypothesisRank(rank int) string {
 		`<demo cmd="go run ./x">demo text</demo>` +
 		`<shape>shape text</shape>` +
 		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create">why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+func planXMLWithShape(shape string) string {
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>` + shape + `</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create">why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+func planXMLWithMigrationsNoneFalse() string {
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="false"></migrations>` +
 		`</design>` +
 		`<delivery>` +
 		`<files><file path="a.go" action="create">why</file></files>` +

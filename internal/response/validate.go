@@ -95,28 +95,76 @@ func checkHeader(h Head, ctx ValidateContext) []*PathError {
 	return errs
 }
 
+// planChecklists is the plan checker's word lists, loaded once from the
+// embedded, trust-root checklists.toml. A load failure means that trusted
+// file itself is broken, which every caller needs to know about
+// immediately rather than have Validate silently skip the plan checks.
+var planChecklists = mustLoadChecklists()
+
+func mustLoadChecklists() Checklists {
+	lists, err := LoadChecklists()
+	if err != nil {
+		panic(err)
+	}
+	return lists
+}
+
 // layer2 dispatches to each response type's own checks: claims against
 // injected observations, the plan checker, and the structural (none-union,
-// children-DAG, option-cardinality) checks. Task 1 ships Layer 1 only, so
-// every case is a no-op for now; later tasks fill each one in, using ctx and
-// present, which is why the dispatch already threads them through.
-//
-//nolint:unparam // every case returns nil until task 3 fills it in; the signature is wired now so later tasks change bodies, not call sites.
-func layer2(doc *Document, _ ValidateContext, _ map[string]bool) []*PathError {
-	switch doc.Response.(type) {
+// children-DAG, option-cardinality) checks (design section 6.4). It runs a
+// check only over a field present says Layer 1 actually found in the
+// document, so a check never reads (or indexes into) a zero value that
+// Layer 1 has already reported missing.
+func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*PathError {
+	switch r := doc.Response.(type) {
 	case *ReadyResponse:
-		return nil
+		return layer2Ready(r, ctx, present)
 	case *NothingToDoResponse:
-		return nil
+		return CheckNothingToDoClaims(r.Claims)
 	case *ChildrenResponse:
-		return nil
+		return checkChildrenDAG(r.Children)
 	case *QuestionResponse:
-		return nil
+		return checkQuestionCardinality(r.Questions)
 	case *BuildResponse, *JudgeResponse:
+		// Layer 1 only; their observation-dependent checks belong to the
+		// orchestrator and the judge (Packages 8, 9).
 		return nil
 	default:
 		return nil
 	}
+}
+
+// layer2Ready runs a ReadyResponse's three Layer 2 checks: the code-claim
+// path check (only when the caller supplied a filesystem), the plan
+// checker, and the plan's two none-union checks. The plan checks all run
+// only when present["plan"], since a missing <plan> element leaves
+// r.Plan a zero value and Layer 1 already reports it missing.
+func layer2Ready(r *ReadyResponse, ctx ValidateContext, present map[string]bool) []*PathError {
+	var errs []*PathError
+
+	if ctx.FS != nil && present["claims"] {
+		errs = append(errs, CheckCodeClaims(r.Claims, ctx.FS)...)
+	}
+
+	if !present["plan"] {
+		return errs
+	}
+	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists)...)
+
+	if present["plan/design/migrations"] {
+		m := r.Plan.Design.Migrations
+		if err := checkNoneUnion("plan/design/migrations", present["plan/design/migrations/none"], m.None, len(m.Items)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if present["plan/delivery/deletions"] {
+		d := r.Plan.Delivery.Deletions
+		if err := checkNoneUnion("plan/delivery/deletions", present["plan/delivery/deletions/none"], d.None, len(d.Items)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errs
 }
 
 // ---- Layer 1: the reflective pass ----------------------------------------

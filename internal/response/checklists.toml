@@ -1,0 +1,4 @@
+# checklists.toml -- plan-checker word lists. Trust root. Tune to cut false positives.
+placeholders = ["TODO", "TBD", "handle appropriately"]
+vague = ["large", "fast", "recent", "many", "often", "quickly", "several", "slow", "soon", "some"]
+units = ["ns", "us", "ms", "s", "B", "KB", "MB", "GB", "%", "x", "rps", "qps", "Hz", "fps", "ops", "allocs"]
