@@ -1,0 +1,8 @@
+[
+  {
+    "kind": "code",
+    "verdict": "true",
+    "evidence": "internal/cart/cart.go:42",
+    "text": "cart.Items is nil when the cart is empty"
+  }
+]

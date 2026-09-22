@@ -1,0 +1,7 @@
+{
+  "lens": "tests",
+  "severity": "minor",
+  "location": "internal/cart/cart_test.go:10",
+  "text": "the new test does not assert the order total",
+  "fix": "assert order.Total == 0 for an empty cart"
+}

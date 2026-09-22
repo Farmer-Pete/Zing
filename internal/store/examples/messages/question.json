@@ -1,0 +1,10 @@
+{
+  "key": "Q1",
+  "kind": "question",
+  "state": "open",
+  "recommended": "a: ship the simpler design",
+  "options": [
+    { "key": "a", "text": "Ship the simpler design" },
+    { "key": "b", "text": "Ship the complex design" }
+  ]
+}

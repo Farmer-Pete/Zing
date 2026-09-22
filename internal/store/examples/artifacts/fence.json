@@ -1,0 +1,5 @@
+{
+  "path": "internal/cart/legacy.go",
+  "symbol": "OldCheckout",
+  "existed_because": "existed because the old checkout flow needed a synchronous path"
+}

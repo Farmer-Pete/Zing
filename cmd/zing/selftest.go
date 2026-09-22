@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"zing/internal/schemagen"
 	"zing/internal/store"
 )
 
@@ -14,22 +15,40 @@ import (
 // when every step passes, or prints "selftest: <detail>" for the first
 // failure and returns 1.
 func runSelftest() int {
+	if err := selftest(); err != nil {
+		fmt.Fprintf(os.Stderr, "selftest: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout, "selftest: OK")
+	return 0
+}
+
+func selftest() error {
 	ctx := context.Background()
 
 	dir, err := os.MkdirTemp("", "zing-selftest")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "selftest: %v\n", err)
-		return 1
+		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	s, err := store.Open(ctx, filepath.Join(dir, "zing.db"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "selftest: %v\n", err)
-		return 1
+		return err
 	}
 	defer func() { _ = s.Close() }()
 
-	fmt.Fprintln(os.Stdout, "selftest: OK")
-	return 0
+	diffs, err := schemagen.Diff(store.SchemaFS())
+	if err != nil {
+		return fmt.Errorf("schema drift: %w", err)
+	}
+	if len(diffs) > 0 {
+		return fmt.Errorf("committed schema differs from the generator: %s", diffs[0])
+	}
+
+	if err := s.ValidateExamples(); err != nil {
+		return err
+	}
+
+	return nil
 }

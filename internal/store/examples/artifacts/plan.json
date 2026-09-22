@@ -1,0 +1,66 @@
+{
+  "overview": {
+    "objective": "Stop checkout from crashing on an empty cart.",
+    "context": "internal/cart handles cart state; internal/checkout reads it at payment time.",
+    "problem": {
+      "text": "checkout panics when cart.Items is nil instead of an empty slice.",
+      "loop": {
+        "cmd": "go test ./internal/cart/... -run TestEmptyCart",
+        "text": "fails: nil pointer dereference in checkout.Total"
+      },
+      "repro": "create a cart, call Checkout without adding items",
+      "hypotheses": [
+        {
+          "rank": 1,
+          "cause": "NewCart never initializes Items",
+          "prediction": "initializing Items to []Item{} makes the loop pass"
+        }
+      ]
+    },
+    "goals": ["checkout never panics on an empty cart"],
+    "nongoals": ["changing the checkout API"]
+  },
+  "design": {
+    "demo": {
+      "cmd": "go run ./cmd/demo -empty-cart",
+      "text": "an empty cart checks out for zero dollars instead of crashing"
+    },
+    "shape": "NewCart initializes Items to an empty slice; checkout reads it unchanged.",
+    "changes": [
+      {
+        "path": "internal/cart/cart.go",
+        "symbol": "NewCart",
+        "kind": "modified",
+        "callers": "checkout.New",
+        "callees": "none",
+        "before": "Items field left at its zero value (nil)",
+        "after": "Items: make([]Item, 0)"
+      }
+    ],
+    "types": [],
+    "migrations": { "migrations": [] }
+  },
+  "delivery": {
+    "files": [
+      { "path": "internal/cart/cart.go", "action": "modify", "reason": "initialize Items to an empty slice" }
+    ],
+    "deletions": { "deletions": [] },
+    "tests": [
+      {
+        "name": "TestEmptyCart_ReturnsEmptyOrder",
+        "seam": "cart.NewCart",
+        "kind": "regression",
+        "mocks": "",
+        "asserts": "checkout of a freshly created cart returns a zero-item order, no panic"
+      }
+    ],
+    "tasks": [
+      { "n": 1, "test": "TestEmptyCart_ReturnsEmptyOrder", "demo": true, "text": "Initialize cart.Items to an empty slice in NewCart." }
+    ]
+  },
+  "review": {
+    "trust_root": "none",
+    "alternatives": ["guard checkout.Total with a nil check instead of fixing the source"],
+    "risks": ["other constructors that build a Cart by struct literal still skip this initializer"]
+  }
+}

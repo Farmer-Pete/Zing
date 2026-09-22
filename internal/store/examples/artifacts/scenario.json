@@ -1,0 +1,8 @@
+{
+  "id": "s1",
+  "kind": "behavior",
+  "check_cmd": "go test ./internal/cart/... -run TestEmptyCart",
+  "given": "an empty cart",
+  "when": "checkout runs",
+  "then": "checkout returns an empty order without crashing"
+}
