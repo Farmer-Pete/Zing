@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	zing "zing"
 	"zing/internal/lens"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/schemagen"
 	"zing/internal/store"
 )
@@ -69,5 +71,101 @@ func selftest() error {
 		return err
 	}
 
+	if err := checkResponseTemplates(); err != nil {
+		return err
+	}
+
+	if err := checkResponseExamples(response.ExampleFS); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// registryPair is one (job, outcome) pair the response registry
+// recognizes.
+type registryPair struct {
+	Job     response.Job
+	Outcome response.Outcome
+}
+
+// registeredPairs is the same (job, outcome) set internal/response's own
+// registry builds (design section 7.1). It is listed here rather than read
+// off that private map, since this task's file perimeter does not modify
+// internal/response (design section 5); internal/response/registry_test.go
+// carries this exact list too, independently, for the same reason: a
+// second, hand-checked reader of the registry catches a pair that silently
+// stops resolving.
+var registeredPairs = buildRegisteredPairs()
+
+func buildRegisteredPairs() []registryPair {
+	named := []registryPair{
+		{response.JobClassify, response.OutcomeBug},
+		{response.JobClassify, response.OutcomeFeature},
+		{response.JobPlanning, response.OutcomeQuestions},
+		{response.JobPlanning, response.OutcomeReady},
+		{response.JobPlanning, response.OutcomeChildren},
+		{response.JobPlanning, response.OutcomeNothingToDo},
+		{response.JobPlanreview, response.OutcomeOk},
+		{response.JobBuild, response.OutcomeOk},
+		{response.JobPerimeter, response.OutcomeOk},
+		{response.JobReview, response.OutcomeOk},
+		{response.JobJudge, response.OutcomeOk},
+		{response.JobRespond, response.OutcomeOk},
+		{response.JobSide, response.OutcomeOk},
+	}
+
+	jobs := response.Job("").Values()
+	pairs := make([]registryPair, 0, len(named)+len(jobs)*2)
+	pairs = append(pairs, named...)
+	for _, j := range jobs {
+		job := response.Job(j)
+		pairs = append(pairs,
+			registryPair{job, response.OutcomeQuestion},
+			registryPair{job, response.OutcomeError},
+		)
+	}
+	return pairs
+}
+
+// checkResponseTemplates renders every registered (job, outcome) pair's
+// annotated template, failing on the first error (design section 6.10):
+// a template exists for exactly the pairs the parser accepts.
+func checkResponseTemplates() error {
+	for _, p := range registeredPairs {
+		if _, err := response.RenderTemplate(p.Job, p.Outcome); err != nil {
+			return fmt.Errorf("render %s/%s: %w", p.Job, p.Outcome, err)
+		}
+	}
+	return nil
+}
+
+// checkResponseExamples parses and validates every example under fsys's
+// examples/ directory (feature kind, no FS), design section 6.10. It reads
+// through fsys, rather than response.ExampleFS directly, so a test can
+// substitute a tampered filesystem without touching the real embedded
+// files.
+func checkResponseExamples(fsys fs.FS) error {
+	entries, err := fs.ReadDir(fsys, "examples")
+	if err != nil {
+		return fmt.Errorf("list examples: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := "examples/" + e.Name()
+		data, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		doc, err := response.Parse(data)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", name, err)
+		}
+		if errs := response.Validate(doc, response.ValidateContext{Kind: response.KindFeature}); len(errs) > 0 {
+			return fmt.Errorf("validate %s: %w", name, errs[0])
+		}
+	}
 	return nil
 }
