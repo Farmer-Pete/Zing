@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "lens": {
+      "type": "string",
+      "enum": [
+        "problem",
+        "simplification",
+        "correctness",
+        "security",
+        "fidelity",
+        "tests",
+        "quality",
+        "observability"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "blocker",
+        "major",
+        "minor",
+        "nit"
+      ]
+    },
+    "location": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fix": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_ref": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "reject",
+        "drop",
+        "discuss"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "lens",
+    "severity",
+    "location",
+    "text",
+    "fix"
+  ]
+}

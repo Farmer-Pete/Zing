@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "n": {
+      "type": "integer",
+      "maximum": 12,
+      "minimum": 1
+    },
+    "test": {
+      "type": "string",
+      "minLength": 1
+    },
+    "demo": {
+      "type": "boolean"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "done",
+        "failed"
+      ]
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "n",
+    "test",
+    "demo",
+    "text",
+    "title",
+    "state",
+    "commit_sha"
+  ]
+}

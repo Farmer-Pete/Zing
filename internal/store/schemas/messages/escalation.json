@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "resumes_exhausted",
+        "loops_exhausted",
+        "wall_clock",
+        "usage_hold",
+        "plan_gap",
+        "cannot_run",
+        "environment",
+        "other"
+      ]
+    },
+    "what": {
+      "type": "string",
+      "minLength": 1
+    },
+    "why": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tried": {
+      "type": "string"
+    },
+    "options": {
+      "items": {
+        "type": "string",
+        "enum": [
+          "retry",
+          "planning",
+          "abandon"
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "code",
+    "what",
+    "why",
+    "tried",
+    "options"
+  ]
+}

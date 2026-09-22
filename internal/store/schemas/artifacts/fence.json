@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "path": {
+      "type": "string"
+    },
+    "symbol": {
+      "type": "string"
+    },
+    "existed_because": {
+      "type": "string",
+      "pattern": "existed because"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "path",
+    "symbol",
+    "existed_because"
+  ]
+}

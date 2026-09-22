@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "from": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "planning",
+        "building",
+        "reviewing",
+        "judging",
+        "shipping",
+        "done",
+        "escalated",
+        "abandoned"
+      ]
+    },
+    "to": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "planning",
+        "building",
+        "reviewing",
+        "judging",
+        "shipping",
+        "done",
+        "escalated",
+        "abandoned"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "from",
+    "to",
+    "reason"
+  ]
+}
