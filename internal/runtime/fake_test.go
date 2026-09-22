@@ -163,11 +163,20 @@ func TestFake_MissingScriptErrors(t *testing.T) {
 	}
 }
 
+// TestFake_BrokenScriptDoesNotAdvanceTurn scripts a MALFORMED turn 2 (not
+// merely a missing one, which Run would fail identically whether or not it
+// had already advanced): the malformed script proves the failure happens
+// before nextTurn moves past 2, because the retry below, with turn 2
+// replaced by valid XML, must still serve turn 2's content rather than
+// turn 3's (there is no turn 3 script at all, so an advance-then-fail bug
+// here would make the retry error with a missing-script message, not
+// succeed with the feature outcome below).
 func TestFake_BrokenScriptDoesNotAdvanceTurn(t *testing.T) {
 	t.Parallel()
 
 	fsys := fstest.MapFS{
 		"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)},
+		"classify/2.xml": &fstest.MapFile{Data: []byte(brokenXML)},
 	}
 	f := NewFake(fsys)
 	ctx := context.Background()
@@ -177,15 +186,15 @@ func TestFake_BrokenScriptDoesNotAdvanceTurn(t *testing.T) {
 		t.Fatalf("turn 1: %v", err)
 	}
 
-	// Turn 2's script does not exist yet: this attempt must fail without
-	// advancing nextTurn past 2.
-	_, missingErr := f.Run(ctx, RunRequest{Job: response.JobClassify, SessionID: res1.SessionID})
-	if missingErr == nil {
-		t.Fatal("Run with a missing turn 2 script, want an error")
+	// Turn 2's script is malformed XML: response.Parse must fail on it,
+	// and that failure must happen before the turn advances.
+	if _, malformedErr := f.Run(ctx, RunRequest{Job: response.JobClassify, SessionID: res1.SessionID}); malformedErr == nil {
+		t.Fatal("Run with a malformed turn 2 script, want an error")
 	}
 
-	// The script becomes available; the resumed session must still serve
-	// turn 2, not turn 3, proving the failed attempt never advanced it.
+	// The script is replaced with valid XML; the resumed session must
+	// still serve turn 2, not turn 3, proving the failed attempt above
+	// never advanced nextTurn.
 	fsys["classify/2.xml"] = &fstest.MapFile{Data: []byte(classifyFeatureXML)}
 	res2, err := f.Run(ctx, RunRequest{Job: response.JobClassify, SessionID: res1.SessionID})
 	if err != nil {
