@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/starfederation/datastar-go/datastar"
-
-	"zing/internal/console/templates"
 )
 
 // streamSignals is the shape GET /stream reads from the client (design
@@ -93,5 +91,10 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		return false
 	}
 
-	return sse.PatchElementTempl(templates.Rail()) == nil
+	rail, err := c.railComponent(ctx, sig.View, sig.Open)
+	if err != nil {
+		slog.Error("console: stream: build rail", "view", sig.View, "open", sig.Open, "err", err)
+		return false
+	}
+	return sse.PatchElementTempl(rail) == nil
 }

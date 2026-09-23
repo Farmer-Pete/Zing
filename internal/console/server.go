@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"zing/internal/bus"
+	"zing/internal/machine"
 	"zing/internal/store"
 )
 
@@ -56,10 +57,15 @@ var keyboardMJS []byte
 var keysJSON []byte
 
 // console holds the read access every handler needs: the store to render
-// from and the bus every SSE stream subscribes to for its wake-up signal.
+// from, the bus every SSE stream subscribes to for its wake-up signal, and
+// the machine (nilable) the rail's Phase section reads States.Order from
+// (design section 6.1, 6.11). A nil machine (every test that does not
+// exercise the rail passes one) renders no phase dots rather than panicking
+// (rail.go's buildPhaseRail).
 type console struct {
-	store *store.Store
-	bus   *bus.Broker
+	store   *store.Store
+	bus     *bus.Broker
+	machine *machine.Machine
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -69,6 +75,7 @@ type console struct {
 //	POST /draft                 save one draft answer or reply (design section 6.7)
 //	POST /send                  send the ticket's drafted batch (design section 6.7)
 //	POST /read                  mark one message read (design section 6.8)
+//	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle
 //	GET  /static/mermaid.js     the vendored mermaid bundle
 //	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
@@ -87,8 +94,8 @@ type console struct {
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, bindHost string, port int) http.Handler {
-	c := &console{store: st, bus: b}
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, port int) http.Handler {
+	c := &console{store: st, bus: b, machine: m}
 	guard := newMutationGuard(port, bindHost, "localhost", "127.0.0.1")
 
 	mux := http.NewServeMux()
@@ -97,6 +104,7 @@ func New(st *store.Store, b *bus.Broker, bindHost string, port int) http.Handler
 	mux.HandleFunc("POST /draft", withWriteDeadline(guard.requireSameOrigin(c.handleDraft)))
 	mux.HandleFunc("POST /send", withWriteDeadline(guard.requireSameOrigin(c.handleSend)))
 	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
+	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))

@@ -96,3 +96,51 @@ type ThreadRow struct {
 // row type the Thread view centers rather than left-aligning (design
 // section 6.6).
 func (r ThreadRow) IsState() bool { return r.Type == "state" }
+
+// PhaseDot is one state in the rail's Phase section (design section 6.11):
+// machine.States.Order drawn as dots, each before, at, or after the
+// ticket's own state. Waiting is only meaningful when Status is "now"
+// (design section 6.11: "The now row shows waiting when the ticket's
+// waiting_on is set").
+type PhaseDot struct {
+	State   string
+	Status  string // "done", "now", or "upcoming"
+	Waiting bool
+}
+
+// ArtifactSlot is one of the rail's seven labeled artifact slots (design
+// section 6.11): Scenarios, Decisions, Plan, Design doc, Explainer, Review
+// report, Judge verdict. Present is false when the ticket carries no
+// artifact of that slot's type yet, and the rail shows "after AfterPhase"
+// in its place. PayloadText is the present artifact's pretty-printed JSON
+// payload, shown inline through a <details> disclosure when Present: design
+// section 7.1's route table names no artifact-viewing endpoint, so "links
+// to open it" (design section 6.11) is an in-page disclosure rather than a
+// second page (console.buildArtifactsRail, rail.go).
+type ArtifactSlot struct {
+	Label       string
+	Present     bool
+	Version     int
+	AfterPhase  string
+	PayloadText string
+}
+
+// RunRail is the rail's Run section (design section 6.11): the newest
+// session's newest run. Every field is pre-formatted by
+// console.buildRunRail (rail.go), "-" standing in for a value this package
+// cannot supply yet (Worktree, Branch -- design section 6.11: "arrive with
+// Package 5") or that a fixture run left nil (Model, AgentSeconds).
+type RunRail struct {
+	Model, AgentTime, Attempts, Worktree, Branch string
+}
+
+// RailModel is the #rail region's full content (design section 6.11), built
+// by console.buildRailModel from the open ticket's store reads plus
+// machine.States.Order. Rail(nil) renders the same empty placeholder every
+// non-thread or ticket-less /stream frame still needs (design section 6.3:
+// "#rail ... is always patched, so leaving a thread clears the old rail").
+type RailModel struct {
+	Phase     []PhaseDot
+	Artifacts []ArtifactSlot
+	Run       RunRail
+}

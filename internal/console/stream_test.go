@@ -61,7 +61,7 @@ func TestStreamPatchesAllThreeRegionsOnConnect(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
@@ -92,7 +92,7 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Ticket one")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, b, nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "recent", 0, 0)
@@ -120,17 +120,17 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 }
 
 // TestStreamLeavingAThreadPatchesAnEmptyRail proves #rail is always
-// patched, and always empty at Task 3 (design section 6.3, 12): a
-// connection opened on a thread view and one opened on any other view both
-// see the same empty <aside id="rail"></aside>, so navigating away from a
-// thread clears whatever the rail held before -- trivially true here
-// because Task 3 never renders rail content, which is exactly the point:
-// the region is always patched, never left stale.
+// patched (design section 6.3, 12): a connection opened on a thread view
+// with a real open ticket sees the rail's real content (Task 9, design
+// section 6.11), while a connection opened on any other view (or a thread
+// with no open ticket) still sees the empty <aside id="rail"></aside> Task
+// 3 introduced -- so navigating away from a thread clears whatever the rail
+// held before, rather than stranding it.
 func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", ticketID, 0)
@@ -143,10 +143,14 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 	defer func() { _ = inboxResp.Body.Close() }()
 	_, _, inboxRail := readInitialFrames(t, inboxR)
 
-	for name, rail := range map[string]string{"view=thread": threadRail, "view=inbox": inboxRail} {
-		if !strings.Contains(rail, `<aside id="rail"></aside>`) {
-			t.Errorf("%s rail frame is not the empty placeholder; got:\n%s", name, rail)
-		}
+	if strings.Contains(threadRail, `<aside id="rail"></aside>`) {
+		t.Errorf("view=thread rail frame is still the empty placeholder; got:\n%s", threadRail)
+	}
+	if !strings.Contains(threadRail, `class="rail-artifacts"`) {
+		t.Errorf("view=thread rail frame missing its real content; got:\n%s", threadRail)
+	}
+	if !strings.Contains(inboxRail, `<aside id="rail"></aside>`) {
+		t.Errorf("view=inbox rail frame is not the empty placeholder; got:\n%s", inboxRail)
 	}
 }
 
@@ -162,7 +166,7 @@ func TestStreamDisconnectUnsubscribesWithNoGoroutineLeak(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, b, nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	// The baseline is taken before the stream opens, not after: a count
@@ -226,7 +230,7 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, b, nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp1, r1, cancel1 := openStream(t, srv.URL, "inbox", 0, 0)
@@ -273,7 +277,7 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 
 func TestStreamRejectsMalformedSignalsWith400(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	//nolint:noctx // a bare GET on a test server needs no deadline

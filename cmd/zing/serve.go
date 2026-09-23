@@ -161,7 +161,7 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		close(dispDone)
 	}()
 
-	srv := newServer(ctx, bindAddr, console.New(st, b, cfg.Console.Bind[0], cfg.Console.Port))
+	srv := newServer(ctx, bindAddr, console.New(st, b, m, cfg.Console.Bind[0], cfg.Console.Port))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

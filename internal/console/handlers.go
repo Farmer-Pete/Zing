@@ -32,11 +32,21 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
+	// The shell's own data-signals default is view=inbox, open=0 (design
+	// section 6.3), so the shell's own rail render is always the empty
+	// placeholder; the first /stream frame (over #stream-ctl's data-init)
+	// builds the real one once navigation opens a thread.
+	rail, err := c.railComponent(r.Context(), viewInbox, 0)
+	if err != nil {
+		slog.Error("console: build rail", "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
+		return
+	}
 
 	// Rendered into a buffer first, not straight to w, so a render failure
 	// still reports 500 rather than sending a 200 with a half-written body.
 	var buf bytes.Buffer
-	if err := templates.Shell(nav, main, templates.Rail()).Render(r.Context(), &buf); err != nil {
+	if err := templates.Shell(nav, main, rail).Render(r.Context(), &buf); err != nil {
 		slog.Error("console: render shell", "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return

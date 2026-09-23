@@ -1,12 +1,133 @@
 package templates
 
-// Rail renders the #rail region. Task 3 renders only an empty placeholder
-// (design section 12, Task 3 scope note: "the rail CONTENTS beyond an empty
-// placeholder are Task 9; the point is the region is always patched"), so
-// every /stream frame patches #rail to this same empty shell, which is what
-// clears a stale rail the instant the client leaves a thread. The real
-// phase, artifacts, run, log, and side-box content is Task 9 (design
-// section 6.11).
-templ Rail() {
-	<aside id="rail"></aside>
+import "strconv"
+
+// Rail renders the #rail region (design section 6.3, 6.11). model is nil
+// for every non-thread view and for a thread with no open ticket (view !=
+// thread, or open == 0, or the ticket names no row): the same empty shell
+// Task 3 built, so every /stream frame still patches #rail to something,
+// clearing a stale rail the instant the client leaves a thread. A non-nil
+// model renders the four rail sections plus the side box, in the mock's
+// order (design section 6.11: "Phase ... Artifacts ... Run ... Log ... Side
+// box").
+templ Rail(model *RailModel) {
+	<aside id="rail">
+		if model != nil {
+			@phaseRail(model.Phase)
+			@artifactsRail(model.Artifacts)
+			@runRail(model.Run)
+			@logRail()
+			@sideBox()
+		}
+	</aside>
+}
+
+// phaseRail draws machine.States.Order as dots (design section 6.11):
+// states before the ticket's state are done, its own state is now (shown
+// with a "waiting" pill when the ticket's waiting_on is set), and later
+// states are upcoming. An empty dots slice (console.buildPhaseRail's result
+// when the console holds no machine) renders the section heading with
+// nothing under it, rather than omitting the section.
+templ phaseRail(dots []PhaseDot) {
+	<section class="rail-phase">
+		<h3>Phase</h3>
+		<div class="phase-dots">
+			for _, d := range dots {
+				<span class={ "phase-dot phase-" + d.Status } data-phase-state={ d.State }>
+					{ d.State }
+					if d.Status == "now" && d.Waiting {
+						<span class="pill pill-waiting">waiting</span>
+					}
+				</span>
+			}
+		</div>
+	</section>
+}
+
+// artifactsRail renders the mock's seven labeled artifact slots (design
+// section 6.11): a present artifact's version, opened inline through a
+// <details> disclosure showing its stored payload (rail.templ's own doc
+// comment on PayloadText explains why this is in-page rather than a link to
+// a dedicated route); an absent slot's "after <phase>" placeholder
+// otherwise.
+templ artifactsRail(slots []ArtifactSlot) {
+	<section class="rail-artifacts">
+		<h3>Artifacts</h3>
+		for _, slot := range slots {
+			<div class="artifact-slot">
+				<span class="artifact-label">{ slot.Label }</span>
+				if slot.Present {
+					<details class="artifact-open">
+						<summary>v{ strconv.Itoa(slot.Version) }</summary>
+						<pre class="artifact-payload">{ slot.PayloadText }</pre>
+					</details>
+				} else {
+					<span class="empty">after { slot.AfterPhase }</span>
+				}
+			</div>
+		}
+	</section>
+}
+
+// runRail renders the newest session's newest run (design section 6.11):
+// Model, Agent time, Attempts, Worktree, Branch. Every field arrives
+// pre-formatted (console.buildRunRail, rail.go), including the "-" for a
+// value this package cannot supply (Worktree, Branch) or a fixture run
+// leaves nil (Model, AgentSeconds).
+templ runRail(run RunRail) {
+	<section class="rail-run">
+		<h3>Run</h3>
+		<dl class="run-fields">
+			<dt>Model</dt>
+			<dd>{ run.Model }</dd>
+			<dt>Agent time</dt>
+			<dd>{ run.AgentTime }</dd>
+			<dt>Attempts</dt>
+			<dd>{ run.Attempts }</dd>
+			<dt>Worktree</dt>
+			<dd>{ run.Worktree }</dd>
+			<dt>Branch</dt>
+			<dd>{ run.Branch }</dd>
+		</dl>
+	</section>
+}
+
+// logRail is a placeholder slot for Task 10's log tail (design section
+// 6.11, 6.12), clearly marked as such (design section 12, Task 10:
+// "control.go ... the log tail wired to the ring" is not this task's
+// scope).
+templ logRail() {
+	<section class="rail-log">
+		<h3>Log</h3>
+		<p class="empty">The log tail arrives in Task 10.</p>
+	</section>
+}
+
+// sideBox renders the inert side box (design section 6.11, 7.1): a text
+// area and a submit, focusable by the b key. console.js's focusSideBox
+// (Task 4) already selects ".side-box textarea, .side-box input" ahead of
+// this task building the box itself, so this markup matches that selector
+// rather than introducing a second, inconsistent id. Its submit posts to
+// POST /side; console.js's postSide (this task) swaps #side-reply's
+// outerHTML with the response instead of waiting for the live stream,
+// since the side box never touches a run or posts to the thread (design
+// section 6.11: "It never touches a run and never posts to the thread").
+templ sideBox() {
+	<section class="rail-side side-box">
+		<h3>Side</h3>
+		<textarea placeholder="Ask the side agent..." rows="3"></textarea>
+		<button type="submit">Send</button>
+		@SideReply("")
+	</section>
+}
+
+// SideReply renders the side box's reply slot: empty on first paint, or
+// POST /side's fixed inert text after a submit (design section 6.11: "a
+// fixed inert reply ... rendered in the rail"). handleSide (rail.go) renders
+// this same component as POST /side's entire response body, and
+// console.js's postSide replaces #side-reply's outerHTML with it verbatim.
+templ SideReply(text string) {
+	<div id="side-reply" class="side-reply">
+		{ text }
+	</div>
 }

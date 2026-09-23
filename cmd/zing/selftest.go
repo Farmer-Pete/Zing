@@ -179,7 +179,7 @@ func selftestE2E(ctx context.Context) error {
 	// made-up bind, never actually listened on, that only needs to satisfy
 	// the mutation guard (mw.go, design section 6.14) the requests below
 	// carry matching Host and Origin headers for.
-	consoleHandler := console.New(st, b, e2eConsoleHost, e2eConsolePort)
+	consoleHandler := console.New(st, b, m, e2eConsoleHost, e2eConsolePort)
 
 	var ticketID int64
 	var answered int

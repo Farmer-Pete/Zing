@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	zing "zing"
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/machine"
 	"zing/internal/store"
 )
 
@@ -32,6 +34,23 @@ const (
 	testBindHost    = "127.0.0.1"
 	testConsolePort = 7420
 )
+
+// testMachine loads the real machine.toml (design section 6.11: the Phase
+// rail draws machine.States.Order), so a rail test asserts phase dots
+// against the pipeline's actual state ordering rather than a hand-rolled
+// fixture that could drift from it. Every other test in this package that
+// does not touch the rail passes nil for console.New's *machine.Machine
+// argument instead: buildPhaseRail (rail.go) treats a nil machine as "no
+// phase dots to draw" rather than panicking, so those tests need not load
+// one just to satisfy the signature.
+func testMachine(t *testing.T) *machine.Machine {
+	t.Helper()
+	m, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+	return m
+}
 
 // testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, and
 // testWaitingQuestions round up the string literals this package's tests
@@ -248,7 +267,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -286,7 +305,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 
 func TestStaticServesDatastarBundle(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/datastar.js") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -318,7 +337,7 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	if err := s.Close(); err != nil {
@@ -354,7 +373,7 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	s := newConsoleTestStore(t)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
 	defer srv.Close()
 
 	//nolint:noctx // a bare GET on a test server needs no deadline

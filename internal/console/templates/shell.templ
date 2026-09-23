@@ -143,5 +143,63 @@ templ palette() {
 		   (design section 6.4): a client-only class, never a Datastar
 		   signal, so a patch never needs to know about it. */
 		.focus { outline: 2px solid var(--zing-accent); outline-offset: 2px; }
+
+		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the
+		   side box, in the mock's order. */
+		#rail section { margin-bottom: 1.25rem; }
+		#rail h3 {
+			font-size: 0.75rem;
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			color: var(--zing-text-dim);
+			margin-bottom: 0.5rem;
+		}
+		.phase-dots { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+		.phase-dot {
+			display: inline-flex;
+			align-items: center;
+			gap: 0.375rem;
+			font-size: 0.75rem;
+			padding: 0.25rem 0.5rem;
+			border-radius: 999px;
+			border: 1px solid var(--zing-border);
+			color: var(--zing-text-dim);
+		}
+		.phase-now { border-color: var(--zing-accent); color: var(--zing-text); }
+		.phase-done { color: var(--zing-text); }
+		.artifact-slot {
+			display: flex;
+			justify-content: space-between;
+			align-items: baseline;
+			gap: 0.5rem;
+			padding: 0.25rem 0;
+			border-bottom: 1px solid var(--zing-border);
+		}
+		.artifact-payload {
+			white-space: pre-wrap;
+			word-break: break-word;
+			font-size: 0.75rem;
+			max-height: 12rem;
+			overflow-y: auto;
+		}
+		.run-fields { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.5rem; margin: 0; }
+		.run-fields dt { color: var(--zing-text-dim); font-size: 0.8rem; }
+		.run-fields dd { margin: 0; }
+		.side-box textarea {
+			width: 100%;
+			background: var(--zing-surface);
+			color: var(--zing-text);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			resize: vertical;
+		}
+		.side-reply:not(:empty) {
+			margin-top: 0.5rem;
+			padding: 0.5rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			font-size: 0.85rem;
+		}
 	</style>
 }

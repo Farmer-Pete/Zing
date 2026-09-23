@@ -35,7 +35,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker) (srv *ht
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, "127.0.0.1", port)
+	handler := console.New(s, b, nil, "127.0.0.1", port)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)

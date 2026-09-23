@@ -288,6 +288,56 @@ function focusSideBox() {
 	return true;
 }
 
+// postSide handles a click on the side box's submit button (design section
+// 6.11, 7.1: "a text area and a submit ... posts to /side, which returns a
+// fixed inert reply ... rendered in the rail"). Unlike postJSON's other
+// callers, the response body is not a 204: POST /side answers with the
+// rendered reply fragment as its whole body (rail.go's handleSide), which
+// this swaps into #side-reply directly, rather than waiting on the live
+// /stream -- the side box never touches a run or posts to the thread, so
+// there is nothing for a bus signal to pick up.
+async function postSide(button) {
+	const box = button.closest('.side-box');
+	const textarea = box?.querySelector('textarea');
+	if (!box || !textarea) {
+		return;
+	}
+	try {
+		const resp = await fetch('/side', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ ticket: state.nav.open, text: textarea.value }),
+		});
+		if (!resp.ok) {
+			console.error('console.js: POST /side', resp.status);
+			return;
+		}
+		const html = await resp.text();
+		const reply = box.querySelector('#side-reply');
+		if (reply) {
+			reply.outerHTML = html;
+		}
+	} catch (err) {
+		console.error('console.js: POST /side', err);
+	}
+}
+
+// installSideBox wires the side box's submit button (design section 6.11).
+// It listens on document rather than the button itself, because #rail is
+// morphed by every /stream patch (design section 6.3); a listener bound
+// directly to the button would need re-attaching after each patch, while
+// delegation from a node that #rail's morph never replaces does not.
+function installSideBox() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.side-box button[type="submit"]');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		postSide(button);
+	});
+}
+
 function stopTicket() {
 	if (!state.nav.open) {
 		return false;
@@ -563,6 +613,7 @@ async function install() {
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
 	installPatchObserver();
+	installSideBox();
 }
 
 install();
