@@ -7,6 +7,9 @@
 pre-commit:
   parallel: false # format mutates files, so read-only jobs must run after it
   commands:
+    00_templ_check:
+      glob: "{*.templ,*_templ.go,go.mod,Makefile}"
+      run: make templ-check
     01_format:
       glob: "*.go"
       run: make fmt-staged

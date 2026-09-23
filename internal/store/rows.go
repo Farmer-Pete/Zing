@@ -52,12 +52,17 @@ type Project struct {
 }
 
 // MessageRow is a messages table row: the id plus every field the store's
-// Message (store.go) already carries. Message itself has no id field, so a
-// read that needs one (every read in this file) returns a MessageRow
-// instead; commit.go's own inserts still return a bare id from
-// LastInsertId and take a Message, unchanged.
+// Message (store.go) already carries, plus CreatedAt (design section 6.16).
+// Message itself has no id field, so a read that needs one (every read in
+// this file) returns a MessageRow instead; commit.go's own inserts still
+// return a bare id from LastInsertId and take a Message, unchanged.
+// CreatedAt is nil only for a row read before migration 0002 ever ran
+// (impossible against a freshly migrated database); every insert path is
+// backed by the messages_set_created_at trigger, so a row this package reads
+// always carries one.
 type MessageRow struct {
-	ID int64
+	ID        int64
+	CreatedAt *time.Time
 	Message
 }
 
@@ -71,8 +76,9 @@ const ticketStateQueued = "queued"
 const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at`
 
 // messageColumns is the messages column list, id first, then the store's
-// Message (store.go) fields in that struct's order.
-const messageColumns = `id, ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at`
+// Message (store.go) fields in that struct's order, then created_at
+// (migration 0002, design section 6.16).
+const messageColumns = `id, ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at, created_at`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanTicket and
 // scanMessage work for a single-row QueryRowContext and a multi-row
@@ -128,11 +134,11 @@ func scanTicket(rs rowScanner) (Ticket, error) {
 func scanMessage(rs rowScanner) (MessageRow, error) {
 	var row MessageRow
 	var runID, parentID, batchID sql.NullInt64
-	var state, body, payload, readAt sql.NullString
+	var state, body, payload, readAt, createdAt sql.NullString
 
 	if err := rs.Scan(
 		&row.ID, &row.TicketID, &runID, &parentID, &row.Type, &row.Author,
-		&state, &body, &payload, &batchID, &readAt,
+		&state, &body, &payload, &batchID, &readAt, &createdAt,
 	); err != nil {
 		return MessageRow{}, err
 	}
@@ -164,6 +170,13 @@ func scanMessage(rs rowScanner) (MessageRow, error) {
 			return MessageRow{}, fmt.Errorf("parse read_at: %w", err)
 		}
 		row.ReadAt = &ts
+	}
+	if createdAt.Valid {
+		ts, err := time.Parse(time.RFC3339Nano, createdAt.String)
+		if err != nil {
+			return MessageRow{}, fmt.Errorf("parse created_at: %w", err)
+		}
+		row.CreatedAt = &ts
 	}
 	return row, nil
 }

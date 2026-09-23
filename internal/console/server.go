@@ -1,12 +1,14 @@
 // Package console serves the console (design section 6.9): a ticket list
 // and one ticket's messages, live over two Server-Sent Events streams, plus
 // the open-question block and POST /answer for recording a chosen option.
+// Every page and fragment renders through the templ components in
+// internal/console/templates (design section 6.2); there is no
+// html/template use left in this package.
 package console
 
 import (
-	"embed"
+	_ "embed"
 	"errors"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"time"
@@ -15,9 +17,13 @@ import (
 	"zing/internal/store"
 )
 
-// contentTypeJS is the MIME type the vendored Datastar bundle is served
-// with; named once so goconst has nothing to flag.
-const contentTypeJS = "text/javascript"
+// contentTypeJS and contentTypeJSON are the MIME types the vendored and
+// authored static assets are served with; named once so goconst has
+// nothing to flag.
+const (
+	contentTypeJS   = "text/javascript"
+	contentTypeJSON = "application/json"
+)
 
 // nonStreamWriteDeadline bounds how long one of the non-streaming routes
 // has to finish writing its response (design section 6.10). It must never
@@ -25,16 +31,29 @@ const contentTypeJS = "text/javascript"
 // bound on purpose (datastar skill, "Long-lived streams").
 const nonStreamWriteDeadline = 5 * time.Second
 
+// The five public static assets (design section 5, 12): the vendored
+// Datastar bundle (Package 3), the vendored mermaid.js (static/ASSETS.md
+// records its source, version, and digest), and three assets authored in
+// this repo (console.js, keyboard.mjs, keys.json are Task 1 skeletons or
+// placeholders; Task 4 fills them in for real). Each is embedded by its
+// own exact path, never as a directory tree, so the mux below can register
+// an explicit allowlist: console.test.js, package.json, and ASSETS.md have
+// no route and so 404, the same as any other unlisted path under /static/.
+//
 //go:embed static/datastar.js
 var datastarJS []byte
 
-//go:embed templates/*.gohtml
-var templatesFS embed.FS
+//go:embed static/mermaid.js
+var mermaidJS []byte
 
-// tmpl holds every named template in templates/*.gohtml, parsed once at
-// package init. html/template escapes every dynamic value it renders, so no
-// message body or ticket title can inject markup into the page.
-var tmpl = template.Must(template.ParseFS(templatesFS, "templates/*.gohtml"))
+//go:embed static/console.js
+var consoleJS []byte
+
+//go:embed static/keyboard.mjs
+var keyboardMJS []byte
+
+//go:embed static/keys.json
+var keysJSON []byte
 
 // console holds the read access every handler needs: the store to render
 // from and the bus every SSE stream subscribes to for its wake-up signal.
@@ -45,11 +64,19 @@ type console struct {
 
 // New builds the console and returns it as an http.Handler:
 //
-//	GET  /                   the shell page
-//	GET  /updates             the ticket-list SSE stream
-//	GET  /thread?id=<n>       one ticket's message-thread SSE stream
-//	POST /answer              record the chosen option for an open question
-//	GET  /static/datastar.js  the vendored Datastar bundle
+//	GET  /                     the shell page
+//	GET  /updates               the ticket-list SSE stream
+//	GET  /thread?id=<n>         one ticket's message-thread SSE stream
+//	POST /answer                record the chosen option for an open question
+//	GET  /static/datastar.js    the vendored Datastar bundle
+//	GET  /static/mermaid.js     the vendored mermaid bundle
+//	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
+//	GET  /static/keyboard.mjs   the console's pure keyboard logic (Task 1 skeleton)
+//	GET  /static/keys.json      the keyboard binding table (Task 1 placeholder)
+//
+// /static/ is an explicit allowlist of exactly those five assets (design
+// section 5, 12): every other path, including console.test.js, package.json,
+// and ASSETS.md, has no registered route and so 404s from the mux itself.
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
@@ -62,7 +89,11 @@ func New(st *store.Store, b *bus.Broker) http.Handler {
 	mux.HandleFunc("GET /updates", c.handleUpdates) // streaming: no write deadline
 	mux.HandleFunc("GET /thread", c.handleThread)   // streaming: no write deadline
 	mux.HandleFunc("POST /answer", withWriteDeadline(requireSameOrigin(c.handleAnswer)))
-	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(handleStatic))
+	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/keyboard.mjs", withWriteDeadline(staticAsset(keyboardMJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/keys.json", withWriteDeadline(staticAsset(keysJSON, contentTypeJSON)))
 	return mux
 }
 
@@ -128,12 +159,16 @@ func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handleStatic serves the embedded, vendored Datastar bundle. It is not
-// fetched at runtime; the file is reviewed and copied into static/ once
-// (design section 0, dependency set).
-func handleStatic(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", contentTypeJS)
-	if _, err := w.Write(datastarJS); err != nil {
-		slog.Error("console: write static bundle", "err", err)
+// staticAsset returns a handler serving one embedded static asset with a
+// fixed content type. Every asset served this way is either vendored and
+// reviewed once, not fetched at runtime (datastar.js, mermaid.js; design
+// section 0, dependency set, and static/ASSETS.md), or authored in this
+// repo (console.js, keyboard.mjs, keys.json).
+func staticAsset(body []byte, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		if _, err := w.Write(body); err != nil {
+			slog.Error("console: write static asset", "content_type", contentType, "err", err)
+		}
 	}
 }

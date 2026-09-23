@@ -576,8 +576,8 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /static/datastar.js status = %d, want 200", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "text/javascript" {
-		t.Errorf("Content-Type = %q, want text/javascript", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != testContentTypeJS {
+		t.Errorf("Content-Type = %q, want %s", ct, testContentTypeJS)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -622,13 +622,19 @@ func TestThreadStreamRendersOpenQuestionBlock(t *testing.T) {
 	if !strings.Contains(frame, "Plain hello") || !strings.Contains(frame, "hello, world") {
 		t.Errorf("thread frame missing both option chips; got:\n%s", frame)
 	}
-	// html/template treats data-on:click as a JS attribute (attrType strips
-	// the "data-" prefix, and "on:click" then matches its "on" heuristic), so
-	// it pads each substituted number with spaces as its JS-context escaper
-	// does; match loosely around the ids instead of a fixed-spacing literal.
+	// templ (Package 4) builds this attribute value through a Go expression
+	// (fmt.Sprintf, in templates/thread.templ), and every Go-expression
+	// attribute value passes through templ's runtime.EscapeString, which is
+	// plain html.EscapeString: it HTML-entity-encodes the single quotes
+	// around the option key ('a' becomes &#39;a&#39;), unlike a static
+	// template literal (the Send button below), which passes through
+	// untouched. A browser decodes the entity back to a literal quote while
+	// parsing the attribute into the DOM, so Datastar reads the same
+	// $answer expression either way; match both spellings rather than
+	// assume one escaping style.
 	wantChipA := regexp.MustCompile(
 		`\$answer = \{ticket:\s*` + strconv.FormatInt(ticketID, 10) +
-			`\s*,\s*question:\s*` + strconv.FormatInt(questionID, 10) + `\s*,\s*option: 'a'\}`)
+			`\s*,\s*question:\s*` + strconv.FormatInt(questionID, 10) + `\s*,\s*option: (?:'a'|&#39;a&#39;)\}`)
 	if !wantChipA.MatchString(frame) {
 		t.Errorf("thread frame missing option a's click signal matching %s; got:\n%s", wantChipA, frame)
 	}

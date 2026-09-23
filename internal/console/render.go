@@ -1,11 +1,10 @@
 package console
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 	"strings"
 
+	"zing/internal/console/templates"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -25,54 +24,13 @@ const (
 	questionStateOpen = "open"
 )
 
-// messageOption is one chip a question block renders: the option key
-// POST /answer's $answer signal carries and the button's label text.
-type messageOption struct {
-	Key, Text string
-}
-
-// questionView is the extra data an open question message renders instead
-// of its plain Body: the heading and body text split from the stored Body
-// (design section 6.6's Title-then-Body mapping) and the chips built from
-// the stored QuestionPayload's options.
-type questionView struct {
-	Title, Body string
-	Options     []messageOption
-}
-
-// messageView is what the thread fragment renders for one message row: the
-// type and author as stored, and a display Body that is either the row's
-// own Body or, for a state message, the decoded "from -> to (reason)" line.
-// Question is non-nil only for a message whose lifecycle state is open, and
-// the template renders its question block in place of Body for that row.
-type messageView struct {
-	ID       int64
-	Type     string
-	Author   string
-	Body     string
-	Question *questionView
-}
-
-// shellData is the template data for the "shell" template (templates/shell.gohtml).
-type shellData struct {
-	Tickets []store.Ticket
-}
-
-// threadData is the template data for the "threadFragment" template
-// (templates/thread.gohtml). Ticket is nil when the requested id does not
-// exist.
-type threadData struct {
-	Ticket   *store.Ticket
-	Messages []messageView
-}
-
 // buildMessageViews turns store rows into the view the thread template
 // renders, decoding a state message's payload into its "from -> to" line and
 // an open question message's payload into its chips.
-func buildMessageViews(rows []store.MessageRow) []messageView {
-	views := make([]messageView, 0, len(rows))
+func buildMessageViews(rows []store.MessageRow) []templates.MessageView {
+	views := make([]templates.MessageView, 0, len(rows))
 	for i := range rows {
-		views = append(views, messageView{
+		views = append(views, templates.MessageView{
 			ID: rows[i].ID, Type: rows[i].Type, Author: rows[i].Author,
 			Body:     displayBody(&rows[i]),
 			Question: buildQuestionView(&rows[i]),
@@ -88,7 +46,7 @@ func buildMessageViews(rows []store.MessageRow) []messageView {
 // plain Body rather than failing the whole thread render, since the
 // commit that wrote it already validated it against the messages/question
 // schema (section 6.6).
-func buildQuestionView(m *store.MessageRow) *questionView {
+func buildQuestionView(m *store.MessageRow) *templates.QuestionView {
 	if m.Type != msgTypeQuestion || m.State == nil || *m.State != questionStateOpen {
 		return nil
 	}
@@ -99,11 +57,11 @@ func buildQuestionView(m *store.MessageRow) *questionView {
 	}
 
 	title, body := splitQuestionBody(m.Body)
-	options := make([]messageOption, 0, len(payload.Options))
+	options := make([]templates.MessageOption, 0, len(payload.Options))
 	for _, o := range payload.Options {
-		options = append(options, messageOption{Key: o.Key, Text: o.Text})
+		options = append(options, templates.MessageOption{Key: o.Key, Text: o.Text})
 	}
-	return &questionView{Title: title, Body: body, Options: options}
+	return &templates.QuestionView{Title: title, Body: body, Options: options}
 }
 
 // splitQuestionBody splits a question message's Body into its heading (the
@@ -132,34 +90,4 @@ func displayBody(m *store.MessageRow) string {
 		line += " (" + sp.Reason + ")"
 	}
 	return line
-}
-
-// renderShell renders the full "/" page, tickets included.
-func renderShell(tickets []store.Ticket) (string, error) {
-	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "shell", shellData{Tickets: tickets}); err != nil {
-		return "", fmt.Errorf("console: render shell: %w", err)
-	}
-	return buf.String(), nil
-}
-
-// renderTicketsFragment renders the #tickets element alone, the payload
-// GET /updates patches on connect and on every bus signal.
-func renderTicketsFragment(tickets []store.Ticket) (string, error) {
-	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "ticketsFragment", tickets); err != nil {
-		return "", fmt.Errorf("console: render tickets fragment: %w", err)
-	}
-	return buf.String(), nil
-}
-
-// renderThreadFragment renders the #thread element alone, the payload
-// GET /thread patches on connect and on every bus signal. ticket is nil when
-// the requested id does not exist.
-func renderThreadFragment(ticket *store.Ticket, messages []messageView) (string, error) {
-	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "threadFragment", threadData{Ticket: ticket, Messages: messages}); err != nil {
-		return "", fmt.Errorf("console: render thread fragment: %w", err)
-	}
-	return buf.String(), nil
 }

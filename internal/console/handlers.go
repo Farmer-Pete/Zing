@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/starfederation/datastar-go/datastar"
 
+	"zing/internal/console/templates"
 	"zing/internal/store"
 )
 
@@ -28,15 +30,19 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := renderShell(tickets)
-	if err != nil {
+	// Rendered into a buffer first, not straight to w, so a render failure
+	// (impossible for Shell's typed, error-free parameters today, but kept
+	// symmetric with every other error path here) still reports 500 rather
+	// than sending a 200 with a half-written body.
+	var buf bytes.Buffer
+	if err := templates.Shell(tickets).Render(r.Context(), &buf); err != nil {
 		slog.Error("console: render shell", "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", contentTypeHTML)
-	if _, err := w.Write([]byte(page)); err != nil {
+	if _, err := w.Write(buf.Bytes()); err != nil {
 		slog.Error("console: write shell page", "err", err)
 	}
 }
@@ -72,20 +78,16 @@ func (c *console) handleUpdates(w http.ResponseWriter, r *http.Request) {
 
 // patchTickets renders the current ticket list and patches it into #tickets.
 // It returns false when the stream should end: a store read failed, or the
-// patch itself failed, which datastar-go treats as the client having gone
-// away.
+// patch itself failed (a render error or a write error alike; PatchElementTempl
+// folds the two together), which datastar-go treats as the client having
+// gone away.
 func (c *console) patchTickets(ctx context.Context, sse *datastar.ServerSentEventGenerator) bool {
 	tickets, err := c.store.ListAllTickets(ctx)
 	if err != nil {
 		slog.Error("console: list tickets", "err", err)
 		return false
 	}
-	fragment, err := renderTicketsFragment(tickets)
-	if err != nil {
-		slog.Error("console: render tickets fragment", "err", err)
-		return false
-	}
-	return sse.PatchElements(fragment) == nil
+	return sse.PatchElementTempl(templates.TicketsFragment(tickets)) == nil
 }
 
 // threadSignals is the shape GET /thread reads from the client's $open
@@ -170,14 +172,10 @@ func (c *console) patchThread(ctx context.Context, sse *datastar.ServerSentEvent
 }
 
 // patchThreadFragment renders and patches #thread for one (ticket,
-// messages) pair, returning false when the patch itself fails.
-func (c *console) patchThreadFragment(sse *datastar.ServerSentEventGenerator, ticket *store.Ticket, messages []messageView) bool {
-	fragment, err := renderThreadFragment(ticket, messages)
-	if err != nil {
-		slog.Error("console: render thread fragment", "err", err)
-		return false
-	}
-	return sse.PatchElements(fragment) == nil
+// messages) pair, returning false when the patch itself fails (a render
+// error or a write error alike; PatchElementTempl folds the two together).
+func (c *console) patchThreadFragment(sse *datastar.ServerSentEventGenerator, ticket *store.Ticket, messages []templates.MessageView) bool {
+	return sse.PatchElementTempl(templates.ThreadFragment(ticket, messages)) == nil
 }
 
 // answerSignals is the shape POST /answer reads from the client's $answer

@@ -1,0 +1,53 @@
+package templates
+
+import (
+	"fmt"
+
+	"zing/internal/store"
+)
+
+// ThreadFragment renders the #thread element alone, the payload GET
+// /thread patches on connect and on every bus signal (design section 6.9,
+// ported from Package 3's thread.gohtml). ticket is nil when the requested
+// id does not exist.
+templ ThreadFragment(ticket *store.Ticket, messages []MessageView) {
+	<main id="thread">
+		if ticket != nil {
+			<h2>{ ticket.Title }</h2>
+			if len(messages) == 0 {
+				<p class="empty">No messages yet.</p>
+			} else {
+				for _, m := range messages {
+					if m.Question != nil {
+						@questionBlock(ticket.ID, m)
+					} else {
+						@messageRow(m)
+					}
+				}
+			}
+		} else {
+			<p class="empty">Ticket not found.</p>
+		}
+	</main>
+}
+
+// questionBlock renders one open question's title, body, and option chips,
+// each chip's data-on:click setting the exact $answer shape POST /answer
+// reads (design section 6.9, 6.3): {ticket, question, option}.
+templ questionBlock(ticketID int64, m MessageView) {
+	<div id={ fmt.Sprintf("q-%d", m.ID) } class="question">
+		<h3>{ m.Question.Title }</h3>
+		<p>{ m.Question.Body }</p>
+		for _, opt := range m.Question.Options {
+			<button data-on:click={ fmt.Sprintf("$answer = {ticket: %d, question: %d, option: '%s'}", ticketID, m.ID, opt.Key) }>{ opt.Text }</button>
+		}
+		<button data-on:click="@post('/answer')">Send</button>
+	</div>
+}
+
+templ messageRow(m MessageView) {
+	<div class={ "message message-" + m.Type }>
+		<div class="meta"><span class="type">{ m.Type }</span> <span class="author">{ m.Author }</span></div>
+		<div class="body">{ m.Body }</div>
+	</div>
+}

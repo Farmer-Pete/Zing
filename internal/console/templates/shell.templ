@@ -1,0 +1,103 @@
+package templates
+
+import "zing/internal/store"
+
+// Shell renders the "/" page: the palette, the server-rendered ticket list,
+// the empty thread region, the client signal, and the script tag (design
+// section 6.9, ported from Package 3's shell.gohtml). #tickets and #thread
+// are Package 3's own live-stream targets (GET /updates and GET /thread);
+// this package's #nav/#main/#rail region scheme (design section 6.3)
+// replaces them at Task 3, once /stream consolidates the two streams.
+templ Shell(tickets []store.Ticket) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>Zing</title>
+			@palette()
+		</head>
+		<body data-signals="{open: 0}" data-init="@get('/updates')">
+			@TicketsFragment(tickets)
+			<main id="thread"><p class="empty">Select a ticket.</p></main>
+			<span data-effect="$open && @get('/thread')" style="display:none"></span>
+			<script type="module" src="/static/datastar.js"></script>
+		</body>
+	</html>
+}
+
+// palette is the console's color and layout system: a dark, low-chroma
+// ground with one accent hue, and a two-pane grid (#tickets, #thread) that
+// grows into the mock's three-column layout (nav, main, rail) at Task 3.
+templ palette() {
+	<style>
+		:root {
+			--zing-bg: #14161c;
+			--zing-surface: #1c1f28;
+			--zing-border: #2b2f3a;
+			--zing-text: #e4e6ec;
+			--zing-text-dim: #9aa0b0;
+			--zing-accent: #6ea8fe;
+			--zing-warn: #f0b429;
+			--zing-danger: #f0616d;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			display: grid;
+			grid-template-columns: 20rem 1fr;
+			min-height: 100vh;
+			background: var(--zing-bg);
+			color: var(--zing-text);
+			font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		}
+		#tickets {
+			border-right: 1px solid var(--zing-border);
+			padding: 1rem;
+			overflow-y: auto;
+		}
+		#thread { padding: 1.5rem; overflow-y: auto; }
+		h2, h3 { margin-top: 0; }
+		.empty { color: var(--zing-text-dim); }
+		.ticket {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			width: 100%;
+			padding: 0.5rem 0.75rem;
+			margin-bottom: 0.25rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			color: inherit;
+			font: inherit;
+			text-align: left;
+			cursor: pointer;
+		}
+		.ticket:hover { border-color: var(--zing-accent); }
+		.badge {
+			font-size: 0.75rem;
+			padding: 0.125rem 0.5rem;
+			border-radius: 999px;
+			background: var(--zing-border);
+			color: var(--zing-text-dim);
+		}
+		.message, .question {
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 0.75rem 1rem;
+			margin-bottom: 0.75rem;
+			background: var(--zing-surface);
+		}
+		.meta { color: var(--zing-text-dim); font-size: 0.8rem; margin-bottom: 0.25rem; }
+		.question button {
+			background: var(--zing-accent);
+			color: var(--zing-bg);
+			border: none;
+			border-radius: 0.375rem;
+			padding: 0.375rem 0.75rem;
+			margin: 0.25rem 0.5rem 0 0;
+			cursor: pointer;
+		}
+	</style>
+}

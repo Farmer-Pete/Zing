@@ -1,8 +1,12 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/adlio/schema"
 )
 
 // Table and type name literals repeated across this package's tests.
@@ -645,5 +649,187 @@ func TestStore_RoundTrip_ReadsBackStoredValues(t *testing.T) {
 	}
 	if logLevel != "info" {
 		t.Errorf("settings.log_level = %q, want info", logLevel)
+	}
+}
+
+// TestMigration0002_ColumnAndTriggerExist proves migration
+// 0002_message_created_at.sql (design section 6.16) ran: messages.created_at
+// exists, and the messages_set_created_at AFTER INSERT trigger exists.
+func TestMigration0002_ColumnAndTriggerExist(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(messages)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(messages): %v", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if scanErr := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); scanErr != nil {
+			t.Fatalf("scan table_info row: %v", scanErr)
+		}
+		if name == "created_at" {
+			found = true
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		t.Fatalf("table_info rows: %v", rowsErr)
+	}
+	if !found {
+		t.Error("messages.created_at column not found after migration")
+	}
+
+	var triggerName string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_set_created_at'").Scan(&triggerName)
+	if err != nil {
+		t.Errorf("messages_set_created_at trigger: %v", err)
+	}
+}
+
+// TestMigration0002_FreshInsertGetsCreatedAt proves the AFTER INSERT trigger
+// populates created_at on every insert path, exercised here through
+// InsertMessage (Package 1's own insert path, design section 6.16: "no
+// insert-site code changes anywhere").
+func TestMigration0002_FreshInsertGetsCreatedAt(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	id, err := s.InsertMessage(ctx, Message{
+		TicketID: 1, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	var createdAt sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT created_at FROM messages WHERE id = ?", id).Scan(&createdAt); err != nil {
+		t.Fatalf("read created_at: %v", err)
+	}
+	if !createdAt.Valid || createdAt.String == "" {
+		t.Errorf("created_at after a fresh insert = %v, want a non-null value", createdAt)
+	}
+}
+
+// TestMigration0002_BackfillsExistingRows proves the migration's one-time
+// UPDATE backfill (design section 6.16), by applying 0001 alone, inserting a
+// row while the column does not yet exist, then applying 0002 and reading
+// the same row back. It drives adlio/schema directly, one migration file at
+// a time, rather than through Open, which would apply every migration
+// together and leave no pre-0002 state to backfill.
+func TestMigration0002_BackfillsExistingRows(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := dbPath(t)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	applyMigration := func(pattern string) {
+		t.Helper()
+		migrator := schema.NewMigrator(schema.WithDialect(schema.SQLite), schema.WithContext(ctx))
+		migs, err := schema.FSMigrations(migrationsFS, pattern)
+		if err != nil {
+			t.Fatalf("FSMigrations(%s): %v", pattern, err)
+		}
+		if err := migrator.Apply(db, migs); err != nil {
+			t.Fatalf("apply %s: %v", pattern, err)
+		}
+	}
+
+	applyMigration("migrations/0001_init.sql")
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO projects (id, name, repo_url, local_path, tracker) VALUES (1, 'zing', 'https://github.com/x/zing', '/tmp/zing', 'github')`,
+	); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (1, 1, '42', 'fix the bug', 'queued')`,
+	); err != nil {
+		t.Fatalf("seed ticket: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO messages (ticket_id, type, author, body) VALUES (1, 'update', 'zing', 'before the migration')`,
+	); err != nil {
+		t.Fatalf("seed pre-migration message: %v", err)
+	}
+
+	applyMigration("migrations/0002_message_created_at.sql")
+
+	var createdAt sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT created_at FROM messages WHERE ticket_id = 1").Scan(&createdAt); err != nil {
+		t.Fatalf("read created_at: %v", err)
+	}
+	if !createdAt.Valid || createdAt.String == "" {
+		t.Errorf("created_at after backfill = %v, want a non-null value", createdAt)
+	}
+}
+
+// TestMessageRow_CreatedAtRoundTrips proves a stored created_at parses back
+// into MessageRow.CreatedAt with time.RFC3339Nano, through both GetMessage
+// and ListMessages (design section 6.16).
+func TestMessageRow_CreatedAtRoundTrips(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	id, err := s.InsertMessage(ctx, Message{
+		TicketID: 1, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	var wantRaw string
+	if scanErr := s.db.QueryRowContext(ctx, "SELECT created_at FROM messages WHERE id = ?", id).Scan(&wantRaw); scanErr != nil {
+		t.Fatalf("read raw created_at: %v", scanErr)
+	}
+	want, err := time.Parse(time.RFC3339Nano, wantRaw)
+	if err != nil {
+		t.Fatalf("parse raw created_at %q: %v", wantRaw, err)
+	}
+
+	got, err := s.GetMessage(ctx, id)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.CreatedAt == nil {
+		t.Fatal("GetMessage: CreatedAt = nil, want the backfilled timestamp")
+	}
+	if !got.CreatedAt.Equal(want) {
+		t.Errorf("GetMessage: CreatedAt = %v, want %v", got.CreatedAt, want)
+	}
+
+	list, err := s.ListMessages(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(list) != 1 || list[0].CreatedAt == nil || !list[0].CreatedAt.Equal(want) {
+		t.Errorf("ListMessages: CreatedAt = %+v, want one message with CreatedAt = %v", list, want)
 	}
 }
