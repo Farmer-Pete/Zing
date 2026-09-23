@@ -1,0 +1,542 @@
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const (
+	testOwner     = "acme"
+	testRepo      = "widgets"
+	mainBranch    = "main"
+	absLocalPath  = "/tmp/widgets"
+	branch7MySlug = "zing/7-my-slug"
+)
+
+// fakeGitHub is a no-op GitHub, enough to satisfy New's required parameter
+// for tests in this file. None of them exercise a GitHub call.
+type fakeGitHub struct{}
+
+func (fakeGitHub) RepoDefaultBranch(context.Context, string, string) (branch string, err error) {
+	return "", errors.New("fakeGitHub: not implemented")
+}
+
+func (fakeGitHub) RequiredChecks(context.Context, string, string, string) (checks []string, err error) {
+	return nil, errors.New("fakeGitHub: not implemented")
+}
+
+func (fakeGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (url string, number int, err error) {
+	return "", 0, errors.New("fakeGitHub: not implemented")
+}
+
+func (fakeGitHub) FindPRByHead(context.Context, string, string, string) (url string, number int, ok bool, err error) {
+	return "", 0, false, errors.New("fakeGitHub: not implemented")
+}
+
+// noCallRunner fails the test if either method is ever invoked. It proves a
+// rejection happens before any git command runs.
+type noCallRunner struct{ t *testing.T }
+
+func (r noCallRunner) Run(_ context.Context, _, name string, args ...string) (string, error) {
+	r.t.Fatalf("unexpected Run call: %s %s", name, strings.Join(args, " "))
+	return "", nil
+}
+
+func (r noCallRunner) Output(_ context.Context, _, name string, args ...string) (string, error) {
+	r.t.Fatalf("unexpected Output call: %s %s", name, strings.Join(args, " "))
+	return "", nil
+}
+
+// failingRunner wraps a real Runner and forces an error for any command
+// whose args slice fail reports true for. Every other command delegates to
+// inner. It deterministically exercises PrepareWorktree's cleanup path
+// without depending on a real git failure mode.
+type failingRunner struct {
+	inner Runner
+	fail  func(args []string) bool
+}
+
+func (r failingRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if r.fail(args) {
+		return "forced failure", errors.New("forced failure")
+	}
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+func (r failingRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if r.fail(args) {
+		return "", errors.New("forced failure")
+	}
+	return r.inner.Output(ctx, dir, name, args...)
+}
+
+// runGit runs a real git command directly (not through a Runner), for test
+// setup and for independently verifying orchestrator behavior. It takes ctx
+// as a parameter, like every git-invoking function in this package, rather
+// than calling t.Context() itself: a call from inside a subtest closure
+// that already has the enclosing test's ctx in scope should pass that one
+// along, not silently swap in a context scoped to the subtest instead.
+func runGit(ctx context.Context, t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// newTestRepo inits a real git repo in a fresh temp directory with a couple
+// of commits on "main", across two subdirectories so sparse-checkout cone
+// tests have something to include and exclude. It configures a throwaway
+// local identity and disables signing at the repo level, so these tests
+// never depend on -- or invoke -- the developer's own git identity or
+// signing key, regardless of their global git config.
+func newTestRepo(t *testing.T) string {
+	t.Helper()
+
+	ctx := t.Context()
+
+	dir := t.TempDir()
+	// Resolve symlinks (macOS's default TMPDIR is a symlink into
+	// /private): PrepareWorktree and RemoveWorktree compare paths
+	// literally against "git worktree list --porcelain" output, which
+	// git reports in resolved form.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+
+	runGit(ctx, t, resolved, "init", "-q", "-b", mainBranch)
+	runGit(ctx, t, resolved, "config", "user.email", "zing-test@example.com")
+	runGit(ctx, t, resolved, "config", "user.name", "Zing Test")
+	runGit(ctx, t, resolved, "config", "commit.gpgsign", "false")
+
+	writeTestFile(t, filepath.Join(resolved, "README.md"), "# test repo\n")
+	runGit(ctx, t, resolved, "add", "README.md")
+	runGit(ctx, t, resolved, "commit", "-q", "-m", "initial commit")
+
+	writeTestFile(t, filepath.Join(resolved, "app", "main.go"), "package main\n")
+	writeTestFile(t, filepath.Join(resolved, "docs", "extra.md"), "# extra\n")
+	runGit(ctx, t, resolved, "add", "app/main.go", "docs/extra.md")
+	runGit(ctx, t, resolved, "commit", "-q", "-m", "add app and docs")
+
+	return resolved
+}
+
+func newTestOrchestrator(t *testing.T, localPath string, run Runner) *Orchestrator {
+	t.Helper()
+	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: localPath, DefaultBranch: mainBranch}
+	log := slog.New(slog.DiscardHandler)
+	o, err := New(proj, fakeGitHub{}, run, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return o
+}
+
+func TestNew(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	valid := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: mainBranch}
+
+	t.Run("valid project", func(t *testing.T) {
+		o, err := New(valid, fakeGitHub{}, execRunner{}, log)
+		if err != nil {
+			t.Fatalf("New: unexpected error: %v", err)
+		}
+		if o.proj != valid {
+			t.Errorf("proj = %+v, want %+v", o.proj, valid)
+		}
+	})
+
+	cases := []struct {
+		name string
+		proj Project
+	}{
+		{"empty owner", Project{Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: mainBranch}},
+		{"empty repo", Project{Owner: testOwner, LocalPath: absLocalPath, DefaultBranch: mainBranch}},
+		{"empty default branch", Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath}},
+		{"relative local path", Project{Owner: testOwner, Repo: testRepo, LocalPath: testRepo, DefaultBranch: mainBranch}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := New(c.proj, fakeGitHub{}, execRunner{}, log)
+			if err == nil {
+				t.Fatalf("New(%+v): expected an error, got nil", c.proj)
+			}
+		})
+	}
+}
+
+func TestBranchName(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			ticketID int64
+			slug     string
+			want     string
+		}{
+			{"ticket only, no slug", 7, "", "zing/7"},
+			{"lowercased", 7, "My Slug", branch7MySlug},
+			{"punctuation collapsed to one dash, underscore kept", 7, "add!!the__thing", "zing/7-add-the__thing"},
+			{"leading and trailing junk trimmed", 7, "--.foo.--", "zing/7-foo"},
+			{"slug that fully sanitizes away falls back to ticket only", 7, "***", "zing/7"},
+			{"dots kept inside the slug", 42, "v1.2.3", "zing/42-v1.2.3"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got, err := branchName(t.Context(), c.ticketID, c.slug)
+				if err != nil {
+					t.Fatalf("branchName(%d, %q): unexpected error: %v", c.ticketID, c.slug, err)
+				}
+				if got != c.want {
+					t.Errorf("branchName(%d, %q) = %q, want %q", c.ticketID, c.slug, got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid ticket id", func(t *testing.T) {
+		for _, id := range []int64{0, -1, -100} {
+			if _, err := branchName(t.Context(), id, "slug"); err == nil {
+				t.Errorf("branchName(%d, \"slug\"): expected an error, got nil", id)
+			}
+		}
+	})
+
+	t.Run("a trailing .lock is rejected by check-ref-format", func(t *testing.T) {
+		// "lock" is a legal slug character, so sanitizeSlug leaves it
+		// untouched; the candidate matches zingBranchPattern but git's
+		// own ref-name rule (no ref may end in ".lock") still rejects it.
+		if _, err := branchName(t.Context(), 7, "wip.lock"); err == nil {
+			t.Fatal("branchName(7, \"wip.lock\"): expected an error, got nil")
+		}
+	})
+
+	t.Run("a run of internal dots is rejected by check-ref-format", func(t *testing.T) {
+		// sanitizeSlug only trims leading/trailing dots, so an internal
+		// ".." survives to the candidate; git rejects two consecutive
+		// dots anywhere in a ref name.
+		if _, err := branchName(t.Context(), 7, "a..b"); err == nil {
+			t.Fatal("branchName(7, \"a..b\"): expected an error, got nil")
+		}
+	})
+}
+
+// TestCheckRefFormat exercises the git check-ref-format wrapper directly,
+// with cases git's ref-name rules reject that branchName's own sanitizing
+// never has occasion to produce (a bare "." component). It is the second,
+// independent validation layer branchName relies on.
+func TestCheckRefFormat(t *testing.T) {
+	cases := []struct {
+		name    string
+		ref     string
+		wantErr bool
+	}{
+		{"valid zing branch", branch7MySlug, false},
+		{"bare dot component", ".", true},
+		{"trailing .lock", "zing/7-wip.lock", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := checkRefFormat(t.Context(), c.ref)
+			if c.wantErr && err == nil {
+				t.Errorf("checkRefFormat(%q): expected an error, got nil", c.ref)
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("checkRefFormat(%q): unexpected error: %v", c.ref, err)
+			}
+		})
+	}
+}
+
+func TestRevalidate(t *testing.T) {
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	wt, err := o.PrepareWorktree(ctx, 1, "feature", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	t.Run("valid worktree passes", func(t *testing.T) {
+		if err := o.revalidate(ctx, wt); err != nil {
+			t.Errorf("revalidate: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("non-zing branch is rejected", func(t *testing.T) {
+		bad := Worktree{dir: wt.dir, branch: "feature/not-zing"}
+		if err := o.revalidate(ctx, bad); err == nil {
+			t.Error("revalidate: expected an error for a non-zing branch, got nil")
+		}
+	})
+
+	t.Run("the default branch is rejected", func(t *testing.T) {
+		bad := Worktree{dir: wt.dir, branch: mainBranch}
+		if err := o.revalidate(ctx, bad); err == nil {
+			t.Error("revalidate: expected an error for the default branch, got nil")
+		}
+	})
+
+	t.Run("a worktree whose checked-out HEAD drifted is rejected", func(t *testing.T) {
+		runGit(ctx, t, wt.dir, "checkout", "-b", "zing/1-drifted")
+		if err := o.revalidate(ctx, wt); err == nil {
+			t.Error("revalidate: expected an error when HEAD no longer matches wt.branch, got nil")
+		}
+	})
+}
+
+func TestPrepareWorktree(t *testing.T) {
+	t.Run("creates the worktree and branch, full checkout", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 7, "my slug", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		wantDir := filepath.Join(repo, ".zing", "wt", "7")
+		if wt.Dir() != wantDir {
+			t.Errorf("Dir() = %q, want %q", wt.Dir(), wantDir)
+		}
+		if wt.Branch() != branch7MySlug {
+			t.Errorf("Branch() = %q, want %q", wt.Branch(), branch7MySlug)
+		}
+
+		for _, rel := range []string{"README.md", "app/main.go", "docs/extra.md"} {
+			if _, err := os.Stat(filepath.Join(wt.Dir(), rel)); err != nil {
+				t.Errorf("expected %s to exist in a full checkout: %v", rel, err)
+			}
+		}
+
+		head := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "symbolic-ref", "--short", "HEAD"))
+		if head != wt.Branch() {
+			t.Errorf("checked out branch = %q, want %q", head, wt.Branch())
+		}
+
+		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+		if strings.TrimSpace(branches) == "" {
+			t.Errorf("expected branch %q to exist in %s", wt.Branch(), repo)
+		}
+	})
+
+	t.Run("applies a sparse cone", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 9, "cone", []string{"app"})
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(wt.Dir(), "app", "main.go")); err != nil {
+			t.Errorf("expected app/main.go inside the cone: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(wt.Dir(), "README.md")); err != nil {
+			t.Errorf("expected README.md at the cone root: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(wt.Dir(), "docs", "extra.md")); err == nil {
+			t.Error("expected docs/extra.md to be excluded by the sparse cone, but it exists")
+		}
+	})
+
+	t.Run("adds .zing/ to .git/info/exclude", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		if _, err := o.PrepareWorktree(ctx, 3, "", nil); err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		excludePath := filepath.Join(repo, ".git", "info", "exclude")
+		contents, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", excludePath, err)
+		}
+		found := false
+		for line := range strings.SplitSeq(string(contents), "\n") {
+			if strings.TrimSpace(line) == ".zing/" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf(".git/info/exclude does not contain \".zing/\":\n%s", contents)
+		}
+	})
+
+	t.Run("does not duplicate the exclude line on a second call", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		if _, err := o.PrepareWorktree(ctx, 4, "", nil); err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		if _, err := o.PrepareWorktree(ctx, 5, "", nil); err != nil {
+			t.Fatalf("second PrepareWorktree: %v", err)
+		}
+
+		excludePath := filepath.Join(repo, ".git", "info", "exclude")
+		contents, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", excludePath, err)
+		}
+		count := 0
+		for line := range strings.SplitSeq(string(contents), "\n") {
+			if strings.TrimSpace(line) == ".zing/" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one \".zing/\" line, found %d:\n%s", count, contents)
+		}
+	})
+
+	t.Run("rejects an already-existing worktree directory", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		dir := filepath.Join(repo, ".zing", "wt", "11")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+
+		_, err := o.PrepareWorktree(ctx, 11, "", nil)
+		if err == nil {
+			t.Fatal("PrepareWorktree: expected an error for an existing directory, got nil")
+		}
+		if !strings.Contains(err.Error(), dir) {
+			t.Errorf("error %q does not name the path %q", err.Error(), dir)
+		}
+
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			t.Fatalf("read dir %s: %v", dir, readErr)
+		}
+		if len(entries) != 0 {
+			t.Errorf("PrepareWorktree must not touch a pre-existing directory, found %d entries", len(entries))
+		}
+	})
+
+	t.Run("cleans up after a failure past worktree add", func(t *testing.T) {
+		repo := newTestRepo(t)
+		failing := failingRunner{
+			inner: execRunner{},
+			fail: func(args []string) bool {
+				return len(args) > 0 && args[0] == "checkout"
+			},
+		}
+		o := newTestOrchestrator(t, repo, failing)
+		ctx := t.Context()
+
+		_, err := o.PrepareWorktree(ctx, 13, "boom", nil)
+		if err == nil {
+			t.Fatal("PrepareWorktree: expected an error, got nil")
+		}
+
+		dir := filepath.Join(repo, ".zing", "wt", "13")
+		if _, statErr := os.Stat(dir); statErr == nil {
+			t.Errorf("expected %s to be removed after cleanup", dir)
+		}
+
+		branches := runGit(ctx, t, repo, "branch", "--list", "zing/13-boom")
+		if strings.TrimSpace(branches) != "" {
+			t.Errorf("expected branch zing/13-boom to be deleted after cleanup, branch --list said: %q", branches)
+		}
+	})
+}
+
+func TestRemoveWorktree(t *testing.T) {
+	t.Run("removes the worktree and branch", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 21, "gone", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		if err := o.RemoveWorktree(ctx, wt); err != nil {
+			t.Fatalf("RemoveWorktree: %v", err)
+		}
+
+		if _, statErr := os.Stat(wt.Dir()); statErr == nil {
+			t.Errorf("expected %s to be removed", wt.Dir())
+		}
+		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+		if strings.TrimSpace(branches) != "" {
+			t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+		}
+	})
+
+	t.Run("is safe when the worktree is already gone but the branch remains", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 22, "half-gone", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		// Remove the worktree administratively through git directly,
+		// bypassing RemoveWorktree, so only the branch is left behind.
+		runGit(ctx, t, repo, "worktree", "remove", "--force", wt.Dir())
+
+		if err := o.RemoveWorktree(ctx, wt); err != nil {
+			t.Fatalf("RemoveWorktree: unexpected error for an already-removed worktree: %v", err)
+		}
+
+		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+		if strings.TrimSpace(branches) != "" {
+			t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+		}
+	})
+
+	t.Run("rejects the default branch without removing anything", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
+		ctx := t.Context()
+
+		bad := Worktree{dir: filepath.Join(repo, ".zing", "wt", "99"), branch: mainBranch}
+		if err := o.RemoveWorktree(ctx, bad); err == nil {
+			t.Fatal("RemoveWorktree: expected an error for the default branch, got nil")
+		}
+	})
+
+	t.Run("rejects a non-zing branch without removing anything", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
+		ctx := t.Context()
+
+		bad := Worktree{dir: filepath.Join(repo, ".zing", "wt", "99"), branch: "feature/not-zing"}
+		if err := o.RemoveWorktree(ctx, bad); err == nil {
+			t.Fatal("RemoveWorktree: expected an error for a non-zing branch, got nil")
+		}
+	})
+}
