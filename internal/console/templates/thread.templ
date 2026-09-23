@@ -1,53 +1,68 @@
 package templates
 
-import (
-	"fmt"
+import "zing/internal/store"
 
-	"zing/internal/store"
-)
-
-// ThreadFragment renders the #thread element alone, the payload GET
-// /thread patches on connect and on every bus signal (design section 6.9,
-// ported from Package 3's thread.gohtml). ticket is nil when the requested
-// id does not exist.
-templ ThreadFragment(ticket *store.Ticket, messages []MessageView) {
-	<main id="thread">
+// Thread renders the #main region for view=thread (design section 6.6,
+// Task 3 scope): the ticket's messages in id order, read only. ticket is
+// nil when open is 0 or names no ticket. A "question" message renders as a
+// read-only group (title, body, recommendation, options); every other
+// type, including the "state" separator, renders as a plain row with its
+// already-decoded Body (internal/console/views.go's displayBody). The
+// interactive chips and composer are Tasks 6 and 7.
+templ Thread(ticket *store.Ticket, rows []ThreadRow) {
+	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
-			if len(messages) == 0 {
+			if len(rows) == 0 {
 				<p class="empty">No messages yet.</p>
 			} else {
-				for _, m := range messages {
-					if m.Question != nil {
-						@questionBlock(ticket.ID, m)
+				for _, row := range rows {
+					if row.Question != nil {
+						@questionGroup(row)
+					} else if row.IsState() {
+						@stateSeparator(row)
 					} else {
-						@messageRow(m)
+						@threadMessageRow(row)
 					}
 				}
 			}
 		} else {
-			<p class="empty">Ticket not found.</p>
+			<p class="empty">Select a ticket.</p>
 		}
 	</main>
 }
 
-// questionBlock renders one open question's title, body, and option chips,
-// each chip's data-on:click setting the exact $answer shape POST /answer
-// reads (design section 6.9, 6.3): {ticket, question, option}.
-templ questionBlock(ticketID int64, m MessageView) {
-	<div id={ fmt.Sprintf("q-%d", m.ID) } class="question">
-		<h3>{ m.Question.Title }</h3>
-		<p>{ m.Question.Body }</p>
-		for _, opt := range m.Question.Options {
-			<button data-on:click={ fmt.Sprintf("$answer = {ticket: %d, question: %d, option: '%s'}", ticketID, m.ID, opt.Key) }>{ opt.Text }</button>
-		}
-		<button data-on:click="@post('/answer')">Send</button>
+templ stateSeparator(row ThreadRow) {
+	<div class="state-separator">{ row.Body }</div>
+}
+
+templ threadMessageRow(row ThreadRow) {
+	<div class={ "message message-" + row.Type }>
+		<div class="meta"><span class="type">{ row.Type }</span> <span class="author">{ row.Author }</span></div>
+		<div class="body">{ row.Body }</div>
 	</div>
 }
 
-templ messageRow(m MessageView) {
-	<div class={ "message message-" + m.Type }>
-		<div class="meta"><span class="type">{ m.Type }</span> <span class="author">{ m.Author }</span></div>
-		<div class="body">{ m.Body }</div>
-	</div>
+// questionGroup is the read-only detail a question message renders in
+// place of a plain row: its title and pill in the summary, then its body,
+// recommendation, and options -- no chip buttons, no composer (design
+// section 6.6, Task 3 scope: "WITHOUT the interactive composer or chips").
+templ questionGroup(row ThreadRow) {
+	<details class="q">
+		<summary>
+			<span class="q-title">{ row.Question.Title }</span>
+			<span class="pill">{ row.Question.StateLabel }</span>
+		</summary>
+		<div class="q-body">{ row.Question.Body }</div>
+		if row.Question.Recommended != "" {
+			<div class="q-recommended"><strong>Recommended:</strong> { row.Question.Recommended }</div>
+		}
+		if len(row.Question.Options) > 0 {
+			<ul class="q-options">
+				for _, opt := range row.Question.Options {
+					<li>{ opt.Key }: { opt.Text }</li>
+				}
+			</ul>
+		}
+	</details>
 }

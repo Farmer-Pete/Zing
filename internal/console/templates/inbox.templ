@@ -1,0 +1,48 @@
+package templates
+
+import (
+	"fmt"
+
+	"zing/internal/store"
+)
+
+// Inbox renders the #main region for view=inbox (design section 6.5):
+// InboxGroup cards under project headings, blocking first. Each ticket
+// renders an ib-thread card -- the ticket ref, title, a state-and-waiting
+// pill, and the open-question count -- then one ib-q row per open
+// question.
+templ Inbox(groups []InboxGroup) {
+	<main id="main" class="view-inbox">
+		if len(groups) == 0 {
+			<p class="empty">Inbox is empty.</p>
+		} else {
+			for _, g := range groups {
+				<section class="inbox-group">
+					<h2>{ g.ProjectName }</h2>
+					for _, item := range g.Items {
+						@inboxCard(item)
+					}
+				</section>
+			}
+		}
+	</main>
+}
+
+templ inboxCard(item store.InboxItem) {
+	<article class="ib-thread">
+		<div class="ib-thread-row">
+			<span class="ref">{ item.Ticket.TrackerRef }</span>
+			<span class="title">{ item.Ticket.Title }</span>
+			@statePill(item.Ticket)
+			if len(item.OpenQuestions) > 0 {
+				<span class="badge">{ fmt.Sprintf("%d open", len(item.OpenQuestions)) }</span>
+			}
+		</div>
+		for _, q := range item.OpenQuestions {
+			<div class="ib-q">
+				<span class="key">{ q.Key }</span>
+				<span class="preview">{ q.Preview }</span>
+			</div>
+		}
+	</article>
+}

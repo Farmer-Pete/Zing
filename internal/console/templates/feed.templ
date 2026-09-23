@@ -1,0 +1,21 @@
+package templates
+
+import "zing/internal/store"
+
+// Feed renders the #main region for view=feed (design section 6.5): the
+// newest messages across every ticket, newest first by id, read only.
+templ Feed(messages []store.MessageRow) {
+	<main id="main" class="view-feed">
+		<h2>Feed</h2>
+		if len(messages) == 0 {
+			<p class="empty">No messages yet.</p>
+		} else {
+			for _, m := range messages {
+				<div class={ "message message-" + m.Type }>
+					<div class="meta"><span class="type">{ m.Type }</span> <span class="author">{ m.Author }</span></div>
+					<div class="body">{ m.Body }</div>
+				</div>
+			}
+		}
+	</main>
+}

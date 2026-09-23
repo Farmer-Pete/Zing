@@ -8,15 +8,22 @@ package templates
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-import "zing/internal/store"
-
-// Shell renders the "/" page: the palette, the server-rendered ticket list,
-// the empty thread region, the client signal, and the script tag (design
-// section 6.9, ported from Package 3's shell.gohtml). #tickets and #thread
-// are Package 3's own live-stream targets (GET /updates and GET /thread);
-// this package's #nav/#main/#rail region scheme (design section 6.3)
-// replaces them at Task 3, once /stream consolidates the two streams.
-func Shell(tickets []store.Ticket) templ.Component {
+// Shell renders the "/" page (design section 6.3, 7.1): the palette, the
+// three regions (#nav, #main, #rail, each rendered once by the caller for
+// the shell's default signals) and the #stream-ctl bridge that hands
+// navigation over to GET /stream. nav, main, and rail are the same
+// templ.Component values GET /stream itself patches with on every frame, so
+// the very first paint and the live stream render through one code path.
+//
+// The body's data-signals declares the three navigation signals with their
+// defaults (design section 6.3): the first /stream request this fires
+// always carries real state, never an empty query. #stream-ctl sits outside
+// #nav, #main, and #rail so a region morph never re-initializes it, and it
+// is the one element every /stream request goes through (data-init for the
+// first, data-on:zing-nav for every navigation after), so Datastar's
+// requestCancellation (default "auto", keyed by trigger element) aborts the
+// prior stream before the next one starts.
+func Shell(nav, main, rail templ.Component) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -45,15 +52,23 @@ func Shell(tickets []store.Ticket) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</head><body data-signals=\"{open: 0}\" data-init=\"@get('/updates')\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</head><body data-signals=\"{view: 'inbox', open: 0, project: 0}\"><div class=\"layout\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = TicketsFragment(tickets).Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = nav.Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<main id=\"thread\"><p class=\"empty\">Select a ticket.</p></main><span data-effect=\"$open && @get('/thread')\" style=\"display:none\"></span><script type=\"module\" src=\"/static/datastar.js\"></script></body></html>")
+		templ_7745c5c3_Err = main.Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = rail.Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</div><span id=\"stream-ctl\" style=\"display:none\" data-init=\"@get('/stream')\" data-on:zing-nav=\"$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream')\"></span><script type=\"module\" src=\"/static/datastar.js\"></script></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -62,8 +77,9 @@ func Shell(tickets []store.Ticket) templ.Component {
 }
 
 // palette is the console's color and layout system: a dark, low-chroma
-// ground with one accent hue, and a two-pane grid (#tickets, #thread) that
-// grows into the mock's three-column layout (nav, main, rail) at Task 3.
+// ground with one accent hue, and a three-column grid (#nav, #main, #rail)
+// matching the mock's layout (design section 0, "fidelity to the approved
+// mock"; section 6.3's region scheme).
 func palette() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -85,7 +101,7 @@ func palette() templ.Component {
 			templ_7745c5c3_Var2 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<style>\n\t\t:root {\n\t\t\t--zing-bg: #14161c;\n\t\t\t--zing-surface: #1c1f28;\n\t\t\t--zing-border: #2b2f3a;\n\t\t\t--zing-text: #e4e6ec;\n\t\t\t--zing-text-dim: #9aa0b0;\n\t\t\t--zing-accent: #6ea8fe;\n\t\t\t--zing-warn: #f0b429;\n\t\t\t--zing-danger: #f0616d;\n\t\t}\n\t\t* { box-sizing: border-box; }\n\t\tbody {\n\t\t\tmargin: 0;\n\t\t\tdisplay: grid;\n\t\t\tgrid-template-columns: 20rem 1fr;\n\t\t\tmin-height: 100vh;\n\t\t\tbackground: var(--zing-bg);\n\t\t\tcolor: var(--zing-text);\n\t\t\tfont: 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;\n\t\t}\n\t\t#tickets {\n\t\t\tborder-right: 1px solid var(--zing-border);\n\t\t\tpadding: 1rem;\n\t\t\toverflow-y: auto;\n\t\t}\n\t\t#thread { padding: 1.5rem; overflow-y: auto; }\n\t\th2, h3 { margin-top: 0; }\n\t\t.empty { color: var(--zing-text-dim); }\n\t\t.ticket {\n\t\t\tdisplay: flex;\n\t\t\tjustify-content: space-between;\n\t\t\talign-items: center;\n\t\t\twidth: 100%;\n\t\t\tpadding: 0.5rem 0.75rem;\n\t\t\tmargin-bottom: 0.25rem;\n\t\t\tbackground: var(--zing-surface);\n\t\t\tborder: 1px solid var(--zing-border);\n\t\t\tborder-radius: 0.375rem;\n\t\t\tcolor: inherit;\n\t\t\tfont: inherit;\n\t\t\ttext-align: left;\n\t\t\tcursor: pointer;\n\t\t}\n\t\t.ticket:hover { border-color: var(--zing-accent); }\n\t\t.badge {\n\t\t\tfont-size: 0.75rem;\n\t\t\tpadding: 0.125rem 0.5rem;\n\t\t\tborder-radius: 999px;\n\t\t\tbackground: var(--zing-border);\n\t\t\tcolor: var(--zing-text-dim);\n\t\t}\n\t\t.message, .question {\n\t\t\tborder: 1px solid var(--zing-border);\n\t\t\tborder-radius: 0.5rem;\n\t\t\tpadding: 0.75rem 1rem;\n\t\t\tmargin-bottom: 0.75rem;\n\t\t\tbackground: var(--zing-surface);\n\t\t}\n\t\t.meta { color: var(--zing-text-dim); font-size: 0.8rem; margin-bottom: 0.25rem; }\n\t\t.question button {\n\t\t\tbackground: var(--zing-accent);\n\t\t\tcolor: var(--zing-bg);\n\t\t\tborder: none;\n\t\t\tborder-radius: 0.375rem;\n\t\t\tpadding: 0.375rem 0.75rem;\n\t\t\tmargin: 0.25rem 0.5rem 0 0;\n\t\t\tcursor: pointer;\n\t\t}\n\t</style>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<style>\n\t\t:root {\n\t\t\t--zing-bg: #14161c;\n\t\t\t--zing-surface: #1c1f28;\n\t\t\t--zing-border: #2b2f3a;\n\t\t\t--zing-text: #e4e6ec;\n\t\t\t--zing-text-dim: #9aa0b0;\n\t\t\t--zing-accent: #6ea8fe;\n\t\t\t--zing-warn: #f0b429;\n\t\t\t--zing-danger: #f0616d;\n\t\t}\n\t\t* { box-sizing: border-box; }\n\t\tbody {\n\t\t\tmargin: 0;\n\t\t\tbackground: var(--zing-bg);\n\t\t\tcolor: var(--zing-text);\n\t\t\tfont: 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;\n\t\t}\n\t\t.layout {\n\t\t\tdisplay: grid;\n\t\t\tgrid-template-columns: 18rem 1fr 18rem;\n\t\t\tmin-height: 100vh;\n\t\t}\n\t\t#nav {\n\t\t\tborder-right: 1px solid var(--zing-border);\n\t\t\tpadding: 1rem;\n\t\t\toverflow-y: auto;\n\t\t}\n\t\t#main { padding: 1.5rem; overflow-y: auto; }\n\t\t#rail {\n\t\t\tborder-left: 1px solid var(--zing-border);\n\t\t\tpadding: 1rem;\n\t\t\toverflow-y: auto;\n\t\t}\n\t\th2, h3 { margin-top: 0; }\n\t\t.empty { color: var(--zing-text-dim); }\n\t\t.nav-link {\n\t\t\tdisplay: flex;\n\t\t\tjustify-content: space-between;\n\t\t\talign-items: center;\n\t\t\twidth: 100%;\n\t\t\tpadding: 0.375rem 0.5rem;\n\t\t\tmargin-bottom: 0.125rem;\n\t\t\tbackground: var(--zing-surface);\n\t\t\tborder: 1px solid var(--zing-border);\n\t\t\tborder-radius: 0.375rem;\n\t\t\tcolor: inherit;\n\t\t\ttext-decoration: none;\n\t\t}\n\t\t.nav-link:hover { border-color: var(--zing-accent); }\n\t\t.badge, .pill {\n\t\t\tfont-size: 0.75rem;\n\t\t\tpadding: 0.125rem 0.5rem;\n\t\t\tborder-radius: 999px;\n\t\t\tbackground: var(--zing-border);\n\t\t\tcolor: var(--zing-text-dim);\n\t\t}\n\t\t.badge-blocking, .pill-waiting { background: var(--zing-warn); color: var(--zing-bg); }\n\t\t.badge-unread { background: var(--zing-accent); color: var(--zing-bg); }\n\t\t.ib-thread, .ticket-row, .message, .q {\n\t\t\tborder: 1px solid var(--zing-border);\n\t\t\tborder-radius: 0.5rem;\n\t\t\tpadding: 0.75rem 1rem;\n\t\t\tmargin-bottom: 0.75rem;\n\t\t\tbackground: var(--zing-surface);\n\t\t}\n\t\t.ib-thread-row, .ticket-row {\n\t\t\tdisplay: flex;\n\t\t\talign-items: center;\n\t\t\tgap: 0.5rem;\n\t\t}\n\t\t.ib-q {\n\t\t\tmargin: 0.375rem 0 0 1rem;\n\t\t\tcolor: var(--zing-text-dim);\n\t\t\tfont-size: 0.85rem;\n\t\t}\n\t\t.meta { color: var(--zing-text-dim); font-size: 0.8rem; margin-bottom: 0.25rem; }\n\t\t.state-separator {\n\t\t\ttext-align: center;\n\t\t\tcolor: var(--zing-text-dim);\n\t\t\tfont-size: 0.8rem;\n\t\t\tmargin: 0.75rem 0;\n\t\t}\n\t</style>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

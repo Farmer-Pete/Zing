@@ -1,0 +1,12 @@
+package templates
+
+// Rail renders the #rail region. Task 3 renders only an empty placeholder
+// (design section 12, Task 3 scope note: "the rail CONTENTS beyond an empty
+// placeholder are Task 9; the point is the region is always patched"), so
+// every /stream frame patches #rail to this same empty shell, which is what
+// clears a stale rail the instant the client leaves a thread. The real
+// phase, artifacts, run, log, and side-box content is Task 9 (design
+// section 6.11).
+templ Rail() {
+	<aside id="rail"></aside>
+}

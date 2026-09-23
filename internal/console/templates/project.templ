@@ -1,0 +1,21 @@
+package templates
+
+import "zing/internal/store"
+
+// Project renders the #main region for view=project (design section 6.5):
+// one project's tickets, ordered by tracker_ref then id, read only. The
+// project id itself has nothing to render (the nav's project link already
+// carries the name), so the caller passes only the tickets it already
+// scoped to that project.
+templ Project(tickets []store.Ticket) {
+	<main id="main" class="view-project">
+		<h2>Project</h2>
+		if len(tickets) == 0 {
+			<p class="empty">No tickets in this project.</p>
+		} else {
+			for _, t := range tickets {
+				@ticketRow(t)
+			}
+		}
+	</main>
+}

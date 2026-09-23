@@ -1,0 +1,19 @@
+package templates
+
+import "zing/internal/store"
+
+// Recent renders the #main region for view=recent (design section 6.5):
+// every ticket ordered by newest message id descending, then ticket id,
+// read only, reusing the shared ticket row.
+templ Recent(tickets []store.Ticket) {
+	<main id="main" class="view-recent">
+		<h2>Recent</h2>
+		if len(tickets) == 0 {
+			<p class="empty">No tickets yet.</p>
+		} else {
+			for _, t := range tickets {
+				@ticketRow(t)
+			}
+		}
+	</main>
+}

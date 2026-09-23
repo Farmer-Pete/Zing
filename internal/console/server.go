@@ -1,9 +1,8 @@
-// Package console serves the console (design section 6.9): a ticket list
-// and one ticket's messages, live over two Server-Sent Events streams, plus
-// the open-question block and POST /answer for recording a chosen option.
-// Every page and fragment renders through the templ components in
-// internal/console/templates (design section 6.2); there is no
-// html/template use left in this package.
+// Package console serves the console (design section 6.3): the shell page,
+// one live GET /stream per tab that patches the #nav, #main, and #rail
+// regions, and POST /answer for recording a chosen option. Every page and
+// fragment renders through the templ components in internal/console/templates
+// (design section 6.2); there is no html/template use in this package.
 package console
 
 import (
@@ -65,8 +64,7 @@ type console struct {
 // New builds the console and returns it as an http.Handler:
 //
 //	GET  /                     the shell page
-//	GET  /updates               the ticket-list SSE stream
-//	GET  /thread?id=<n>         one ticket's message-thread SSE stream
+//	GET  /stream                the one live SSE stream per tab (design section 6.3)
 //	POST /answer                record the chosen option for an open question
 //	GET  /static/datastar.js    the vendored Datastar bundle
 //	GET  /static/mermaid.js     the vendored mermaid bundle
@@ -80,14 +78,13 @@ type console struct {
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
-// BaseContext and shutdown sequence (Task 5c, design section 6.10).
+// BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
 func New(st *store.Store, b *bus.Broker) http.Handler {
 	c := &console{store: st, bus: b}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
-	mux.HandleFunc("GET /updates", c.handleUpdates) // streaming: no write deadline
-	mux.HandleFunc("GET /thread", c.handleThread)   // streaming: no write deadline
+	mux.HandleFunc("GET /stream", c.handleStream) // streaming: no write deadline
 	mux.HandleFunc("POST /answer", withWriteDeadline(requireSameOrigin(c.handleAnswer)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
@@ -101,11 +98,11 @@ func New(st *store.Store, b *bus.Broker) http.Handler {
 // deadline set through http.ResponseController, so a stalled write cannot
 // hang a connection open indefinitely (design section 6.10). It must wrap
 // only the non-streaming routes: New (above) is the one place that knows
-// which routes stream and which do not, so the SSE handlers never get
-// wrapped here, matching the two handlers' own SetWriteDeadline(time.Time{})
-// call that clears any deadline before they start writing.
+// which routes stream and which do not, so /stream never gets wrapped
+// here, matching its own SetWriteDeadline(time.Time{}) call that clears any
+// deadline before it starts writing.
 //
-// http.ErrNotSupported is not fatal here, unlike in the SSE handlers: it
+// http.ErrNotSupported is not fatal here, unlike in the streaming handler: it
 // means w does not implement the optional deadline interface at all, which
 // on a real connection never happens (net/http's own ResponseWriter always
 // does) and only arises when a handler is driven directly against an
