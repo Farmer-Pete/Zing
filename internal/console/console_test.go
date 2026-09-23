@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -101,6 +102,43 @@ func newConsoleTestStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// newTestServer builds a console.New handler on a listener reserved first,
+// so the port passed to console.New always matches the listener's real,
+// OS-assigned port (mirroring mw_test.go's newMutationTestServer). GET /
+// and GET /stream sit behind the Host-only guard (mw.go's
+// requireAllowedHost, design section 6.14 fix 4), which checks the
+// request's effective port against exactly this port; a plain
+// httptest.NewServer(console.New(...)) pairs an arbitrary ephemeral port
+// with the unrelated testConsolePort constant, which now 403s every GET /
+// or GET /stream. Every call site in this package that hits either route
+// goes through this helper instead. push is always nil and the token
+// always testPushToken here, matching every caller (none of them exercise
+// push.go); a test that needs a real PushKeys builds its own server through
+// newPushTestServer (push_test.go) instead.
+func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler) *httptest.Server {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken)
+	srv := httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // seedTicketIn inserts one queued ticket under proj and ref, returning its
@@ -289,8 +327,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
 	if err != nil {
@@ -327,8 +364,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 
 func TestStaticServesDatastarBundle(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	resp, err := http.Get(srv.URL + "/static/datastar.js") //nolint:noctx // a bare GET on a test server needs no deadline
 	if err != nil {
@@ -359,8 +395,7 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -395,8 +430,7 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	s := newConsoleTestStore(t)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	//nolint:noctx // a bare GET on a test server needs no deadline
 	indexResp, err := http.Get(srv.URL + "/")

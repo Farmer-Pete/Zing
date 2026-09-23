@@ -2,7 +2,6 @@ package console_test
 
 import (
 	"encoding/json"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -66,8 +65,7 @@ func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
 	ticketA2 := seedTicketIn(t, s, testProject, "acme#2", "A2 unread")
 	seedUnreadUpdate(t, s, ticketA2, "an update")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "inbox", 0, 0)
 
@@ -109,8 +107,7 @@ func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
 	ticketZ := seedTicket(t, s, "r#3", "Ticket Z newer message")
 	seedStateMessage(t, s, ticketZ, "queued", "planning", "start Z")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "recent", 0, 0)
 
@@ -131,8 +128,7 @@ func TestFeedOrdersNewestMessageFirst(t *testing.T) {
 	seedUnreadUpdate(t, s, ticketID, "first update")
 	seedUnreadUpdate(t, s, ticketID, "second update")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "feed", 0, 0)
 
@@ -156,8 +152,7 @@ func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
 	seedTicketIn(t, s, testProject, "p#a", "Project ticket A")
 	seedTicketIn(t, s, otherProject, "p#z", "Other project's ticket")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	projects, err := s.ListProjects(t.Context())
 	if err != nil {
@@ -206,8 +201,7 @@ func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 	seedUnreadUpdate(t, s, ticketID, "working on it")
 	seedOpenQuestion(t, s, ticketID)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
 
@@ -265,8 +259,7 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 		t.Fatalf("InsertArtifact(plan): %v", err)
 	}
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
 
@@ -298,8 +291,7 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 // 6.6, carried over from Package 3's patchThread guard).
 func TestThreadOpenZeroOrMissingRendersEmptyThread(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	cases := []struct {
 		name string

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"runtime"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"zing/internal/bus"
-	"zing/internal/console"
 )
 
 // streamURL builds a GET /stream request url sending view, open, and
@@ -61,8 +59,7 @@ func TestStreamPatchesAllThreeRegionsOnConnect(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
 	defer cancel()
@@ -92,8 +89,7 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Ticket one")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
 
 	resp, r, cancel := openStream(t, srv.URL, "recent", 0, 0)
 	defer cancel()
@@ -130,8 +126,7 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer threadCancel()
@@ -166,8 +161,7 @@ func TestStreamDisconnectUnsubscribesWithNoGoroutineLeak(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
 
 	// The baseline is taken before the stream opens, not after: a count
 	// taken while the handler is already alive can never show that
@@ -230,8 +224,7 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
 
-	srv := httptest.NewServer(console.New(s, b, nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
 
 	resp1, r1, cancel1 := openStream(t, srv.URL, "inbox", 0, 0)
 	nav1, main1, rail1 := readInitialFrames(t, r1)
@@ -277,8 +270,7 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 
 func TestStreamRejectsMalformedSignalsWith400(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	//nolint:noctx // a bare GET on a test server needs no deadline
 	resp, err := http.Get(srv.URL + "/stream?datastar=" + url.QueryEscape("{not valid json"))

@@ -7,14 +7,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"zing/internal/bus"
-	"zing/internal/console"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -113,8 +111,7 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 
 	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()
@@ -181,8 +178,7 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()

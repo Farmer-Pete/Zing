@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -161,8 +160,7 @@ func TestLogTail_FiltersByOpenTicketRunIDs(t *testing.T) {
 	logger.Info("line belonging to ticket A", "run_id", runsA[0].ID)
 	logger.Info("line belonging to ticket B", "run_id", runsB[0].ID)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHosts, testConsolePort, log, nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), testMachine(t), log)
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketA, 0)
 	defer cancel()

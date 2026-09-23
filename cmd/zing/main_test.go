@@ -127,6 +127,37 @@ func TestDispatch_Validate(t *testing.T) {
 
 // TestDispatch_UnknownCommand cannot run in parallel: it swaps the process
 // os.Stderr to capture dispatch's error message.
+// TestDispatch_BareInvocationDoesNotPanic proves the args[2:] slice-bounds
+// bug is fixed: commandName defaults a bare `zing` invocation (len(args) ==
+// 1) to "serve", so dispatch must not slice args[2:] unconditionally -- that
+// panicked with "slice bounds out of range" since 2 > len(args). HOME is
+// redirected to an empty temp dir so config.DefaultPath's ~/.zing/zing.toml
+// is guaranteed absent; serve then fails fast on the missing config (exit 1)
+// rather than opening any real database, so this test never touches
+// ~/.zing/zing.db.
+func TestDispatch_BareInvocationDoesNotPanic(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	got := dispatch([]string{argv0})
+	if got != 1 {
+		t.Errorf("dispatch(bare) = %d, want 1 (serve reached and failed fast on the missing config, not a panic)", got)
+	}
+}
+
+// TestDispatch_ValidateWithNoExtraArgs covers "zing validate" with nothing
+// after it, the other len(args) == 2 edge subArgs must also get right:
+// args[2:] on a two-element slice is empty, not out of range, but this locks
+// the behavior in alongside the bare-invocation fix so a future refactor of
+// subArgs cannot regress it silently. runValidate(nil) prints its usage line
+// and returns 2.
+func TestDispatch_ValidateWithNoExtraArgs(t *testing.T) {
+	t.Parallel()
+
+	if got := dispatch([]string{argv0, cmdValidate}); got != 2 {
+		t.Errorf("dispatch(validate, no args) = %d, want 2 (usage error)", got)
+	}
+}
+
 func TestDispatch_UnknownCommand(t *testing.T) {
 	r, w, pipeErr := os.Pipe()
 	if pipeErr != nil {

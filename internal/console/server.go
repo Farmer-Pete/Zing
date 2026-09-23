@@ -88,6 +88,7 @@ type console struct {
 //	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
+//	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle
@@ -123,16 +124,23 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
-	mux.HandleFunc("GET /stream", c.handleStream) // streaming: no write deadline
+	mux.HandleFunc("GET /{$}", withWriteDeadline(guard.requireAllowedHost(c.handleIndex)))
+	mux.HandleFunc("GET /stream", guard.requireAllowedHost(c.handleStream)) // streaming: no write deadline
 	mux.HandleFunc("POST /draft", withWriteDeadline(guard.requireSameOrigin(c.handleDraft)))
 	mux.HandleFunc("POST /send", withWriteDeadline(guard.requireSameOrigin(c.handleSend)))
 	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
 	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
+	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
-	mux.HandleFunc("POST /push/subscribe", withWriteDeadline(guard.requireSameOrigin(c.handlePushSubscribe)))
+	// POST /push/subscribe is token-only (push.go's checkPushToken), not
+	// behind the same-origin guard: a phone subscribing is authenticated by
+	// the bearer token it was handed, not by browser same-origin, and its
+	// MagicDNS host need not be in allowed_hosts. This matches GET
+	// /push/key, already token-only for the same reason (design section
+	// 6.13).
+	mux.HandleFunc("POST /push/subscribe", withWriteDeadline(c.handlePushSubscribe))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))

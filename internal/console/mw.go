@@ -100,6 +100,29 @@ func (g *mutationGuard) requireSameOrigin(next http.HandlerFunc) http.HandlerFun
 	}
 }
 
+// requireAllowedHost wraps next with only the Host-allowlist half of the
+// guard (design section 6.14): the request's Host must parse, carry the
+// console's own effective port, and canonicalize to an authority in
+// allowedHosts. Unlike requireSameOrigin, it does not check Origin or
+// Referer at all -- a normal top-level GET navigation (typing the address,
+// following a bookmark) carries no Origin header, so wrapping a GET route in
+// the full same-origin check would reject every ordinary page load. It
+// still closes the DNS-rebinding gap on GET / and GET /stream (design
+// section 6.14's own threat model for the same-origin guard): a page served
+// from an attacker-controlled hostname that DNS-rebinds to this process's
+// loopback or tailnet address presents that attacker hostname as Host,
+// which is not in the allowlist, so the request is rejected before either
+// handler ever runs and can leak tickets, plans, or log lines.
+func (g *mutationGuard) requireAllowedHost(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := g.checkHost(r); !ok {
+			forbidden(w)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // forbidden writes the one 403 body every rejection in this file shares.
 func forbidden(w http.ResponseWriter) {
 	http.Error(w, "cross-site request rejected", http.StatusForbidden)

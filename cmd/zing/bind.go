@@ -190,18 +190,28 @@ const bindTokenTailscale = "tailscale"
 // address (design section 6.14): a literal IP unchanged (config.Load
 // already rejected a wildcard at load time), or "tailscale" resolved via
 // resolveTailnetAddr and skipped, not erred, when resolution fails. The
-// returned hosts are in tokens' order, tailscale-token entries omitted when
-// unresolved.
+// returned hosts are deduplicated, first occurrence wins, in tokens' order,
+// tailscale-token entries omitted when unresolved. Deduplication matters
+// because two entries can resolve to the same address -- an explicit
+// tailnet IP alongside a "tailscale" token that resolves to it, say --
+// and listenOnAll (serve.go) opens one net.Listen per returned host:port,
+// so a duplicate host would make the second Listen fail "address already
+// in use" and crash startup.
 func resolveBindHosts(ctx context.Context, tokens []string, runCLI tailscaleCLIRunner, listIfaces tailscaleInterfaceLister) []string {
 	hosts := make([]string, 0, len(tokens))
+	seen := make(map[string]bool, len(tokens))
 	for _, tok := range tokens {
 		if tok == bindTokenTailscale {
-			if addr, ok := resolveTailnetAddr(ctx, runCLI, listIfaces); ok {
+			if addr, ok := resolveTailnetAddr(ctx, runCLI, listIfaces); ok && !seen[addr] {
+				seen[addr] = true
 				hosts = append(hosts, addr)
 			}
 			continue
 		}
-		hosts = append(hosts, tok)
+		if !seen[tok] {
+			seen[tok] = true
+			hosts = append(hosts, tok)
+		}
 	}
 	return hosts
 }

@@ -53,10 +53,12 @@ func newPushTestServer(t *testing.T) (srv *httptest.Server) {
 }
 
 // pushRequest builds a request to srv.URL+path carrying the given bearer
-// token (empty means no Authorization header at all) and, for a POST, the
-// same same-origin headers mutationRequest (mw_test.go) sends, since
-// POST /push/subscribe sits behind both the mutation guard and the token
-// check (design section 7.1: "origin + token").
+// token (empty means no Authorization header at all) and, for a POST, a
+// Content-Type and Origin (fix 5: POST /push/subscribe dropped the
+// mutation guard, so neither header is required any more, but sending them
+// stays harmless and keeps this helper's shape close to mutationRequest's).
+// TestPushSubscribe_SucceedsWithoutSameOriginHeaders below proves the guard
+// is actually gone by omitting them entirely.
 func pushRequest(t *testing.T, srv *httptest.Server, method, path, token, body string) *http.Request {
 	t.Helper()
 	var r *strings.Reader
@@ -193,6 +195,31 @@ func TestPushSubscribe_RejectsKeysMissingRequiredFields(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("POST /push/subscribe missing auth: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestPushSubscribe_SucceedsWithoutSameOriginHeaders proves POST
+// /push/subscribe is token-only (design section 6.13, fix 5), symmetric
+// with GET /push/key: a request presenting none of the mutation guard's
+// headers (no Datastar-Request, no Origin, and a Host outside the
+// allowlist) still succeeds once it carries the right bearer token. A
+// phone subscribing is authenticated by that token, not by browser
+// same-origin, and a phone's MagicDNS host need not be in allowed_hosts.
+func TestPushSubscribe_SucceedsWithoutSameOriginHeaders(t *testing.T) {
+	srv := newPushTestServer(t)
+
+	body := `{"endpoint":"https://push.example/no-guard","keys":{"p256dh":"a-key","auth":"a-secret"}}`
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/push/subscribe", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testPushToken2)
+	req.Host = "phone.example.ts.net" // deliberately outside the mutation guard's Host allowlist
+
+	resp := doRequest(t, req)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /push/subscribe with no same-origin headers and an out-of-allowlist Host: status = %d, want 204", resp.StatusCode)
 	}
 }
 

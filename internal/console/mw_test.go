@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -297,6 +298,66 @@ func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReadRoutes_RejectOutOfAllowlistHost proves the Host-only guard (mw.go's
+// requireAllowedHost, design section 6.14 fix 4) wraps GET / and GET
+// /stream: a request presenting a Host outside the allowlist -- the DNS
+// rebinding shape, a page served from an attacker hostname that resolves to
+// this process's own address -- is rejected with 403 before either handler
+// runs, even though neither route carries an Origin header the way a
+// mutation POST would.
+func TestReadRoutes_RejectOutOfAllowlistHost(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/", http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Host = "evil.example:" + strconv.Itoa(portFromURL(t, srv.URL))
+
+	resp := doRequest(t, req)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("GET / with an out-of-allowlist Host: status = %d, want 403", resp.StatusCode)
+	}
+}
+
+// TestReadRoutes_PassAnInAllowlistHost proves the same Host-only guard lets
+// an ordinary, in-allowlist GET / through -- a normal top-level navigation,
+// which carries no Origin header at all -- so fix 4 closes the rebinding
+// gap without breaking the page load every real client depends on.
+func TestReadRoutes_PassAnInAllowlistHost(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET / with the server's own (allowlisted) Host: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// portFromURL extracts the numeric port from a "http://host:port" URL, so
+// TestReadRoutes_RejectOutOfAllowlistHost can build an out-of-allowlist Host
+// at the server's own real port (not the allowlisted host, and not a wrong
+// port either, so the test proves the host check specifically).
+func portFromURL(t *testing.T, rawURL string) int {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", rawURL, err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("port from %q: %v", rawURL, err)
+	}
+	return port
 }
 
 // TestMutationGuard_PassesSameOriginThroughLocalhostAnd127AndTheBoundHost

@@ -1,7 +1,6 @@
 package console_test
 
 import (
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,8 +58,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 		t.Fatalf("SeedQuestionFixtures: %v", err)
 	}
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
-	defer srv.Close()
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()

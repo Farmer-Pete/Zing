@@ -20,6 +20,19 @@ func commandName(args []string) string {
 	return "serve"
 }
 
+// subArgs returns the arguments after the subcommand name, os.Args[2:]
+// shaped: args[2:] when args carries at least a program name and a
+// subcommand, else an empty slice. commandName defaults to "serve" when
+// len(args) <= 1 (a bare `zing` invocation), so dispatch must not slice
+// args[2:] unconditionally -- that panics with "slice bounds out of range"
+// on exactly that bare invocation, since 2 > len(args).
+func subArgs(args []string) []string {
+	if len(args) < 2 {
+		return nil
+	}
+	return args[2:]
+}
+
 // dispatch runs the subcommand named in os.Args-shaped args and returns the
 // process exit code.
 func dispatch(args []string) int {
@@ -27,9 +40,9 @@ func dispatch(args []string) int {
 	case "selftest":
 		return runSelftest()
 	case "validate":
-		return runValidate(args[2:])
+		return runValidate(subArgs(args))
 	case "serve":
-		if err := run(args[2:]); err != nil {
+		if err := run(subArgs(args)); err != nil {
 			slog.Error("server stopped", "err", err)
 			return 1
 		}

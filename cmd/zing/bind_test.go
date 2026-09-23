@@ -177,3 +177,38 @@ func TestResolveBindHosts_SkipsAnUnresolvedTailscaleEntry(t *testing.T) {
 		t.Errorf("resolveBindHosts = %v, want %v", got, want)
 	}
 }
+
+// TestResolveBindHosts_DedupesAResolvedDuplicate proves resolveBindHosts
+// dedupes: an explicit tailnet IP alongside a "tailscale" token that
+// resolves to that same address must appear exactly once in the result, in
+// first-occurrence order, so listenOnAll (serve.go) never gets asked to bind
+// the same host:port twice (the second net.Listen call would otherwise fail
+// "address already in use" and crash startup).
+func TestResolveBindHosts_DedupesAResolvedDuplicate(t *testing.T) {
+	t.Parallel()
+
+	const tailnetIP = "100.64.5.5"
+	ifaces := []tailscaleInterface{
+		{Name: testUtunIface, Addrs: []netip.Addr{mustAddr(t, tailnetIP)}},
+	}
+
+	got := resolveBindHosts(t.Context(), []string{tailnetIP, bindTokenTailscale},
+		fakeCLI("", errors.New("no binary")), fakeIfaces(ifaces))
+	want := []string{tailnetIP}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("resolveBindHosts = %v, want %v (deduplicated, first occurrence kept)", got, want)
+	}
+}
+
+// TestResolveBindHosts_DedupesRepeatedLiterals proves the same dedupe
+// applies to two identical literal entries, not only the tailscale-token
+// case.
+func TestResolveBindHosts_DedupesRepeatedLiterals(t *testing.T) {
+	t.Parallel()
+
+	got := resolveBindHosts(t.Context(), []string{loopback, loopback}, fakeCLI("", errors.New("no binary")), fakeIfaces(nil))
+	want := []string{loopback}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("resolveBindHosts = %v, want %v (deduplicated)", got, want)
+	}
+}
