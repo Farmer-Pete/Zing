@@ -28,7 +28,17 @@ repo-side bookkeeping only.
 
 ## console.js, keyboard.mjs, keys.json
 
-Authored in this repo, not vendored. `console.js` and `keyboard.mjs` are
-placeholder skeletons at Task 1 (real behavior arrives at Task 4, design
-section 6.3, 6.4). `keys.json` is a placeholder at Task 1; Task 4 generates
-it for real from `internal/console/keys.go`.
+Authored in this repo, not vendored. `keys.json` is generated from
+`internal/console/keys.go` (design section 6.4, 7.3; `go generate
+./internal/console`, checked by `keys_test.go`). `keyboard.mjs` is the pure
+keyboard logic (the chord machine, key-to-action resolution, input-context
+detection, the send-chord platform check, the id-based focus step,
+`reconcileFocus`, `collectPatchWork`), covered by `console.test.js` under
+`node --test`. `console.js` is the DOM wiring: it reads `keys.json`,
+installs the keyboard handler and the `#main`/`#rail` `MutationObserver`,
+and dispatches `zing-nav` on `#stream-ctl`. Its mermaid step is guarded off
+(see the "Known gap" note above): it collects and marks diagram nodes but
+does not import or run mermaid yet, since a static import of the
+unvendored `mermaid.js` would fail module resolution in a real browser and
+take the whole module down with it. Task 5 wires the real import once the
+chunk-vendoring gap is fixed.

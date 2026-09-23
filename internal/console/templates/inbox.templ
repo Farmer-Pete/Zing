@@ -29,7 +29,7 @@ templ Inbox(groups []InboxGroup) {
 }
 
 templ inboxCard(item store.InboxItem) {
-	<article class="ib-thread">
+	<article class="ib-thread" data-focus-id={ fmt.Sprintf("ticket:%d", item.Ticket.ID) }>
 		<div class="ib-thread-row">
 			<span class="ref">{ item.Ticket.TrackerRef }</span>
 			<span class="title">{ item.Ticket.Title }</span>

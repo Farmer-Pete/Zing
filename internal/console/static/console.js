@@ -1,14 +1,544 @@
-// console.js — the console's DOM wiring (design section 6.3, 6.4): imports
-// keyboard.mjs and mermaid, reads keys.json, installs the chord state
-// machine and focus ring, and bridges to Datastar by dispatching a
-// zing-nav CustomEvent on #stream-ctl. It is the only module with
-// browser-absolute imports, and it is not unit-tested under Node
-// (keyboard.mjs carries every piece of pure logic Node can exercise).
+// console.js — the console's DOM wiring (design section 6.3, 6.4): reads
+// /static/keys.json, imports the pure logic from keyboard.mjs, installs a
+// global keydown handler that runs the chord machine and dispatches
+// actions, tracks focusedID and railOpen as plain JS state, and bridges to
+// Datastar by dispatching a zing-nav CustomEvent on #stream-ctl. It is the
+// only module with browser-absolute imports, and it is not unit-tested
+// under Node (keyboard.mjs carries every piece of pure logic Node can
+// exercise; design section 6.4: "console.js imports keyboard.mjs ... does
+// the DOM walking and wiring ... it is not unit-tested under Node").
 //
-// This is a Task 1 skeleton, served at /static/console.js and digest-safe
-// to load, but not yet wired into the shell's <script> tags and not yet
-// importing mermaid (design section 6.10 wires that import at Task 4/5,
-// once static/ASSETS.md's vendored-mermaid gap is resolved). The real
-// wiring lands in Task 4.
+// TASK 5: mermaid is not imported here yet. static/ASSETS.md records the
+// vendoring gap in mermaid.js (it carries static imports to sibling chunk
+// files this repo does not vendor); a top-level `import mermaid from
+// '/static/mermaid.js'` would fail to resolve in a real browser and take
+// this entire module down with it, breaking every keyboard binding, not
+// just diagrams. So the observer's diagram step is collected but guarded
+// off below (runMermaidGuarded) until Task 5 fixes the vendoring and wires
+// the real import and mermaid.initialize call (design section 6.10).
 
-import './keyboard.mjs';
+import {
+	emptyChordState,
+	advanceChord,
+	resolveAction,
+	isInputContext,
+	isSendChord,
+	sendChordToken,
+	stepFocus,
+	collectPatchWork,
+} from './keyboard.mjs';
+
+// defaultNav is the shell's own data-signals default (templates/shell.templ:
+// `data-signals="{view: 'inbox', open: 0, project: 0}"`). console.js starts
+// its local mirror of the navigation state from the same literal so the
+// very first keyboard nav (before any zing-nav has fired) agrees with what
+// the page already shows.
+const defaultNav = { view: 'inbox', open: 0, project: 0 };
+
+// isMac decides the platform for the send chord (design section 6.4: "Cmd
+// on mac, Ctrl elsewhere"). userAgentData is preferred where available;
+// userAgent is the fallback for browsers that do not yet implement it.
+function isMac() {
+	const uaData = globalThis.navigator?.userAgentData;
+	if (uaData?.platform) {
+		return uaData.platform === 'macOS';
+	}
+	return /Mac|iPhone|iPad|iPod/.test(globalThis.navigator?.userAgent ?? '');
+}
+
+// state is every piece of plain, client-only console.js state (design
+// section 6.3, 6.4: "Focus and rail are not Datastar signals; they are
+// plain console.js state"). Bundled in one object so the module has a
+// single, greppable place naming what it tracks, not because callers pass
+// it around.
+const state = {
+	bindings: [], // parsed keys.json; empty until it loads
+	chord: emptyChordState(),
+	nav: { ...defaultNav }, // this module's mirror of view/open/project
+	navHistory: [], // for "u" (up one level); design section 6.4
+	focusedID: '',
+	previousFocusableIDs: [],
+	railOpen: false,
+	helpOpen: false,
+};
+
+// ---- keys.json loading -----------------------------------------------
+
+// loadBindings fetches and parses /static/keys.json (design section 6.4:
+// "It reads its binding table from /static/keys.json"). A fetch failure or
+// a malformed body leaves state.bindings empty, so every key resolves to no
+// action rather than throwing out of the keydown handler.
+async function loadBindings() {
+	try {
+		const resp = await fetch('/static/keys.json');
+		if (!resp.ok) {
+			console.error('console.js: GET /static/keys.json', resp.status);
+			return;
+		}
+		const parsed = await resp.json();
+		if (Array.isArray(parsed)) {
+			state.bindings = parsed;
+		}
+	} catch (err) {
+		console.error('console.js: load keys.json', err);
+	}
+}
+
+// ---- navigation: the zing-nav bridge -----------------------------------
+
+// dispatchNav dispatches the zing-nav CustomEvent on #stream-ctl (design
+// section 6.3): the one supported way imperative code writes the view,
+// open, and project signals, since plain JavaScript has no signal-write
+// API of its own.
+function dispatchNav(detail) {
+	const ctl = document.getElementById('stream-ctl');
+	if (!ctl) {
+		return;
+	}
+	ctl.dispatchEvent(new CustomEvent('zing-nav', { detail }));
+}
+
+// navigate moves to next (a full {view, open, project} triple), updating
+// this module's local mirror, pushing the current position onto the back
+// stack (unless this navigation is itself a "u" pop), and clearing focus
+// state on any real view/open/project change (design section 6.4: "A view
+// change clears both focusedID and the stored previous order").
+function navigate(next, opts = {}) {
+	const changed = next.view !== state.nav.view || next.open !== state.nav.open || next.project !== state.nav.project;
+	if (!opts.isBack) {
+		state.navHistory.push({ ...state.nav });
+	}
+	state.nav = { ...next };
+	if (changed) {
+		setFocusedID('');
+		state.previousFocusableIDs = [];
+	}
+	dispatchNav(state.nav);
+}
+
+// goUp handles "u": pop the back stack, or fall back to Inbox when it is
+// empty (design section 6.4: "u goes up one level").
+function goUp() {
+	const prev = state.navHistory.pop() ?? { ...defaultNav };
+	navigate(prev, { isBack: true });
+}
+
+// openFocused handles "o"/Enter on a focused list row (design section 6.4:
+// "o or Enter on a focused list row sets open and view=thread"). Only a
+// ticket-namespaced focus id names something to open; anything else (no
+// focus, or a focus id from a namespace this task does not yet make
+// focusable) is a no-op, returning false so dispatchAction skips
+// preventDefault and any native behavior (e.g. a plain Enter inside a
+// non-composer control) still runs.
+function openFocused() {
+	if (!state.focusedID.startsWith('ticket:')) {
+		return false;
+	}
+	const id = Number(state.focusedID.slice('ticket:'.length));
+	if (!Number.isFinite(id) || id <= 0) {
+		return false;
+	}
+	navigate({ view: 'thread', open: id, project: 0 });
+	return true;
+}
+
+// ---- focus ring ---------------------------------------------------------
+
+// focusableSelector names every element the focus ring moves across:
+// anything in #main carrying a stable data-focus-id (design section 6.4,
+// "every focusable item carries a stable, globally unique data-focus-id").
+const focusableSelector = '#main [data-focus-id]';
+
+function collectFocusableIDs() {
+	return Array.from(document.querySelectorAll(focusableSelector)).map((el) => el.getAttribute('data-focus-id'));
+}
+
+function findByFocusID(id) {
+	if (!id) {
+		return null;
+	}
+	return document.querySelector(`[data-focus-id="${CSS.escape(id)}"]`);
+}
+
+// setFocusedID moves the focus class from the previously focused element
+// (if any) to the one named by id (if any), and scrolls the newly focused
+// element into view (design section 6.4: "adds the focus class to that
+// id's element and scrolls it into view").
+function setFocusedID(id) {
+	const prevEl = findByFocusID(state.focusedID);
+	prevEl?.classList.remove('focus');
+	state.focusedID = id ?? '';
+	const el = findByFocusID(state.focusedID);
+	if (el) {
+		el.classList.add('focus');
+		el.scrollIntoView({ block: 'nearest' });
+	}
+}
+
+// moveFocus handles "j"/"k": step from the current focus over the live
+// focusable ids in DOM order (design section 6.4).
+function moveFocus(direction) {
+	const ids = collectFocusableIDs();
+	setFocusedID(stepFocus(ids, state.focusedID, direction));
+}
+
+// ---- the composer's inputs (Tab/Shift-Tab; Task 6/7 build the composer) -
+
+// composerInputSelector names the composer's own focusable controls (Task
+// 6 introduces the composer markup this selector targets). Until then it
+// matches nothing, so Tab and Shift-Tab fall through to the browser's
+// native tab order rather than being silently swallowed.
+const composerInputSelector = '.composer input, .composer textarea, .composer select, .composer button';
+
+function moveComposerFocus(delta) {
+	const els = Array.from(document.querySelectorAll(composerInputSelector));
+	if (els.length === 0) {
+		return false; // nothing to move across yet; let the browser handle Tab
+	}
+	const i = els.indexOf(document.activeElement);
+	// JS "%" keeps the dividend's sign, so a plain (i + delta) % length can
+	// come out negative when i is -1 (activeElement not among els) and delta
+	// is -1; the extra "+ length) % length" normalizes it back to [0, length).
+	const next = els[((i + delta) % els.length + els.length) % els.length];
+	next.focus();
+	return true;
+}
+
+// ---- draft, chips, send (Task 6/7 endpoints; wired ahead of them) -------
+
+// postJSON is the one small fetch wrapper every forward-wired mutation
+// below shares: same-origin, Datastar-Request set so mw.go's guard (or its
+// Task 7/10 successors) treats it as a first-party call, and errors logged
+// rather than thrown into the keydown handler.
+async function postJSON(path, body) {
+	try {
+		const resp = await fetch(path, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify(body),
+		});
+		if (!resp.ok) {
+			console.error(`console.js: POST ${path}`, resp.status);
+		}
+	} catch (err) {
+		console.error(`console.js: POST ${path}`, err);
+	}
+}
+
+// postDraft handles Enter inside a question input (design section 6.4,
+// 6.7). POST /draft does not exist until Task 7; this reaches for it ahead
+// of time from the composer contract Task 6 will introduce
+// (data-draft-ticket/data-draft-question on the focused input, its value
+// as the free-text reply), and is a no-op today since no such input exists
+// yet.
+function postDraft() {
+	const el = document.activeElement;
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || typeof el.value !== 'string' || el.value === '') {
+		return false;
+	}
+	postJSON('/draft', {
+		ticket: Number(ticket),
+		question: question ? Number(question) : null,
+		text: el.value,
+	});
+	return true;
+}
+
+// pickChip handles 1..9 on the focused question (design section 6.4: "1 to
+// 9 click the nth option chip of the focused question"). Chip controls
+// arrive with Task 6; until then the focused element never has a
+// data-focus-id in the "question:" namespace, so this is a no-op.
+function pickChip(n) {
+	if (!state.focusedID.startsWith('question:')) {
+		return false;
+	}
+	const question = findByFocusID(state.focusedID);
+	const chip = question?.querySelector(`[data-chip-index="${n}"]`);
+	if (!chip) {
+		return false;
+	}
+	chip.click();
+	return true;
+}
+
+// sendBatch handles the send chord (design section 6.4, 6.7). POST /send
+// does not exist until Task 7; wired ahead of it against the ticket this
+// module's own nav state already tracks.
+function sendBatch() {
+	if (!state.nav.open) {
+		return false;
+	}
+	postJSON('/send', { ticket: state.nav.open });
+	return true;
+}
+
+// ---- rail, side box, stop, mark-read (Task 9/10/7 backends) -------------
+
+function toggleRail() {
+	state.railOpen = !state.railOpen;
+	document.getElementById('rail')?.classList.toggle('open', state.railOpen);
+}
+
+function focusSideBox() {
+	const el = document.querySelector('.side-box textarea, .side-box input');
+	if (!el) {
+		return false;
+	}
+	el.focus();
+	return true;
+}
+
+function stopTicket() {
+	if (!state.nav.open) {
+		return false;
+	}
+	postJSON('/stop', { ticket: state.nav.open });
+	return true;
+}
+
+function stopEverything() {
+	if (!globalThis.confirm?.('Stop every running ticket?')) {
+		return false;
+	}
+	postJSON('/stop', { all: true });
+	return true;
+}
+
+function markRead() {
+	if (!state.focusedID.startsWith('message:')) {
+		return false;
+	}
+	const id = Number(state.focusedID.slice('message:'.length));
+	if (!Number.isFinite(id) || id <= 0) {
+		return false;
+	}
+	postJSON('/read', { message: id });
+	return true;
+}
+
+// ---- the help overlay ----------------------------------------------------
+
+// buildHelpOverlay lazily builds the "?" help overlay from state.bindings
+// (design section 6.4: "toggles the keyboard-map overlay, rendered from
+// keys.json"), so the one source also feeds the overlay text, not a
+// second hand-copied list.
+function buildHelpOverlay() {
+	let overlay = document.getElementById('keyboard-help');
+	if (overlay) {
+		return overlay;
+	}
+	overlay = document.createElement('div');
+	overlay.id = 'keyboard-help';
+	overlay.style.display = 'none';
+	overlay.style.position = 'fixed';
+	overlay.style.inset = '10%';
+	overlay.style.overflow = 'auto';
+	overlay.style.zIndex = '1000';
+	overlay.style.background = 'var(--zing-surface, #1c1f28)';
+	overlay.style.border = '1px solid var(--zing-border, #2b2f3a)';
+	overlay.style.borderRadius = '0.5rem';
+	overlay.style.padding = '1rem';
+
+	const rows = state.bindings
+		.map((b) => `<div><strong>${b.keys.join(' / ')}</strong> — ${b.action}</div>`)
+		.join('');
+	overlay.innerHTML = `<h2>Keyboard map</h2>${rows || '<p>Loading…</p>'}`;
+	document.body.appendChild(overlay);
+	return overlay;
+}
+
+function toggleHelp() {
+	const overlay = buildHelpOverlay();
+	state.helpOpen = !state.helpOpen;
+	overlay.style.display = state.helpOpen ? 'block' : 'none';
+}
+
+// blurActive handles Esc (design section 6.4: "Esc blurs" / "?14: Esc =
+// leave an input"). When the help overlay is open, Esc closes that first,
+// matching ordinary overlay conventions; otherwise it blurs whatever
+// element currently has focus, which is only meaningful when that element
+// is an input.
+function blurActive() {
+	if (state.helpOpen) {
+		toggleHelp();
+		return true;
+	}
+	document.activeElement?.blur?.();
+	return true;
+}
+
+// ---- action dispatch table ----------------------------------------------
+
+// actions maps every keys.json action name to its handler (design section
+// 6.4). A handler returns false to decline the keypress (nothing to act
+// on yet, e.g. an empty composer), which skips preventDefault so any
+// native browser behavior for that key still runs.
+const actions = {
+	'nav-inbox': () => navigate({ view: 'inbox', open: 0, project: 0 }),
+	'nav-recent': () => navigate({ view: 'recent', open: 0, project: 0 }),
+	'nav-feed': () => navigate({ view: 'feed', open: 0, project: 0 }),
+	'focus-next': () => moveFocus('next'),
+	'focus-prev': () => moveFocus('prev'),
+	open: () => openFocused(),
+	up: () => goUp(),
+	'input-next': () => moveComposerFocus(1),
+	'input-prev': () => moveComposerFocus(-1),
+	draft: () => postDraft(),
+	chip: (event) => pickChip(Number(event.key)),
+	send: () => sendBatch(),
+	'toggle-rail': () => toggleRail(),
+	'focus-side': () => focusSideBox(),
+	stop: () => stopTicket(),
+	'stop-all': () => stopEverything(),
+	'mark-read': () => markRead(),
+	help: () => toggleHelp(),
+	blur: () => blurActive(),
+};
+
+function dispatchAction(action, event) {
+	const handler = action ? actions[action] : null;
+	if (!handler) {
+		return;
+	}
+	if (handler(event) !== false) {
+		event.preventDefault();
+	}
+}
+
+// ---- keydown: token resolution and the chord machine ---------------------
+
+// resolveToken turns one raw keydown event, plus whether it landed in an
+// input, into the token keys.json binds (design section 6.4, 8). The send
+// chord and Esc always resolve the same way regardless of context ("Keys
+// are suppressed while an input is focused, except Esc, Enter, and the
+// send chord"); Tab/Shift-Tab likewise always resolve, since
+// moveComposerFocus itself is a no-op outside the composer. Every other
+// key is suppressed while typing in an input (returns null, so the
+// character types normally) and otherwise passed through as-is for the
+// chord machine or a direct single-key lookup.
+function resolveToken(event, inInput) {
+	if (isSendChord(event, isMac())) {
+		return sendChordToken(isMac());
+	}
+	if (event.key === 'Escape') {
+		return 'Esc';
+	}
+	if (event.key === 'Tab') {
+		return event.shiftKey ? 'Shift-Tab' : 'Tab';
+	}
+	if (inInput) {
+		return event.key === 'Enter' ? 'Enter-in-input' : null;
+	}
+	return event.key;
+}
+
+// tokensNeverChorded are resolved directly, never fed through the "g"
+// chord machine: each already names a complete action on its own, and
+// running it through advanceChord would let a stray "g" arm just before
+// one of these and then misinterpret it as a chord's second key.
+const tokensNeverChorded = new Set(['Esc', 'Enter-in-input', 'Cmd-Enter', 'Ctrl-Enter', 'Tab', 'Shift-Tab']);
+
+function onKeyDown(event) {
+	const target = event.target;
+	const inInput = isInputContext({ tagName: target?.tagName, isContentEditable: target?.isContentEditable });
+	const token = resolveToken(event, inInput);
+	if (token === null) {
+		return; // suppressed while typing; let the input handle the keystroke
+	}
+
+	if (tokensNeverChorded.has(token)) {
+		state.chord = emptyChordState();
+		dispatchAction(resolveAction(token, state.bindings), event);
+		return;
+	}
+
+	const { state: nextChord, chord } = advanceChord(state.chord, token, Date.now());
+	state.chord = nextChord;
+	if (chord) {
+		dispatchAction(resolveAction(chord, state.bindings), event);
+		return;
+	}
+	if (state.chord.leader) {
+		return; // armed on this key (e.g. "g"), waiting for its second key
+	}
+	dispatchAction(resolveAction(token, state.bindings), event);
+}
+
+// ---- the patch observer: focus reconcile + (guarded) mermaid ------------
+
+// diagramSelector names an unprocessed mermaid fence (design section 6.3,
+// 6.10: goldmark-diagram emits `<pre class="mermaid">`). processedAttr
+// marks a node once its diagram work has been considered, so the observer
+// does not re-collect the same node on a later, unrelated patch (design
+// section 6.3: "marks processed diagram nodes and does not react to its
+// own class or attribute changes").
+const diagramSelector = 'pre.mermaid:not([data-mermaid-processed])';
+const processedAttr = 'data-mermaid-processed';
+
+function collectDiagramIDs() {
+	const nodes = Array.from(document.querySelectorAll(`#main ${diagramSelector}, #rail ${diagramSelector}`));
+	return nodes.map((el, i) => {
+		const id = el.id || `diagram:${Date.now()}:${i}`;
+		el.id = id;
+		return id;
+	});
+}
+
+// runMermaidGuarded is the TASK 5 seam (see the file-header note): once a
+// working vendored mermaid import lands, this marks each resolved node
+// processed and calls mermaid.run() over them. Today it only marks nodes
+// processed, so a diagram block renders as its raw fenced text rather than
+// being silently reprocessed forever, and never runs mermaid itself.
+function runMermaidGuarded(diagramIDs) {
+	for (const id of diagramIDs) {
+		document.getElementById(id)?.setAttribute(processedAttr, '');
+	}
+	// TASK 5: once static/mermaid.js's chunk-vendoring gap (ASSETS.md) is
+	// fixed, dynamically import it here (never as a static top-level import;
+	// see the file header) and call mermaid.run({ nodes: [...] }) over the
+	// elements named by diagramIDs.
+}
+
+// runPatchWork is the MutationObserver callback's one per-patch step
+// (design section 6.3): collect plain descriptors from the DOM, hand them
+// to the pure collectPatchWork, then apply its result as DOM effects.
+function runPatchWork() {
+	const descriptors = {
+		diagramIDs: collectDiagramIDs(),
+		focusableIDs: collectFocusableIDs(),
+		previousFocusableIDs: state.previousFocusableIDs,
+	};
+	const { diagramIDs, focusID } = collectPatchWork(descriptors, state.focusedID);
+	state.previousFocusableIDs = descriptors.focusableIDs;
+	setFocusedID(focusID);
+	runMermaidGuarded(diagramIDs);
+}
+
+// installPatchObserver installs the one MutationObserver on #main and
+// #rail (design section 6.3): childList + subtree only, deliberately
+// without `attributes: true`, so the observer never reacts to its own
+// focus-class or data-mermaid-processed writes (design section 6.3: "does
+// not react to its own class or attribute changes"). It runs one initial
+// scan on install, matching "It does one initial scan on install".
+function installPatchObserver() {
+	const observer = new MutationObserver(() => runPatchWork());
+	for (const id of ['main', 'rail']) {
+		const el = document.getElementById(id);
+		if (el) {
+			observer.observe(el, { childList: true, subtree: true });
+		}
+	}
+	runPatchWork();
+}
+
+// ---- install --------------------------------------------------------------
+
+async function install() {
+	await loadBindings();
+	document.addEventListener('keydown', onKeyDown);
+	installPatchObserver();
+}
+
+install();

@@ -1,6 +1,10 @@
 package templates
 
-import "zing/internal/store"
+import (
+	"fmt"
+
+	"zing/internal/store"
+)
 
 // Thread renders the #main region for view=thread (design section 6.6,
 // Task 3 scope): the ticket's messages in id order, read only. ticket is
@@ -37,7 +41,7 @@ templ stateSeparator(row ThreadRow) {
 }
 
 templ threadMessageRow(row ThreadRow) {
-	<div class={ "message message-" + row.Type }>
+	<div class={ "message message-" + row.Type } data-focus-id={ fmt.Sprintf("message:%d", row.ID) }>
 		<div class="meta"><span class="type">{ row.Type }</span> <span class="author">{ row.Author }</span></div>
 		<div class="body">{ row.Body }</div>
 	</div>
@@ -48,7 +52,7 @@ templ threadMessageRow(row ThreadRow) {
 // recommendation, and options -- no chip buttons, no composer (design
 // section 6.6, Task 3 scope: "WITHOUT the interactive composer or chips").
 templ questionGroup(row ThreadRow) {
-	<details class="q">
+	<details class="q" data-focus-id={ fmt.Sprintf("question:%d", row.ID) }>
 		<summary>
 			<span class="q-title">{ row.Question.Title }</span>
 			<span class="pill">{ row.Question.StateLabel }</span>
