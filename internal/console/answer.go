@@ -1,10 +1,17 @@
 // answer.go: POST /draft, POST /send, POST /read (design section 6.7, 6.8),
 // the batched composer's HTTP surface. Each wraps a store.console_writes.go
-// method, publishes on success, and maps a *store.ConflictError to 409.
-// This supersedes Package 3's POST /answer (server.go, handlers.go), which
-// answered one option at a time with no draft stage; console.js's
-// postDraft, sendBatch, and markRead (Task 4) were already written against
-// these three routes' JSON contract, ahead of this task building them.
+// method and maps a *store.ConflictError to 409. POST /send and POST /read
+// publish on success, waking the live /stream; POST /draft does not (review
+// fix, package 4 re-review): a draft renders nothing server-side -- Thread,
+// Feed, Inbox, and Nav all filter draft rows out, and no server region shows
+// a picked/answered chip state -- so publishing on a draft only woke the
+// stream to re-render identical HTML, and the resulting morph stripped the
+// client-only ".picked" highlight and collapsed the open question group
+// after every pick. This supersedes Package 3's POST /answer (server.go,
+// handlers.go), which answered one option at a time with no draft stage;
+// console.js's postDraft, sendBatch, and markRead (Task 4) were already
+// written against these three routes' JSON contract, ahead of this task
+// building them.
 package console
 
 import (
@@ -53,8 +60,13 @@ type draftRequest struct {
 // strictly and bounded, translate it into a store.DraftInput, call
 // SaveDraft, and report the outcome. 413 over the body cap, 400 on
 // malformed or unknown-field JSON or an over-length Text, 409 on a typed
-// *store.ConflictError (SaveDraft's semantic checks), 204 and a bus publish
-// on success.
+// *store.ConflictError (SaveDraft's semantic checks), 204 on success. It
+// deliberately does not call c.bus.Publish (review fix, package 4
+// re-review): a draft changes nothing any server-rendered region shows, so
+// waking /stream would only cost every open tab an identical re-render --
+// one whose morph strips the client-only ".picked" highlight and collapses
+// the open question group, degrading multi-item picking. POST /send below
+// still publishes once the batch is actually sent.
 func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
 
@@ -88,7 +100,6 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -99,8 +100,12 @@ var (
 
 // minPushTokenLen is the shortest console.push_token Load accepts when
 // zing.toml sets one explicitly (design section 6.13's bearer token gates
-// every POST /subscribe and /push route). It is not applied to the
-// auto-generated token cmd/zing/serve.go creates and persists to
+// every POST /subscribe and /push route), counted in runes
+// (utf8.RuneCountInString) to match the "16 characters" wording in the error
+// message below -- a byte-length check under-counts a multi-byte character
+// as more than one toward the floor, and over-counts a rune-short token that
+// happens to use multi-byte characters as long enough. It is not applied to
+// the auto-generated token cmd/zing/serve.go creates and persists to
 // settings.push_token when zing.toml sets none; that value is generated at
 // a fixed, already-adequate length, so this floor only catches a
 // hand-written value weak enough to downgrade push auth toward a guessable
@@ -207,7 +212,7 @@ func checkValues(md toml.MetaData, cfg Config) error {
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
 	}
-	if md.IsDefined("console", "push_token") && len(cfg.Console.PushToken) < minPushTokenLen {
+	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
 		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)
 	}
 	return nil

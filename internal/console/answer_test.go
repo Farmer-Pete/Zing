@@ -152,6 +152,48 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestDraft_DoesNotPublishWhileSendDoes proves handleDraft's review fix
+// (answer.go's doc comment): a POST /draft that saves cleanly must not wake
+// the bus, since a draft renders nothing server-side and the resulting
+// /stream re-render would strip the client-only ".picked" highlight and
+// collapse the open question group after every pick. POST /send against the
+// same ticket, by contrast, still publishes once the batch actually sends.
+func TestDraft_DoesNotPublishWhileSendDoes(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	b := bus.New()
+	ch, cancel := b.Subscribe()
+	defer cancel()
+	srv, _ := newMutationTestServer(t, s, b, newTestLogHandler(t))
+
+	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":"a"}`, ticketID, questionID)
+	draftResp := doRequest(t, mutationRequest(t, srv, "/draft", draftBody))
+	_ = draftResp.Body.Close()
+	if draftResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft status = %d, want 204", draftResp.StatusCode)
+	}
+
+	select {
+	case <-ch:
+		t.Fatal("POST /draft woke a bus subscriber, want no publish")
+	default:
+	}
+
+	sendResp := doRequest(t, mutationRequest(t, srv, "/send", fmt.Sprintf(`{"ticket":%d}`, ticketID)))
+	_ = sendResp.Body.Close()
+	if sendResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	}
+
+	select {
+	case <-ch:
+	default:
+		t.Fatal("POST /send did not wake a bus subscriber, want a publish")
+	}
+}
+
 // TestRead_MarksOneMessageRead proves POST /read sets read_at on the named
 // message and publishes (design section 6.8, 7.1).
 func TestRead_MarksOneMessageRead(t *testing.T) {

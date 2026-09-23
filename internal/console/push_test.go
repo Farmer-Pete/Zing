@@ -82,6 +82,62 @@ func pushRequest(t *testing.T, srv *httptest.Server, method, path, token, body s
 	return req
 }
 
+// newPushTestServerWithToken is newPushTestServer but with the console's own
+// configured pushToken set explicitly, so a test can exercise an edge case
+// (an empty configured token) newPushTestServer's fixed testPushToken2
+// cannot.
+func newPushTestServerWithToken(t *testing.T, pushToken string) (srv *httptest.Server) {
+	t.Helper()
+
+	s := newConsoleTestStore(t)
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+	port := addr.Port
+
+	push := notify.New(s)
+	handler := console.New(s, bus.New(), nil, []string{testBindHost}, port, newTestLogHandler(t), push, pushToken)
+	srv = httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestPushKey_EmptyConfiguredTokenAlwaysRejects proves checkPushToken's
+// constant-time rewrite (review fix, package 4 re-review) still rejects an
+// empty presented token when the console's own configured pushToken is also
+// empty, rather than a sha256("") == sha256("") digest collision letting it
+// through. It builds the request by hand, not through pushRequest, so the
+// Authorization header is present as "Bearer " with a genuinely empty token
+// value rather than omitted outright -- the digest-collision case the
+// prefix check alone would not exercise.
+func TestPushKey_EmptyConfiguredTokenAlwaysRejects(t *testing.T) {
+	srv := newPushTestServerWithToken(t, "")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/push/key", http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer ")
+
+	resp := doRequest(t, req)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /push/key with an empty presented token against an empty configured token: status = %d, want 401", resp.StatusCode)
+	}
+}
+
 // TestPushKey_RequiresBearerToken proves GET /push/key rejects a missing or
 // wrong token with 401 and returns the VAPID public key with 200 once the
 // right token is presented (design section 6.13, 7.1, 9).

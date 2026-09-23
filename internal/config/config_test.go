@@ -390,6 +390,36 @@ lint = "golangci-lint run"
 	}
 }
 
+// TestLoad_PushTokenCountsRunesNotBytes proves minPushTokenLen's floor is
+// counted in runes (config.go's utf8.RuneCountInString), matching the error
+// message's "16 characters" wording: a token built from eight 4-byte emoji
+// is 32 bytes long but only 8 runes, short of the 16-character floor, and
+// must be rejected even though a byte-length check would have wrongly
+// accepted it.
+func TestLoad_PushTokenCountsRunesNotBytes(t *testing.T) {
+	t.Parallel()
+
+	const eightEmoji = "😀😀😀😀😀😀😀😀" // 8 runes, 32 bytes
+	_, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_token = \""+eightEmoji+"\"\n"))
+	if err == nil {
+		t.Fatal("Load() = nil, want an error for an 8-rune (32-byte) push_token")
+	}
+	const want = "zing.toml: console.push_token: must be at least 16 characters"
+	if err.Error() != want {
+		t.Errorf("Load() = %q, want %q", err.Error(), want)
+	}
+
+	// A genuinely 16-rune multi-byte token clears the same floor.
+	const sixteenEmoji = eightEmoji + eightEmoji // 16 runes, 64 bytes
+	cfg, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_token = \""+sixteenEmoji+"\"\n"))
+	if err != nil {
+		t.Fatalf("Load() with a 16-rune push_token: %v", err)
+	}
+	if cfg.Console.PushToken != sixteenEmoji {
+		t.Errorf("Console.PushToken = %q, want %q", cfg.Console.PushToken, sixteenEmoji)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 

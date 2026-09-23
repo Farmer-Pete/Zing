@@ -273,8 +273,16 @@ const logLineTimeFormat = "15:04:05.000"
 // (store.RunsForTicket), merged and sorted oldest first, since two runs'
 // entries need not have been appended to the ring in that order relative
 // to each other even though each run's own entries already are (log.go's
-// logRing.add). The ring itself is fixed at RingCapacity, so this needs no
-// separate cap (design section 6.11: "capped at the ring size").
+// logRing.add).
+//
+// Each run's own Tail is already capped at RingCapacity, but this method
+// merges one Tail snapshot per run: with N runs the merged slice can hold up
+// to N*RingCapacity entries, and the separate per-run locked snapshots are
+// not atomic across runs either. So after sorting, this trims the merged
+// slice back down to the newest RingCapacity entries (review fix, package 4
+// re-review: "the rail never shows more than the cap"), the same bound
+// design section 6.11's "capped at the ring size" describes for a single
+// run's own tail.
 func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.LogRail, error) {
 	level, ok, err := c.store.GetSetting(ctx, settingLogLevel)
 	if err != nil {
@@ -299,6 +307,7 @@ func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.L
 	// runs' lines that share a Time value in either order; the stable sort
 	// keeps that run/append order as the tiebreak instead.
 	slices.SortStableFunc(entries, func(a, b LogEntry) int { return a.Time.Compare(b.Time) })
+	entries = capLogEntries(entries, RingCapacity)
 
 	lines := make([]templates.LogLine, 0, len(entries))
 	for _, e := range entries {
@@ -310,6 +319,19 @@ func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.L
 	}
 
 	return templates.LogRail{Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines}, nil
+}
+
+// capLogEntries trims a slice already sorted oldest-first down to at most
+// capacity entries, keeping the newest ones and dropping the oldest excess
+// (review fix, package 4 re-review). buildLogRail's merge across a ticket's
+// runs can hold more than capacity entries even though the ring itself never
+// does (see buildLogRail's own doc comment), so this is the merge's own
+// bound, applied after the merge rather than relied on from the ring.
+func capLogEntries(entries []LogEntry, capacity int) []LogEntry {
+	if len(entries) > capacity {
+		return entries[len(entries)-capacity:]
+	}
+	return entries
 }
 
 // ---- POST /side (design section 6.11, 7.1) ---------------------------

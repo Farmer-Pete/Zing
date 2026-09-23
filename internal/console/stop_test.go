@@ -41,11 +41,12 @@ func TestStop_AllSetsStoppedFlagAndReturnsNoContent(t *testing.T) {
 	}
 }
 
-// TestStop_TicketLogsAndReturnsNoContent proves POST /stop {"ticket": N}
-// answers 204 without touching the "stopped" flag: Package 4 has no
-// per-ticket stop column (that lands with Package 5's orchestrator), so the
-// handler only logs the request rather than inventing one.
-func TestStop_TicketLogsAndReturnsNoContent(t *testing.T) {
+// TestStop_TicketReturnsNotImplementedAndDoesNotTouchStoppedFlag proves
+// POST /stop {"ticket": N} answers 501, not 204 (review fix, package 4
+// re-review): Package 4 has no per-ticket stop column (that lands with
+// Package 5's orchestrator), so claiming success for that request would
+// misreport a no-op. The "stopped" flag stays untouched either way.
+func TestStop_TicketReturnsNotImplementedAndDoesNotTouchStoppedFlag(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
@@ -53,8 +54,8 @@ func TestStop_TicketLogsAndReturnsNoContent(t *testing.T) {
 	body := `{"ticket":` + strconv.FormatInt(ticketID, 10) + `}`
 	resp := doRequest(t, mutationRequest(t, srv, "/stop", body))
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /stop {ticket:N} status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("POST /stop {ticket:N} status = %d, want 501", resp.StatusCode)
 	}
 
 	_, stopped, err := s.Flags(t.Context())
@@ -63,6 +64,30 @@ func TestStop_TicketLogsAndReturnsNoContent(t *testing.T) {
 	}
 	if stopped {
 		t.Error("stopped flag set by a per-ticket POST /stop, want it untouched (false)")
+	}
+}
+
+// TestStop_RejectsAmbiguousBodyNamingBoth proves a body setting both all=true
+// and a positive ticket is rejected with 400 rather than silently taking the
+// all-branch (review fix, package 4 re-review: "exactly one of all/ticket").
+func TestStop_RejectsAmbiguousBodyNamingBoth(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	body := `{"all":true,"ticket":` + strconv.FormatInt(ticketID, 10) + `}`
+	resp := doRequest(t, mutationRequest(t, srv, "/stop", body))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /stop {all:true,ticket:N} status = %d, want 400", resp.StatusCode)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped flag set by an ambiguous POST /stop body, want it untouched (false)")
 	}
 }
 

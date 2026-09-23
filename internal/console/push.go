@@ -8,6 +8,7 @@ package console
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
@@ -40,6 +41,14 @@ const maxPushSubscribeBodyBytes = 8 << 10 // 8 KiB
 // explicit console.push_token always wins, else the token persisted in
 // settings.push_token from an earlier run (or generated and persisted on
 // the very first run) is reused.
+//
+// The comparison itself hashes both sides to a fixed 32-byte sha256 digest
+// before calling subtle.ConstantTimeCompare (review fix, package 4
+// re-review): comparing got and c.pushToken directly first checked
+// len(got) != len(c.pushToken), a mismatch that short-circuits before
+// ConstantTimeCompare runs and so leaks, via timing, whether a guessed
+// token's length matches the real one. Hashing first fixes both inputs to
+// the same 32-byte length, so no length branch is ever needed.
 func (c *console) checkPushToken(w http.ResponseWriter, r *http.Request) bool {
 	const prefix = "Bearer "
 	got := r.Header.Get("Authorization")
@@ -49,12 +58,14 @@ func (c *console) checkPushToken(w http.ResponseWriter, r *http.Request) bool {
 	}
 	got = got[len(prefix):]
 
-	// subtle.ConstantTimeCompare requires equal-length inputs to avoid a
-	// length-derived timing signal; comparing the SHA-nothing-needed simple
-	// byte-length check above is itself constant relative to the secret (it
-	// only depends on the untrusted request, not c.pushToken), so this does
-	// not reopen a timing side channel on the token itself.
-	if len(got) != len(c.pushToken) || subtle.ConstantTimeCompare([]byte(got), []byte(c.pushToken)) != 1 {
+	gotSum := sha256.Sum256([]byte(got))
+	wantSum := sha256.Sum256([]byte(c.pushToken))
+	// c.pushToken == "" is a configuration check, not a secret comparison
+	// (an empty configured token has nothing to leak the timing of), so
+	// short-circuiting on it ahead of the constant-time digest compare below
+	// reopens no side channel; it only makes sure an unset token can never
+	// authenticate, digest collision or not.
+	if c.pushToken == "" || subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
@@ -98,8 +109,9 @@ type pushSubscribeRequest struct {
 }
 
 // handlePushSubscribe is POST /push/subscribe (design section 6.13, 7.1):
-// guarded by both the mutation guard (mw.go, wired in server.go) and the
-// bearer token. It decodes strictly, bounds the body, rejects a non-https
+// guarded by the bearer token only, matching GET /push/key (fix 5: the
+// mutation guard was dropped so a phone outside the Host allowlist can still
+// subscribe). It decodes strictly, bounds the body, rejects a non-https
 // endpoint with 400, then calls PushKeys.Subscribe, which validates
 // keys_json against the push_subscriptions/keys schema; a validation
 // failure there also reports 400, since it is the same "bad body" class as
