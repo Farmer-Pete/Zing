@@ -85,6 +85,67 @@ func TestEnsureProject_ReturnsExistingIDOnSecondCall(t *testing.T) {
 	}
 }
 
+// TestEnsureProject_ReconcilesChangedDefaultBranch proves that when
+// zing.toml's default_branch changes for an already-known project,
+// EnsureProject updates the stored column rather than leaving it stale
+// (spine.go, PKG5-PLAN.md section 9).
+func TestEnsureProject_ReconcilesChangedDefaultBranch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	id, err := s.EnsureProject(ctx, testProject) // testProject.DefaultBranch == "main"
+	if err != nil {
+		t.Fatalf("first EnsureProject: %v", err)
+	}
+
+	changed := testProject
+	changed.DefaultBranch = "develop"
+	second, err := s.EnsureProject(ctx, changed)
+	if err != nil {
+		t.Fatalf("second EnsureProject with a changed default_branch: %v", err)
+	}
+	if second != id {
+		t.Errorf("second EnsureProject id = %d, want the existing id %d", second, id)
+	}
+
+	var stored string
+	if err := s.db.QueryRowContext(ctx, "SELECT default_branch FROM projects WHERE id = ?", id).Scan(&stored); err != nil {
+		t.Fatalf("read back default_branch: %v", err)
+	}
+	if stored != "develop" {
+		t.Errorf("default_branch = %q, want develop (reconciled)", stored)
+	}
+}
+
+// TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite proves EnsureProject
+// only reconciles when p.DefaultBranch is non-empty, so a caller that omits
+// it (config.Project.DefaultBranch is optional at the TOML layer, but
+// applyDefaults always fills it to "main" before ensureBindings ever calls
+// EnsureProject) never wipes an existing stored value.
+func TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	id, err := s.EnsureProject(ctx, testProject) // testProject.DefaultBranch == "main"
+	if err != nil {
+		t.Fatalf("first EnsureProject: %v", err)
+	}
+
+	noBranch := testProject
+	noBranch.DefaultBranch = ""
+	if _, err := s.EnsureProject(ctx, noBranch); err != nil {
+		t.Fatalf("second EnsureProject with an empty default_branch: %v", err)
+	}
+
+	var stored string
+	if err := s.db.QueryRowContext(ctx, "SELECT default_branch FROM projects WHERE id = ?", id).Scan(&stored); err != nil {
+		t.Fatalf("read back default_branch: %v", err)
+	}
+	if stored != "main" {
+		t.Errorf("default_branch = %q, want main (untouched by an empty p.DefaultBranch)", stored)
+	}
+}
+
 func TestInsertTicket_RequiresQueuedState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()

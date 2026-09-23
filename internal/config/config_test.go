@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,10 @@ import (
 )
 
 const testUser = "peter"
+
+// testGitHubToken is the github_token value every valid fixture below uses,
+// so a fixture missing it is unambiguously testing that absence.
+const testGitHubToken = "ghp_test_token_0123456789"
 
 // wantWildcardBindError is the exact error checkBindAddresses returns for a
 // wildcard console.bind entry (config.go, design section 6.14).
@@ -30,6 +35,7 @@ func writeTOML(t *testing.T, body string) string {
 
 const minimalValidTOML = `
 user = "peter"
+github_token = "ghp_test_token_0123456789"
 
 [[projects]]
 name = "zing"
@@ -51,7 +57,8 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 	}
 
 	want := &Config{
-		User: testUser,
+		User:        testUser,
+		GitHubToken: testGitHubToken,
 		Console: Console{
 			Bind: []string{"127.0.0.1", "tailscale"},
 			Port: 7420,
@@ -77,9 +84,10 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		Projects: []Project{
 			{
 				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
-				Self:     false,
-				Intake:   Intake{AssignedTo: testUser}, // defaults to the top-level user
-				Commands: Commands{Test: "go test ./...", Lint: "golangci-lint run"},
+				DefaultBranch: "main", // defaults when absent
+				Self:          false,
+				Intake:        Intake{AssignedTo: testUser}, // defaults to the top-level user
+				Commands:      Commands{Test: "go test ./...", Lint: "golangci-lint run"},
 			},
 		},
 	}
@@ -94,6 +102,7 @@ func TestLoad_FullConfigKeepsExplicitValues(t *testing.T) {
 
 	const full = `
 user = "peter"
+github_token = "ghp_test_token_0123456789"
 
 [console]
 bind = ["127.0.0.1"]
@@ -129,6 +138,7 @@ name = "zing"
 repo = "git@github.com:x/zing.git"
 path = "/home/peter/zing"
 tracker = "github"
+default_branch = "develop"
 self = true
 
 [projects.intake]
@@ -144,7 +154,8 @@ lint = "golangci-lint run"
 	}
 
 	want := &Config{
-		User: testUser,
+		User:        testUser,
+		GitHubToken: testGitHubToken,
 		Console: Console{
 			Bind:         []string{"127.0.0.1"},
 			Port:         8080,
@@ -169,9 +180,10 @@ lint = "golangci-lint run"
 		Projects: []Project{
 			{
 				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
-				Self:     true,
-				Intake:   Intake{AssignedTo: "someone-else"},
-				Commands: Commands{Test: "go test ./...", Lint: "golangci-lint run"},
+				DefaultBranch: "develop",
+				Self:          true,
+				Intake:        Intake{AssignedTo: "someone-else"},
+				Commands:      Commands{Test: "go test ./...", Lint: "golangci-lint run"},
 			},
 		},
 	}
@@ -211,6 +223,7 @@ func TestLoad_IntakeAssignedToDefaultsWhenExplicitlyEmpty(t *testing.T) {
 
 	const body = `
 user = "peter"
+github_token = "ghp_test_token_0123456789"
 
 [[projects]]
 name = "zing"
@@ -272,13 +285,14 @@ lint = "golangci-lint run"
 		},
 		{
 			name: "missing projects",
-			body: `user = "peter"`,
+			body: "user = \"peter\"\ngithub_token = \"" + testGitHubToken + "\"\n",
 			want: "zing.toml: missing required key projects",
 		},
 		{
 			name: "missing projects[0].name",
 			body: `
 user = "peter"
+github_token = "` + testGitHubToken + `"
 
 [[projects]]
 repo = "git@github.com:x/zing.git"
@@ -295,6 +309,7 @@ lint = "golangci-lint run"
 			name: "missing projects[0].commands.test",
 			body: `
 user = "peter"
+github_token = "` + testGitHubToken + `"
 
 [[projects]]
 name = "zing"
@@ -321,6 +336,7 @@ lint = "golangci-lint run"
 			name: "bad project tracker",
 			body: `
 user = "peter"
+github_token = "` + testGitHubToken + `"
 
 [[projects]]
 name = "zing"
@@ -426,6 +442,23 @@ lint = "golangci-lint run"
 			body: minimalValidTOML + "\n[console]\npush_token = \"\"\n",
 			want: "zing.toml: console.push_token: must be at least 16 characters",
 		},
+		{
+			name: "missing github_token",
+			body: `
+user = "peter"
+
+[[projects]]
+name = "zing"
+repo = "git@github.com:x/zing.git"
+path = "/home/peter/zing"
+tracker = "github"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`,
+			want: "zing.toml: missing required key github_token",
+		},
 	}
 
 	for _, tt := range tests {
@@ -484,5 +517,167 @@ func TestDefaultPath(t *testing.T) {
 	}
 	if filepath.Base(filepath.Dir(path)) != ".zing" {
 		t.Errorf("DefaultPath() = %q, want the parent directory to be .zing", path)
+	}
+}
+
+// TestSave_RoundTripsThroughLoad proves Save's write half and Load's read
+// half agree: a config loaded, saved to a fresh path (whose parent directory
+// does not exist yet, exercising Save's MkdirAll), then loaded again comes
+// back identical, including PushToken's "omitempty" tag (config.go) not
+// resurfacing as an explicit empty string that checkValues would then
+// reject.
+func TestSave_RoundTripsThroughLoad(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "nested", "zing.toml")
+	if saveErr := Save(dst, cfg); saveErr != nil {
+		t.Fatalf("Save: %v", saveErr)
+	}
+
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load(Save(cfg)): %v", err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("round-tripped config = %+v, want %+v", got, cfg)
+	}
+}
+
+// TestSave_WritesFileAt0600 proves Save's file lands at 0600, since it
+// carries github_token (PKG5-PLAN.md section 9).
+func TestSave_WritesFileAt0600(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "zing.toml")
+	if saveErr := Save(path, cfg); saveErr != nil {
+		t.Fatalf("Save: %v", saveErr)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("saved file mode = %o, want 0600", perm)
+	}
+}
+
+// TestSave_ErrorLeavesTempRemovedAndOriginalUntouched proves the edge case
+// in PKG5-PLAN.md section 13 ("config.Save cannot write"): a rename failure
+// (forced here by making the destination an existing directory) removes the
+// sibling temp file and leaves whatever was already at path untouched,
+// since the rename that would have replaced it never completed.
+func TestSave_ErrorLeavesTempRemovedAndOriginalUntouched(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "zing.toml")
+	if mkdirErr := os.Mkdir(path, 0o700); mkdirErr != nil {
+		t.Fatalf("Mkdir: %v", mkdirErr)
+	}
+
+	if saveErr := Save(path, cfg); saveErr == nil {
+		t.Fatal("Save() = nil, want an error when the rename target is an existing directory")
+	}
+
+	if _, statErr := os.Stat(path + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("temp file after a failed Save: stat err = %v, want os.ErrNotExist", statErr)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(path) after a failed Save: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("path was overwritten by a failed Save, want the original left untouched")
+	}
+}
+
+// TestLoad_RepairsGroupReadableTokenFileTo0600 proves a token-bearing
+// zing.toml left group- or other-readable (0644 here) is chmod'd to 0600 as
+// a side effect of Load, before the token is ever read out of it.
+func TestLoad_RepairsGroupReadableTokenFileTo0600(t *testing.T) {
+	t.Parallel()
+
+	path := writeTOML(t, minimalValidTOML)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode after Load = %o, want repaired to 0600", perm)
+	}
+}
+
+// TestLoadForAdd_AcceptsZeroProjects proves LoadForAdd's one relaxation from
+// Load (PKG5-PLAN.md section 9): a config with user and github_token but no
+// [[projects]] loads clean, so "zing project add" can bootstrap the first
+// project.
+func TestLoadForAdd_AcceptsZeroProjects(t *testing.T) {
+	t.Parallel()
+
+	body := "user = \"peter\"\ngithub_token = \"" + testGitHubToken + "\"\n"
+	cfg, err := LoadForAdd(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("LoadForAdd: %v", err)
+	}
+	if len(cfg.Projects) != 0 {
+		t.Errorf("Projects = %v, want empty", cfg.Projects)
+	}
+	if cfg.GitHubToken != testGitHubToken {
+		t.Errorf("GitHubToken = %q, want %q", cfg.GitHubToken, testGitHubToken)
+	}
+}
+
+// TestLoadForAdd_StillRequiresGitHubToken proves LoadForAdd relaxes only the
+// zero-projects requirement, not github_token.
+func TestLoadForAdd_StillRequiresGitHubToken(t *testing.T) {
+	t.Parallel()
+
+	_, err := LoadForAdd(writeTOML(t, `user = "peter"`))
+	if err == nil {
+		t.Fatal("LoadForAdd() = nil, want an error for missing github_token")
+	}
+	const want = "zing.toml: missing required key github_token"
+	if err.Error() != want {
+		t.Errorf("LoadForAdd() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestLoad_RejectsZeroProjects proves Load, unlike LoadForAdd, still
+// requires at least one project.
+func TestLoad_RejectsZeroProjects(t *testing.T) {
+	t.Parallel()
+
+	body := "user = \"peter\"\ngithub_token = \"" + testGitHubToken + "\"\n"
+	_, err := Load(writeTOML(t, body))
+	if err == nil {
+		t.Fatal("Load() = nil, want an error for zero projects")
+	}
+	const want = "zing.toml: missing required key projects"
+	if err.Error() != want {
+		t.Errorf("Load() = %q, want %q", err.Error(), want)
 	}
 }

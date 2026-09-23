@@ -41,6 +41,8 @@ func dispatch(args []string) int {
 		return runSelftest()
 	case "validate":
 		return runValidate(subArgs(args))
+	case "project":
+		return runProject(subArgs(args))
 	case "serve":
 		if err := run(subArgs(args)); err != nil {
 			slog.Error("server stopped", "err", err)

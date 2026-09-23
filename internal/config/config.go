@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,20 +17,29 @@ import (
 )
 
 type Config struct {
-	User     string    `toml:"user"`
-	Console  Console   `toml:"console"`
-	Models   Models    `toml:"models"`
-	Dispatch Dispatch  `toml:"dispatch"`
-	Budget   Budget    `toml:"budget"`
-	Review   Review    `toml:"review"`
-	Merge    Merge     `toml:"merge"`
-	Projects []Project `toml:"projects"`
+	User string `toml:"user"`
+	// GitHubToken authenticates the orchestrator's go-github client
+	// (internal/orchestrator.NewGitHub). Required; never logged, never
+	// written to another file (PKG5-PLAN.md section 9 and 14).
+	GitHubToken string    `toml:"github_token"`
+	Console     Console   `toml:"console"`
+	Models      Models    `toml:"models"`
+	Dispatch    Dispatch  `toml:"dispatch"`
+	Budget      Budget    `toml:"budget"`
+	Review      Review    `toml:"review"`
+	Merge       Merge     `toml:"merge"`
+	Projects    []Project `toml:"projects"`
 }
 
 type Console struct {
-	Bind      []string `toml:"bind"`
-	Port      int      `toml:"port"`
-	PushToken string   `toml:"push_token"`
+	Bind []string `toml:"bind"`
+	Port int      `toml:"port"`
+	// PushToken is left as the toml zero value (empty) by Load and
+	// LoadForAdd when zing.toml omits it (see Load's doc comment), so it
+	// carries "omitempty": Save must not write an explicit empty string
+	// back, which checkValues would then reject as shorter than
+	// minPushTokenLen on the next Load.
+	PushToken string `toml:"push_token,omitempty"`
 	// AllowedHosts extends the mutation middleware's Host allowlist (design
 	// section 6.14) with hostnames the middleware cannot derive on its own,
 	// such as a tailnet DNS name: bare hostnames, no port. Empty by default.
@@ -65,13 +75,19 @@ type Merge struct {
 }
 
 type Project struct {
-	Name     string   `toml:"name"`
-	Repo     string   `toml:"repo"`
-	Path     string   `toml:"path"`
-	Tracker  string   `toml:"tracker"`
-	Self     bool     `toml:"self"`
-	Intake   Intake   `toml:"intake"`
-	Commands Commands `toml:"commands"`
+	Name    string `toml:"name"`
+	Repo    string `toml:"repo"`
+	Path    string `toml:"path"`
+	Tracker string `toml:"tracker"`
+	// DefaultBranch is the branch the orchestrator worktrees off of and
+	// targets a draft PR at. Optional; defaults to "main" in applyDefaults.
+	// ensureBindings (cmd/zing/serve.go) passes it into store.EnsureProject,
+	// which reconciles a changed value into the projects table on every
+	// start (store/spine.go).
+	DefaultBranch string   `toml:"default_branch"`
+	Self          bool     `toml:"self"`
+	Intake        Intake   `toml:"intake"`
+	Commands      Commands `toml:"commands"`
 }
 
 type Intake struct {
@@ -112,15 +128,35 @@ var (
 const minPushTokenLen = 16
 
 // Load reads and validates the zing.toml at path, in this exact order so the
-// first reported error is deterministic: decode, unknown-key check,
-// missing-required check, value checks, then defaults. Console.PushToken is
-// left empty when zing.toml omits it (design section 6.13): cmd/zing/serve.go
-// is the one place that resolves the effective bearer token, since only it
-// can tell an explicit zing.toml value apart from a value that needs to be
-// generated once and persisted to settings.push_token for stability across
-// restarts -- a distinction a value regenerated fresh on every Load call
-// could not preserve.
+// first reported error is deterministic: mode repair, decode, unknown-key
+// check, missing-required check, value checks, then defaults. It requires at
+// least one project; LoadForAdd is the same load with that one requirement
+// relaxed. Console.PushToken is left empty when zing.toml omits it (design
+// section 6.13): cmd/zing/serve.go is the one place that resolves the
+// effective bearer token, since only it can tell an explicit zing.toml value
+// apart from a value that needs to be generated once and persisted to
+// settings.push_token for stability across restarts -- a distinction a value
+// regenerated fresh on every Load call could not preserve.
 func Load(path string) (*Config, error) {
+	return load(path, false)
+}
+
+// LoadForAdd loads config for "zing project add" only (PKG5-PLAN.md section
+// 9). It runs the same decode, unknown-key, and value checks as Load, but
+// permits zero projects, so the first project can be added to a fresh
+// config. It still requires user and github_token.
+func LoadForAdd(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// load is the shared decode/unknown-key/value-check body of Load and
+// LoadForAdd, so the two never diverge except in whether an empty
+// cfg.Projects is accepted.
+func load(path string, allowEmptyProjects bool) (*Config, error) {
+	if err := repairFileMode(path); err != nil {
+		return nil, err
+	}
+
 	var cfg Config
 	md, err := toml.DecodeFile(path, &cfg)
 	if err != nil {
@@ -130,7 +166,7 @@ func Load(path string) (*Config, error) {
 	if err := checkUnknownKeys(md); err != nil {
 		return nil, err
 	}
-	if err := checkRequiredKeys(cfg); err != nil {
+	if err := checkRequiredKeys(cfg, allowEmptyProjects); err != nil {
 		return nil, err
 	}
 	if err := checkValues(md, cfg); err != nil {
@@ -140,6 +176,70 @@ func Load(path string) (*Config, error) {
 	applyDefaults(md, &cfg)
 
 	return &cfg, nil
+}
+
+// permissiveMode is the bit set that makes a file group- or other-readable.
+// zing.toml carries github_token, so a file with any of these bits set gets
+// repaired to 0600 (PKG5-PLAN.md section 9).
+const permissiveMode = 0o077
+
+// repairFileMode chmods path to 0600 when it is readable by group or other,
+// logging a warning once. It runs first, before the decode, so a token is
+// never left group- or other-readable past the start of a Load or
+// LoadForAdd call, even one that goes on to fail a later check.
+func repairFileMode(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("zing.toml: %w", err)
+	}
+	if info.Mode().Perm()&permissiveMode == 0 {
+		return nil
+	}
+	slog.Warn("zing.toml is readable by group or other; repairing to 0600", "path", path, "mode", info.Mode().Perm())
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("zing.toml: repair file mode: %w", err)
+	}
+	return nil
+}
+
+// Save re-encodes cfg to path atomically and at mode 0600, since the file
+// holds github_token (PKG5-PLAN.md section 9). It writes to a sibling temp
+// file opened O_CREATE|O_EXCL|O_WRONLY at 0600 -- so a pre-existing
+// permissive file or symlink at the temp name cannot defeat the mode --
+// creating the parent directory at 0700 if absent, then renames over path.
+// On any error the temp file is removed and path is left untouched, since
+// the rename never runs until every earlier step has succeeded. Save drops
+// comments and hand-formatting in the existing file (decision Q70).
+func Save(path string, cfg *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+
+	data, err := toml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+	return nil
 }
 
 func checkUnknownKeys(md toml.MetaData) error {
@@ -155,15 +255,22 @@ func checkUnknownKeys(md toml.MetaData) error {
 	return fmt.Errorf("zing.toml: unknown key %s", keys[0])
 }
 
-func checkRequiredKeys(cfg Config) error {
+// checkRequiredKeys checks the keys required of every config: user,
+// github_token, and (unless allowEmptyProjects, LoadForAdd's one relaxation)
+// at least one project with its own required per-project keys.
+func checkRequiredKeys(cfg Config, allowEmptyProjects bool) error {
 	if cfg.User == "" {
 		return errors.New("zing.toml: missing required key user")
 	}
-	if len(cfg.Projects) == 0 {
+	if cfg.GitHubToken == "" {
+		return errors.New("zing.toml: missing required key github_token")
+	}
+	if !allowEmptyProjects && len(cfg.Projects) == 0 {
 		return errors.New("zing.toml: missing required key projects")
 	}
 
-	for i, p := range cfg.Projects {
+	for i := range cfg.Projects {
+		p := &cfg.Projects[i]
 		switch {
 		case p.Name == "":
 			return fmt.Errorf("zing.toml: missing required key projects[%d].name", i)
@@ -193,8 +300,8 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("merge", "method") && !slices.Contains(validMergeMethods, cfg.Merge.Method) {
 		return fmt.Errorf("zing.toml: merge.method: must be one of %s", strings.Join(validMergeMethods, ", "))
 	}
-	for i, p := range cfg.Projects {
-		if p.Tracker != "github" {
+	for i := range cfg.Projects {
+		if p := &cfg.Projects[i]; p.Tracker != "github" {
 			return fmt.Errorf("zing.toml: projects[%d].tracker: must be github", i)
 		}
 	}
@@ -336,6 +443,9 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 	for i := range cfg.Projects {
 		if cfg.Projects[i].Intake.AssignedTo == "" {
 			cfg.Projects[i].Intake.AssignedTo = cfg.User
+		}
+		if cfg.Projects[i].DefaultBranch == "" {
+			cfg.Projects[i].DefaultBranch = "main"
 		}
 	}
 }

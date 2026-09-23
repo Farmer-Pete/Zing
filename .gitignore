@@ -25,6 +25,12 @@ go.work.sum
 .env.*
 !.env.example
 
+# Orchestrator worktree state and a safety net for zing.toml (design section
+# 14): it holds github_token, and the real file lives at ~/.zing/, but this
+# keeps a copy checked out into the repo from ever landing in a commit.
+.zing/
+zing.toml
+
 # Editor and OS noise
 .idea/
 .vscode/

@@ -30,6 +30,7 @@ import (
 // itself instead of asking serve for an ephemeral one.
 const testZingTOMLFormat = `
 user = "test-user"
+github_token = "test-github-token"
 
 [console]
 bind = ["127.0.0.1"]
@@ -395,6 +396,7 @@ func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 
 	doc := fmt.Sprintf(`
 user = "test-user"
+github_token = "test-github-token"
 
 [console]
 bind = [%s]
