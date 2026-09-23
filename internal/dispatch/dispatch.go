@@ -44,6 +44,13 @@ const defaultCodeTimeout = 5 * time.Minute
 // deadline: checkpoint grace, not run time (design section 6.8 step 7).
 const claimGrace = 5 * time.Minute
 
+// postHandlerWriteTimeout bounds the detached context every post-handler
+// store write (the commit, the claim release, and the fail-closed
+// SetStopped write) runs under: long enough for an ordinary write, short
+// enough that a truly wedged store cannot hang the dispatcher forever
+// (design section "dispatch" fix 4).
+const postHandlerWriteTimeout = 30 * time.Second
+
 // ErrFailClosed is the error Tick returns once a post-run commit comes back
 // applied=false or errors: the runtime has already advanced its session, so
 // the dispatcher must not re-drive it (Q-runtime, design section 6.8, 13).
@@ -110,6 +117,20 @@ func New(
 	}, nil
 }
 
+// postHandlerContext returns a detached, bounded context for a post-handler
+// store write: detached with context.WithoutCancel so a cancelled handler
+// context (the run deadline expiring, or the drain sequence force-cancelling
+// the dispatcher's own context) cannot abort recording the commit, the
+// claim release, or the fail-closed stopped flag -- the runtime may already
+// have advanced past what a cancellation could undo, so these writes must
+// still land. Bounded with a fixed timeout so a truly wedged store cannot
+// hang the dispatcher forever now that cancellation no longer reaches it
+// (design section "dispatch" fix 4). The caller must call the returned
+// cancel to release the timer.
+func postHandlerContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), postHandlerWriteTimeout)
+}
+
 // NotifyDrain wakes a running Run promptly once draining has been set,
 // rather than leaving it to notice on the next ticker fire (up to
 // cfg.Interval, which can race a short drain deadline). The send is
@@ -173,9 +194,15 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	// incoming expires to whole-second UTC precision at the store boundary
 	// (section 6.3), so this same raw expires, handed to both Claim below
 	// and to Deps.Expires / the eventual commit's Expires, fences correctly
-	// without this caller truncating it itself.
+	// without this caller truncating it itself. expires is computed from a
+	// fresh time.Now() taken right here, after reconcile, intake, and count
+	// (steps 1-4, which can each spend real wall time, notably a slow
+	// intake) have already run, not the tick-start now: otherwise the
+	// lease's actual coverage, measured from the moment it is really
+	// claimed, would fall short of timeout + claimGrace by however long
+	// those earlier steps took (design section "dispatch" fix 5, cubic P2).
 	timeout := d.timeoutFor(ticket.State)
-	expires := now.Add(timeout + claimGrace)
+	expires := time.Now().Add(timeout + claimGrace)
 	claimed, err := d.store.Claim(ctx, ticket.ID, d.cfg.Owner, expires)
 	if err != nil {
 		return fmt.Errorf("dispatch: claim ticket %d: %w", ticket.ID, err)
@@ -287,9 +314,14 @@ func jobNameForState(state string) (string, bool) {
 // error or an invalid commit releases the claim and leaves the ticket's
 // state for a later retry; a lost lease or a commit error fails the
 // dispatcher closed; a valid, applied commit publishes. expires is the
-// claim lease Claim was already called with (step 6), computed from the
-// tick-start now, and stays as-is here so it remains consistent with what
-// was actually claimed.
+// claim lease Claim was already called with (step 6), computed from a fresh
+// post-intake time.Now() taken there (design section "dispatch" fix 5), and
+// stays as-is here so it remains consistent with what was actually claimed.
+// Every post-handler store write below (the commit, the release, and the
+// fail-closed SetStopped) runs under a detached, bounded context
+// (postHandlerContext), not ctx or runCtx directly, so a cancelled handler
+// context cannot abort recording what the runtime already did (design
+// section "dispatch" fix 4).
 func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, timeout time.Duration, expires time.Time) error {
 	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
@@ -317,7 +349,9 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		return d.releaseClaim(ctx, ticket.ID, expires)
 	}
 
-	applied, err := d.store.CommitHandlerResult(ctx, commit)
+	commitCtx, cancelCommit := postHandlerContext(ctx)
+	defer cancelCommit()
+	applied, err := d.store.CommitHandlerResult(commitCtx, commit)
 	if err != nil || !applied {
 		if err != nil {
 			slog.Error("commit failed", "ticket_id", ticket.ID, "err", err)
@@ -328,7 +362,9 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// out) must not stop this flag write from landing: the runtime may
 		// already have advanced past what a cancellation could undo, so the
 		// stopped flag is the one thing that must still get through.
-		if setErr := d.store.SetStopped(context.WithoutCancel(ctx), true); setErr != nil {
+		stoppedCtx, cancelStopped := postHandlerContext(ctx)
+		defer cancelStopped()
+		if setErr := d.store.SetStopped(stoppedCtx, true); setErr != nil {
 			return fmt.Errorf("dispatch: set stopped after fail-closed on ticket %d: %w", ticket.ID, setErr)
 		}
 		if err != nil {
@@ -357,7 +393,9 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 // process still believes.
 func (d *Dispatcher) releaseClaim(ctx context.Context, ticketID int64, expires time.Time) error {
 	noop := store.HandlerCommit{TicketID: ticketID, Owner: d.cfg.Owner, Expires: expires}
-	applied, err := d.store.CommitHandlerResult(ctx, noop)
+	commitCtx, cancelCommit := postHandlerContext(ctx)
+	defer cancelCommit()
+	applied, err := d.store.CommitHandlerResult(commitCtx, noop)
 	if err == nil && applied {
 		d.bus.Publish()
 		return nil
@@ -368,7 +406,9 @@ func (d *Dispatcher) releaseClaim(ctx context.Context, ticketID int64, expires t
 	} else {
 		slog.Error("release claim: lease already lost", "ticket_id", ticketID)
 	}
-	if setErr := d.store.SetStopped(context.WithoutCancel(ctx), true); setErr != nil {
+	stoppedCtx, cancelStopped := postHandlerContext(ctx)
+	defer cancelStopped()
+	if setErr := d.store.SetStopped(stoppedCtx, true); setErr != nil {
 		return fmt.Errorf("dispatch: set stopped after fail-closed releasing claim for ticket %d: %w", ticketID, setErr)
 	}
 	if err != nil {

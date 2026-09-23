@@ -61,7 +61,7 @@ func New(st *store.Store, b *bus.Broker) http.Handler {
 	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
 	mux.HandleFunc("GET /updates", c.handleUpdates) // streaming: no write deadline
 	mux.HandleFunc("GET /thread", c.handleThread)   // streaming: no write deadline
-	mux.HandleFunc("POST /answer", withWriteDeadline(c.handleAnswer))
+	mux.HandleFunc("POST /answer", withWriteDeadline(requireSameOrigin(c.handleAnswer)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(handleStatic))
 	return mux
 }
@@ -88,6 +88,40 @@ func withWriteDeadline(next http.HandlerFunc) http.HandlerFunc {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Now().Add(nonStreamWriteDeadline)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// datastarRequestHeader is the header every Datastar backend action sends
+// (datastar skill, attributes.md: "All backend actions send a
+// Datastar-Request: true header"). A plain cross-site form POST cannot set a
+// custom header without triggering a CORS preflight, so requiring it here
+// rules out that attack shape even when Sec-Fetch-Site is absent.
+const datastarRequestHeader = "Datastar-Request"
+
+// requireSameOrigin guards a mutating route against a cross-site request
+// forgery (CWE-352, design section "Console" fix 2): a cross-site fetch sent
+// as text/plain under no-cors mode still reaches datastar.ReadSignals, since
+// it decodes whatever body arrived without checking its declared content
+// type, so without this guard a hostile page could POST a crafted body to
+// /answer using the visitor's own session and silently answer an open
+// question. The check rejects the request with 403 unless both hold: the
+// Sec-Fetch-Site header, when the browser sends one, is "same-origin" or
+// "none" (a same-origin fetch, or a request with no meaningful origin, such
+// as a curl call or an older browser); and the Datastar-Request header is
+// present and "true", which the SDK always sets on every backend action but
+// a simple cross-origin form POST cannot set without a CORS preflight the
+// browser would block first.
+func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+		if r.Header.Get(datastarRequestHeader) != "true" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
 			return
 		}
 		next(w, r)

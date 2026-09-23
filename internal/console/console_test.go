@@ -2,13 +2,13 @@ package console_test
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -127,6 +127,37 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 	t.Fatal("seedOpenQuestion: no question message found after commit")
 	return 0
+}
+
+// threadURL builds a GET /thread request url sending open as the $open
+// signal, the way a real @get('/thread') call does: JSON-encoded in the
+// "datastar" query parameter, since /thread is a single STABLE url and
+// never carries a per-ticket "id" query parameter (design section 6.9,
+// datastar skill go-sdk.md: "Expects signals in URL.Query for GET").
+func threadURL(base string, open int64) string {
+	v := url.Values{}
+	v.Set("datastar", fmt.Sprintf(`{"open":%d}`, open))
+	return base + "/thread?" + v.Encode()
+}
+
+// postAnswer POSTs body to base+"/answer" with the Content-Type and
+// Datastar-Request headers a real Datastar @post('/answer') call always
+// sends (design section "Console" fix 2: requireSameOrigin rejects a
+// same-origin POST that lacks the Datastar-Request header, so every test
+// that expects a real answer-handling response, not a 403, must set it).
+func postAnswer(t *testing.T, base, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, base+"/answer", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST /answer request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /answer: %v", err)
+	}
+	return resp
 }
 
 // readFrame reads one SSE frame from r, bounded by frameTimeout so a hung
@@ -291,8 +322,7 @@ func TestThreadStreamPatchesTicketMessages(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, threadURL(srv.URL, ticketID), http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -331,8 +361,7 @@ func TestThreadStreamUnsubscribesOnDisconnect(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, threadURL(srv.URL, ticketID), http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -391,8 +420,7 @@ func TestThreadStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	defer srv.Close()
 
 	ctx1, cancel1 := context.WithCancel(t.Context())
-	req1, err := http.NewRequestWithContext(ctx1, http.MethodGet,
-		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	req1, err := http.NewRequestWithContext(ctx1, http.MethodGet, threadURL(srv.URL, ticketID), http.NoBody)
 	if err != nil {
 		t.Fatalf("new request 1: %v", err)
 	}
@@ -404,12 +432,11 @@ func TestThreadStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	assertExactSSEFraming(t, readFrame(t, r1))
 
 	// The second stream opens for the same ticket while the first is still
-	// live, the way a fresh /thread?id= fetch briefly overlaps the request
-	// it is about to cancel.
+	// live, the way a fresh /thread fetch briefly overlaps the request it is
+	// about to cancel.
 	ctx2, cancel2 := context.WithCancel(t.Context())
 	defer cancel2()
-	req2, err := http.NewRequestWithContext(ctx2, http.MethodGet,
-		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	req2, err := http.NewRequestWithContext(ctx2, http.MethodGet, threadURL(srv.URL, ticketID), http.NoBody)
 	if err != nil {
 		t.Fatalf("new request 2: %v", err)
 	}
@@ -453,6 +480,88 @@ func TestThreadStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	assertExactSSEFraming(t, readFrame(t, r2))
 }
 
+// TestThreadStreamSwitchingTicketAbortsPriorStream proves the stable-url fix
+// (design section 6.9, "Console" fix 3) holds across a genuine ticket
+// switch, not just a same-ticket reopen: /thread is one constant url for
+// every ticket, so Datastar's requestCancellation (keyed by method and url
+// alone, never by the $open signal value) aborts ticket A's in-flight fetch
+// the moment $open changes to ticket B, even though the two are different
+// tickets. This test drives that same abort explicitly at the HTTP layer and
+// proves the server side of it: ticket A's handler returns once its
+// connection is cancelled, and ticket B's stream, opened on the same
+// "/thread" url with a different $open value, is the one live subscriber
+// left, patched with ticket B's own content.
+func TestThreadStreamSwitchingTicketAbortsPriorStream(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketA := seedTicket(t, s, "fake#1", "Ticket A")
+	ticketB := seedTicket(t, s, "fake#2", "Ticket B")
+	b := bus.New()
+
+	srv := httptest.NewServer(console.New(s, b))
+	defer srv.Close()
+
+	ctx1, cancel1 := context.WithCancel(t.Context())
+	req1, err := http.NewRequestWithContext(ctx1, http.MethodGet, threadURL(srv.URL, ticketA), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request (ticket A): %v", err)
+	}
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("GET /thread (ticket A): %v", err)
+	}
+	r1 := bufio.NewReader(resp1.Body)
+	assertExactSSEFraming(t, readFrame(t, r1))
+
+	// The second stream opens for a DIFFERENT ticket, still on the same
+	// "/thread" url, while the first is still live -- the way a real $open
+	// change from ticket A to ticket B briefly overlaps the fetch it is
+	// about to cancel.
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	defer cancel2()
+	req2, err := http.NewRequestWithContext(ctx2, http.MethodGet, threadURL(srv.URL, ticketB), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request (ticket B): %v", err)
+	}
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /thread (ticket B): %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	r2 := bufio.NewReader(resp2.Body)
+	frame2 := readFrame(t, r2)
+	assertExactSSEFraming(t, frame2)
+	if !strings.Contains(frame2, "Ticket B") {
+		t.Errorf("ticket B stream's initial frame missing its own title; got:\n%s", frame2)
+	}
+
+	afterBoth := runtime.NumGoroutine()
+
+	// Cancel the first request, the abort a real $open change to ticket B
+	// would trigger client-side, and prove that specific handler (ticket
+	// A's) returns rather than lingering alongside ticket B's.
+	cancel1()
+	_ = resp1.Body.Close()
+
+	deadline := time.Now().Add(frameTimeout)
+	for runtime.NumGoroutine() >= afterBoth {
+		if time.Now().After(deadline) {
+			t.Fatalf("ticket A's stream handler did not return after cancellation: goroutines = %d, want < %d (the count with both streams live)",
+				runtime.NumGoroutine(), afterBoth)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Ticket B's stream is the one live subscriber left: a publish must
+	// reach it, framed with ticket B's own content, never a stale patch left
+	// over from the cancelled ticket-A stream.
+	b.Publish()
+	frame3 := readFrame(t, r2)
+	assertExactSSEFraming(t, frame3)
+	if !strings.Contains(frame3, "Ticket B") {
+		t.Errorf("post-publish frame on the surviving (ticket B) stream missing its title; got:\n%s", frame3)
+	}
+}
+
 func TestStaticServesDatastarBundle(t *testing.T) {
 	s := newConsoleTestStore(t)
 	srv := httptest.NewServer(console.New(s, bus.New()))
@@ -490,8 +599,7 @@ func TestThreadStreamRendersOpenQuestionBlock(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, threadURL(srv.URL, ticketID), http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -537,14 +645,10 @@ func TestAnswerAcceptsThenConflictsOnRepeat(t *testing.T) {
 	srv := httptest.NewServer(console.New(s, bus.New()))
 	defer srv.Close()
 
-	body := []byte(`{"answer":{"ticket":` + strconv.FormatInt(ticketID, 10) +
-		`,"question":` + strconv.FormatInt(questionID, 10) + `,"option":"a"}}`)
+	body := `{"answer":{"ticket":` + strconv.FormatInt(ticketID, 10) +
+		`,"question":` + strconv.FormatInt(questionID, 10) + `,"option":"a"}}`
 
-	//nolint:noctx // a bare POST on a test server needs no deadline
-	resp, err := http.Post(srv.URL+"/answer", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("first POST /answer: %v", err)
-	}
+	resp := postAnswer(t, srv.URL, body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("first POST /answer status = %d, want 204", resp.StatusCode)
@@ -566,11 +670,7 @@ func TestAnswerAcceptsThenConflictsOnRepeat(t *testing.T) {
 		t.Errorf("question state after the first answer = %v, want \"answered\"", answered.State)
 	}
 
-	//nolint:noctx // a bare POST on a test server needs no deadline
-	resp2, err := http.Post(srv.URL+"/answer", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("second POST /answer: %v", err)
-	}
+	resp2 := postAnswer(t, srv.URL, body)
 	defer func() { _ = resp2.Body.Close() }()
 	if resp2.StatusCode != http.StatusConflict {
 		t.Fatalf("second POST /answer status = %d, want 409", resp2.StatusCode)
@@ -616,11 +716,7 @@ func TestAnswerRejectsInvalidInputWith400(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			//nolint:noctx // a bare POST on a test server needs no deadline
-			resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("POST /answer: %v", err)
-			}
+			resp := postAnswer(t, srv.URL, tc.body)
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Errorf("POST /answer(%s) status = %d, want 400", tc.body, resp.StatusCode)
@@ -646,11 +742,7 @@ func TestAnswerReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	const missingQuestionID = 999999
 	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, missingQuestionID)
 
-	//nolint:noctx // a bare POST on a test server needs no deadline
-	resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
-	}
+	resp := postAnswer(t, srv.URL, body)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusInternalServerError {
@@ -707,28 +799,69 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 // TestThreadRejectsInvalidIDWith400 proves handleThread validates the id
 // query parameter -- non-integer and non-positive alike -- before it ever
 // opens the SSE stream (design section "Console" fix 11).
-func TestThreadRejectsInvalidIDWith400(t *testing.T) {
+// TestThreadOpenZeroOrNegativeRendersEmptyThread proves patchThread's
+// id<=0 guard (design section 6.9, "Console" fix 3): a $open signal of 0 (no
+// ticket open, including an absent signal, which ReadSignals leaves at its
+// zero value) or a negative value opens the stream normally and patches an
+// empty #thread, rather than erroring -- a stale or unset signal is a normal
+// client state, not a bad request.
+func TestThreadOpenZeroOrNegativeRendersEmptyThread(t *testing.T) {
 	s := newConsoleTestStore(t)
 	srv := httptest.NewServer(console.New(s, bus.New()))
 	defer srv.Close()
 
-	cases := []struct{ name, id string }{
-		{"non-integer", "abc"},
-		{"zero", "0"},
-		{"negative", "-1"},
+	cases := []struct {
+		name string
+		open int64
+	}{
+		{"zero", 0},
+		{"negative", -1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			//nolint:noctx // a bare GET on a test server needs no deadline
-			resp, err := http.Get(srv.URL + "/thread?id=" + tc.id)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, threadURL(srv.URL, tc.open), http.NoBody)
 			if err != nil {
-				t.Fatalf("GET /thread?id=%s: %v", tc.id, err)
+				t.Fatalf("new request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET /thread(open=%d): %v", tc.open, err)
 			}
 			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("GET /thread?id=%s status = %d, want 400", tc.id, resp.StatusCode)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET /thread(open=%d) status = %d, want 200", tc.open, resp.StatusCode)
+			}
+
+			r := bufio.NewReader(resp.Body)
+			frame := readFrame(t, r)
+			assertExactSSEFraming(t, frame)
+			if !strings.Contains(frame, `id="thread"`) {
+				t.Errorf("GET /thread(open=%d) frame missing #thread; got:\n%s", tc.open, frame)
 			}
 		})
+	}
+}
+
+// TestThreadRejectsMalformedSignalsWith400 proves handleThread validates the
+// datastar-encoded $open signal before it ever opens the SSE stream (design
+// section 6.9, "Console" fix 3): a "datastar" query parameter that is not
+// valid JSON fails ReadSignals and returns 400.
+func TestThreadRejectsMalformedSignalsWith400(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	resp, err := http.Get(srv.URL + "/thread?datastar=" + url.QueryEscape("{not valid json"))
+	if err != nil {
+		t.Fatalf("GET /thread: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /thread with malformed signals: status = %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -746,16 +879,86 @@ func TestAnswerRejectsOversizedBodyWith400(t *testing.T) {
 	filler := strings.Repeat("x", 16<<10) // far past the console's body size limit
 	body := fmt.Sprintf(`{"answer":{"ticket":1,"question":999999,"option":"a"},"filler":%q}`, filler)
 
-	//nolint:noctx // a bare POST on a test server needs no deadline
-	resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
-	}
+	resp := postAnswer(t, srv.URL, body)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("POST /answer with an oversized body: status = %d, want 400 (rejected before it could reach the store)", resp.StatusCode)
 	}
+}
+
+// TestAnswerCSRFGuard proves the same-origin guard on POST /answer (design
+// section "Console" fix 2, CWE-352): a cross-site request -- whether flagged
+// by a Sec-Fetch-Site value other than "same-origin" or "none", or by the
+// absence of the Datastar-Request header every real Datastar backend action
+// sends -- is rejected with 403 before it ever reaches the store, leaving
+// the question untouched; a normal same-origin Datastar POST still succeeds
+// with 204. Each rejected case seeds its own ticket and question, since a
+// wrongly accepted case would answer the question and corrupt a later
+// case's expectations.
+func TestAnswerCSRFGuard(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	postWithHeaders := func(t *testing.T, body string, headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/answer", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build POST /answer request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /answer: %v", err)
+		}
+		return resp
+	}
+
+	rejected := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"cross-site Sec-Fetch-Site", map[string]string{"Sec-Fetch-Site": "cross-site", "Datastar-Request": "true"}},
+		{"same-site Sec-Fetch-Site is not same-origin", map[string]string{"Sec-Fetch-Site": "same-site", "Datastar-Request": "true"}},
+		{"missing Datastar-Request header", map[string]string{}},
+	}
+	for i, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			ticketID := seedTicket(t, s, fmt.Sprintf("csrf-reject-%d", i), "CSRF guard fixture")
+			questionID := seedOpenQuestion(t, s, ticketID)
+			body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
+
+			resp := postWithHeaders(t, body, tc.headers)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("POST /answer status = %d, want 403", resp.StatusCode)
+			}
+
+			ticket, err := s.GetTicket(t.Context(), ticketID)
+			if err != nil {
+				t.Fatalf("GetTicket: %v", err)
+			}
+			if ticket.WaitingOn == nil || *ticket.WaitingOn != "questions" {
+				t.Errorf("ticket.WaitingOn after a rejected cross-site POST = %v, want unchanged \"questions\" (nothing answered)", ticket.WaitingOn)
+			}
+		})
+	}
+
+	t.Run("same-origin Datastar POST still succeeds", func(t *testing.T) {
+		ticketID := seedTicket(t, s, "csrf-accept", "CSRF guard fixture (accepted)")
+		questionID := seedOpenQuestion(t, s, ticketID)
+		body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
+
+		resp := postAnswer(t, srv.URL, body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("same-origin POST /answer status = %d, want 204", resp.StatusCode)
+		}
+	})
 }
 
 // TestNonStreamingRoutesSucceedUnderWriteDeadline proves the write-deadline
@@ -792,11 +995,7 @@ func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	}
 
 	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
-	//nolint:noctx // a bare POST on a test server needs no deadline
-	answerResp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
-	}
+	answerResp := postAnswer(t, srv.URL, body)
 	_ = answerResp.Body.Close()
 	if answerResp.StatusCode != http.StatusNoContent {
 		t.Errorf("POST /answer status = %d, want 204", answerResp.StatusCode)

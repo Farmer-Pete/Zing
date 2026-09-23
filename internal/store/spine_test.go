@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -271,6 +272,16 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 		if !wantCleared[id] {
 			t.Errorf("ExpireClaims returned unexpected id %d", id)
 		}
+	}
+	// Assert each expected id is actually present, not only that the set
+	// sizes match: a set-size check alone would not catch, for example, a
+	// bug that returned the expired id twice instead of the expired id and
+	// the boundary id.
+	if !slices.Contains(ids, expiredID) {
+		t.Errorf("ExpireClaims = %v, want it to contain the expired ticket id %d", ids, expiredID)
+	}
+	if !slices.Contains(ids, boundaryID) {
+		t.Errorf("ExpireClaims = %v, want it to contain the boundary ticket id %d", ids, boundaryID)
 	}
 
 	got, err := s.GetTicket(ctx, expiredID)

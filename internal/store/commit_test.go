@@ -601,7 +601,7 @@ func TestCommitHandlerResult_ResolveQuestionRejectsStillOpenQuestion(t *testing.
 		t.Errorf("question state = %v, want unchanged open (never resolved)", q.State)
 	}
 	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ?`, ticketID, msgTypeState); n != 0 {
-		t.Errorf("state messages after a rejected commit = %d, want 0 (whole tx rolled back)", n)
+		t.Errorf("state messages after a rejected commit = %d, want 0 (the rejected transition wrote no state message)", n)
 	}
 }
 

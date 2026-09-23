@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/starfederation/datastar-go/datastar"
@@ -31,7 +30,8 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	page, err := renderShell(tickets)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("console: render shell", "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
@@ -88,15 +88,30 @@ func (c *console) patchTickets(ctx context.Context, sse *datastar.ServerSentEven
 	return sse.PatchElements(fragment) == nil
 }
 
-// handleThread is the thread stream for one ticket: it patches #thread once
-// on connect and again on every bus wake, until the client disconnects or
-// Datastar cancels the previous request for a newly opened ticket (design
-// section 6.9). Cancellation runs the deferred cancel, so no subscriber
-// leaks.
+// threadSignals is the shape GET /thread reads from the client's $open
+// signal: the id of the open ticket, 0 meaning none (design section 6.9).
+// For a GET, Datastar sends signals JSON-encoded in the "datastar" query
+// parameter (datastar skill, go-sdk.md), so ReadSignals decodes from there
+// rather than from a query id.
+type threadSignals struct {
+	Open int64 `json:"open"`
+}
+
+// handleThread is the thread stream: it patches #thread once on connect and
+// again on every bus wake, until the client disconnects or Datastar cancels
+// the previous request for a newly opened ticket (design section 6.9). The
+// route itself is a STABLE url, "/thread", never "/thread?id=<n>": Datastar
+// keys requestCancellation (default "auto") by method and url, so a
+// per-ticket url would not cancel the prior stream when $open switches from
+// one ticket to another, leaving a stale stream that could patch #thread
+// with the wrong ticket's content. A constant url means every $open change
+// aborts the prior fetch first; cancellation runs the deferred cancel below,
+// so no subscriber leaks.
 func (c *console) handleThread(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	if err != nil || id <= 0 {
-		http.Error(w, "id must be a positive integer", http.StatusBadRequest)
+	var sig threadSignals
+	if err := datastar.ReadSignals(r, &sig); err != nil {
+		slog.Error("console: read thread signals", "err", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -110,7 +125,7 @@ func (c *console) handleThread(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := c.bus.Subscribe()
 	defer cancel()
 
-	if !c.patchThread(r.Context(), sse, id) {
+	if !c.patchThread(r.Context(), sse, sig.Open) {
 		return
 	}
 	for {
@@ -118,7 +133,7 @@ func (c *console) handleThread(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ch:
-			if !c.patchThread(r.Context(), sse, id) {
+			if !c.patchThread(r.Context(), sse, sig.Open) {
 				return
 			}
 		}
@@ -126,11 +141,17 @@ func (c *console) handleThread(w http.ResponseWriter, r *http.Request) {
 }
 
 // patchThread renders ticketID's messages and patches them into #thread. A
-// missing ticket renders a "not found" fragment rather than ending the
-// stream, since a not-yet-committed id is a client-timing issue, not a
-// stream failure. Any other store error ends the stream, matching
-// patchTickets.
+// non-positive ticketID (open == 0: no ticket is open, or the signal was
+// absent) renders an empty thread rather than looking anything up or
+// erroring, matching the design's "id<=0 means render nothing" guard (design
+// section 6.9). A missing ticket ID (positive, but no such row) renders a
+// "not found" fragment rather than ending the stream, since a
+// not-yet-committed id is a client-timing issue, not a stream failure. Any
+// other store error ends the stream, matching patchTickets.
 func (c *console) patchThread(ctx context.Context, sse *datastar.ServerSentEventGenerator, ticketID int64) bool {
+	if ticketID <= 0 {
+		return c.patchThreadFragment(sse, nil, nil)
+	}
 	ticket, err := c.store.GetTicket(ctx, ticketID)
 	switch {
 	case err == nil:
@@ -199,7 +220,8 @@ func (c *console) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 	var sig answerSignals
 	if err := datastar.ReadSignals(r, &sig); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		slog.Error("console: read answer signals", "err", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 

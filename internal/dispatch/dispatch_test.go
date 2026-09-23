@@ -580,6 +580,60 @@ func TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt(t *testing.T) {
 	}
 }
 
+// TestTick_ClaimExpirySurvivesSlowIntakeNotEatenByIt proves the claim expiry
+// (Deps.Expires, the same value that fences the eventual commit) is computed
+// from a fresh time.Now() taken after reconcile, intake, and count have
+// already run (design section "dispatch" fix 5, cubic P2), not the
+// tick-start now: a slow intake step must not shrink the lease's actual
+// coverage, measured from the moment the ticket is really claimed, below
+// timeout + claimGrace. planning's machine.toml timeout_minutes is 60;
+// claimGrace is 5m, so the claim window is ~65m.
+func TestTick_ClaimExpirySurvivesSlowIntakeNotEatenByIt(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	projectID := seedProject(t, s)
+	const intakeDelay = 300 * time.Millisecond
+	slow := &slowTracker{Tracker: newFixtureTracker(t), delay: intakeDelay}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name}}
+
+	spy := &spyHandler{next: testStateBuilding, reason: testReasonPlanReady}
+	reg := job.Registry()
+	reg[testStatePlanning] = spy
+
+	d := newDispatcher(t, s, slow, bus.New(), rt, reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	tickStart := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	afterTick := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+
+	// Were expires still computed from the tick-start now (the bug), it
+	// would sit at roughly tickStart+65m regardless of the slow intake. The
+	// fix takes a fresh time.Now() after intake, so expires must land at
+	// least intakeDelay later than that, with a safety margin well under
+	// intakeDelay so this assertion cannot pass by coincidence.
+	const margin = 100 * time.Millisecond
+	minExpires := tickStart.Add(65*time.Minute + intakeDelay - margin)
+	if spy.expires.Before(minExpires) {
+		t.Errorf("claim expiry = %v, want at least %v (computed after the %v slow intake, not at tick start)",
+			spy.expires, minExpires, intakeDelay)
+	}
+	maxExpires := afterTick.Add(66 * time.Minute)
+	if spy.expires.After(maxExpires) {
+		t.Errorf("claim expiry = %v, want at most %v", spy.expires, maxExpires)
+	}
+}
+
 // TestTick_HandlerErrorBeforeAStateChangeReleasesClaimAndLeavesState proves
 // a handler error is recoverable: the dispatcher logs it, releases the
 // claim with a fenced no-op commit, and leaves the ticket's state and wait
@@ -693,6 +747,73 @@ func TestTick_ReleaseClaimFailsClosedWhenLeaseAlreadyLost(t *testing.T) {
 	}
 	if !stopped {
 		t.Error("stopped flag = false, want true after fail-closed on the release path")
+	}
+}
+
+// --- post-handler writes survive a cancelled tick context (fix 4) --------
+
+// TestTick_PostHandlerCommitSurvivesCancelledTickContext proves the
+// post-handler commit runs under a detached, bounded context, not ctx
+// itself (design section "dispatch" fix 4): a handler that cancels the tick
+// context it was handed before returning its commit must still see that
+// commit land, since a cancelled handler context (or the drain sequence's
+// own force-cancel racing the same moment) must not be able to abort
+// recording what the runtime already did.
+func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reg := job.Registry()
+	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateBuilding, reason: testReasonPlanReady}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v, want nil (the commit must still land despite the cancelled tick context)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateBuilding {
+		t.Errorf("final ticket state = %q, want building (the post-handler commit must survive ctx's own cancellation)", final.State)
+	}
+}
+
+// TestTick_ReleaseClaimSurvivesCancelledTickContext proves the release
+// path's fenced no-op commit gets the same detached, bounded context (design
+// section "dispatch" fix 4): a handler that cancels the tick context before
+// returning a plain error must still see its claim released, rather than the
+// release write itself failing because ctx was already cancelled.
+func TestTick_ReleaseClaimSurvivesCancelledTickContext(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reg := job.Registry()
+	reg[testStateQueued] = &cancelingHandler{cancel: cancel, err: errors.New("boom: handler blew up after cancelling ctx")}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v, want nil (the claim release must still land despite the cancelled tick context)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released despite the cancelled tick context)", *final.ClaimOwner)
 	}
 }
 
@@ -866,6 +987,29 @@ func TestRun_NotifyDrainReturnsPromptly(t *testing.T) {
 }
 
 // --- test doubles ----------------------------------------------------------
+
+// cancelingHandler is a job.Handler test double that cancels a captured
+// context.CancelFunc from inside Run, simulating the tick context becoming
+// cancelled (a drain force-cancel racing the exact moment the handler
+// finishes) right before the post-handler store writes run, then returns
+// either a fixed, valid commit (next/reason set) or a plain error (err set).
+// It exercises dispatch fix 4's detached, bounded post-handler context on
+// both the commit path (TestTick_PostHandlerCommitSurvivesCancelledTickContext)
+// and the release path (TestTick_ReleaseClaimSurvivesCancelledTickContext).
+type cancelingHandler struct {
+	cancel context.CancelFunc
+
+	next, reason string
+	err          error
+}
+
+func (h *cancelingHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	h.cancel()
+	if h.err != nil {
+		return store.HandlerCommit{}, h.err
+	}
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: h.next, Reason: h.reason}, nil
+}
 
 // spyHandler is a job.Handler test double: it records every call, its
 // context's deadline, and the claim it was handed, and either returns err or

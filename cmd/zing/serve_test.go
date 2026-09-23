@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -659,8 +660,10 @@ func TestConsoleBindAddr(t *testing.T) {
 }
 
 // TestDispatchInterval covers dispatchInterval directly: a positive
-// interval_seconds converts straight to seconds, and zero or negative
-// clamps to defaultDispatchInterval.
+// interval_seconds converts straight to seconds, zero or negative clamps to
+// defaultDispatchInterval, and a value large enough to overflow a
+// time.Duration also clamps to defaultDispatchInterval instead of wrapping
+// around and panicking time.NewTicker (cubic P1).
 func TestDispatchInterval(t *testing.T) {
 	t.Parallel()
 
@@ -672,6 +675,14 @@ func TestDispatchInterval(t *testing.T) {
 		{name: "positive", seconds: 5, want: 5 * time.Second},
 		{name: "zero clamps to default", seconds: 0, want: defaultDispatchInterval},
 		{name: "negative clamps to default", seconds: -1, want: defaultDispatchInterval},
+		{
+			name:    "just under the overflow bound converts straight through",
+			seconds: int(maxDispatchIntervalSeconds), want: time.Duration(maxDispatchIntervalSeconds) * time.Second,
+		},
+		{
+			name:    "huge value overflowing a time.Duration clamps to default",
+			seconds: math.MaxInt64, want: defaultDispatchInterval,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

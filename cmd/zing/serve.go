@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -318,18 +319,33 @@ func consoleBindAddr(cfg config.Console) (string, error) {
 	return net.JoinHostPort(cfg.Bind[0], strconv.Itoa(cfg.Port)), nil
 }
 
+// maxDispatchIntervalSeconds is the largest interval_seconds value that
+// time.Duration(seconds) * time.Second cannot overflow an int64 nanosecond
+// count (cubic P1): dispatchInterval passes its result straight to
+// time.NewTicker inside the dispatcher's goroutine, so a value above this
+// would wrap around to a bogus (often negative) duration and panic it.
+const maxDispatchIntervalSeconds = math.MaxInt64 / int64(time.Second)
+
 // dispatchInterval returns the dispatcher's tick interval for a configured
 // dispatch.interval_seconds, clamping a non-positive value (zero or
-// negative, whether from an explicit zing.toml entry or an unset field) to
-// defaultDispatchInterval. Passed straight through to time.Ticker, a
-// non-positive interval would otherwise panic.
+// negative, whether from an explicit zing.toml entry or an unset field) and
+// a value large enough to overflow a time.Duration
+// (maxDispatchIntervalSeconds) to defaultDispatchInterval. Passed straight
+// through to time.Ticker, either an out-of-range value would otherwise
+// panic it.
 func dispatchInterval(seconds int) time.Duration {
-	if seconds <= 0 {
+	switch {
+	case seconds <= 0:
 		slog.Warn("dispatch.interval_seconds is not positive, using the default",
 			"interval_seconds", seconds, "default_seconds", int(defaultDispatchInterval.Seconds()))
 		return defaultDispatchInterval
+	case int64(seconds) > maxDispatchIntervalSeconds:
+		slog.Warn("dispatch.interval_seconds overflows a time.Duration, using the default",
+			"interval_seconds", seconds, "default_seconds", int(defaultDispatchInterval.Seconds()))
+		return defaultDispatchInterval
+	default:
+		return time.Duration(seconds) * time.Second
 	}
-	return time.Duration(seconds) * time.Second
 }
 
 // dispatchMaxParallel returns the dispatcher's max-parallel guard for a
