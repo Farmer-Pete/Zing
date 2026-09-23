@@ -113,7 +113,7 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 
 	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort, newTestLogHandler(t)))
+	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
@@ -181,7 +181,7 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort, newTestLogHandler(t)))
+	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)

@@ -2,10 +2,10 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +30,10 @@ type Console struct {
 	Bind      []string `toml:"bind"`
 	Port      int      `toml:"port"`
 	PushToken string   `toml:"push_token"`
+	// AllowedHosts extends the mutation middleware's Host allowlist (design
+	// section 6.14) with hostnames the middleware cannot derive on its own,
+	// such as a tailnet DNS name: bare hostnames, no port. Empty by default.
+	AllowedHosts []string `toml:"allowed_hosts"`
 }
 
 type Models struct {
@@ -95,7 +99,13 @@ var (
 
 // Load reads and validates the zing.toml at path, in this exact order so the
 // first reported error is deterministic: decode, unknown-key check,
-// missing-required check, value checks, defaults, then push-token generation.
+// missing-required check, value checks, then defaults. Console.PushToken is
+// left empty when zing.toml omits it (design section 6.13): cmd/zing/serve.go
+// is the one place that resolves the effective bearer token, since only it
+// can tell an explicit zing.toml value apart from a value that needs to be
+// generated once and persisted to settings.push_token for stability across
+// restarts -- a distinction a value regenerated fresh on every Load call
+// could not preserve.
 func Load(path string) (*Config, error) {
 	var cfg Config
 	md, err := toml.DecodeFile(path, &cfg)
@@ -114,14 +124,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(md, &cfg)
-
-	if cfg.Console.PushToken == "" {
-		token, err := generatePushToken()
-		if err != nil {
-			return nil, fmt.Errorf("zing.toml: generate push token: %w", err)
-		}
-		cfg.Console.PushToken = token
-	}
 
 	return &cfg, nil
 }
@@ -185,9 +187,46 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("console", "port") && (cfg.Console.Port < 1 || cfg.Console.Port > 65535) {
 		return errors.New("zing.toml: console.port: must be 1 to 65535")
 	}
+	if err := checkBindAddresses(cfg.Console.Bind); err != nil {
+		return err
+	}
+	if err := checkAllowedHosts(cfg.Console.AllowedHosts); err != nil {
+		return err
+	}
 	if md.IsDefined("budget", "usage_hold_percent") &&
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
+	}
+	return nil
+}
+
+// checkBindAddresses rejects a wildcard console.bind entry (design section
+// 6.14: "netip.Addr.IsUnspecified, that is 0.0.0.0 or ::"), because a
+// wildcard listener has no single browser Host authority and the no-login
+// console must bind concrete addresses only. A "tailscale" token, or any
+// other entry that does not parse as an IP at all, is left for cmd/zing's
+// resolver to handle and is not an error here.
+func checkBindAddresses(bind []string) error {
+	for _, b := range bind {
+		addr, err := netip.ParseAddr(b)
+		if err != nil {
+			continue
+		}
+		if addr.IsUnspecified() {
+			return errors.New("zing.toml: console.bind: wildcard address not allowed")
+		}
+	}
+	return nil
+}
+
+// checkAllowedHosts rejects a console.allowed_hosts entry that carries a
+// port (design section 6.14: "allowed_hosts entries are hostnames without a
+// port, validated at config load").
+func checkAllowedHosts(hosts []string) error {
+	for i, h := range hosts {
+		if _, _, err := net.SplitHostPort(h); err == nil {
+			return fmt.Errorf("zing.toml: console.allowed_hosts[%d]: must not include a port", i)
+		}
 	}
 	return nil
 }
@@ -241,12 +280,4 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 			cfg.Projects[i].Intake.AssignedTo = cfg.User
 		}
 	}
-}
-
-func generatePushToken() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("read random bytes: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

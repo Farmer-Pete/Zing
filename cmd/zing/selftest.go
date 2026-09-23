@@ -185,7 +185,7 @@ func selftestE2E(ctx context.Context) error {
 	// requires is a throwaway one over a discarded sink, not the process's
 	// installed default (run's own, serve.go).
 	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar))
-	consoleHandler := console.New(st, b, m, e2eConsoleHost, e2eConsolePort, logHandler)
+	consoleHandler := console.New(st, b, m, []string{e2eConsoleHost}, e2eConsolePort, logHandler, nil, e2ePushToken)
 
 	var ticketID int64
 	var answered int
@@ -236,6 +236,9 @@ func selftestE2E(ctx context.Context) error {
 const (
 	e2eConsoleHost = "127.0.0.1"
 	e2eConsolePort = 7420
+	// e2ePushToken is never checked: this suite never calls /push/key or
+	// /push/subscribe, so any value satisfies console.New's signature.
+	e2ePushToken = "selftest-e2e-push-token" //nolint:gosec // not a credential: a fixed placeholder no route in this suite ever checks
 )
 
 // answerOpenQuestions answers every question ticketID has open, each with

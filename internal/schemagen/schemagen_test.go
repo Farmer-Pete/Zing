@@ -16,21 +16,23 @@ var update = flag.Bool("update", false, "update the committed schema files in in
 
 const schemaDir = "../store/schemas"
 
-func TestRegistry_Has16Entries(t *testing.T) {
+func TestRegistry_Has17Entries(t *testing.T) {
 	t.Parallel()
 
 	entries := Registry()
-	if len(entries) != 16 {
-		t.Fatalf("len(Registry()) = %d, want 16", len(entries))
+	if len(entries) != 17 {
+		t.Fatalf("len(Registry()) = %d, want 17", len(entries))
 	}
 
-	var messages, artifacts int
+	var messages, artifacts, pushSubscriptions int
 	for _, e := range entries {
 		switch e.Table {
 		case "messages":
 			messages++
 		case "artifacts":
 			artifacts++
+		case "push_subscriptions":
+			pushSubscriptions++
 		default:
 			t.Errorf("unexpected table %q for %s", e.Table, e.Name)
 		}
@@ -40,6 +42,9 @@ func TestRegistry_Has16Entries(t *testing.T) {
 	}
 	if artifacts != 12 {
 		t.Errorf("artifacts entries = %d, want 12", artifacts)
+	}
+	if pushSubscriptions != 1 {
+		t.Errorf("push_subscriptions entries = %d, want 1", pushSubscriptions)
 	}
 }
 

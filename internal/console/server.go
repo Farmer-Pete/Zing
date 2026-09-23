@@ -66,12 +66,16 @@ var keysJSON []byte
 // does not exercise the rail passes one) renders no phase dots rather than
 // panicking (rail.go's buildPhaseRail); log has no such nil case, since
 // every caller of New, including every test, now builds one (design
-// section 12, Task 10).
+// section 12, Task 10). push and pushToken back GET /push/key and POST
+// /push/subscribe (push.go, design section 6.13): push is nilable the same
+// way machine is, for a test that never exercises those two routes.
 type console struct {
-	store   *store.Store
-	bus     *bus.Broker
-	machine *machine.Machine
-	log     *Handler
+	store     *store.Store
+	bus       *bus.Broker
+	machine   *machine.Machine
+	log       *Handler
+	push      PushKeys
+	pushToken string
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -84,6 +88,8 @@ type console struct {
 //	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
+//	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
+//	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle
 //	GET  /static/mermaid.js     the vendored mermaid bundle
 //	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
@@ -94,10 +100,10 @@ type console struct {
 // section 5, 12): every other path, including console.test.js, package.json,
 // and ASSETS.md, has no registered route and so 404s from the mux itself.
 //
-// bindHost and port build the mutation guard's Host allowlist (mw.go,
-// design section 6.14): for this task, bindHost plus localhost and
-// 127.0.0.1, each at port. Task 11 widens the source to every resolved bind
-// authority plus Console.AllowedHosts, still through this same guard.
+// hosts and port build the mutation guard's Host allowlist (mw.go, design
+// section 6.14): every entry in hosts, plus localhost and 127.0.0.1, each
+// at port. cmd/zing/serve.go builds hosts from every resolved console.bind
+// authority plus Console.AllowedHosts (design section 6.14, Task 11).
 //
 // log is the Task 5 slog.Handler (log.go): cmd/zing builds it, seeds its
 // LevelVar from settings.log_level, and installs it as slog's default
@@ -105,12 +111,16 @@ type console struct {
 // same instance backs both the process's own logging and the console's
 // live level control, per-ticket debug toggle, and Log rail tail.
 //
+// push and pushToken back GET /push/key and POST /push/subscribe (push.go,
+// design section 6.13): push may be nil for a caller (most tests) that
+// never exercises those two routes.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, port int, log *Handler) http.Handler {
-	c := &console{store: st, bus: b, machine: m, log: log}
-	guard := newMutationGuard(port, bindHost, "localhost", "127.0.0.1")
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string) http.Handler {
+	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken}
+	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
@@ -121,6 +131,8 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, po
 	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
+	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
+	mux.HandleFunc("POST /push/subscribe", withWriteDeadline(guard.requireSameOrigin(c.handlePushSubscribe)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))

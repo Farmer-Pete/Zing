@@ -9,6 +9,10 @@ import (
 
 const testUser = "peter"
 
+// wantWildcardBindError is the exact error checkBindAddresses returns for a
+// wildcard console.bind entry (config.go, design section 6.14).
+const wantWildcardBindError = "zing.toml: console.bind: wildcard address not allowed"
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -46,7 +50,9 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		Console: Console{
 			Bind: []string{"127.0.0.1", "tailscale"},
 			Port: 7420,
-			// PushToken is randomly generated; checked separately below.
+			// PushToken defaults to empty: cmd/zing/serve.go resolves and
+			// persists the effective token (design section 6.13), not Load.
+			// AllowedHosts defaults to empty too.
 		},
 		Models: Models{
 			Sonnet: "claude-sonnet-5",
@@ -73,17 +79,8 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 	}
 
-	if cfg.Console.PushToken == "" {
-		t.Error("Console.PushToken was not generated")
-	}
-	gotToken := cfg.Console.PushToken
-	cfg.Console.PushToken = ""
-
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
-	}
-	if len(gotToken) < 32 {
-		t.Errorf("Console.PushToken = %q, too short for 32 random bytes base64-encoded", gotToken)
 	}
 }
 
@@ -97,6 +94,7 @@ user = "peter"
 bind = ["127.0.0.1"]
 port = 8080
 push_token = "explicit-token"
+allowed_hosts = ["example.tailnet", "another.example"]
 
 [models]
 sonnet = "custom-sonnet"
@@ -143,9 +141,10 @@ lint = "golangci-lint run"
 	want := &Config{
 		User: testUser,
 		Console: Console{
-			Bind:      []string{"127.0.0.1"},
-			Port:      8080,
-			PushToken: "explicit-token",
+			Bind:         []string{"127.0.0.1"},
+			Port:         8080,
+			PushToken:    "explicit-token",
+			AllowedHosts: []string{"example.tailnet", "another.example"},
 		},
 		Models: Models{
 			Sonnet: "custom-sonnet",
@@ -174,6 +173,31 @@ lint = "golangci-lint run"
 
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
+	}
+}
+
+// TestLoad_AllowedHostsParsesAndDefaultsEmpty proves design section 6.14's
+// console.allowed_hosts is nil (empty) by default and parses to a plain
+// string slice when set.
+func TestLoad_AllowedHostsParsesAndDefaultsEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Console.AllowedHosts) != 0 {
+		t.Errorf("Console.AllowedHosts = %v, want empty by default", cfg.Console.AllowedHosts)
+	}
+
+	const withHosts = minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet\", \"box.local\"]\n"
+	cfg, err = Load(writeTOML(t, withHosts))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"example.tailnet", "box.local"}
+	if !reflect.DeepEqual(cfg.Console.AllowedHosts, want) {
+		t.Errorf("Console.AllowedHosts = %v, want %v", cfg.Console.AllowedHosts, want)
 	}
 }
 
@@ -319,6 +343,26 @@ lint = "golangci-lint run"
 			name: "bad budget.usage_hold_percent",
 			body: minimalValidTOML + "\n[budget]\nusage_hold_percent = 150\n",
 			want: "zing.toml: budget.usage_hold_percent: must be 0 to 100",
+		},
+		{
+			name: "wildcard bind IPv4",
+			body: minimalValidTOML + "\n[console]\nbind = [\"0.0.0.0\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "wildcard bind IPv6",
+			body: minimalValidTOML + "\n[console]\nbind = [\"::\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "wildcard bind among other entries",
+			body: minimalValidTOML + "\n[console]\nbind = [\"127.0.0.1\", \"0.0.0.0\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "allowed_hosts entry with a port",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet:7420\"]\n",
+			want: "zing.toml: console.allowed_hosts[0]: must not include a port",
 		},
 	}
 

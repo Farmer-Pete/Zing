@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +25,7 @@ import (
 	zdispatch "zing/internal/dispatch"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/notify"
 	"zing/internal/runtime"
 	"zing/internal/store"
 	"zing/internal/tracker"
@@ -79,9 +82,16 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		return err
 	}
 
-	bindAddr, err := consoleBindAddr(cfg.Console)
-	if err != nil {
-		return err
+	// Resolved before store.Open, so a console.bind that resolves to no
+	// address at all fails before any database file is created (design
+	// section 6.14; matches the single-bind skeleton's own
+	// consoleBindAddr, which this replaces). A literal IP passes straight
+	// through; "tailscale" resolves CLI-first, falling back to an
+	// interface scan, and is skipped -- not an error -- when it cannot
+	// resolve (bind.go).
+	hosts := resolveBindHosts(ctx, cfg.Console.Bind, runTailscaleCLI, realTailscaleInterfaces)
+	if len(hosts) == 0 {
+		return fmt.Errorf("zing.toml: console.bind: no address could be resolved from %v", cfg.Console.Bind)
 	}
 
 	st, err := store.Open(ctx, dbPath)
@@ -167,11 +177,44 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		close(dispDone)
 	}()
 
-	srv := newServer(ctx, bindAddr, console.New(st, b, m, cfg.Console.Bind[0], cfg.Console.Port, logHandler))
+	// The bearer token GET /push/key and POST /push/subscribe check (design
+	// section 6.13): an explicit console.push_token always wins; otherwise
+	// the token persisted from an earlier run (or generated and persisted
+	// now, on the very first run) is reused, so it is stable across
+	// restarts.
+	pushToken, err := resolvePushToken(ctx, st, cfg.Console.PushToken)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	push := notify.New(st)
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("starting", "addr", bindAddr)
+	// The mutation guard's Host allowlist (mw.go, design section 6.14):
+	// every resolved bind authority plus every configured
+	// console.allowed_hosts entry; console.New itself adds localhost and
+	// 127.0.0.1 at the console port.
+	allowedHosts := make([]string, 0, len(hosts)+len(cfg.Console.AllowedHosts))
+	allowedHosts = append(allowedHosts, hosts...)
+	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
+
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken)
+	srv := newServer(ctx, handler)
+
+	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	// One srv.Serve(ln) goroutine per resolved listener (design section
+	// 6.14: "One http.Server with one mux serves every resolved listener
+	// through a srv.Serve(ln) goroutine each"). srv.Shutdown, below, closes
+	// every listener registered this way on the same *http.Server.
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func(ln net.Listener) { errCh <- srv.Serve(ln) }(ln)
+	}
+	slog.Info("starting", "hosts", hosts, "port", cfg.Console.Port)
 
 	// dispTriggered records whether the dispatcher's own goroutine is what
 	// ended this select, as opposed to a normal signal (ctx.Done()) or an
@@ -182,14 +225,83 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 	// report.
 	var serveErr error
 	var dispTriggered bool
+	var consumedFromErrCh bool
 	select {
 	case serveErr = <-errCh:
+		consumedFromErrCh = true
 	case <-ctx.Done():
 	case <-dispDone:
 		dispTriggered = true
 	}
 
-	return shutdown(ctx, st, srv, d, errCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+}
+
+// listenOnAll opens one TCP listener per host in hosts, each at port. On
+// any failure it closes every listener already opened before returning the
+// error, so a mid-list bind failure leaks no socket.
+func listenOnAll(ctx context.Context, hosts []string, port int) ([]net.Listener, error) {
+	listeners := make([]net.Listener, 0, len(hosts))
+	for _, host := range hosts {
+		var lc net.ListenConfig
+		ln, err := lc.Listen(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			for _, opened := range listeners {
+				_ = opened.Close()
+			}
+			return nil, fmt.Errorf("listen on %s:%d: %w", host, port, err)
+		}
+		listeners = append(listeners, ln)
+	}
+	return listeners, nil
+}
+
+// resolvePushToken resolves the console's bearer token for GET /push/key
+// and POST /push/subscribe (design section 6.13): an explicitly configured
+// console.push_token always wins, so rotating it in zing.toml takes effect
+// on the next restart; otherwise the token persisted in settings.push_token
+// from an earlier run is reused, and when neither exists yet (the very
+// first run, with no explicit token) a fresh one is generated and persisted
+// once, so it is then stable across every later restart. config.Load never
+// invents a token of its own (internal/config/config.go), which is what
+// makes "explicit" and "generated" distinguishable here: configured is
+// empty unless zing.toml set console.push_token.
+func resolvePushToken(ctx context.Context, st *store.Store, configured string) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+
+	stored, ok, err := st.GetSetting(ctx, settingPushToken)
+	if err != nil {
+		return "", fmt.Errorf("get %s setting: %w", settingPushToken, err)
+	}
+	if ok && stored != "" {
+		return stored, nil
+	}
+
+	token, err := generateBearerToken()
+	if err != nil {
+		return "", fmt.Errorf("generate push token: %w", err)
+	}
+	if err := st.SetSettings(ctx, settingPushToken, token); err != nil {
+		return "", fmt.Errorf("persist push token: %w", err)
+	}
+	return token, nil
+}
+
+// settingPushToken is the settings.key resolvePushToken persists a
+// generated token under (design section 6.13, 14: "settings.push_token").
+const settingPushToken = "push_token"
+
+// generateBearerToken returns a fresh random bearer token, 32 bytes of
+// crypto/rand encoded as base64url (the same shape
+// internal/config's now-removed generatePushToken used).
+func generateBearerToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // shutdown runs the drain-then-close sequence (design section 6.10 step
@@ -205,7 +317,8 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 // *dispatch.Dispatcher; so does shutdown_test.go, which drives it directly.
 func shutdown(
 	ctx context.Context, st *store.Store, srv *http.Server, d *zdispatch.Dispatcher,
-	errCh <-chan error, serveErr error, dispTriggered bool, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
+	errCh <-chan error, listenerCount int, consumedFromErrCh bool,
+	serveErr error, dispTriggered bool, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
 ) error {
 	err := drainAndShutdown(
 		ctx, drainDeadline,
@@ -243,8 +356,18 @@ func shutdown(
 	if serveErr == nil {
 		serveErr = err
 	}
-	if serveErr == nil {
-		if e := <-errCh; e != nil && !errors.Is(e, http.ErrServerClosed) {
+	// Every srv.Serve(ln) goroutine (one per resolved listener) sends its
+	// own return value to errCh; the outer select above already consumed
+	// one of them when consumedFromErrCh is true. Drain the rest here, so
+	// none of those goroutines blocks forever on a full send, and keep the
+	// first error that is not the expected http.ErrServerClosed a clean
+	// Shutdown produces.
+	remaining := listenerCount
+	if consumedFromErrCh {
+		remaining--
+	}
+	for range remaining {
+		if e := <-errCh; e != nil && !errors.Is(e, http.ErrServerClosed) && serveErr == nil {
 			serveErr = e
 		}
 	}
@@ -339,24 +462,6 @@ func installLogHandler(ctx context.Context, st *store.Store) (*console.Handler, 
 	return h, nil
 }
 
-// consoleBindAddr validates cfg.Console.Bind and returns the address to
-// listen on: host from the first entry, joined with cfg.Console.Port. An
-// empty Bind list would otherwise panic net.JoinHostPort(cfg.Console.Bind[0],
-// ...) below, so that case is rejected here instead. This skeleton binds one
-// loopback address; a configured Bind longer than one entry (for example the
-// tailnet address a later package adds) is not an error, but only its first
-// entry is used, so the rest are logged rather than silently ignored.
-func consoleBindAddr(cfg config.Console) (string, error) {
-	if len(cfg.Bind) == 0 {
-		return "", errors.New("zing.toml: console.bind: must have at least one address")
-	}
-	if len(cfg.Bind) > 1 {
-		slog.Warn("console.bind has more than one address; only the first is bound, the rest are deferred to a later package",
-			"bind", cfg.Bind, "using", cfg.Bind[0])
-	}
-	return net.JoinHostPort(cfg.Bind[0], strconv.Itoa(cfg.Port)), nil
-}
-
 // maxDispatchIntervalSeconds is the largest interval_seconds value that
 // time.Duration(seconds) * time.Second cannot overflow an int64 nanosecond
 // count (cubic P1): dispatchInterval passes its result straight to
@@ -449,10 +554,9 @@ func claimOwner() string {
 // WriteTimeout stays unset on purpose: SSE handlers hold the connection
 // open. Non-streaming routes should bound writes with http.ResponseController
 // instead.
-func newServer(ctx context.Context, addr string, handler http.Handler) *http.Server {
+func newServer(ctx context.Context, handler http.Handler) *http.Server {
 	drainCtx, drain := context.WithCancel(context.WithoutCancel(ctx))
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,

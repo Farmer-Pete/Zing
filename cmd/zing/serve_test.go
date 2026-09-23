@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"zing/internal/config"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -611,11 +610,13 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 	}
 }
 
-// TestServe_UsesFirstOfMultipleConsoleBinds proves that a console.bind with
-// more than one entry does not error or panic: serve binds the first entry
-// only (the second, "198.51.100.1", is TEST-NET-2, reserved and never
-// dialed) and still serves normally.
-func TestServe_UsesFirstOfMultipleConsoleBinds(t *testing.T) {
+// TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry
+// proves multi-bind (design section 6.14, Task 11): serve binds every
+// literal console.bind entry (not only the first, unlike the single-bind
+// skeleton TestConsoleBindAddr used to cover), and a "tailscale" entry that
+// cannot resolve in this sandboxed test environment (no tailscale CLI, no
+// matching interface) is skipped rather than failing serve.
+func TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -624,7 +625,7 @@ func TestServe_UsesFirstOfMultipleConsoleBinds(t *testing.T) {
 
 	port := freeLoopbackPort(t)
 	writeZingTOML(t, cfgPath, zingTOMLOpts{
-		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback, "198.51.100.1"},
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback, bindTokenTailscale},
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -637,43 +638,11 @@ func TestServe_UsesFirstOfMultipleConsoleBinds(t *testing.T) {
 	cancelAndWaitForServe(t, cancel, serveDone)
 }
 
-// TestConsoleBindAddr covers consoleBindAddr directly: an empty Bind errors,
-// a single entry joins with the port, and more than one entry uses only the
-// first (a warning is logged for the rest, not asserted here).
-func TestConsoleBindAddr(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		bind    []string
-		port    int
-		want    string
-		wantErr bool
-	}{
-		{name: "empty", bind: nil, port: 7420, wantErr: true},
-		{name: "single", bind: []string{loopback}, port: 7420, want: "127.0.0.1:7420"},
-		{name: "multiple uses first", bind: []string{loopback, "100.64.0.1"}, port: 7420, want: "127.0.0.1:7420"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := consoleBindAddr(config.Console{Bind: tc.bind, Port: tc.port})
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("consoleBindAddr(%v) error = nil, want an error", tc.bind)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("consoleBindAddr(%v): %v", tc.bind, err)
-			}
-			if got != tc.want {
-				t.Errorf("consoleBindAddr(%v) = %q, want %q", tc.bind, got, tc.want)
-			}
-		})
-	}
-}
+// TestResolveBindHosts_EmptyTokensResolvesToNoHosts and the config-level
+// wildcard/allowed_hosts checks cover the rest of multi-bind resolution
+// directly (bind_test.go, internal/config/config_test.go); serve's own
+// "no address resolved" error path is covered by
+// TestServe_ErrorsOnEmptyConsoleBind above.
 
 // TestDispatchInterval covers dispatchInterval directly: a positive
 // interval_seconds converts straight to seconds, zero or negative clamps to
@@ -775,5 +744,49 @@ func TestDispatchFailure(t *testing.T) {
 				t.Errorf("dispatchFailure(%v, %v) = %v, want it to wrap %v", tc.dispTriggered, tc.de, got, boom)
 			}
 		})
+	}
+}
+
+// TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured
+// proves the design section 6.13 precedence rule end to end against a real
+// store: with no explicit console.push_token, the first call generates and
+// persists a token that a second call (simulating a restart, with the same
+// empty configured value) reuses unchanged; an explicit configured value on
+// a later call always wins and overrides what was persisted, "rotating it
+// in zing.toml" the way the design names.
+func TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured(t *testing.T) {
+	t.Parallel()
+
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	first, err := resolvePushToken(t.Context(), st, "")
+	if err != nil {
+		t.Fatalf("resolvePushToken (first, generated): %v", err)
+	}
+	if first == "" {
+		t.Fatal("resolvePushToken (first) = \"\", want a generated token")
+	}
+
+	// A second call with no explicit config, simulating a restart: must
+	// reuse the persisted token, not generate a new one.
+	second, err := resolvePushToken(t.Context(), st, "")
+	if err != nil {
+		t.Fatalf("resolvePushToken (second, after restart): %v", err)
+	}
+	if second != first {
+		t.Errorf("resolvePushToken (after restart) = %q, want the same persisted token (%q)", second, first)
+	}
+
+	// An explicit config value always wins and rotates the effective token.
+	explicit, err := resolvePushToken(t.Context(), st, "my-explicit-token")
+	if err != nil {
+		t.Fatalf("resolvePushToken (explicit): %v", err)
+	}
+	if explicit != "my-explicit-token" {
+		t.Errorf("resolvePushToken (explicit) = %q, want my-explicit-token", explicit)
 	}
 }

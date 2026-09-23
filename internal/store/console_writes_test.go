@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -581,5 +583,78 @@ func TestSetSettings_RejectsOddArgumentCount(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.SetSettings(t.Context(), "log_level"); err == nil {
 		t.Error("SetSettings with an odd argument count: err = nil, want an error")
+	}
+}
+
+// pushKeysJSON builds a valid {p256dh, auth} keys_json payload for
+// UpsertPushSubscription's tests.
+func pushKeysJSON(p256dh, auth string) []byte {
+	return []byte(`{"p256dh":` + strconv.Quote(p256dh) + `,"auth":` + strconv.Quote(auth) + `}`)
+}
+
+// TestUpsertPushSubscription_InsertsThenReplacesByEndpoint proves the design
+// section 6.13 upsert: a first call inserts, and a second call for the same
+// endpoint replaces its keys_json in place, so a re-subscribe is idempotent
+// rather than leaving two rows.
+func TestUpsertPushSubscription_InsertsThenReplacesByEndpoint(t *testing.T) {
+	s := newTestStore(t)
+	const endpoint = "https://push.example/abc"
+
+	if err := s.UpsertPushSubscription(t.Context(), PushSubscription{
+		Endpoint: endpoint, KeysJSON: pushKeysJSON("p256dh-one", "auth-one"),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (insert): %v", err)
+	}
+	if err := s.UpsertPushSubscription(t.Context(), PushSubscription{
+		Endpoint: endpoint, KeysJSON: pushKeysJSON("p256dh-two", "auth-two"),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (replace): %v", err)
+	}
+
+	var count int
+	var keysJSON string
+	row := s.db.QueryRowContext(t.Context(), `SELECT COUNT(*), MAX(keys_json) FROM push_subscriptions WHERE endpoint = ?`, endpoint)
+	if err := row.Scan(&count, &keysJSON); err != nil {
+		t.Fatalf("query push_subscriptions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("push_subscriptions rows for %s = %d, want 1 (replaced, not duplicated)", endpoint, count)
+	}
+	if !strings.Contains(keysJSON, "p256dh-two") {
+		t.Errorf("keys_json = %s, want the replaced value", keysJSON)
+	}
+}
+
+// TestUpsertPushSubscription_RejectsKeysMissingRequiredFields proves
+// keys_json is validated against the push_subscriptions/keys schema: a
+// payload missing p256dh or auth is rejected and writes nothing.
+func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
+	s := newTestStore(t)
+
+	tests := []struct {
+		name string
+		keys []byte
+	}{
+		{name: "missing p256dh", keys: []byte(`{"auth":"auth-one"}`)},
+		{name: "missing auth", keys: []byte(`{"p256dh":"p256dh-one"}`)},
+		{name: "unknown key", keys: []byte(`{"p256dh":"a","auth":"b","extra":"c"}`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.UpsertPushSubscription(t.Context(), PushSubscription{
+				Endpoint: "https://push.example/" + tc.name, KeysJSON: tc.keys,
+			})
+			if err == nil {
+				t.Fatal("UpsertPushSubscription: err = nil, want a schema validation error")
+			}
+		})
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM push_subscriptions`).Scan(&count); err != nil {
+		t.Fatalf("count push_subscriptions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("push_subscriptions row count = %d, want 0 (nothing written on a rejected payload)", count)
 	}
 }

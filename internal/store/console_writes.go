@@ -693,6 +693,35 @@ func (s *Store) SetSettings(ctx context.Context, kvs ...string) error {
 	return nil
 }
 
+// PushSubscription is one push_subscriptions row to upsert (design section
+// 6.13): Endpoint is the subscription's https URL, validated by the console
+// handler (push.go), not here, because the endpoint is its own column and a
+// keys_json schema cannot see it; KeysJSON is the serialized {p256dh, auth}
+// object, validated here against push_subscriptions/keys.
+type PushSubscription struct {
+	Endpoint string
+	KeysJSON []byte
+}
+
+// UpsertPushSubscription validates sub.KeysJSON against the
+// push_subscriptions/keys schema, then inserts or replaces sub by its
+// unique Endpoint (design section 6.13: "It replaces by endpoint, so a
+// re-subscribe is idempotent"), migrations/0001_init.sql's own UNIQUE
+// constraint on push_subscriptions.endpoint backing the upsert.
+func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription) error {
+	if err := s.schemas.validate("push_subscriptions", "keys", sub.KeysJSON); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO push_subscriptions (endpoint, keys_json) VALUES (?, ?)
+		 ON CONFLICT(endpoint) DO UPDATE SET keys_json = excluded.keys_json`,
+		sub.Endpoint, string(sub.KeysJSON),
+	); err != nil {
+		return fmt.Errorf("upsert push subscription: %w", err)
+	}
+	return nil
+}
+
 // MarkRead sets messageID's read_at to now (design section 6.8).
 func (s *Store) MarkRead(ctx context.Context, messageID int64) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE messages SET read_at = ? WHERE id = ?`, formatTime(time.Now()), messageID)

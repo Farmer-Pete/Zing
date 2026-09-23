@@ -32,7 +32,7 @@ func TestShutdownCancelsRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(t.Context(), ln.Addr().String(), mux)
+	srv := newServer(t.Context(), mux)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 

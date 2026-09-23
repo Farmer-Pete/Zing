@@ -39,7 +39,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *con
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, "127.0.0.1", port, log)
+	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -48,6 +48,122 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *con
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv, port
+}
+
+// newMutationTestServerWithHosts is newMutationTestServer with additional
+// entries in the mutation guard's Host allowlist, beyond the always-added
+// "127.0.0.1" and "localhost" (design section 6.14, Task 11: the allowlist
+// is built from every resolved bind authority plus Console.AllowedHosts).
+// Every test below that needs a non-loopback literal, an IPv6 authority, or
+// a configured DNS alias to pass builds its server through this helper.
+func newMutationTestServerWithHosts(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, extraHosts ...string) (srv *httptest.Server, port int) {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+	port = addr.Port
+
+	handler := console.New(s, b, nil, extraHosts, port, log, nil, testPushToken)
+	srv = httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, port
+}
+
+// sameOriginRequestTo builds a POST /read request that dials srv (the real
+// listener) but presents authority as its Host and Origin, the same
+// technique TestMutationGuard_PassesSameOriginThroughLocalhostAnd127AndTheBoundHost
+// uses: a browser's Host header need not match the socket it dialed, so this
+// is how a test proves the guard's allowlist check itself, not just that the
+// real listener answered.
+func sameOriginRequestTo(t *testing.T, srv *httptest.Server, authority string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/read", strings.NewReader(`{"message":1}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Host = authority
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", "http://"+authority)
+	return req
+}
+
+// TestMutationGuard_PassesAConfiguredNonLoopbackLiteral proves a literal,
+// non-loopback bind address in the Host allowlist passes the guard (design
+// section 6.14, Task 11: "any configured bind address serves mutations, not
+// only loopback"). 203.0.113.5 is TEST-NET-3 (RFC 5737), reserved for
+// documentation and never actually dialed here.
+func TestMutationGuard_PassesAConfiguredNonLoopbackLiteral(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "203.0.113.5")
+
+	authority := "203.0.113.5:" + strconv.Itoa(port)
+	resp := doRequest(t, sameOriginRequestTo(t, srv, authority))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = 403, want the guard to pass a configured non-loopback literal")
+	}
+}
+
+// TestMutationGuard_PassesABracketedIPv6Authority proves an IPv6 bind
+// address in the Host allowlist passes when presented in its bracketed
+// authority form, exactly as a browser sends it (design section 6.14, 11).
+func TestMutationGuard_PassesABracketedIPv6Authority(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "2001:db8::1")
+
+	authority := "[2001:db8::1]:" + strconv.Itoa(port)
+	resp := doRequest(t, sameOriginRequestTo(t, srv, authority))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = 403, want the guard to pass a bracketed IPv6 authority")
+	}
+}
+
+// TestMutationGuard_PassesAConfiguredDNSAlias proves a DNS name in
+// console.allowed_hosts (surfaced here as an extra Host allowlist entry)
+// passes the guard, the tailnet-DNS-name case design section 6.14
+// introduces allowed_hosts for.
+func TestMutationGuard_PassesAConfiguredDNSAlias(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "example.tailnet")
+
+	authority := "example.tailnet:" + strconv.Itoa(port)
+	resp := doRequest(t, sameOriginRequestTo(t, srv, authority))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = 403, want the guard to pass a configured DNS alias")
+	}
+}
+
+// TestMutationGuard_CanonicalizesDNSNameCaseAndTrailingDot proves
+// "Example.Tailnet." and "example.tailnet" canonicalize to the same
+// allowed authority (design section 6.14: "the DNS name lowercased and a
+// trailing dot stripped"), so a request presenting the mixed-case,
+// fully-qualified form still passes when the allowlist holds the plain
+// lowercase form.
+func TestMutationGuard_CanonicalizesDNSNameCaseAndTrailingDot(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "example.tailnet")
+
+	authority := "Example.Tailnet.:" + strconv.Itoa(port)
+	resp := doRequest(t, sameOriginRequestTo(t, srv, authority))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = 403, want Example.Tailnet. to canonicalize to the allowed example.tailnet")
+	}
 }
 
 // mutationRequest builds a POST request to srv.URL+path with a Content-Type

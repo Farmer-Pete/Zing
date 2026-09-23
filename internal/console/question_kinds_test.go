@@ -59,7 +59,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 		t.Fatalf("SeedQuestionFixtures: %v", err)
 	}
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)

@@ -105,6 +105,10 @@ func forbidden(w http.ResponseWriter) {
 	http.Error(w, "cross-site request rejected", http.StatusForbidden)
 }
 
+// schemeHTTPS is the "https" scheme literal, named once so goconst has
+// nothing to flag across mw.go and push.go (both compare against it).
+const schemeHTTPS = "https"
+
 // requestScheme reports the scheme this request arrived over: "https" when
 // TLS terminated inside this process, "http" otherwise. The console never
 // terminates TLS itself (loopback and tailnet, no login), so this is "http"
@@ -113,7 +117,7 @@ func forbidden(w http.ResponseWriter) {
 // language.
 func requestScheme(r *http.Request) string {
 	if r.TLS != nil {
-		return "https"
+		return schemeHTTPS
 	}
 	return "http"
 }
@@ -121,7 +125,7 @@ func requestScheme(r *http.Request) string {
 // defaultPort is the scheme default effective-port computation falls back
 // to when an authority carries no explicit port (design section 6.14).
 func defaultPort(scheme string) int {
-	if scheme == "https" {
+	if scheme == schemeHTTPS {
 		return 443
 	}
 	return 80
