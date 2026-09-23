@@ -169,6 +169,86 @@ func (s *Store) QuestionsByState(ctx context.Context, ticketID int64, state stri
 	return out, nil
 }
 
+// runColumns is the runs column list, in table-declaration order.
+const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code`
+
+// scanRun scans one row of runColumns, in that order, into a Run.
+func scanRun(rs rowScanner) (Run, error) {
+	var r Run
+	var lens, model, outcome sql.NullString
+	var taskN, agentSeconds, exitCode sql.NullInt64
+
+	if err := rs.Scan(&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode); err != nil {
+		return Run{}, err
+	}
+	if lens.Valid {
+		r.Lens = &lens.String
+	}
+	if taskN.Valid {
+		n := int(taskN.Int64)
+		r.TaskN = &n
+	}
+	if model.Valid {
+		r.Model = &model.String
+	}
+	if outcome.Valid {
+		r.Outcome = &outcome.String
+	}
+	if agentSeconds.Valid {
+		n := int(agentSeconds.Int64)
+		r.AgentSeconds = &n
+	}
+	if exitCode.Valid {
+		n := int(exitCode.Int64)
+		r.ExitCode = &n
+	}
+	return r, nil
+}
+
+// FirstRun returns the session's turn-0 run: the row with the lowest turn
+// for sessionID (design section 6.6). ok is false, with no error, when the
+// session has no runs yet.
+func (s *Store) FirstRun(ctx context.Context, sessionID int64) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+runColumns+` FROM runs WHERE session_id = ? ORDER BY turn ASC LIMIT 1`, sessionID)
+	r, err := scanRun(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, false, nil
+		}
+		return Run{}, false, fmt.Errorf("first run for session %d: %w", sessionID, err)
+	}
+	return r, true, nil
+}
+
+// QuestionsByRun returns every "question" message attached to runID whose
+// messages.state equals state (the canonical question lifecycle value,
+// section 8), ordered by id. Planning's resume reads this to scope its
+// answered batch to the session's turn-0 run, rather than to every answered
+// question on the ticket (section 6.6).
+func (s *Store) QuestionsByRun(ctx context.Context, runID int64, state string) ([]MessageRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+messageColumns+` FROM messages WHERE run_id = ? AND type = 'question' AND state = ? ORDER BY id`,
+		runID, state)
+	if err != nil {
+		return nil, fmt.Errorf("questions by run %d state %s: %w", runID, state, err)
+	}
+	defer rows.Close()
+
+	var out []MessageRow
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("questions by run %d state %s: %w", runID, state, err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("questions by run %d state %s: %w", runID, state, err)
+	}
+	return out, nil
+}
+
 // GetMessage reads the message with id, or a wrapped sql.ErrNoRows if none exists.
 func (s *Store) GetMessage(ctx context.Context, id int64) (MessageRow, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, id)

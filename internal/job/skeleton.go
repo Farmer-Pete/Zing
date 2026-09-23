@@ -214,18 +214,30 @@ func planningFirstEntry(ctx context.Context, t store.Ticket, d Deps) (store.Hand
 // planningResume reads the batch's sent answers, serializes them into the
 // resumed run's prompt, runs the fake with the open session's external id
 // (fake turn 2), and, on ready, resolves the batch and transitions to
-// building (design section 6.6 diagram, right column).
+// building (design section 6.6 diagram, right column). The batch is scoped
+// to the session's turn-0 run (design section 6.6): only the questions that
+// run posted, not every answered question on the ticket, so an unrelated
+// answered question elsewhere on the ticket is never swept into this
+// resume's ResolveQuestions.
 func planningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (store.HandlerCommit, error) {
 	if sess.ExternalID == nil || *sess.ExternalID == "" {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: session %d has no external id", sess.ID)
 	}
 
-	answered, err := d.Store.QuestionsByState(ctx, t.ID, questionStateAnswered)
+	run0, ok, err := d.Store.FirstRun(ctx, sess.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: questions by state: %w", err)
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: first run: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: session %d has no turn-0 run", sess.ID)
+	}
+
+	answered, err := d.Store.QuestionsByRun(ctx, run0.ID, questionStateAnswered)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: questions by run: %w", err)
 	}
 	if len(answered) == 0 {
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: ticket %d has no answered questions", t.ID)
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: run %d has no answered questions", run0.ID)
 	}
 
 	prompt, err := resumePrompt(ctx, d, t.ID, answered)

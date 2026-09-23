@@ -439,6 +439,14 @@ func TestPlanningHandler_Resume_AfterBatchAnsweredTransitionsToBuilding(t *testi
 	}
 	answeredID := answered[0].ID
 
+	// A second, unrelated answered question on the same ticket, attached to
+	// an unrelated (build) session's run rather than the planning session's
+	// turn-0 run. The resume batch must be scoped to that turn-0 run
+	// (design section 6.6: QuestionsByRun, not QuestionsByState across the
+	// whole ticket), so this question must stay untouched by the resume
+	// below.
+	unrelatedID := postAndAnswerUnrelatedQuestion(t, s, rt, ticketID)
+
 	ticket = getTicket(t, s, ticketID)
 	deps = claim(t, s, rt, ticketID)
 	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
@@ -462,7 +470,8 @@ func TestPlanningHandler_Resume_AfterBatchAnsweredTransitionsToBuilding(t *testi
 		t.Errorf("commit.Runs = %+v, want exactly one turn-1 run with outcome ready", commit.Runs)
 	}
 	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != answeredID {
-		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, answeredID)
+		t.Errorf("commit.ResolveQuestions = %v, want [%d] (only the planning run's batch, not the unrelated question %d)",
+			commit.ResolveQuestions, answeredID, unrelatedID)
 	}
 
 	apply(t, s, ticket, commit)
@@ -479,6 +488,66 @@ func TestPlanningHandler_Resume_AfterBatchAnsweredTransitionsToBuilding(t *testi
 	if len(resolved) != 1 || resolved[0].ID != answeredID {
 		t.Errorf("QuestionsByState(resolved) = %v, want [question %d]", resolved, answeredID)
 	}
+
+	unrelated, err := s.GetMessage(t.Context(), unrelatedID)
+	if err != nil {
+		t.Fatalf("GetMessage(unrelated): %v", err)
+	}
+	if unrelated.State == nil || *unrelated.State != "answered" {
+		t.Errorf("unrelated question state = %v, want unchanged answered (the resume must not touch it)", unrelated.State)
+	}
+}
+
+// postAndAnswerUnrelatedQuestion posts one question on ticketID through a
+// bare CommitHandlerResult (not the planning handler), attached to a fresh,
+// unrelated "build" session's turn-0 run, answers it, and returns its
+// message id. Used to prove a resume batch stays scoped to the planning
+// session's own turn-0 run rather than sweeping in every answered question
+// on the ticket (design section 6.6).
+func postAndAnswerUnrelatedQuestion(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) int64 {
+	t.Helper()
+	ctx := t.Context()
+
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q9", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "A"}, {Key: "b", Text: "B"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal unrelated question payload: %v", err)
+	}
+
+	deps := claim(t, s, rt, ticketID)
+	ticket := getTicket(t, s, ticketID)
+	externalID := "ext-unrelated"
+	openState := "open"
+	apply(t, s, ticket, store.HandlerCommit{
+		TicketID: ticketID, Owner: deps.Owner, Expires: deps.Expires,
+		Session: &store.SessionUpsert{Job: "build", Runtime: "fake", ExternalID: &externalID},
+		Runs:    []store.Run{{Turn: 0, Outcome: new("question")}},
+		Messages: []store.Message{{
+			TicketID: ticketID, Type: "question", Author: testAuthorZing,
+			State: &openState, Body: "unrelated question", Payload: payload,
+		}},
+		AttachRunToMsgs: true,
+	})
+
+	open, err := s.QuestionsByState(ctx, ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) after posting the unrelated question: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) after posting the unrelated question = %d, want 1", len(open))
+	}
+	unrelatedID := open[0].ID
+
+	res, err := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: unrelatedID, Option: "a"})
+	if err != nil {
+		t.Fatalf("AnswerQuestion(unrelated): %v", err)
+	}
+	if !res.Accepted {
+		t.Fatalf("AnswerQuestion(unrelated): Accepted = false, Conflict = %q, want accepted", res.Conflict)
+	}
+	return unrelatedID
 }
 
 // multiQuestionScript is a job-agnostic two-question QuestionResponse,

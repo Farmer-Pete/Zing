@@ -734,6 +734,40 @@ func TestRun_ReturnsAfterTheCurrentTickWhenDraining(t *testing.T) {
 	}
 }
 
+// TestRun_NotifyDrainReturnsPromptly proves NotifyDrain wakes Run well under
+// a tick interval (design section 6.8, fix 5), rather than leaving it to
+// notice draining only on the next ticker fire: with a long Interval, Run
+// still returns almost immediately once SetDraining and NotifyDrain are
+// called, because drainCh is buffered and Run's select observes it directly
+// rather than waiting on the timer.
+func TestRun_NotifyDrainReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	d := newDispatcher(t, s, nil, bus.New(), fakeRuntime(t), nil, nil,
+		dispatch.Config{Interval: time.Hour, MaxParallel: 1, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	if err := s.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+	d.NotifyDrain()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run() = %v, want nil on drain", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after NotifyDrain (want well under the 1h tick interval)")
+	}
+}
+
 // --- test doubles ----------------------------------------------------------
 
 // spyHandler is a job.Handler test double: it records every call, its

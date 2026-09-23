@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,26 @@ func readFrame(t *testing.T, r *bufio.Reader) string {
 	}
 }
 
+// sseFrameRe is the exact shape one datastar-go PatchElements frame takes
+// (no selector, mode, namespace, or event id set, matching every patch this
+// console sends): "event: datastar-patch-elements\n", one or more
+// "data: elements <line>\n" rows (one per line of the rendered fragment),
+// then the blank line readFrame stops at (datastar-go's sse.go: each event
+// ends with a "double newline", of which the first belongs to the last data
+// line and the second is this trailing blank line).
+var sseFrameRe = regexp.MustCompile(`^event: datastar-patch-elements\n(?:data: elements[^\n]*\n)+\n$`)
+
+// assertExactSSEFraming fails the test unless frame is exactly one
+// datastar-patch-elements event in the SDK's own wire shape, not just a
+// loose substring match (design section 11, "console").
+func assertExactSSEFraming(t *testing.T, frame string) {
+	t.Helper()
+	if !sseFrameRe.MatchString(frame) {
+		t.Errorf("SSE frame framing mismatch (want \"event: datastar-patch-elements\\n\" "+
+			"then one or more \"data: elements ...\\n\" lines then a blank line); got:\n%q", frame)
+	}
+}
+
 func TestIndexRendersTicketListAndScript(t *testing.T) {
 	s := newConsoleTestStore(t)
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
@@ -299,6 +320,12 @@ func TestThreadStreamUnsubscribesOnDisconnect(t *testing.T) {
 	srv := httptest.NewServer(console.New(s, b))
 	defer srv.Close()
 
+	// The baseline is taken before the stream opens, not after: a count
+	// taken while the handler is already alive can never show that
+	// handler's own exit bringing the count back down, so it would prove
+	// nothing about the disconnect below.
+	baseline := runtime.NumGoroutine()
+
 	ctx, cancel := context.WithCancel(t.Context())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -314,18 +341,17 @@ func TestThreadStreamUnsubscribesOnDisconnect(t *testing.T) {
 	r := bufio.NewReader(resp.Body)
 	readFrame(t, r) // the initial patch, proving the stream is live
 
-	baseline := runtime.NumGoroutine()
-
 	cancel() // simulate the client navigating away or Datastar aborting the request
 	_ = resp.Body.Close()
 
-	// Poll, bounded, instead of a fixed sleep: the handler's goroutine exits
-	// promptly once r.Context().Done() fires, so the count should settle back
-	// near baseline well inside the deadline.
+	// Poll, bounded, instead of a fixed sleep: this is how the test
+	// synchronizes on the handler's observable unsubscribe (the bus itself
+	// exposes no subscriber count to read directly), rather than sleeping a
+	// fixed guess and hoping the handler was done by then.
 	deadline := time.Now().Add(frameTimeout)
 	for runtime.NumGoroutine() > baseline {
 		if time.Now().After(deadline) {
-			t.Errorf("goroutine count did not settle after disconnect: got %d, baseline %d",
+			t.Errorf("goroutine count did not settle back to the pre-stream baseline: got %d, baseline %d",
 				runtime.NumGoroutine(), baseline)
 			break
 		}
@@ -342,6 +368,86 @@ func TestThreadStreamUnsubscribesOnDisconnect(t *testing.T) {
 	case <-time.After(frameTimeout):
 		t.Fatal("a fresh subscriber saw no publish after the prior client disconnected")
 	}
+}
+
+// TestThreadStreamRapidReopenLeavesOneSubscriber models Datastar's
+// requestCancellation default: a rapid $open replacement aborts the prior
+// /thread fetch on the same element before the next one starts (design
+// section 6.9). It opens a second stream for the same ticket while the
+// first is still live, then cancels the first's context (the abort) and
+// proves that specific handler returns, leaving the second as the one live
+// subscriber: a publish reaches it, and the goroutine count settles back to
+// "only the second stream's handler still running" rather than "both
+// still running."
+func TestThreadStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	b := bus.New()
+
+	srv := httptest.NewServer(console.New(s, b))
+	defer srv.Close()
+
+	ctx1, cancel1 := context.WithCancel(t.Context())
+	req1, err := http.NewRequestWithContext(ctx1, http.MethodGet,
+		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request 1: %v", err)
+	}
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("GET /thread (1): %v", err)
+	}
+	r1 := bufio.NewReader(resp1.Body)
+	assertExactSSEFraming(t, readFrame(t, r1))
+
+	// The second stream opens for the same ticket while the first is still
+	// live, the way a fresh /thread?id= fetch briefly overlaps the request
+	// it is about to cancel.
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	defer cancel2()
+	req2, err := http.NewRequestWithContext(ctx2, http.MethodGet,
+		srv.URL+"/thread?id="+strconv.FormatInt(ticketID, 10), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request 2: %v", err)
+	}
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /thread (2): %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	r2 := bufio.NewReader(resp2.Body)
+	assertExactSSEFraming(t, readFrame(t, r2))
+
+	// The count with both streams live and confirmed (each has delivered
+	// its initial frame) is the reference point for the cancellation
+	// below: an absolute baseline taken before either connection opened
+	// would also count each connection's own client-transport goroutines
+	// (its persistConn readLoop and writeLoop), which are per-connection
+	// overhead, not evidence of a leaked stream handler. Comparing against
+	// this "both open" count isolates exactly what cancelling the first
+	// connection should remove.
+	afterBoth := runtime.NumGoroutine()
+
+	// Cancel the first request, Datastar's own abort of the prior fetch,
+	// and prove that specific handler returns rather than lingering
+	// alongside the second: the count must drop below afterBoth once its
+	// handler (and that connection's own transport goroutines) exit.
+	cancel1()
+	_ = resp1.Body.Close()
+
+	deadline := time.Now().Add(frameTimeout)
+	for runtime.NumGoroutine() >= afterBoth {
+		if time.Now().After(deadline) {
+			t.Fatalf("the first stream's handler did not return after cancellation: goroutines = %d, want < %d (the count with both streams live)",
+				runtime.NumGoroutine(), afterBoth)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The second stream is the one live subscriber left: a publish must
+	// still reach it promptly, framed exactly like any other patch.
+	b.Publish()
+	assertExactSSEFraming(t, readFrame(t, r2))
 }
 
 func TestStaticServesDatastarBundle(t *testing.T) {
@@ -480,5 +586,128 @@ func TestAnswerAcceptsThenConflictsOnRepeat(t *testing.T) {
 	}
 	if stillAnswered.State == nil || *stillAnswered.State != "answered" {
 		t.Errorf("question state after the repeat = %v, want unchanged \"answered\"", stillAnswered.State)
+	}
+}
+
+// TestAnswerRejectsInvalidInputWith400 proves handleAnswer validates
+// $answer before it ever reaches the store: a non-positive ticket or
+// question id, or an option that is not a single lowercase letter, all
+// return 400 (design section "Console" fix 1) without needing any seeded
+// question, since validation runs first.
+func TestAnswerRejectsInvalidInputWith400(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	cases := []struct {
+		name, body string
+	}{
+		{"zero ticket", `{"answer":{"ticket":0,"question":1,"option":"a"}}`},
+		{"negative ticket", `{"answer":{"ticket":-1,"question":1,"option":"a"}}`},
+		{"zero question", `{"answer":{"ticket":1,"question":0,"option":"a"}}`},
+		{"negative question", `{"answer":{"ticket":1,"question":-1,"option":"a"}}`},
+		{"empty option", `{"answer":{"ticket":1,"question":1,"option":""}}`},
+		{"uppercase option", `{"answer":{"ticket":1,"question":1,"option":"A"}}`},
+		{"multi-letter option", `{"answer":{"ticket":1,"question":1,"option":"ab"}}`},
+		{"digit option", `{"answer":{"ticket":1,"question":1,"option":"1"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			//nolint:noctx // a bare POST on a test server needs no deadline
+			resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("POST /answer: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("POST /answer(%s) status = %d, want 400", tc.body, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestAnswerReturns500WithGenericBodyOnStoreError proves a real store error
+// (not a named conflict) never leaks its detail to the client: a question
+// id that passes validation but names no real message makes
+// store.AnswerQuestion return a genuine error (a wrapped sql.ErrNoRows,
+// not an AnswerResult conflict), and handleAnswer must turn that into 500
+// with the fixed generic body, logging the detail server-side instead
+// (design section "Console" fix 1).
+func TestAnswerReturns500WithGenericBodyOnStoreError(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	const missingQuestionID = 999999
+	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, missingQuestionID)
+
+	//nolint:noctx // a bare POST on a test server needs no deadline
+	resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /answer: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("POST /answer status = %d, want 500", resp.StatusCode)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	got := strings.TrimSpace(string(respBody))
+	if got != "internal error" {
+		t.Errorf(`POST /answer body = %q, want exactly "internal error"`, got)
+	}
+	if strings.Contains(got, "sql") || strings.Contains(got, strconv.Itoa(missingQuestionID)) ||
+		strings.Contains(got, "answer question") {
+		t.Errorf("POST /answer body leaked store error detail: %q", got)
+	}
+}
+
+// TestNonStreamingRoutesSucceedUnderWriteDeadline proves the write-deadline
+// middleware (design section 6.10, fix 2) does not break an ordinary, fast
+// response on any of the three non-streaming routes it wraps: GET /,
+// POST /answer, and GET /static/datastar.js. It does not test the deadline
+// firing, only that its presence leaves a normal response intact.
+func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	indexResp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	_ = indexResp.Body.Close()
+	if indexResp.StatusCode != http.StatusOK {
+		t.Errorf("GET / status = %d, want 200", indexResp.StatusCode)
+	}
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	staticResp, err := http.Get(srv.URL + "/static/datastar.js")
+	if err != nil {
+		t.Fatalf("GET /static/datastar.js: %v", err)
+	}
+	_ = staticResp.Body.Close()
+	if staticResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /static/datastar.js status = %d, want 200", staticResp.StatusCode)
+	}
+
+	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
+	//nolint:noctx // a bare POST on a test server needs no deadline
+	answerResp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /answer: %v", err)
+	}
+	_ = answerResp.Body.Close()
+	if answerResp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /answer status = %d, want 204", answerResp.StatusCode)
 	}
 }

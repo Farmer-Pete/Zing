@@ -87,10 +87,12 @@ func (f *Fixture) Fetch(_ context.Context, project, ref string) (Ticket, error) 
 	return Ticket{}, fmt.Errorf("tracker: no ticket %q in project %q", ref, project)
 }
 
-// Comment records body against ref as a structured log line and returns
-// nil; the fixture keeps no comment history to read back.
+// Comment records a structured log line for body against ref and returns
+// nil; the fixture keeps no comment history to read back. The log line
+// carries body's length, never body itself: a comment body can carry
+// sensitive text, and the repo rule is never log a secret.
 func (f *Fixture) Comment(_ context.Context, project, ref, body string) error {
-	slog.Info("tracker fixture comment", "project", project, "ref", ref, "body", body)
+	slog.Info("tracker fixture comment", "project", project, "ref", ref, "body_len", len(body))
 	return nil
 }
 

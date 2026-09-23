@@ -138,7 +138,7 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 	case <-ctx.Done():
 	}
 
-	return shutdown(ctx, st, srv, errCh, serveErr, dispDone, func() error { return dispErr }, cancelDisp)
+	return shutdown(ctx, st, srv, d, errCh, serveErr, dispDone, func() error { return dispErr }, cancelDisp)
 }
 
 // shutdown runs the drain-then-close sequence (design section 6.10 step
@@ -147,14 +147,27 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 // dispatcher's own returned error (logged, not returned: an expected
 // consequence of a forced shutdown, not a serve failure) and the console
 // listener's error from errCh. It returns the first real error among the
-// console listener, Shutdown, and the store close.
+// console listener, Shutdown, and the store close. d is used only to wake
+// Run promptly once draining is set (d.NotifyDrain, called from the
+// setDraining closure below); drainAndShutdown itself stays decoupled from
+// *dispatch.Dispatcher; so does shutdown_test.go, which drives it directly.
 func shutdown(
-	ctx context.Context, st *store.Store, srv *http.Server,
+	ctx context.Context, st *store.Store, srv *http.Server, d *zdispatch.Dispatcher,
 	errCh <-chan error, serveErr error, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
 ) error {
 	err := drainAndShutdown(
 		ctx, drainDeadline,
-		func() error { return st.SetDraining(context.WithoutCancel(ctx), true) },
+		func() error {
+			setErr := st.SetDraining(context.WithoutCancel(ctx), true)
+			if setErr == nil {
+				// Wake Run promptly rather than leaving it to notice only
+				// on the next ticker fire, which can race a short drain
+				// deadline (design section 6.10; dispatch.Dispatcher's own
+				// NotifyDrain doc comment).
+				d.NotifyDrain()
+			}
+			return setErr
+		},
 		dispDone,
 		cancelDisp,
 		func(parent context.Context) error {

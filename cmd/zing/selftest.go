@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	zing "zing"
 	"zing/fixtures"
 	"zing/internal/bus"
+	"zing/internal/console"
 	zdispatch "zing/internal/dispatch"
 	"zing/internal/job"
 	"zing/internal/lens"
@@ -165,6 +169,14 @@ func selftestE2E(ctx context.Context) error {
 		return err
 	}
 
+	// The real console handler, driven in-process through
+	// httptest.NewRecorder (no network port): section 11's e2e suite
+	// answers through POST /answer exactly as the browser's chip click
+	// would, not through store.AnswerQuestion directly, so this suite also
+	// proves the console's own answer path end to end (design section 11,
+	// "cmd/zing" fix 7).
+	consoleHandler := console.New(st, b)
+
 	var ticketID int64
 	var answered int
 
@@ -193,7 +205,7 @@ func selftestE2E(ctx context.Context) error {
 		}
 
 		if ticket.WaitingOn != nil && *ticket.WaitingOn == "questions" {
-			n, err := answerOpenQuestions(ctx, st, ticketID)
+			n, err := answerOpenQuestions(ctx, st, consoleHandler, ticketID)
 			if err != nil {
 				return err
 			}
@@ -208,8 +220,10 @@ func selftestE2E(ctx context.Context) error {
 }
 
 // answerOpenQuestions answers every question ticketID has open, each with
-// its first offered option, and returns how many it answered.
-func answerOpenQuestions(ctx context.Context, st *store.Store, ticketID int64) (int, error) {
+// its first offered option, through the real console answer handler
+// in-process (design section 6.9, section 11), and returns how many it
+// answered.
+func answerOpenQuestions(ctx context.Context, st *store.Store, consoleHandler http.Handler, ticketID int64) (int, error) {
 	open, err := st.QuestionsByState(ctx, ticketID, "open")
 	if err != nil {
 		return 0, fmt.Errorf("questions by state: %w", err)
@@ -223,17 +237,34 @@ func answerOpenQuestions(ctx context.Context, st *store.Store, ticketID int64) (
 		if len(payload.Options) == 0 {
 			return 0, fmt.Errorf("question %d has no options", q.ID)
 		}
-		res, err := st.AnswerQuestion(ctx, store.AnswerInput{
-			TicketID: ticketID, QuestionID: q.ID, Option: payload.Options[0].Key,
-		})
-		if err != nil {
+		if err := postAnswer(ctx, consoleHandler, ticketID, q.ID, payload.Options[0].Key); err != nil {
 			return 0, fmt.Errorf("answer question %d: %w", q.ID, err)
-		}
-		if !res.Accepted {
-			return 0, fmt.Errorf("answer question %d not accepted: %s", q.ID, res.Conflict)
 		}
 	}
 	return len(open), nil
+}
+
+// postAnswer sends one answer through consoleHandler's real POST /answer
+// route, in-process: an http.Request built with the same Datastar signal
+// body and Datastar-Request header a browser's chip click sends (design
+// section 6.9), served directly to an httptest.NewRecorder rather than
+// over a network port. It fails unless the handler reports 204, the same
+// contract console_test.go's own answer tests assert.
+func postAnswer(ctx context.Context, consoleHandler http.Handler, ticketID, questionID int64, option string) error {
+	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":%q}}`, ticketID, questionID, option)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/answer", strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build POST /answer request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+
+	rec := httptest.NewRecorder()
+	consoleHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		return fmt.Errorf("POST /answer: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	return nil
 }
 
 // verifySelftestE2E asserts the design section 11 end-to-end checkpoints

@@ -79,17 +79,22 @@ type Dispatcher struct {
 	rt       runtime.Runtime
 	bindings []Binding
 	cfg      Config
+	drainCh  chan struct{}
 }
+
+// deferredMechanics names the three section 10 dispatcher mechanics this
+// package defers, and their owner, for the one-line startup log New emits
+// (the narrowing note, design section 0): a reader sees these are
+// deliberate no-ops, not omissions.
+const deferredMechanics = "dependency-blocking of tickets with unmerged depends_on children, " +
+	"durable resume of an interrupted run, and max_resumes enforcement"
 
 // New validates that every non-terminal state m.States.Order names has a
 // handler in reg (job.Validate), so a missing handler fails at startup,
 // never at a nil map read mid-tick, and returns a Dispatcher ready to tick.
 //
-// The plan's New signature (design section 6.8) does not list a
-// runtime.Runtime parameter, but job.Deps carries one and a handler cannot
-// run without it, so this implementation adds rt as an explicit trailing
-// parameter. This is a deliberate deviation from the plan's listed
-// signature, noted in the build report.
+// New's signature matches the plan (design section 6.8): rt is threaded
+// into job.Deps.Runtime on every handler call.
 func New(
 	s *store.Store, tr tracker.Tracker, b *bus.Broker, m *machine.Machine,
 	reg map[string]job.Handler, bindings []Binding, cfg Config, rt runtime.Runtime,
@@ -97,9 +102,24 @@ func New(
 	if err := job.Validate(m, reg); err != nil {
 		return nil, fmt.Errorf("dispatch: %w", err)
 	}
+	slog.Info("deferred section 10 mechanics are explicit no-ops in this package",
+		"mechanics", deferredMechanics, "owner", "Package 7")
 	return &Dispatcher{
 		store: s, tracker: tr, bus: b, machine: m, reg: reg, rt: rt, bindings: bindings, cfg: cfg,
+		drainCh: make(chan struct{}, 1),
 	}, nil
+}
+
+// NotifyDrain wakes a running Run promptly once draining has been set,
+// rather than leaving it to notice on the next ticker fire (up to
+// cfg.Interval, which can race a short drain deadline). The send is
+// non-blocking, so repeated notifications before Run consumes one coalesce
+// into a single wake.
+func (d *Dispatcher) NotifyDrain() {
+	select {
+	case d.drainCh <- struct{}{}:
+	default:
+	}
 }
 
 // Tick runs one pass (design section 6.8): reconcile, drain-or-stop check,
@@ -149,14 +169,13 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	}
 	ticket := ordered[0]
 
-	// 6. Claim. expires is truncated to second precision because SQLite
-	// round-trips the stored claim_expires_at TEXT column at second
-	// precision (store's formatTime uses RFC 3339 with no fractional
-	// seconds); CommitHandlerResult's fence compares the read-back value
-	// against this same expires with time.Time.Equal, which is
-	// nanosecond-sensitive, so an untruncated expires would never match.
+	// 6. Claim. Claim and CommitHandlerResult each truncate their own
+	// incoming expires to whole-second UTC precision at the store boundary
+	// (section 6.3), so this same raw expires, handed to both Claim below
+	// and to Deps.Expires / the eventual commit's Expires, fences correctly
+	// without this caller truncating it itself.
 	timeout := d.timeoutFor(ticket.State)
-	expires := now.Add(timeout + claimGrace).UTC().Truncate(time.Second)
+	expires := now.Add(timeout + claimGrace)
 	claimed, err := d.store.Claim(ctx, ticket.ID, d.cfg.Owner, expires)
 	if err != nil {
 		return fmt.Errorf("dispatch: claim ticket %d: %w", ticket.ID, err)
@@ -171,7 +190,8 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 
 // Run ticks every cfg.Interval until ctx is done or the drain flag is set.
 // It returns as soon as draining is observed, after the current tick
-// finishes (design section 6.8).
+// finishes (design section 6.8). NotifyDrain wakes it promptly rather than
+// leaving it to notice only on the next ticker fire.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	ticker := time.NewTicker(d.cfg.Interval)
 	defer ticker.Stop()
@@ -180,6 +200,14 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-d.drainCh:
+			draining, _, err := d.store.Flags(ctx)
+			if err != nil {
+				return fmt.Errorf("dispatch: read flags: %w", err)
+			}
+			if draining {
+				return nil
+			}
 		case <-ticker.C:
 			if err := d.Tick(ctx); err != nil {
 				return err
@@ -285,7 +313,11 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 
 	applied, err := d.store.CommitHandlerResult(ctx, commit)
 	if err != nil || !applied {
-		slog.Error("lease lost", "ticket_id", ticket.ID, "applied", applied, "err", err)
+		if err != nil {
+			slog.Error("commit failed", "ticket_id", ticket.ID, "err", err)
+		} else {
+			slog.Error("lease lost", "ticket_id", ticket.ID)
+		}
 		if setErr := d.store.SetStopped(ctx, true); setErr != nil {
 			return fmt.Errorf("dispatch: set stopped after fail-closed on ticket %d: %w", ticket.ID, setErr)
 		}

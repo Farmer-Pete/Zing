@@ -29,6 +29,8 @@ const (
 	questionStateOpen     = "open"
 	questionStateAnswered = "answered"
 	questionStateResolved = "resolved"
+
+	waitingFlagQuestions = "questions"
 )
 
 // errRunNeedsSession is returned when a HandlerCommit carries a Run but no
@@ -86,6 +88,8 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		return false, fmt.Errorf("commit handler result: reason is required when transitioning to %s", c.Next)
 	}
 
+	expires := truncateExpires(c.Expires)
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("commit handler result: begin tx: %w", err)
@@ -98,8 +102,16 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		return false, fmt.Errorf("commit handler result: get ticket %d: %w", c.TicketID, err)
 	}
 
-	if !leaseMatches(ticket, c.Owner, c.Expires) {
-		return false, nil // the lease was lost; the deferred rollback discards the read-only tx
+	// No Go-side lease pre-check: the fenced UPDATE at the end of this
+	// transaction (WHERE claim_owner = ? AND claim_expires_at = ?) is the
+	// one authoritative fence. Zero rows affected there rolls everything in
+	// this tx back and reports applied=false, so a lease already lost is
+	// caught there rather than duplicated here.
+
+	if c.Session != nil && c.Session.ID != nil {
+		if err = verifySessionForTicket(ctx, tx, c.TicketID, *c.Session.ID); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
 	}
 
 	var sessionID int64
@@ -130,6 +142,10 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		attachRunID = &runIDs[0]
 	}
 	for _, m := range c.Messages {
+		// Force every inserted message's ticket_id to c.TicketID: a handler
+		// proposes messages but never writes, so this commit boundary, not
+		// the handler, is what a message can never be scoped away from.
+		m.TicketID = c.TicketID
 		if attachRunID != nil {
 			m.RunID = attachRunID
 		}
@@ -139,6 +155,9 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 	}
 
 	for _, qid := range c.ResolveQuestions {
+		if err = verifyQuestionForTicket(ctx, tx, c.TicketID, qid); err != nil {
+			return false, fmt.Errorf("commit handler result: resolve question %d: %w", qid, err)
+		}
 		if err = resolveQuestionTx(ctx, tx, qid); err != nil {
 			return false, fmt.Errorf("commit handler result: resolve question %d: %w", qid, err)
 		}
@@ -172,7 +191,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			claim_owner = NULL,
 			claim_expires_at = NULL
 		 WHERE id = ? AND claim_owner = ? AND claim_expires_at = ?`,
-		c.Next, c.Next, c.Waiting, c.TicketID, c.Owner, formatTime(c.Expires),
+		c.Next, c.Next, c.Waiting, c.TicketID, c.Owner, formatTime(expires),
 	)
 	if err != nil {
 		return false, fmt.Errorf("commit handler result: update ticket: %w", err)
@@ -202,12 +221,46 @@ func rollback(tx *sql.Tx) {
 	}
 }
 
-// leaseMatches reports whether t is currently held by owner with exactly
-// expires as its claim expiry, the fence CommitHandlerResult checks before
-// writing anything.
-func leaseMatches(t Ticket, owner string, expires time.Time) bool {
-	return t.ClaimOwner != nil && *t.ClaimOwner == owner &&
-		t.ClaimExpiresAt != nil && t.ClaimExpiresAt.Equal(expires)
+// verifySessionForTicket errors unless sessionID exists and belongs to
+// ticketID, the check a resume commit's Session.ID must pass before this
+// transaction touches it (section 6.3: every write scoped to c.TicketID).
+func verifySessionForTicket(ctx context.Context, tx *sql.Tx, ticketID, sessionID int64) error {
+	var gotTicketID int64
+	err := tx.QueryRowContext(ctx, `SELECT ticket_id FROM sessions WHERE id = ?`, sessionID).Scan(&gotTicketID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("session %d not found", sessionID)
+		}
+		return fmt.Errorf("get session %d: %w", sessionID, err)
+	}
+	if gotTicketID != ticketID {
+		return fmt.Errorf("session %d belongs to ticket %d, not %d", sessionID, gotTicketID, ticketID)
+	}
+	return nil
+}
+
+// verifyQuestionForTicket errors unless questionID exists, is a "question"
+// message, and belongs to ticketID, the check every ResolveQuestions id must
+// pass before this transaction resolves it (section 6.3: every write scoped
+// to c.TicketID).
+func verifyQuestionForTicket(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) error {
+	var gotTicketID int64
+	var gotType string
+	err := tx.QueryRowContext(ctx,
+		`SELECT ticket_id, type FROM messages WHERE id = ?`, questionID).Scan(&gotTicketID, &gotType)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("question %d not found", questionID)
+		}
+		return fmt.Errorf("get question %d: %w", questionID, err)
+	}
+	if gotType != msgTypeQuestion {
+		return fmt.Errorf("message %d is type %s, not question", questionID, gotType)
+	}
+	if gotTicketID != ticketID {
+		return fmt.Errorf("question %d belongs to ticket %d, not %d", questionID, gotTicketID, ticketID)
+	}
+	return nil
 }
 
 // upsertSessionTx creates su's session when su.ID is nil, or bumps its
@@ -414,18 +467,30 @@ func (s *Store) AnswerQuestion(ctx context.Context, in AnswerInput) (AnswerResul
 	}
 
 	var openSiblings int
-	openSiblings, err = countOpenBatchSiblings(ctx, tx, q.RunID)
+	openSiblings, err = countOpenBatchSiblings(ctx, tx, in.TicketID, q.RunID)
 	if err != nil {
 		return AnswerResult{}, fmt.Errorf("answer question: %w", err)
 	}
 
 	waitCleared := false
 	if openSiblings == 0 {
-		_, err = tx.ExecContext(ctx, `UPDATE tickets SET waiting_on = NULL WHERE id = ?`, in.TicketID)
+		// Conditional on waiting_on = 'questions': the batch being fully
+		// answered only ever clears the questions wait, and never some other
+		// wait flag the ticket might (hypothetically) carry instead.
+		// WaitCleared reports whether this update actually cleared
+		// something, not just whether the batch was done.
+		var res sql.Result
+		res, err = tx.ExecContext(ctx,
+			`UPDATE tickets SET waiting_on = NULL WHERE id = ? AND waiting_on = ?`, in.TicketID, waitingFlagQuestions)
 		if err != nil {
 			return AnswerResult{}, fmt.Errorf("answer question: clear wait: %w", err)
 		}
-		waitCleared = true
+		var n int64
+		n, err = res.RowsAffected()
+		if err != nil {
+			return AnswerResult{}, fmt.Errorf("answer question: clear wait: %w", err)
+		}
+		waitCleared = n > 0
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -435,19 +500,21 @@ func (s *Store) AnswerQuestion(ctx context.Context, in AnswerInput) (AnswerResul
 }
 
 // countOpenBatchSiblings counts questions still "open" that share runID, the
-// batch an answered question belongs to (section 6.3, section 6.6).
-func countOpenBatchSiblings(ctx context.Context, tx *sql.Tx, runID *int64) (int, error) {
+// batch an answered question belongs to (section 6.3, section 6.6), scoped
+// to ticketID so one ticket's batch can never be gated by another ticket's
+// open question.
+func countOpenBatchSiblings(ctx context.Context, tx *sql.Tx, ticketID int64, runID *int64) (int, error) {
 	var n int
 	var err error
 	if runID == nil {
 		err = tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM messages WHERE type = ? AND state = ? AND run_id IS NULL`,
-			msgTypeQuestion, questionStateOpen,
+			`SELECT COUNT(*) FROM messages WHERE type = ? AND state = ? AND run_id IS NULL AND ticket_id = ?`,
+			msgTypeQuestion, questionStateOpen, ticketID,
 		).Scan(&n)
 	} else {
 		err = tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM messages WHERE type = ? AND state = ? AND run_id = ?`,
-			msgTypeQuestion, questionStateOpen, *runID,
+			`SELECT COUNT(*) FROM messages WHERE type = ? AND state = ? AND run_id = ? AND ticket_id = ?`,
+			msgTypeQuestion, questionStateOpen, *runID, ticketID,
 		).Scan(&n)
 	}
 	if err != nil {

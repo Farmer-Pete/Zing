@@ -67,9 +67,21 @@ func (s *Store) InsertTicket(ctx context.Context, t Ticket) (int64, error) {
 	return id, nil
 }
 
+// truncateExpires normalizes a claim/commit lease expiry to whole-second,
+// UTC precision, matching the precision the claim_expires_at TEXT column
+// round-trips through (formatTime, rows.go, uses RFC 3339 with no
+// fractional seconds). Claim and CommitHandlerResult each call this on
+// their own incoming expires, so a caller that hands the identical
+// time.Time to both gets a fence that matches without truncating it itself
+// (design section 6.3).
+func truncateExpires(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
+}
+
 // Claim conditionally sets the claim owner and expiry on ticket id, only
 // when it is currently unclaimed. It returns whether the claim was taken.
 func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.Time) (bool, error) {
+	expires = truncateExpires(expires)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE tickets SET claim_owner = ?, claim_expires_at = ? WHERE id = ? AND claim_owner IS NULL`,
 		owner, formatTime(expires), id)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -168,14 +169,33 @@ type answerSignals struct {
 	} `json:"answer"`
 }
 
-// handleAnswer reads $answer, records it through store.AnswerQuestion, and
-// reports the outcome: 204 and a bus publish when it is accepted, 409 with
-// the named conflict reason when it is rejected (no publish, since nothing
-// changed), and 500 on any other error (design section 6.9, section 6.3).
+// optionPattern is the one legal shape for a chosen option key: a single
+// lowercase letter, matching the option keys commit.go's QuestionPayload
+// mapping and AnswerQuestion's schema both use (design section 6.3, 6.6).
+var optionPattern = regexp.MustCompile(`^[a-z]$`)
+
+// genericServerErrorBody is what a real store error returns to the client:
+// no error detail, since AnswerQuestion's underlying errors can carry
+// database internals a browser has no business seeing. The detail goes to
+// slog instead (design section 6.9: never err.Error() in the response).
+const genericServerErrorBody = "internal error"
+
+// handleAnswer validates $answer, records it through store.AnswerQuestion,
+// and reports the outcome: 400 on a malformed signal (a non-positive ticket
+// or question id, or an option that is not a single lowercase letter), 204
+// and a bus publish when the store accepts it, 409 with the named conflict
+// reason when the store rejects it (a safe, intended message; no publish,
+// since nothing changed), and 500 with a generic body on any other store
+// error, logged server-side with the detail (design section 6.9, 6.3).
 func (c *console) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	var sig answerSignals
 	if err := datastar.ReadSignals(r, &sig); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if sig.Answer.Ticket <= 0 || sig.Answer.Question <= 0 || !optionPattern.MatchString(sig.Answer.Option) {
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -185,7 +205,8 @@ func (c *console) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		Option:     sig.Answer.Option,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("console: answer question", "ticket_id", sig.Answer.Ticket, "question_id", sig.Answer.Question, "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 	if !result.Accepted {

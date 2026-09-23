@@ -178,6 +178,48 @@ func TestCommitHandlerResult_FirstEntryPlanningAppliesAtomically(t *testing.T) {
 	}
 }
 
+// TestCommitHandlerResult_TruncatesExpiresLikeClaim proves the second-based
+// truncation moved to the store boundary (section 6.3): a caller that hands
+// the identical, sub-second-precision time.Time to both Claim and
+// CommitHandlerResult, truncating neither itself, still gets a fence that
+// matches, because each store method truncates its own incoming expires the
+// same way.
+func TestCommitHandlerResult_TruncatesExpiresLikeClaim(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	rawExpires := time.Now().Add(10 * time.Minute).Add(123456789 * time.Nanosecond)
+
+	claimed, err := s.Claim(ctx, ticketID, testOwner, rawExpires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: testOwner, Expires: rawExpires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult with the same untruncated expires Claim used: applied = false, want true")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.State != testStateBuilding {
+		t.Errorf("ticket state = %q, want building", got.State)
+	}
+}
+
 func TestCommitHandlerResult_StaleOwnerAppliesNothing(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
@@ -360,6 +402,147 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	}
 }
 
+// TestCommitHandlerResult_RejectsSessionFromAnotherTicket proves every write
+// in one commit is scoped to c.TicketID (section 6.3): a commit naming
+// another ticket's session errors and writes nothing, rather than silently
+// updating a session that belongs to a different ticket.
+func TestCommitHandlerResult_RejectsSessionFromAnotherTicket(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+	sessA := insertSession(t, s, ticketA, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketB)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Session: &SessionUpsert{ID: &sessA, BumpResumes: true},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult naming another ticket's session: want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult naming another ticket's session: applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketB)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.State != testStatePlanning {
+		t.Errorf("ticket B state = %q, want unchanged planning", got.State)
+	}
+	if got.ClaimOwner == nil {
+		t.Error("ticket B claim was cleared despite the rejected commit, want it held")
+	}
+
+	var resumes int
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT resumes FROM sessions WHERE id = ?`, sessA).Scan(&resumes); scanErr != nil {
+		t.Fatalf("read session A resumes: %v", scanErr)
+	}
+	if resumes != 0 {
+		t.Errorf("session A resumes = %d, want unchanged 0 (the commit must not touch another ticket's session)", resumes)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 0 {
+		t.Errorf("ticket B messages after a rejected commit = %d, want 0", n)
+	}
+}
+
+// TestCommitHandlerResult_RejectsResolveQuestionFromAnotherTicket proves the
+// same scoping for ResolveQuestions (section 6.3): a commit that names
+// another ticket's question id errors and writes nothing, including no
+// partial resolution of the question it did not own.
+func TestCommitHandlerResult_RejectsResolveQuestionFromAnotherTicket(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	sessA := insertSession(t, s, ticketA, testStatePlanning)
+	runA := insertQuestionRun(t, s, sessA)
+	qA := insertOpenQuestion(t, s, ticketA, runA, "Q1")
+
+	owner, expires := claimForCommit(t, s, ticketB)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		ResolveQuestions: []int64{qA},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult naming another ticket's question: want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult naming another ticket's question: applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketB)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.State != testStatePlanning {
+		t.Errorf("ticket B state = %q, want unchanged planning", got.State)
+	}
+
+	qGot, getMsgErr := s.GetMessage(ctx, qA)
+	if getMsgErr != nil {
+		t.Fatalf("GetMessage(qA): %v", getMsgErr)
+	}
+	if qGot.State == nil || *qGot.State != questionStateOpen {
+		t.Errorf("question A state = %v, want unchanged open (the commit must not resolve another ticket's question)", qGot.State)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 0 {
+		t.Errorf("ticket B messages after a rejected commit = %d, want 0", n)
+	}
+}
+
+// TestCommitHandlerResult_ForcesMessageTicketID proves the commit boundary
+// overrides a handler-supplied message TicketID rather than trusting it
+// (section 6.3): every inserted message lands under c.TicketID regardless of
+// what the commit's Messages carried.
+func TestCommitHandlerResult_ForcesMessageTicketID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketB, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketB)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Messages: []Message{{
+			TicketID: ticketA, // a misbehaving handler naming the wrong ticket
+			Type:     testTypeUpdate, Author: testAuthorZing, Body: "progress",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	msgs, listErr := s.ListMessages(ctx, ticketB)
+	if listErr != nil {
+		t.Fatalf("ListMessages(ticketB): %v", listErr)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ticketB messages = %d, want 1 (forced to c.TicketID)", len(msgs))
+	}
+	if msgs[0].TicketID != ticketB {
+		t.Errorf("message.TicketID = %d, want %d (forced, not the handler's %d)", msgs[0].TicketID, ticketB, ticketA)
+	}
+
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketA); n != 0 {
+		t.Errorf("ticketA messages = %d, want 0 (the handler-supplied ticket id must not be trusted)", n)
+	}
+}
+
 func TestCommitHandlerResult_CodeHandlerTransitionWritesStateMessage(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
@@ -470,6 +653,46 @@ func TestAnswerQuestion_AcceptsValidAnswerAndClearsWaitOnLastOfBatch(t *testing.
 	}
 	if answers != 2 {
 		t.Errorf("answer messages = %d, want 2", answers)
+	}
+}
+
+// TestAnswerQuestion_LeavesANonQuestionsWaitUntouched proves the wait-clear
+// is conditional on waiting_on = 'questions' (section 6.3): answering the
+// last open question of a batch never clears some other wait flag the
+// ticket happens to carry, and WaitCleared reports that it did not clear
+// anything.
+func TestAnswerQuestion_LeavesANonQuestionsWaitUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	const otherWait = "split" // one of the eight waiting flags, not "questions"
+	if _, err := s.db.ExecContext(ctx, `UPDATE tickets SET waiting_on = ? WHERE id = ?`, otherWait, ticketID); err != nil {
+		t.Fatalf("set ticket waiting_on: %v", err)
+	}
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+
+	res, err := s.AnswerQuestion(ctx, AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"})
+	if err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	if !res.Accepted {
+		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", res.Conflict)
+	}
+	if res.WaitCleared {
+		t.Error("AnswerQuestion with the ticket waiting on something else: WaitCleared = true, want false")
+	}
+
+	ticket, ticketErr := s.GetTicket(ctx, ticketID)
+	if ticketErr != nil {
+		t.Fatalf("GetTicket: %v", ticketErr)
+	}
+	if ticket.WaitingOn == nil || *ticket.WaitingOn != otherWait {
+		t.Errorf("ticket.WaitingOn after the last question answered = %v, want unchanged %q", ticket.WaitingOn, otherWait)
 	}
 }
 

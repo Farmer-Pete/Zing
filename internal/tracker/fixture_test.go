@@ -1,7 +1,10 @@
 package tracker_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"zing/fixtures"
@@ -126,13 +129,31 @@ func TestFixture_FileTicketAppendsAndGeneratesARef(t *testing.T) {
 	}
 }
 
+// TestFixture_CommentReturnsNil proves Comment succeeds and, since a
+// comment body can carry sensitive text (the repo rule is never log a
+// secret), that its log line carries the body's length, never the body
+// itself. It swaps the process-wide slog default logger to capture that
+// line, so it does not run in parallel with the other subtests here, none
+// of which touch slog.
 func TestFixture_CommentReturnsNil(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t)
 
-	if err := f.Comment(context.Background(), fixtureProject, "fake#1", "looks good"); err != nil {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	const secretBody = "the deploy key is sk-super-secret-value"
+	if err := f.Comment(context.Background(), fixtureProject, "fake#1", secretBody); err != nil {
 		t.Errorf("Comment: %v, want nil", err)
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, secretBody) {
+		t.Errorf("Comment logged the raw body; want only its length, got log line: %s", logged)
+	}
+	if !strings.Contains(logged, "body_len") {
+		t.Errorf("Comment's log line is missing body_len; got: %s", logged)
 	}
 }
 

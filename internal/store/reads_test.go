@@ -335,6 +335,90 @@ func TestOpenSession_NoneForJobReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+
+	run0 := insertQuestionRun(t, s, sessID)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO runs (session_id, turn, outcome) VALUES (?, 1, 'ready')`, sessID); err != nil {
+		t.Fatalf("insert turn-1 run: %v", err)
+	}
+
+	got, ok, err := s.FirstRun(ctx, sessID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("FirstRun: ok = false, want true")
+	}
+	if got.ID != run0 {
+		t.Errorf("FirstRun.ID = %d, want the turn-0 run %d", got.ID, run0)
+	}
+	if got.Turn != 0 {
+		t.Errorf("FirstRun.Turn = %d, want 0", got.Turn)
+	}
+	if got.SessionID != sessID {
+		t.Errorf("FirstRun.SessionID = %d, want %d", got.SessionID, sessID)
+	}
+}
+
+func TestFirstRun_NoRunsReturnsFalse(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+
+	_, ok, err := s.FirstRun(ctx, sessID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if ok {
+		t.Error("FirstRun with no runs: ok = true, want false")
+	}
+}
+
+func TestQuestionsByRun_ScopedToOneRun(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runA := insertQuestionRun(t, s, sessID)
+	runB := insertQuestionRun(t, s, sessID)
+
+	openState := "open"
+	answeredState := "answered"
+
+	qA, err := s.InsertMessage(ctx, Message{
+		TicketID: ticketID, RunID: &runA, Type: msgTypeQuestion, Author: testAuthorZing, State: &answeredState,
+		Body: "Q1", Payload: questionPayload("Q1"),
+	})
+	if err != nil {
+		t.Fatalf("insert question for run A: %v", err)
+	}
+	if _, err = s.InsertMessage(ctx, Message{
+		TicketID: ticketID, RunID: &runB, Type: msgTypeQuestion, Author: testAuthorZing, State: &answeredState,
+		Body: "Q2", Payload: questionPayload("Q2"),
+	}); err != nil {
+		t.Fatalf("insert question for run B: %v", err)
+	}
+	if _, err = s.InsertMessage(ctx, Message{
+		TicketID: ticketID, RunID: &runA, Type: msgTypeQuestion, Author: testAuthorZing, State: &openState,
+		Body: "Q3", Payload: questionPayload("Q3"),
+	}); err != nil {
+		t.Fatalf("insert open question for run A: %v", err)
+	}
+
+	got, err := s.QuestionsByRun(ctx, runA, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByRun: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != qA {
+		t.Errorf("QuestionsByRun(runA, answered) = %+v, want exactly [%d]", got, qA)
+	}
+}
+
 func TestGetMessage_RoundTrips(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
