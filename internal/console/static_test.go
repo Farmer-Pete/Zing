@@ -13,9 +13,11 @@ import (
 )
 
 // wantMermaidSHA256 is the digest static/ASSETS.md records for the vendored
-// mermaid 11.4.1 bundle (design section 0, dependency set: "An asset-verify
-// test asserts the embedded bytes match the recorded digest").
-const wantMermaidSHA256 = "cff34e82c8bded4711ae36bc9cf1df0f1d05fa0594cb6540eb8dc3d2aced9426"
+// mermaid 11.4.1 UMD bundle (design section 0, dependency set: "An
+// asset-verify test asserts the embedded bytes match the recorded digest";
+// v10 change log: the self-contained UMD build replaces the chunked ESM
+// entry Task 1 vendored).
+const wantMermaidSHA256 = "a43bc1afd446f9c4cc66ac5dd45d02e8d65e26fc5344ec0ef787f88d6ddb6f9e"
 
 // testContentTypeJS and testContentTypeJSON name the two Content-Type
 // values the static assets serve with, reused across this file and

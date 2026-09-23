@@ -19,12 +19,12 @@ repo-side bookkeeping only.
 ## mermaid.js
 
 - Version: 11.4.1
-- Source: https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs
+- Source: https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js
 - Project: https://github.com/mermaid-js/mermaid
-- SHA-256: `cff34e82c8bded4711ae36bc9cf1df0f1d05fa0594cb6540eb8dc3d2aced9426`
+- SHA-256: `a43bc1afd446f9c4cc66ac5dd45d02e8d65e26fc5344ec0ef787f88d6ddb6f9e`
 - License: MIT (Mermaid Contributors). Full text: https://github.com/mermaid-js/mermaid/blob/develop/LICENSE
-- Vendored unmodified, byte-for-byte, straight from the CDN response. `internal/console/asset_test.go` asserts the embedded bytes match the recorded digest above (design section 0, dependency set).
-- **Known gap, flagged for whoever wires `console.js`'s real mermaid import (Task 4/5):** this entry-point file is not self-contained. It carries 10 static `import` statements and 23 dynamic `import()` calls to sibling chunk files under a relative `./chunks/mermaid.esm.min/` path (mermaid's diagram-type renderers are code-split). Only this one file is vendored here, matching the plan's single-file `/static/mermaid.js` asset; the chunk files are not vendored and the static allowlist does not serve them. A browser that actually imports and runs this module will 404 on those chunk requests. Task 1 only serves and digest-verifies this file; it does not wire a working mermaid import (that starts at Task 4's `console.js` and Task 5's `render.go`). Whoever does that work must vendor the chunk tree (or reach for a different mermaid distribution) before mermaid can render a diagram end to end.
+- Vendored unmodified, byte-for-byte, straight from the CDN response: fetched read-only, hashed, and scanned for `eval`, `document.write`, `new Function`, dynamic `import()`, and unexpected external hosts before vendoring, none found (every URL string in the bundle is a license or upstream-project link). `internal/console/static_test.go`'s `TestMermaidAssetDigestMatchesRecorded` asserts the embedded bytes match the recorded digest above (design section 0, dependency set).
+- **Replaces the Task 1 ESM entry (design v10 change log, "build-time correction").** Task 1 vendored `mermaid.esm.min.mjs`, which is not self-contained: it carries static and dynamic `import`/`import()` statements to about thirty sibling chunk files under a relative `./chunks/` path, which a single embedded asset cannot serve offline. This entry is the self-contained UMD build instead (esbuild's IIFE output ending `globalThis.mermaid = globalThis.__esbuild_esm_mermaid.default`), one file with no chunk imports. It sets the `mermaid` global (`window.mermaid` in a browser) when loaded via a classic, non-module `<script>` tag, which is how `internal/console/templates/shell.templ` loads it, in the document head. `internal/console/static/console.js`'s `runMermaidGuarded` step (previously guarded off) now calls `window.mermaid.initialize({securityLevel:'strict', startOnLoad:false})` once and `window.mermaid.run()` over the collected diagram nodes on every patch (design section 6.10). `internal/console/render.go`'s goldmark-diagram wiring never registers a script-emitting renderer (it replaces `NewMermaidClientRenderer` with a renderer that writes the same `<pre class="mermaid">` block but never marks the render context that would make goldmark-diagram append its own `<script>` tag), so this classic script tag is the one and only mermaid load, matching the design's "exactly one mermaid load."
 
 ## console.js, keyboard.mjs, keys.json
 
@@ -36,9 +36,7 @@ detection, the send-chord platform check, the id-based focus step,
 `reconcileFocus`, `collectPatchWork`), covered by `console.test.js` under
 `node --test`. `console.js` is the DOM wiring: it reads `keys.json`,
 installs the keyboard handler and the `#main`/`#rail` `MutationObserver`,
-and dispatches `zing-nav` on `#stream-ctl`. Its mermaid step is guarded off
-(see the "Known gap" note above): it collects and marks diagram nodes but
-does not import or run mermaid yet, since a static import of the
-unvendored `mermaid.js` would fail module resolution in a real browser and
-take the whole module down with it. Task 5 wires the real import once the
-chunk-vendoring gap is fixed.
+and dispatches `zing-nav` on `#stream-ctl`. Its mermaid step
+(`runMermaidGuarded`) now initializes `window.mermaid` (set by the classic
+script tag above) once and runs it over unprocessed `.mermaid` nodes on
+each patch (design section 6.3, 6.10).

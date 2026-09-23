@@ -9,6 +9,8 @@ require (
 	github.com/invopop/jsonschema v0.14.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/starfederation/datastar-go v1.2.2
+	github.com/yuin/goldmark-diagram v1.1.0
+	github.com/yuin/goldmark/v2 v2.1.5
 	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.59.0
 )

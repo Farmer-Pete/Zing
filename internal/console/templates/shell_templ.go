@@ -23,6 +23,14 @@ import templruntime "github.com/a-h/templ/runtime"
 // first, data-on:zing-nav for every navigation after), so Datastar's
 // requestCancellation (default "auto", keyed by trigger element) aborts the
 // prior stream before the next one starts.
+//
+// The head loads the vendored mermaid UMD bundle with a classic, non-module
+// script tag (design section 6.10, v10 change log): the vendored build
+// (static/ASSETS.md) is esbuild's self-contained UMD output, which sets the
+// `mermaid` global directly and needs no module resolution, unlike the
+// ES-module entry point Task 1 first vendored and Task 5 replaced. Loading
+// it here, once, is the only mermaid script on the page: render.go's
+// goldmark-diagram wiring never emits a second one (design section 6.10).
 func Shell(nav, main, rail templ.Component) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -52,7 +60,7 @@ func Shell(nav, main, rail templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</head><body data-signals=\"{view: 'inbox', open: 0, project: 0}\"><div class=\"layout\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<script src=\"/static/mermaid.js\"></script></head><body data-signals=\"{view: 'inbox', open: 0, project: 0}\"><div class=\"layout\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -8,14 +8,12 @@
 // exercise; design section 6.4: "console.js imports keyboard.mjs ... does
 // the DOM walking and wiring ... it is not unit-tested under Node").
 //
-// TASK 5: mermaid is not imported here yet. static/ASSETS.md records the
-// vendoring gap in mermaid.js (it carries static imports to sibling chunk
-// files this repo does not vendor); a top-level `import mermaid from
-// '/static/mermaid.js'` would fail to resolve in a real browser and take
-// this entire module down with it, breaking every keyboard binding, not
-// just diagrams. So the observer's diagram step is collected but guarded
-// off below (runMermaidGuarded) until Task 5 fixes the vendoring and wires
-// the real import and mermaid.initialize call (design section 6.10).
+// mermaid (design section 6.3, 6.10): static/mermaid.js is the vendored,
+// self-contained UMD build, loaded once by templates/shell.templ with a
+// classic, non-module <script> tag in the document head, which sets
+// window.mermaid before this module's own script (type=module, so it is
+// deferred) runs. This module never imports mermaid itself; it only reads
+// the global, in runMermaidGuarded below.
 
 import {
 	emptyChordState,
@@ -486,19 +484,45 @@ function collectDiagramIDs() {
 	});
 }
 
-// runMermaidGuarded is the TASK 5 seam (see the file-header note): once a
-// working vendored mermaid import lands, this marks each resolved node
-// processed and calls mermaid.run() over them. Today it only marks nodes
-// processed, so a diagram block renders as its raw fenced text rather than
-// being silently reprocessed forever, and never runs mermaid itself.
-function runMermaidGuarded(diagramIDs) {
-	for (const id of diagramIDs) {
-		document.getElementById(id)?.setAttribute(processedAttr, '');
+// mermaidReady serializes mermaid.run() calls (design section 6.3: "Mermaid
+// runs are serialized (one run resolves before the next starts)"). Chaining
+// every call onto this promise, instead of firing each independently, stops
+// two back-to-back patches from starting overlapping runs against nodes an
+// earlier run may still be mutating. mermaidInitialized guards the one
+// required mermaid.initialize() call (design section 6.3, 6.10).
+let mermaidReady = Promise.resolve();
+let mermaidInitialized = false;
+
+function ensureMermaidInitialized() {
+	if (mermaidInitialized) {
+		return;
 	}
-	// TASK 5: once static/mermaid.js's chunk-vendoring gap (ASSETS.md) is
-	// fixed, dynamically import it here (never as a static top-level import;
-	// see the file header) and call mermaid.run({ nodes: [...] }) over the
-	// elements named by diagramIDs.
+	mermaidInitialized = true;
+	globalThis.mermaid.initialize({ securityLevel: 'strict', startOnLoad: false });
+}
+
+// runMermaidGuarded marks each resolved diagram node processed, then queues
+// one mermaid.run() over them (design section 6.3, 6.10: "runs mermaid.run()
+// over unprocessed .mermaid nodes after each patch"). It is a no-op when
+// there is nothing new to draw, or when window.mermaid never loaded (the
+// classic script in shell.templ's head failed, or has not run yet), so a
+// missing or slow bundle degrades to the fence's raw escaped text instead of
+// throwing out of the observer callback. A rejected run is caught and
+// logged (design section 6.3: "a rejected run is caught and logged, not
+// left to bubble"), never left to reject mermaidReady itself, which would
+// poison every run queued after it.
+function runMermaidGuarded(diagramIDs) {
+	const nodes = diagramIDs.map((id) => document.getElementById(id)).filter((el) => el != null);
+	for (const el of nodes) {
+		el.setAttribute(processedAttr, '');
+	}
+	if (nodes.length === 0 || !globalThis.mermaid) {
+		return;
+	}
+	ensureMermaidInitialized();
+	mermaidReady = mermaidReady
+		.then(() => globalThis.mermaid.run({ nodes }))
+		.catch((err) => console.error('console.js: mermaid.run', err));
 }
 
 // runPatchWork is the MutationObserver callback's one per-patch step
