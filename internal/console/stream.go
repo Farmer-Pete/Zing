@@ -70,8 +70,13 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // always all three (design section 6.3: "#rail ... is always patched, so
 // leaving a thread clears the old rail"). It returns false -- ending the
 // stream -- on a store read failure or on any PatchElementTempl error (a
-// render error or a write error alike, folded together by the SDK, meaning
-// the client has gone away).
+// render error or a write error alike, folded together by the SDK, most
+// often meaning the client has gone away). Every PatchElementTempl error is
+// logged, with the frame's ids, before the stream ends (review fix, PR
+// #16): the SDK folds a render error into the same return as an ordinary
+// client-disconnect write error, so this was the only place that could
+// still tell the two apart, and silently ending on a genuine render error
+// left it undiagnosable.
 func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
 	nav, err := c.navComponent(ctx)
 	if err != nil {
@@ -79,6 +84,7 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(nav); patchErr != nil {
+		slog.Warn("console: stream: patch nav", "view", sig.View, "open", sig.Open, "err", patchErr)
 		return false
 	}
 
@@ -88,6 +94,7 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(main); patchErr != nil {
+		slog.Warn("console: stream: patch main", "view", sig.View, "open", sig.Open, "err", patchErr)
 		return false
 	}
 
@@ -96,5 +103,9 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		slog.Error("console: stream: build rail", "view", sig.View, "open", sig.Open, "err", err)
 		return false
 	}
-	return sse.PatchElementTempl(rail) == nil
+	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
+		slog.Warn("console: stream: patch rail", "view", sig.View, "open", sig.Open, "err", patchErr)
+		return false
+	}
+	return true
 }

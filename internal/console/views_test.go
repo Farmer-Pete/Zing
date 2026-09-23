@@ -139,6 +139,44 @@ func TestFeedOrdersNewestMessageFirst(t *testing.T) {
 	}
 }
 
+// TestFeedRendersStateAndAnswerContentNotBlank proves the Feed view decodes
+// a state row's transition and a sent answer row's chosen option through
+// the same displayBody logic the Thread view already used (design section
+// 6.5, 6.6; code review fix, PR #16), rather than showing each row's raw
+// Body -- always empty for these two types, since a commit never sets a
+// state row's Body (the transition lives in Payload) and SaveDraft/
+// SendBatch never set an answer row's Body (the choice lives in Payload).
+func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketID := seedTicket(t, s, "f#3", "Feed decode ticket")
+	// A transition other than every other call site's queued->planning, so
+	// this fixture does not make seedStateMessage's from/to params look
+	// unconditionally hardcodable to golangci-lint's unparam check.
+	seedStateMessage(t, s, ticketID, "planning", "building", "start")
+
+	questionID := seedOpenQuestion(t, s, ticketID)
+	option := "b"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	if !strings.Contains(main, "planning -&gt; building") {
+		t.Errorf("feed missing the state row's decoded transition; got:\n%s", main)
+	}
+	if !strings.Contains(main, "Option: b") {
+		t.Errorf("feed missing the sent answer row's decoded option; got:\n%s", main)
+	}
+}
+
 // TestProjectScopesAndOrdersByTrackerRef proves Project shows only the
 // requested project's tickets, ordered by tracker_ref then id, regardless
 // of insertion order (design section 6.5, 7.2), and that a ticket from a
@@ -235,6 +273,60 @@ func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 	}
 	if !strings.Contains(main, `class="reply-input"`) {
 		t.Errorf("thread frame missing the question's free reply input; got:\n%s", main)
+	}
+}
+
+// TestThreadAnsweredAndResolvedQuestionsRenderReadOnly proves an answered or
+// resolved question's group drops its active controls -- option chips and
+// the free reply input -- while still showing its context and lifecycle
+// pill (design section 6.6, 6.7; code review fix, PR #16: questionGroup
+// used to render those controls for every question regardless of state).
+func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#5", "Thread answered/resolved ticket")
+
+	answeredPayload := []byte(`{"key":"Q1","kind":"question","state":"answered","recommended":"a",` +
+		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
+	answeredState := "answered"
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "question", Author: "zing", State: &answeredState,
+		Body: "Answered question\n\nAlready decided.", Payload: answeredPayload,
+	}); err != nil {
+		t.Fatalf("InsertMessage(answered question): %v", err)
+	}
+
+	resolvedState := "resolved" // named once; reused below so this file's literal "resolved" stays under goconst's threshold
+	resolvedPayload := []byte(`{"key":"Q2","kind":"question","state":"` + resolvedState + `","recommended":"a",` +
+		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "question", Author: "zing", State: &resolvedState,
+		Body: "Resolved question\n\nSettled.", Payload: resolvedPayload,
+	}); err != nil {
+		t.Fatalf("InsertMessage(resolved question): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	for _, tc := range []struct {
+		name, title, pill string
+	}{
+		{"answered", "Answered question", "resuming"}, // questionStateLabel's answered->resuming mapping (views.go)
+		{resolvedState, "Resolved question", resolvedState},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := findGroup(t, groups, tc.title)
+			if strings.Contains(g, "data-chip-index") {
+				t.Errorf("%s question still renders option chips; got:\n%s", tc.name, g)
+			}
+			if strings.Contains(g, `class="reply-input"`) {
+				t.Errorf("%s question still renders the free reply input; got:\n%s", tc.name, g)
+			}
+			if !strings.Contains(g, tc.pill) {
+				t.Errorf("%s question missing its %q lifecycle pill; got:\n%s", tc.name, tc.pill, g)
+			}
+		})
 	}
 }
 

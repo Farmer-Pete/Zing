@@ -4,7 +4,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -224,8 +223,20 @@ func checkValues(md toml.MetaData, cfg Config) error {
 // console must bind concrete addresses only. A "tailscale" token, or any
 // other entry that does not parse as an IP at all, is left for cmd/zing's
 // resolver to handle and is not an error here.
+//
+// It also rejects an empty or whitespace-only entry (security fix, PR #16
+// review): cmd/zing/bind.go's resolveBindHosts passes a non-"tailscale"
+// token straight through unresolved, and serve.go's listenOnAll then builds
+// its listen address with net.JoinHostPort(host, port); JoinHostPort("",
+// port) yields ":port", which net.Listen binds to every interface. A blank
+// bind entry is never a legitimate value the resolver can act on (unlike
+// "tailscale" or a literal IP), so it is rejected here rather than left for
+// cmd/zing, the same way a wildcard address is.
 func checkBindAddresses(bind []string) error {
-	for _, b := range bind {
+	for i, b := range bind {
+		if strings.TrimSpace(b) == "" {
+			return fmt.Errorf("zing.toml: console.bind[%d]: must not be empty", i)
+		}
 		addr, err := netip.ParseAddr(b)
 		if err != nil {
 			continue
@@ -237,12 +248,18 @@ func checkBindAddresses(bind []string) error {
 	return nil
 }
 
-// checkAllowedHosts rejects a console.allowed_hosts entry that carries a
-// port (design section 6.14: "allowed_hosts entries are hostnames without a
-// port, validated at config load").
+// checkAllowedHosts rejects a console.allowed_hosts entry that is not a
+// bare hostname (design section 6.14: "allowed_hosts entries are hostnames
+// without a port, validated at config load"). A hostname never contains a
+// colon, so testing for one catches both a well-formed "host:port" entry
+// and a malformed authority (cubic review fix, PR #16: net.SplitHostPort's
+// error varies by shape -- "host:80" parses clean, but "host:" and
+// "h:o:st" each fail differently -- so gating on SplitHostPort's error
+// alone let a malformed colon-bearing entry like "h:o:st" slip through
+// unrejected; a plain colon check has no such gap).
 func checkAllowedHosts(hosts []string) error {
 	for i, h := range hosts {
-		if _, _, err := net.SplitHostPort(h); err == nil {
+		if strings.Contains(h, ":") {
 			return fmt.Errorf("zing.toml: console.allowed_hosts[%d]: must not include a port", i)
 		}
 	}

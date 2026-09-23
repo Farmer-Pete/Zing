@@ -15,8 +15,10 @@
 package console
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -81,6 +83,26 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	if len([]rune(req.Text)) > maxDraftTextLen {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// A thread reply (Question nil) reaches SaveDraft's insertReplyDraftTx
+	// with no further existence check on Ticket (unlike an option or item
+	// answer, which validates Ticket against the named question's own row);
+	// a nonexistent ticket id there fails the messages.ticket_id foreign
+	// key, an untyped *sqlite.Error SaveDraft returns as-is, so it fell
+	// through to the generic 500 branch below instead of a 4xx (review fix,
+	// PR #16). Checking existence here, for every draft mode, keeps that
+	// check in the one console-owned lookup already used elsewhere
+	// (views.go's threadComponent) rather than adding a store-side error
+	// type this package would need a new seam to detect.
+	if _, err := c.store.GetTicket(r.Context(), req.Ticket); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "ticket not found", http.StatusConflict)
+			return
+		}
+		slog.Error("console: save draft: get ticket", "ticket_id", req.Ticket, "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
@@ -181,13 +203,24 @@ func (c *console) handleRead(w http.ResponseWriter, r *http.Request) {
 // decodeStrict decodes r's JSON body into dst, rejecting unknown fields and
 // trailing data (design section 6.7: "decodes strictly"). The caller must
 // already have wrapped r.Body in http.MaxBytesReader.
+//
+// The trailing-data check is a second Decode into a throwaway value, not
+// dec.More() (cubic review fix, PR #16): More only peeks the next
+// non-whitespace byte and treats ']' or '}' as "end of the enclosing
+// array/object", so trailing garbage that happens to start with one of
+// those bytes -- a body like `{"ticket":1}}`, say -- read as "no more
+// input" and slipped through unrejected. A second Decode call returns
+// io.EOF only when nothing but whitespace remains after the first value;
+// any other outcome, a parse error or a second value alike, means there
+// was another token, which is exactly "trailing data" (verified against
+// both known-good and known-bad bodies before landing this fix).
 func decodeStrict(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return errTrailingData
 	}
 	return nil

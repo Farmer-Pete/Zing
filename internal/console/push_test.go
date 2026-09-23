@@ -2,6 +2,7 @@ package console_test
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -298,5 +299,72 @@ func TestPushSubscribe_SucceedsAndIsIdempotentOnReSubscribe(t *testing.T) {
 	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusNoContent {
 		t.Fatalf("POST /push/subscribe (re-subscribe): status = %d, want 204", second.StatusCode)
+	}
+}
+
+// TestPushSubscribe_RejectsKeysWithExtraProperty proves
+// validSubscriptionKeys' additionalProperties:false half of the
+// push_subscriptions/keys schema (review fix, PR #16): a Keys map carrying
+// an unexpected third property is rejected with 400, the same as a missing
+// required one (TestPushSubscribe_RejectsKeysMissingRequiredFields above).
+func TestPushSubscribe_RejectsKeysWithExtraProperty(t *testing.T) {
+	srv := newPushTestServer(t)
+
+	body := `{"endpoint":"https://push.example/extra","keys":{"p256dh":"a-key","auth":"a-secret","extra":"nope"}}`
+	resp := doRequest(t, pushRequest(t, srv, http.MethodPost, "/push/subscribe", testPushToken2, body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /push/subscribe with an extra keys property: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestPushSubscribe_StoreFailureReturns500NotBadRequest proves
+// handlePushSubscribe's fixed class split (review fix, PR #16): once the
+// endpoint and Keys shape both pass their own checks, a genuine store
+// failure -- closing the store out from under a live server, the same
+// technique TestIndexReturns500WithGenericBodyOnStoreError (console_test.go)
+// uses for GET / -- reports 500 with the generic body, not 400. Before this
+// fix, handlePushSubscribe treated every Subscribe error as a bad payload
+// and answered 400 even here.
+func TestPushSubscribe_StoreFailureReturns500NotBadRequest(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+
+	push := notify.New(s)
+	handler := console.New(s, bus.New(), nil, []string{testBindHost}, addr.Port, newTestLogHandler(t), push, testPushToken2)
+	srv := httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	body := `{"endpoint":"https://push.example/store-failure","keys":{"p256dh":"a-key","auth":"a-secret"}}`
+	resp := doRequest(t, pushRequest(t, srv, http.MethodPost, "/push/subscribe", testPushToken2, body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("POST /push/subscribe after closing the store: status = %d, want 500", resp.StatusCode)
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatalf("read response body: %v", readErr)
+	}
+	if got := strings.TrimSpace(string(respBody)); got != "internal error" {
+		t.Errorf(`response body = %q, want exactly "internal error"`, got)
 	}
 }

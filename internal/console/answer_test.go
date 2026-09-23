@@ -113,6 +113,56 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 	})
 }
 
+// TestDraft_ThreadReplyAgainstMissingTicketReturns409 proves a thread-reply
+// draft (no question, design section 6.7) against a ticket id that names no
+// row is a 409, not a 500 (review fix, PR #16): SaveDraft's insertReplyDraftTx
+// path had no existence check of its own, so it fell through to the
+// messages.ticket_id foreign key and an untyped store error the handler
+// mapped to 500.
+func TestDraft_ThreadReplyAgainstMissingTicketReturns409(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	const missingTicketID = 999999
+	body := fmt.Sprintf(`{"ticket":%d,"text":"hello"}`, missingTicketID)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST /draft against a missing ticket: status = %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestDraft_RejectsTrailingDataAfterTheJSONBody proves decodeStrict rejects
+// a body that decodes cleanly but keeps going, including trailing bytes
+// that dec.More() alone missed (cubic review fix, PR #16): a stray '}' or
+// ']' right after a complete top-level value makes More() report "no more
+// input" (it treats those bytes as closing an enclosing array/object,
+// which does not exist at the top level), so a body like `{"ticket":1}}`
+// used to decode as valid.
+func TestDraft_RejectsTrailingDataAfterTheJSONBody(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"trailing brace", fmt.Sprintf(`{"ticket":%d,"text":"hi"}}`, ticketID)},
+		{"trailing bracket", fmt.Sprintf(`{"ticket":%d,"text":"hi"}]`, ticketID)},
+		{"second JSON value", fmt.Sprintf(`{"ticket":%d,"text":"hi"}{"ticket":%d,"text":"hi"}`, ticketID, ticketID)},
+		{"trailing garbage", fmt.Sprintf(`{"ticket":%d,"text":"hi"} garbage`, ticketID)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doRequest(t, mutationRequest(t, srv, "/draft", tc.body))
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", resp.StatusCode)
+			}
+		})
+	}
+}
+
 // TestSend_SucceedsThenConflictsWhenEmpty proves POST /send's happy path
 // (204, drafts flip to sent) and that sending again with nothing left
 // drafted is 409 Empty (design section 6.7, 7.1).

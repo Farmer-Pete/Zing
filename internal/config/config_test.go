@@ -13,6 +13,11 @@ const testUser = "peter"
 // wildcard console.bind entry (config.go, design section 6.14).
 const wantWildcardBindError = "zing.toml: console.bind: wildcard address not allowed"
 
+// wantAllowedHostsPortError is the exact error checkAllowedHosts returns
+// for any console.allowed_hosts[0] entry that carries a colon, well-formed
+// or malformed alike (config.go, design section 6.14).
+const wantAllowedHostsPortError = "zing.toml: console.allowed_hosts[0]: must not include a port"
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -362,7 +367,38 @@ lint = "golangci-lint run"
 		{
 			name: "allowed_hosts entry with a port",
 			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet:7420\"]\n",
-			want: "zing.toml: console.allowed_hosts[0]: must not include a port",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// PR #16 review: net.SplitHostPort("h:o:st") itself errors ("too
+			// many colons in address"), so gating the old check on
+			// SplitHostPort's error alone let this malformed entry through
+			// unrejected.
+			name: "allowed_hosts entry malformed with multiple colons",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"h:o:st\"]\n",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// PR #16 review: net.SplitHostPort("host:") succeeds with an
+			// empty port, so the old check already caught this one; kept as
+			// a regression case alongside the multi-colon one above.
+			name: "allowed_hosts entry with a trailing colon and no port",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"host:\"]\n",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// SECURITY, PR #16 review: an empty bind entry parses as neither
+			// a wildcard IP nor "tailscale", so cmd/zing/bind.go passed it
+			// through unresolved and net.JoinHostPort("", port) bound every
+			// interface.
+			name: "empty bind entry",
+			body: minimalValidTOML + "\n[console]\nbind = [\"\"]\n",
+			want: "zing.toml: console.bind[0]: must not be empty",
+		},
+		{
+			name: "whitespace-only bind entry",
+			body: minimalValidTOML + "\n[console]\nbind = [\"127.0.0.1\", \"   \"]\n",
+			want: "zing.toml: console.bind[1]: must not be empty",
 		},
 		{
 			name: "explicit push_token shorter than the minimum",

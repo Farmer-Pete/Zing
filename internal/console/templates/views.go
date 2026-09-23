@@ -77,8 +77,18 @@ type ThreadQuestion struct {
 	Items           []ThreadItem
 	StateLabel      string
 	MessageCount    int
-	PRURL           string        // merge kind only; empty when the ticket has no PR link yet
-	Plan            *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
+
+	// Interactive reports whether this question is still open and should
+	// render its active controls -- option chips, item-decision rows, and
+	// the free reply input (design section 6.6, 6.7; code review fix, PR
+	// #16). An answered or resolved question renders read-only: its
+	// context region and lifecycle pill still show, but console.SaveDraft
+	// already refuses a draft against a closed question (openQuestionForTicketTx),
+	// so a control that let a visitor try anyway was misleading, not just
+	// inert.
+	Interactive bool
+	PRURL       string        // merge kind only; empty when the ticket has no PR link yet
+	Plan        *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 }
 
 // ThreadRow is one message the read-only Thread view renders: a state

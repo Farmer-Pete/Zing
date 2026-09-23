@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"unicode/utf8"
 
 	"zing/internal/notify"
 )
@@ -112,11 +113,8 @@ type pushSubscribeRequest struct {
 // guarded by the bearer token only, matching GET /push/key (fix 5: the
 // mutation guard was dropped so a phone outside the Host allowlist can still
 // subscribe). It decodes strictly, bounds the body, rejects a non-https
-// endpoint with 400, then calls PushKeys.Subscribe, which validates
-// keys_json against the push_subscriptions/keys schema; a validation
-// failure there also reports 400, since it is the same "bad body" class as
-// an invalid endpoint (design section 7.1: "204, 401, or 400"). 204 and a
-// bus publish on success.
+// endpoint or a malformed Keys map with 400, then calls PushKeys.Subscribe.
+// 204 and a bus publish on success.
 func (c *console) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 	if !c.checkPushToken(w, r) {
 		return
@@ -133,20 +131,59 @@ func (c *console) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-
-	if err := c.push.Subscribe(r.Context(), notify.Subscription{Endpoint: req.Endpoint, Keys: req.Keys}); err != nil {
-		// Every failure here is a bad subscription payload (keys_json failed
-		// schema validation) rather than a genuine server fault, since the
-		// endpoint itself was already checked above and Subscribe's only
-		// other work is a validated store write; report it the same way
-		// writeDecodeError reports a malformed body.
-		slog.Warn("console: subscribe push", "err", err)
+	if !validSubscriptionKeys(req.Keys) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Every failure Subscribe can still return past the two checks above is
+	// a genuine store fault, not a bad payload (review fix, PR #16):
+	// isHTTPSURL already rejected a bad endpoint and validSubscriptionKeys
+	// already rejected a Keys map that would fail
+	// UpsertPushSubscription's own push_subscriptions/keys schema check, so
+	// this package no longer needs to guess which failure class a Subscribe
+	// error belongs to the way the old blanket "every failure is 400" comment
+	// here used to.
+	if err := c.push.Subscribe(r.Context(), notify.Subscription{Endpoint: req.Endpoint, Keys: req.Keys}); err != nil {
+		slog.Error("console: subscribe push", "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
 	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// pushSubscriptionKeyMaxRunes is push_subscriptions/keys.json's maxLength
+// for both "p256dh" and "auth" (internal/store/schemas/push_subscriptions/
+// keys.json), counted in runes to match the JSON Schema string-length rule
+// (design section 6.13; the same rune-counting reasoning as
+// config.minPushTokenLen).
+const pushSubscriptionKeyMaxRunes = 512
+
+// validSubscriptionKeys reports whether keys is exactly the shape
+// push_subscriptions/keys.json requires: the two properties "p256dh" and
+// "auth", both present, non-empty, and at most 512 runes, no others (review
+// fix, PR #16). internal/console never imports the store's schema
+// validator (PushKeys is this package's only seam onto internal/notify), so
+// this reproduces that one small schema locally, the same way isHTTPSURL
+// reproduces "an https URL" rather than reaching into another package for
+// it; keep it in sync with keys.json if that schema ever changes.
+func validSubscriptionKeys(keys map[string]string) bool {
+	if len(keys) != 2 {
+		return false
+	}
+	for _, key := range [2]string{"p256dh", "auth"} {
+		v, ok := keys[key]
+		if !ok {
+			return false
+		}
+		n := utf8.RuneCountInString(v)
+		if n == 0 || n > pushSubscriptionKeyMaxRunes {
+			return false
+		}
+	}
+	return true
 }
 
 // isHTTPSURL reports whether s parses as an absolute URL with scheme

@@ -8,6 +8,7 @@ package console
 import (
 	"log/slog"
 	"net/http"
+	"sync"
 )
 
 // logLevelsByName is the design section 6.12 closed set POST /loglevel
@@ -41,11 +42,23 @@ type logLevelRequest struct {
 	Level string `json:"level"`
 }
 
+// logLevelMu serializes POST /loglevel's write to settings.log_level with
+// the live LevelVar.Set call right after it (review fix, PR #16: without
+// this, two concurrent requests can interleave their write-then-set pairs
+// -- request A's SetSettings, then B's SetSettings, then B's SetLevel, then
+// A's SetLevel -- leaving the persisted setting and the live level
+// disagreeing until the next successful POST /loglevel or process
+// restart). Package-level rather than a field on *console: this critical
+// section is the only place either half of that pair is touched, and one
+// zing process runs one console.
+var logLevelMu sync.Mutex
+
 // handleLogLevel is POST /loglevel (design section 6.12, 7.1): validate the
-// requested level against the closed set, write settings.log_level, then
-// call LevelVar.Set through the handler so the change takes hold at once,
-// before this request even returns. 400 on a level outside the closed set
-// (or a malformed body), 204 and a bus publish on success.
+// requested level against the closed set, then, under logLevelMu, write
+// settings.log_level and call LevelVar.Set through the handler so the
+// change takes hold at once, before this request even returns. 400 on a
+// level outside the closed set (or a malformed body), 204 and a bus
+// publish on success.
 func (c *console) handleLogLevel(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
 
@@ -59,6 +72,9 @@ func (c *console) handleLogLevel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+
+	logLevelMu.Lock()
+	defer logLevelMu.Unlock()
 
 	if err := c.store.SetSettings(r.Context(), settingLogLevel, req.Level); err != nil {
 		slog.Error("console: set log level", "level", req.Level, "err", err)

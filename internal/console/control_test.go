@@ -6,10 +6,12 @@ package console_test
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"zing/internal/bus"
@@ -71,6 +73,68 @@ func TestLogLevel_RejectsAnUnknownLevel(t *testing.T) {
 	}
 	if !ok || stored != "info" {
 		t.Errorf("GetSetting(log_level) = (%q, %v), want the seeded default (info, true) unchanged", stored, ok)
+	}
+}
+
+// TestLogLevel_ConcurrentRequestsStayConsistent proves POST /loglevel's
+// settings write and live LevelVar.Set stay paired under concurrency
+// (review fix, PR #16): without logLevelMu, two concurrent requests could
+// interleave their write-then-set pairs -- A's write, B's write, B's set,
+// A's set -- and leave settings.log_level and the live level permanently
+// disagreeing, since nothing else ever revisits either after this handler
+// returns. A burst of concurrent requests, each proposing a different
+// level, must still leave the persisted setting and the live level
+// agreeing on whichever one won, every time. This does not prove the
+// interleaving is impossible on its own (a single run can pass by luck);
+// it is run with -race and enough iterations that an unsynchronized
+// version fails it reliably in practice.
+func TestLogLevel_ConcurrentRequestsStayConsistent(t *testing.T) {
+	s := newConsoleTestStore(t)
+	lv := new(slog.LevelVar)
+	lv.Set(slog.LevelInfo)
+	log := console.NewHandler(&bytes.Buffer{}, lv)
+	srv, _ := newMutationTestServer(t, s, bus.New(), log)
+
+	levels := []string{"debug", "info", "warn", "error"}
+	const requests = 40
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, requests)
+	for i := range requests {
+		level := levels[i%len(levels)]
+		wg.Go(func() {
+			req := mutationRequest(t, srv, "/loglevel", `{"level":"`+level+`"}`)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusNoContent {
+				errCh <- fmt.Errorf("POST /loglevel(%s) status = %d, want 204", level, resp.StatusCode)
+			}
+		})
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	stored, ok, err := s.GetSetting(t.Context(), "log_level")
+	if err != nil {
+		t.Fatalf("GetSetting(log_level): %v", err)
+	}
+	if !ok {
+		t.Fatal("GetSetting(log_level): not set after the concurrent POST /loglevel burst")
+	}
+	wantLevel, wantOK := console.ParseLogLevel(stored)
+	if !wantOK {
+		t.Fatalf("persisted log_level %q is not one of the closed set", stored)
+	}
+	if lv.Level() != wantLevel {
+		t.Errorf("live LevelVar = %v, persisted log_level = %q (%v): store and live level diverged under concurrency",
+			lv.Level(), stored, wantLevel)
 	}
 }
 

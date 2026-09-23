@@ -48,12 +48,17 @@ templ threadMessageRow(row ThreadRow) {
 // questionGroup is a "question" message's <details class="q"> group (design
 // section 6.6): the summary (key, title, message count, and the lifecycle
 // pill), the body and recommendation (pre-rendered markdown, the Task 5
-// Render helper), then the control the payload's Kind dispatches to -- option
-// chips for the four option kinds, one row per Item for the two item kinds,
-// each kind's minimal context first -- and finally the free reply input
-// every kind renders. ticketID feeds every control's data-draft-ticket
-// attribute, so each carries what Task 7's POST /draft needs without this
-// package reaching back into the store itself.
+// Render helper), each kind's context region (always shown), and then,
+// only while the question is still open (row.Question.Interactive, code
+// review fix PR #16), the control the payload's Kind dispatches to --
+// option chips for the four option kinds, one row per Item for the two
+// item kinds -- plus the free reply input every open kind renders. An
+// answered or resolved question shows its context and pill but none of
+// those controls, since a draft against a closed question is refused
+// server-side anyway (store's openQuestionForTicketTx). ticketID feeds
+// every control's data-draft-ticket attribute, so each carries what Task
+// 7's POST /draft needs without this package reaching back into the store
+// itself.
 templ questionGroup(ticketID int64, row ThreadRow) {
 	<details class="q" data-focus-id={ fmtFocusID("question", row.ID) }>
 		<summary>
@@ -74,19 +79,20 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		switch row.Question.Kind {
 			case string(response.QuestionKindGate):
 				@gateContext(row.Question.Plan)
-				@optionChips(ticketID, row.ID, row.Question.Options)
 			case string(response.QuestionKindSplit):
 				@splitContext()
-				@optionChips(ticketID, row.ID, row.Question.Options)
 			case string(response.QuestionKindMerge):
 				@mergeContext(row.Question.PRURL)
-				@optionChips(ticketID, row.ID, row.Question.Options)
-			case string(response.QuestionKindPerimeter), string(response.QuestionKindReview):
-				@itemRows(ticketID, row.ID, row.Question.Items)
-			default:
-				@optionChips(ticketID, row.ID, row.Question.Options)
 		}
-		@freeReply(ticketID, row.ID)
+		if row.Question.Interactive {
+			switch row.Question.Kind {
+				case string(response.QuestionKindPerimeter), string(response.QuestionKindReview):
+					@itemRows(ticketID, row.ID, row.Question.Items)
+				default:
+					@optionChips(ticketID, row.ID, row.Question.Options)
+			}
+			@freeReply(ticketID, row.ID)
+		}
 	</details>
 }
 

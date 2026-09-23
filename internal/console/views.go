@@ -89,7 +89,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		return templates.Feed(messages), nil
+		return templates.Feed(displayFeedMessages(messages)), nil
 	case viewProject:
 		tickets, err := c.store.TicketsByProject(ctx, project)
 		if err != nil {
@@ -131,6 +131,26 @@ func buildInboxGroups(items []store.InboxItem) []templates.InboxGroup {
 		groups[i].Items = append(groups[i].Items, items[n])
 	}
 	return groups
+}
+
+// displayFeedMessages returns a copy of messages with each row's Body
+// replaced by displayBody's decoding (code review fix, PR #16): the Feed
+// view passed store.FeedMessages' raw rows straight to templates.Feed,
+// which renders m.Body verbatim, so a state row (whose Body a commit
+// leaves empty, the transition living in Payload instead) and a sent
+// answer row (whose Body SaveDraft and SendBatch never set, the choice
+// living in Payload instead) both rendered blank -- only the Thread view,
+// through buildThreadRows, ever ran a row's Body through displayBody. The
+// original rows are left untouched; displayBody reads from the copy still
+// carrying the original Payload and Type, so decoding is unaffected by the
+// Body overwrite.
+func displayFeedMessages(messages []store.MessageRow) []store.MessageRow {
+	out := make([]store.MessageRow, len(messages))
+	for i := range messages {
+		out[i] = messages[i]
+		out[i].Body = displayBody(&messages[i])
+	}
+	return out
 }
 
 // threadComponent builds the read-only Thread view for the open ticket:
@@ -335,6 +355,13 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
 		Options: options, Items: items, StateLabel: questionStateLabel(m.State),
 		MessageCount: messageCount,
+		// Interactive is true only for a still-open question (code review
+		// fix, PR #16): questionGroup (thread.templ) used to render option
+		// chips, item rows, and the free reply input for every question
+		// regardless of state, so an answered or resolved question -- whose
+		// draft SaveDraft would refuse anyway (openQuestionForTicketTx) --
+		// still looked editable.
+		Interactive: m.State != nil && *m.State == msgStateOpen,
 	}
 	if payload.Kind == response.QuestionKindMerge && ticket != nil && ticket.PRURL != nil {
 		q.PRURL = *ticket.PRURL

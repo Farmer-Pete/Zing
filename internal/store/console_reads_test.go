@@ -365,6 +365,49 @@ func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
 	}
 }
 
+// TestRecentTickets_IgnoresDraftMessages proves RecentTickets' ordering
+// subquery excludes state='draft' rows, matching Inbox and Feed's own
+// newest-sent-message rule (design section 7.2; code review fix, PR #16).
+// ticketOld's only message is a real, sent update; ticketNew's is the same,
+// inserted after it, so ticketNew is genuinely newer. A draft saved on
+// ticketOld afterward gets the greatest message id of all three but must
+// not let ticketOld jump ahead of ticketNew, since a draft is never a real
+// message until POST /send flips it to sent.
+func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	ticketOld, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "old", Title: "t", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(old): %v", err)
+	}
+	insertZingUpdate(t, s, ticketOld)
+
+	ticketNew, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "new", Title: "t", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(new): %v", err)
+	}
+	insertZingUpdate(t, s, ticketNew)
+
+	if _, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketOld, Text: "a draft reply after both real updates"}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	got, err := s.RecentTickets(t.Context())
+	if err != nil {
+		t.Fatalf("RecentTickets: %v", err)
+	}
+	want := []int64{ticketNew, ticketOld}
+	if len(got) != len(want) {
+		t.Fatalf("RecentTickets returned %d tickets, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].ID != w {
+			t.Errorf("RecentTickets[%d].ID = %d, want %d (a later draft on ticketOld must not outrank ticketNew's real update)", i, got[i].ID, w)
+		}
+	}
+}
+
 func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
