@@ -57,15 +57,21 @@ var keyboardMJS []byte
 var keysJSON []byte
 
 // console holds the read access every handler needs: the store to render
-// from, the bus every SSE stream subscribes to for its wake-up signal, and
-// the machine (nilable) the rail's Phase section reads States.Order from
-// (design section 6.1, 6.11). A nil machine (every test that does not
-// exercise the rail passes one) renders no phase dots rather than panicking
-// (rail.go's buildPhaseRail).
+// from, the bus every SSE stream subscribes to for its wake-up signal, the
+// machine (nilable) the rail's Phase section reads States.Order from
+// (design section 6.1, 6.11), and log, the Task 5 slog.Handler (design
+// section 6.12) cmd/zing installs as slog's default and this package reads
+// from and mutates live: the Log rail's tail (rail.go's buildLogRail) and
+// POST /loglevel and /debug (control.go). A nil machine (every test that
+// does not exercise the rail passes one) renders no phase dots rather than
+// panicking (rail.go's buildPhaseRail); log has no such nil case, since
+// every caller of New, including every test, now builds one (design
+// section 12, Task 10).
 type console struct {
 	store   *store.Store
 	bus     *bus.Broker
 	machine *machine.Machine
+	log     *Handler
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -75,6 +81,8 @@ type console struct {
 //	POST /draft                 save one draft answer or reply (design section 6.7)
 //	POST /send                  send the ticket's drafted batch (design section 6.7)
 //	POST /read                  mark one message read (design section 6.8)
+//	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
+//	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle
 //	GET  /static/mermaid.js     the vendored mermaid bundle
@@ -91,11 +99,17 @@ type console struct {
 // 127.0.0.1, each at port. Task 11 widens the source to every resolved bind
 // authority plus Console.AllowedHosts, still through this same guard.
 //
+// log is the Task 5 slog.Handler (log.go): cmd/zing builds it, seeds its
+// LevelVar from settings.log_level, and installs it as slog's default
+// before calling New (design section 6.12, cmd/zing/serve.go), so this
+// same instance backs both the process's own logging and the console's
+// live level control, per-ticket debug toggle, and Log rail tail.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, port int) http.Handler {
-	c := &console{store: st, bus: b, machine: m}
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, port int, log *Handler) http.Handler {
+	c := &console{store: st, bus: b, machine: m, log: log}
 	guard := newMutationGuard(port, bindHost, "localhost", "127.0.0.1")
 
 	mux := http.NewServeMux()
@@ -104,6 +118,8 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, bindHost string, po
 	mux.HandleFunc("POST /draft", withWriteDeadline(guard.requireSameOrigin(c.handleDraft)))
 	mux.HandleFunc("POST /send", withWriteDeadline(guard.requireSameOrigin(c.handleSend)))
 	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
+	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
+	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))

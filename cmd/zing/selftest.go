@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -178,8 +180,12 @@ func selftestE2E(ctx context.Context) error {
 	// design section 6.7). e2eConsoleHost and e2eConsolePort are a fixed,
 	// made-up bind, never actually listened on, that only needs to satisfy
 	// the mutation guard (mw.go, design section 6.14) the requests below
-	// carry matching Host and Origin headers for.
-	consoleHandler := console.New(st, b, m, e2eConsoleHost, e2eConsolePort)
+	// carry matching Host and Origin headers for. This suite never exercises
+	// /loglevel or /debug, so the Task 5/10 log handler console.New now
+	// requires is a throwaway one over a discarded sink, not the process's
+	// installed default (run's own, serve.go).
+	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar))
+	consoleHandler := console.New(st, b, m, e2eConsoleHost, e2eConsolePort, logHandler)
 
 	var ticketID int64
 	var answered int

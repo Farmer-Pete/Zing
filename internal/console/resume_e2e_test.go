@@ -91,7 +91,7 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("dispatch.New: %v", err)
 	}
 
-	srv, _ := newMutationTestServer(t, st, b)
+	srv, _ := newMutationTestServer(t, st, b, newTestLogHandler(t))
 
 	// Drive the dispatcher directly (as cmd/zing's own selftestE2E does),
 	// bounded, until the fixture ticket appears and waits on its planning

@@ -18,10 +18,14 @@ import (
 // before the handler is built and can be passed to console.New itself
 // (design section 6.14: the mutation guard's Host allowlist is built at
 // "the console port", so a test that exercises it needs its own listener's
-// port, not an arbitrary one). It returns the server and the port every
-// same-origin request in this file and answer_test.go must present as
-// Host/Origin's port.
-func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker) (srv *httptest.Server, port int) {
+// port, not an arbitrary one). log is console.New's Task 10 log handler
+// argument; every caller here that does not itself exercise the log wiring
+// passes newTestLogHandler(t), and control_test.go passes its own
+// buffer-and-LevelVar-backed handler so it can assert what the console
+// wrote and changed. It returns the server and the port every same-origin
+// request in this file and answer_test.go must present as Host/Origin's
+// port.
+func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler) (srv *httptest.Server, port int) {
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -35,7 +39,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker) (srv *ht
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, "127.0.0.1", port)
+	handler := console.New(s, b, nil, "127.0.0.1", port, log)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -81,7 +85,7 @@ func doRequest(t *testing.T, req *http.Request) *http.Response {
 // into the next.
 func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv, port := newMutationTestServer(t, s, bus.New())
+	srv, port := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	authority := "127.0.0.1:" + strconv.Itoa(port)
 
 	tests := []struct {
@@ -189,7 +193,7 @@ func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
 // not MarkRead, let it through requires seeing anything but 403.
 func TestMutationGuard_PassesSameOriginThroughLocalhostAnd127AndTheBoundHost(t *testing.T) {
 	s := newConsoleTestStore(t)
-	_, port := newMutationTestServer(t, s, bus.New())
+	_, port := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	portStr := strconv.Itoa(port)
 
 	hosts := []string{"127.0.0.1", "localhost"}

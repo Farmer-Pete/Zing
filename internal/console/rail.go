@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -98,11 +99,16 @@ func (c *console) buildRailModel(ctx context.Context, ticketID int64) (*template
 	if err != nil {
 		return nil, err
 	}
+	logRail, err := c.buildLogRail(ctx, ticketID)
+	if err != nil {
+		return nil, err
+	}
 
 	return &templates.RailModel{
 		Phase:     c.buildPhaseRail(ticket),
 		Artifacts: artifacts,
 		Run:       run,
+		Log:       logRail,
 	}, nil
 }
 
@@ -252,6 +258,53 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		run.AgentTime = dash
 	}
 	return run, nil
+}
+
+// logLineTimeFormat is the Log rail's own compact per-line timestamp,
+// distinct from the store's ISO-8601 message times (design section 6.16):
+// a rail line is read next to its neighbors in one narrow column, not
+// cross-referenced against another system, so hours:minutes:seconds.millis
+// is enough.
+const logLineTimeFormat = "15:04:05.000"
+
+// buildLogRail renders the Log section (design section 6.11, 6.12): the
+// current settings.log_level, whether ticketID's per-ticket debug override
+// is on, and the ring buffer's entries for every run on ticketID
+// (store.RunsForTicket), merged and sorted oldest first, since two runs'
+// entries need not have been appended to the ring in that order relative
+// to each other even though each run's own entries already are (log.go's
+// logRing.add). The ring itself is fixed at RingCapacity, so this needs no
+// separate cap (design section 6.11: "capped at the ring size").
+func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.LogRail, error) {
+	level, ok, err := c.store.GetSetting(ctx, settingLogLevel)
+	if err != nil {
+		return templates.LogRail{}, fmt.Errorf("console: rail: log tail: get %s: %w", settingLogLevel, err)
+	}
+	if !ok || level == "" {
+		level = "info" // migrations/0001_init.sql's own seeded default
+	}
+
+	runs, err := c.store.RunsForTicket(ctx, ticketID)
+	if err != nil {
+		return templates.LogRail{}, fmt.Errorf("console: rail: log tail: runs for ticket %d: %w", ticketID, err)
+	}
+
+	var entries []LogEntry
+	for _, run := range runs {
+		entries = append(entries, c.log.Tail(run.ID)...)
+	}
+	slices.SortFunc(entries, func(a, b LogEntry) int { return a.Time.Compare(b.Time) })
+
+	lines := make([]templates.LogLine, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, templates.LogLine{
+			Time:    e.Time.Format(logLineTimeFormat),
+			Level:   e.Level.String(),
+			Message: e.Message,
+		})
+	}
+
+	return templates.LogRail{Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines}, nil
 }
 
 // ---- POST /side (design section 6.11, 7.1) ---------------------------

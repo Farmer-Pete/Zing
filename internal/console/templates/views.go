@@ -134,6 +134,26 @@ type RunRail struct {
 	Model, AgentTime, Attempts, Worktree, Branch string
 }
 
+// LogLine is one entry the rail's Log section renders (design section 6.11,
+// 6.12): one row of console.LogEntry from the ring buffer, pre-formatted by
+// console.buildLogRail (rail.go) so this package never imports log/slog of
+// its own.
+type LogLine struct {
+	Time, Level, Message string
+}
+
+// LogRail is the rail's Log section (design section 6.11, 6.12): the
+// current runtime log level and whether the open ticket's per-ticket debug
+// override is on (both read fresh on every render, for the small level
+// select and debug toggle POST /loglevel and /debug back), and Lines, the
+// ring buffer's entries for the open ticket's own run_ids, oldest first
+// (design section 6.11: "filtered by the open ticket's run_ids").
+type LogRail struct {
+	Level string
+	Debug bool
+	Lines []LogLine
+}
+
 // RailModel is the #rail region's full content (design section 6.11), built
 // by console.buildRailModel from the open ticket's store reads plus
 // machine.States.Order. Rail(nil) renders the same empty placeholder every
@@ -143,4 +163,5 @@ type RailModel struct {
 	Phase     []PhaseDot
 	Artifacts []ArtifactSlot
 	Run       RunRail
+	Log       LogRail
 }

@@ -16,7 +16,7 @@ templ Rail(model *RailModel) {
 			@phaseRail(model.Phase)
 			@artifactsRail(model.Artifacts)
 			@runRail(model.Run)
-			@logRail()
+			@logRail(model.Log)
 			@sideBox()
 		}
 	</aside>
@@ -92,14 +92,51 @@ templ runRail(run RunRail) {
 	</section>
 }
 
-// logRail is a placeholder slot for Task 10's log tail (design section
-// 6.11, 6.12), clearly marked as such (design section 12, Task 10:
-// "control.go ... the log tail wired to the ring" is not this task's
-// scope).
-templ logRail() {
+// logLevelOptions is POST /loglevel's closed set (design section 6.12,
+// console.ParseLogLevel, control.go), in the fixed order the level select
+// renders them.
+var logLevelOptions = []string{"debug", "info", "warn", "error"}
+
+// logRail renders the Log section (design section 6.11, 6.12): a level
+// select and a debug toggle affordance for the open ticket -- console.js
+// wires both to POST /loglevel and POST /debug -- above the ring buffer's
+// tail, filtered to the open ticket's own run_ids and pre-formatted by
+// console.buildLogRail (rail.go), oldest first. An empty Lines renders a
+// placeholder rather than an empty list.
+templ logRail(log LogRail) {
 	<section class="rail-log">
 		<h3>Log</h3>
-		<p class="empty">The log tail arrives in Task 10.</p>
+		<div class="log-controls">
+			<select class="log-level-select">
+				for _, lvl := range logLevelOptions {
+					if lvl == log.Level {
+						<option value={ lvl } selected>{ lvl }</option>
+					} else {
+						<option value={ lvl }>{ lvl }</option>
+					}
+				}
+			</select>
+			<button type="button" class="log-debug-toggle">
+				if log.Debug {
+					Debug: on
+				} else {
+					Debug: off
+				}
+			</button>
+		</div>
+		if len(log.Lines) == 0 {
+			<p class="empty">No log lines yet.</p>
+		} else {
+			<ul class="log-lines">
+				for _, line := range log.Lines {
+					<li class={ "log-line log-level-" + line.Level }>
+						<span class="log-time">{ line.Time }</span>
+						<span class="log-level">{ line.Level }</span>
+						<span class="log-message">{ line.Message }</span>
+					</li>
+				}
+			</ul>
+		}
 	</section>
 }
 

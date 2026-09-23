@@ -544,3 +544,42 @@ func TestMarkRead_MissingMessageErrors(t *testing.T) {
 		t.Error("MarkRead on a missing message: err = nil, want an error")
 	}
 }
+
+// TestSetSettings_UpdatesExistingAndInsertsNew proves SetSettings (design
+// section 6.12, 6.13, 7.2) writes every key/value pair in one call: it
+// updates an existing row (log_level, seeded by migrations/0001_init.sql)
+// and inserts a brand-new key (the shape Task 11's VAPID pair needs) in the
+// same transaction.
+func TestSetSettings_UpdatesExistingAndInsertsNew(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetSettings(t.Context(), "log_level", "debug", "vapid_public", "pub-key"); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+
+	level, ok, err := s.GetSetting(t.Context(), "log_level")
+	if err != nil {
+		t.Fatalf("GetSetting(log_level): %v", err)
+	}
+	if !ok || level != "debug" {
+		t.Errorf("GetSetting(log_level) = (%q, %v), want (debug, true)", level, ok)
+	}
+
+	pub, ok, err := s.GetSetting(t.Context(), "vapid_public")
+	if err != nil {
+		t.Fatalf("GetSetting(vapid_public): %v", err)
+	}
+	if !ok || pub != "pub-key" {
+		t.Errorf("GetSetting(vapid_public) = (%q, %v), want (pub-key, true)", pub, ok)
+	}
+}
+
+// TestSetSettings_RejectsOddArgumentCount proves a mismatched key without a
+// value is rejected before any write happens, rather than silently dropping
+// the dangling key.
+func TestSetSettings_RejectsOddArgumentCount(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SetSettings(t.Context(), "log_level"); err == nil {
+		t.Error("SetSettings with an odd argument count: err = nil, want an error")
+	}
+}

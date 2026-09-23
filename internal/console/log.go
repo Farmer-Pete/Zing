@@ -139,6 +139,15 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 	return &h2
 }
 
+// SetLevel changes the handler's effective level at once (design section
+// 6.12, 7.1: "POST /loglevel ... calls LevelVar.Set"). The caller (Task
+// 10's POST /loglevel handler, control.go) validates level is one of
+// debug/info/warn/error before calling this; SetLevel itself accepts any
+// slog.Level, matching slog.LevelVar.Set's own contract.
+func (h *Handler) SetLevel(level slog.Level) {
+	h.levelVar.Set(level)
+}
+
 // SetDebug turns the per-ticket debug override on or off for ticketID
 // (design section 6.12; the Task 10 POST /debug handler calls this).
 func (h *Handler) SetDebug(ticketID int64, on bool) {

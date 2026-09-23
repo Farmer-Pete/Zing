@@ -19,7 +19,7 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	questionID := seedOpenQuestion(t, s, ticketID)
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
 	body := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":"a"}`, ticketID, questionID)
 	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
@@ -74,7 +74,7 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
 	t.Run("malformed JSON", func(t *testing.T) {
 		resp := doRequest(t, mutationRequest(t, srv, "/draft", `{not json`))
@@ -121,7 +121,7 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	questionID := seedOpenQuestion(t, s, ticketID)
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
 	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":"a"}`, ticketID, questionID)
 	draftResp := doRequest(t, mutationRequest(t, srv, "/draft", draftBody))
@@ -159,7 +159,7 @@ func TestRead_MarksOneMessageRead(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	msgID := seedUnreadUpdate(t, s, ticketID, "progress")
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
 	body := fmt.Sprintf(`{"message":%d}`, msgID)
 	resp := doRequest(t, mutationRequest(t, srv, "/read", body))

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -50,6 +51,18 @@ func testMachine(t *testing.T) *machine.Machine {
 		t.Fatalf("machine.Load: %v", err)
 	}
 	return m
+}
+
+// newTestLogHandler builds a console.Handler over a discarded sink, seeded
+// at slog's zero LevelVar (info), for every test in this package that does
+// not itself exercise Task 10's log wiring: console.New now requires one to
+// build the #rail region's Log section and to back POST /loglevel and
+// /debug. control_test.go builds its own handler directly, over a real
+// buffer and a *slog.LevelVar it keeps, so it can assert what the console
+// wrote and changed.
+func newTestLogHandler(t *testing.T) *console.Handler {
+	t.Helper()
+	return console.NewHandler(io.Discard, new(slog.LevelVar))
 }
 
 // testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, and
@@ -267,7 +280,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -305,7 +318,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 
 func TestStaticServesDatastarBundle(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/datastar.js") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -337,7 +350,7 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	if err := s.Close(); err != nil {
@@ -373,7 +386,7 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	s := newConsoleTestStore(t)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	//nolint:noctx // a bare GET on a test server needs no deadline

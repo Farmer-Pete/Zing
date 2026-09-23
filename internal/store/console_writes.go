@@ -659,6 +659,40 @@ func openQuestionOfKindExistsTx(ctx context.Context, tx *sql.Tx, ticketID int64,
 	return false, nil
 }
 
+// SetSettings writes one or more settings rows in a single transaction
+// (design section 7.2: "a variadic key-value set in one transaction, for
+// the atomic VAPID pair and the log level"). kvs alternates key, value,
+// key, value...; an odd count is rejected before any write. Each pair
+// upserts: an existing key (every row migrations/0001_init.sql seeds,
+// including log_level) is updated in place, and a key with no row yet (the
+// VAPID pair Task 11 adds) is inserted, so one call covers both shapes.
+func (s *Store) SetSettings(ctx context.Context, kvs ...string) error {
+	if len(kvs)%2 != 0 {
+		return fmt.Errorf("set settings: odd number of key/value arguments (%d)", len(kvs))
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set settings: begin tx: %w", err)
+	}
+	defer rollback(tx)
+
+	for i := 0; i+1 < len(kvs); i += 2 {
+		key, value := kvs[i], kvs[i+1]
+		if _, execErr := tx.ExecContext(ctx,
+			`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			key, value,
+		); execErr != nil {
+			return fmt.Errorf("set settings: %s: %w", key, execErr)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set settings: commit tx: %w", err)
+	}
+	return nil
+}
+
 // MarkRead sets messageID's read_at to now (design section 6.8).
 func (s *Store) MarkRead(ctx context.Context, messageID int64) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE messages SET read_at = ? WHERE id = ?`, formatTime(time.Now()), messageID)

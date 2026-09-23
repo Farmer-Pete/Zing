@@ -338,6 +338,49 @@ function installSideBox() {
 	});
 }
 
+// postLogLevel handles a change on the Log rail's level select (design
+// section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
+// It is a small forward-wired affordance around the endpoint that is this
+// task's real substance, kept to the same postJSON/204 shape as stopTicket
+// and markRead below rather than the fixed-reply shape postSide needs.
+function postLogLevel(select) {
+	postJSON('/loglevel', { level: select.value });
+}
+
+// postDebugToggle handles a click on the Log rail's debug toggle button
+// (design section 6.11, 6.12, 7.1): POST /debug for the open ticket. The
+// rail's own re-render (design section 6.3: every /stream frame re-patches
+// #rail) picks up the flipped state and relabels the button; this function
+// does not toggle any local state of its own.
+function postDebugToggle() {
+	if (!state.nav.open) {
+		return;
+	}
+	postJSON('/debug', { ticket: state.nav.open });
+}
+
+// installLogControls wires the Log rail's level select and debug toggle
+// (design section 6.11), delegated from document like installSideBox
+// below, because #rail is morphed by every /stream patch (design section
+// 6.3) and a listener bound directly to either control would need
+// re-attaching after each patch.
+function installLogControls() {
+	document.addEventListener('change', (event) => {
+		const select = event.target.closest?.('.rail-log .log-level-select');
+		if (select) {
+			postLogLevel(select);
+		}
+	});
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.rail-log .log-debug-toggle');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		postDebugToggle();
+	});
+}
+
 function stopTicket() {
 	if (!state.nav.open) {
 		return false;
@@ -614,6 +657,7 @@ async function install() {
 	document.addEventListener('keydown', onKeyDown);
 	installPatchObserver();
 	installSideBox();
+	installLogControls();
 }
 
 install();

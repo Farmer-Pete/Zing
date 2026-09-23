@@ -29,9 +29,11 @@ const testWaitingGate = "gate"
 // "building" with waiting_on set and one session-and-run, through the same
 // store.CommitHandlerResult seam commit.go's own producers use (design
 // section 6.7, 6.11): a real fenced write, not a raw SQL poke, so this
-// fixture is a row a real handler could have written. It returns the new
-// session's id.
-func advanceTicketToBuilding(t *testing.T, s *store.Store, ticketID int64, model string, agentSeconds int) int64 {
+// fixture is a row a real handler could have written. Every caller reads
+// the session or run back through the store (SessionsForTicket,
+// RunsForTicket) rather than a returned id, so this reports only the
+// t.Fatalf failures above.
+func advanceTicketToBuilding(t *testing.T, s *store.Store, ticketID int64, model string, agentSeconds int) {
 	t.Helper()
 
 	const owner = "rail-test-owner"
@@ -67,7 +69,6 @@ func advanceTicketToBuilding(t *testing.T, s *store.Store, ticketID int64, model
 	if len(sessions) == 0 {
 		t.Fatal("SessionsForTicket: no session found after CommitHandlerResult")
 	}
-	return sessions[len(sessions)-1].ID
 }
 
 // railScenarioPayload is a minimal, schema-valid scenario artifact payload
@@ -112,7 +113,7 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 
 	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42)
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
@@ -180,7 +181,7 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), testMachine(t), testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
@@ -215,7 +216,7 @@ func TestPostSide_ReturnsTheFixedReplyAndWritesNoMessage(t *testing.T) {
 		t.Fatalf("ListMessages (before): %v", err)
 	}
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	req := mutationRequest(t, srv, "/side", `{"ticket":`+strconv.FormatInt(ticketID, 10)+`,"text":"what should I ask?"}`)
 	resp := doRequest(t, req)
 	defer func() { _ = resp.Body.Close() }()
@@ -252,7 +253,7 @@ func TestPostSide_RejectsCrossOrigin(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	srv, _ := newMutationTestServer(t, s, bus.New())
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	req := mutationRequest(t, srv, "/side", `{"ticket":`+strconv.FormatInt(ticketID, 10)+`,"text":"hi"}`)
 	req.Header.Set("Origin", "http://evil.example")
 	resp := doRequest(t, req)

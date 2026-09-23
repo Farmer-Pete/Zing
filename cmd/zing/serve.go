@@ -89,6 +89,12 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		return err
 	}
 
+	logHandler, err := installLogHandler(ctx, st)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// Clear the persisted control flags a prior graceful stop may have left
 	// set. Without this, the "draining" flag survives across a restart: the
 	// HTTP listener below starts normally, but the dispatcher goroutine's
@@ -161,7 +167,7 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		close(dispDone)
 	}()
 
-	srv := newServer(ctx, bindAddr, console.New(st, b, m, cfg.Console.Bind[0], cfg.Console.Port))
+	srv := newServer(ctx, bindAddr, console.New(st, b, m, cfg.Console.Bind[0], cfg.Console.Port, logHandler))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -299,6 +305,38 @@ func drainAndShutdown(
 		err = closeErr
 	}
 	return err
+}
+
+// installLogHandler builds the Task 5 slog.Handler (internal/console/log.go,
+// design section 6.12), seeds its LevelVar from settings.log_level, and
+// installs it as slog's process-wide default, so every slog call from here
+// on -- this package's own and every other package's -- goes through the
+// one handler console.New's Task 10 log argument wires into POST /loglevel,
+// POST /debug, and the rail's Log tail. Writing to os.Stderr, the same sink
+// slog's own factory default uses, preserves this process's existing log
+// output shape; only the level gate, the per-ticket debug override, and the
+// ring are new. A missing or unrecognized stored level (a hand-edited
+// settings row, or a fresh database before migrations seed it -- store.Open
+// always runs them first, so this is defensive, not an expected path)
+// defaults to info and is logged once, rather than failing serve over a bad
+// setting.
+func installLogHandler(ctx context.Context, st *store.Store) (*console.Handler, error) {
+	lv := new(slog.LevelVar)
+	h := console.NewHandler(os.Stderr, lv)
+	slog.SetDefault(slog.New(h))
+
+	stored, ok, err := st.GetSetting(ctx, "log_level")
+	if err != nil {
+		return nil, fmt.Errorf("serve: get log_level setting: %w", err)
+	}
+	level, known := console.ParseLogLevel(stored)
+	if !ok || !known {
+		slog.Warn("settings.log_level missing or unrecognized, defaulting to info", "stored", stored)
+		level = slog.LevelInfo
+	}
+	lv.Set(level)
+
+	return h, nil
 }
 
 // consoleBindAddr validates cfg.Console.Bind and returns the address to

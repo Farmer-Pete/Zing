@@ -32,7 +32,7 @@ const (
 // internal/console/server.go serves (design section 5, 12).
 func TestStaticAssetsServeWithContentType(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	tests := []struct {
@@ -78,7 +78,7 @@ func TestStaticAssetsServeWithContentType(t *testing.T) {
 // 3, 5, 12).
 func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	forbidden := []string{
@@ -109,7 +109,7 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 // (design section 0, dependency set).
 func TestMermaidAssetDigestMatchesRecorded(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHost, testConsolePort, newTestLogHandler(t)))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/mermaid.js") //nolint:noctx // a bare GET on a test server needs no deadline
