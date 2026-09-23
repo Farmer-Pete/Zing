@@ -528,13 +528,18 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		}
 	}
 	if len(valid) == 0 {
-		// Every draft in the batch turned out stale (PR review fix): still
-		// commit, so the DELETE above actually discards them, rather than
-		// rolling back into the same wedge the caller is trying to escape.
+		// Every draft in the batch turned out stale (PR review fix): discard
+		// them (the DELETE above) and still reconcile the wait. Without this,
+		// a ticket whose questions closed under a stale draft stays blocked
+		// with waiting_on set and no run left to resume it (PR review fix).
+		waitCleared, clearErr := clearMatchingWaitTx(ctx, tx, ticketID)
+		if clearErr != nil {
+			return BatchResult{}, clearErr
+		}
 		if err = tx.Commit(); err != nil {
 			return BatchResult{}, fmt.Errorf("send batch: commit tx: %w", err)
 		}
-		return BatchResult{Discarded: len(stale), Empty: true}, nil
+		return BatchResult{Discarded: len(stale), Empty: true, WaitCleared: waitCleared}, nil
 	}
 
 	var batchID int64

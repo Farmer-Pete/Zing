@@ -507,6 +507,49 @@ func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
 	}
 }
 
+// TestSendBatch_AllStaleDiscardsAndClearsWait covers the all-stale path: the
+// batch's only draft is for a question that has since closed, so SendBatch
+// discards it and finds nothing to send, yet must still clear a now-obsolete
+// wait so the ticket is not left blocked with no run to resume it.
+func TestSendBatch_AllStaleDiscardsAndClearsWait(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+
+	q1 := insertQuestionOption(t, s, ticketID, "Q1")
+	opt := "a"
+	staleDraft, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Option: &opt})
+	if err != nil {
+		t.Fatalf("SaveDraft(q1): %v", err)
+	}
+
+	// q1 closes under its own draft; it was the only open question.
+	closeQuestion(t, s, q1, questionStateResolved)
+
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if !res.Empty || res.Sent != 0 || res.Discarded != 1 {
+		t.Errorf("SendBatch = %+v, want Empty=true Sent=0 Discarded=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true: no open question of the wait's kind remains after the discard")
+	}
+
+	if _, getErr := s.GetMessage(t.Context(), staleDraft.MessageID); !errors.Is(getErr, sql.ErrNoRows) {
+		t.Errorf("GetMessage(stale draft) err = %v, want sql.ErrNoRows (discarded)", getErr)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil (the obsolete wait must clear)", *ticket.WaitingOn)
+	}
+}
+
 func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
