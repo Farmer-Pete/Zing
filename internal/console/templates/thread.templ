@@ -1,18 +1,16 @@
 package templates
 
 import (
-	"fmt"
+	"strconv"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
-// Thread renders the #main region for view=thread (design section 6.6,
-// Task 3 scope): the ticket's messages in id order, read only. ticket is
-// nil when open is 0 or names no ticket. A "question" message renders as a
-// read-only group (title, body, recommendation, options); every other
-// type, including the "state" separator, renders as a plain row with its
-// already-decoded Body (internal/console/views.go's displayBody). The
-// interactive chips and composer are Tasks 6 and 7.
+// Thread renders the #main region for view=thread (design section 6.6):
+// the ticket's messages in id order, read only except for the question
+// groups, which dispatch on QuestionPayload.Kind into interactive controls
+// (Task 6). ticket is nil when open is 0 or names no ticket.
 templ Thread(ticket *store.Ticket, rows []ThreadRow) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
@@ -22,7 +20,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow) {
 			} else {
 				for _, row := range rows {
 					if row.Question != nil {
-						@questionGroup(row)
+						@questionGroup(ticket.ID, row)
 					} else if row.IsState() {
 						@stateSeparator(row)
 					} else {
@@ -41,32 +39,173 @@ templ stateSeparator(row ThreadRow) {
 }
 
 templ threadMessageRow(row ThreadRow) {
-	<div class={ "message message-" + row.Type } data-focus-id={ fmt.Sprintf("message:%d", row.ID) }>
+	<div class={ "message message-" + row.Type } data-focus-id={ fmtFocusID("message", row.ID) }>
 		<div class="meta"><span class="type">{ row.Type }</span> <span class="author">{ row.Author }</span></div>
 		<div class="body">{ row.Body }</div>
 	</div>
 }
 
-// questionGroup is the read-only detail a question message renders in
-// place of a plain row: its title and pill in the summary, then its body,
-// recommendation, and options -- no chip buttons, no composer (design
-// section 6.6, Task 3 scope: "WITHOUT the interactive composer or chips").
-templ questionGroup(row ThreadRow) {
-	<details class="q" data-focus-id={ fmt.Sprintf("question:%d", row.ID) }>
+// questionGroup is a "question" message's <details class="q"> group (design
+// section 6.6): the summary (key, title, message count, and the lifecycle
+// pill), the body and recommendation (pre-rendered markdown, the Task 5
+// Render helper), then the control the payload's Kind dispatches to -- option
+// chips for the four option kinds, one row per Item for the two item kinds,
+// each kind's minimal context first -- and finally the free reply input
+// every kind renders. ticketID feeds every control's data-draft-ticket
+// attribute, so each carries what Task 7's POST /draft needs without this
+// package reaching back into the store itself.
+templ questionGroup(ticketID int64, row ThreadRow) {
+	<details class="q" data-focus-id={ fmtFocusID("question", row.ID) }>
 		<summary>
+			<span class="q-key">{ row.Question.Key }</span>
 			<span class="q-title">{ row.Question.Title }</span>
+			<span class="q-count">{ strconv.Itoa(row.Question.MessageCount) }</span>
 			<span class="pill">{ row.Question.StateLabel }</span>
 		</summary>
-		<div class="q-body">{ row.Question.Body }</div>
-		if row.Question.Recommended != "" {
-			<div class="q-recommended"><strong>Recommended:</strong> { row.Question.Recommended }</div>
+		<div class="q-body">
+			@row.Question.BodyHTML
+		</div>
+		if row.Question.RecommendedHTML != nil {
+			<div class="q-recommended">
+				<strong>Recommended:</strong>
+				@row.Question.RecommendedHTML
+			</div>
 		}
-		if len(row.Question.Options) > 0 {
-			<ul class="q-options">
-				for _, opt := range row.Question.Options {
-					<li>{ opt.Key }: { opt.Text }</li>
-				}
-			</ul>
+		switch row.Question.Kind {
+			case string(response.QuestionKindGate):
+				@gateContext()
+				@optionChips(ticketID, row.ID, row.Question.Options)
+			case string(response.QuestionKindSplit):
+				@splitContext()
+				@optionChips(ticketID, row.ID, row.Question.Options)
+			case string(response.QuestionKindMerge):
+				@mergeContext(row.Question.PRURL)
+				@optionChips(ticketID, row.ID, row.Question.Options)
+			case string(response.QuestionKindPerimeter), string(response.QuestionKindReview):
+				@itemRows(ticketID, row.ID, row.Question.Items)
+			default:
+				@optionChips(ticketID, row.ID, row.Question.Options)
 		}
+		@freeReply(ticketID, row.ID)
 	</details>
+}
+
+// gateContext is the gate kind's context region (design section 6.6, Task 6
+// scope note: "the plan via the Task 8 renderer is not ready yet, so render
+// the plan/scenarios/decisions area as a placeholder region that Task 8
+// fills"). Its class and data-context name are the seam Task 8 renders into.
+templ gateContext() {
+	<div class="q-context gate-context" data-context="plan">
+		<p class="placeholder">The plan, scenarios, and decisions render here once the plan renderer (Task 8) is wired.</p>
+	</div>
+}
+
+// splitContext is the split kind's context region: the proposed children,
+// deferred to the same later-task seam as gateContext, since no store read
+// for a ticket's proposed children exists yet (design section 7.2 names none;
+// Task 6 keeps this minimal rather than reaching for one).
+templ splitContext() {
+	<div class="q-context split-context" data-context="children">
+		<p class="placeholder">The proposed children render here once split has a producer.</p>
+	</div>
+}
+
+// mergeContext is the merge kind's context region: the PR link, which,
+// unlike gate's plan or split's children, is already on the Ticket row
+// (Package 1's pr_url column), so this renders for real rather than a
+// placeholder.
+templ mergeContext(prURL string) {
+	<div class="q-context merge-context" data-context="pr">
+		if prURL != "" {
+			<a href={ templ.URL(prURL) } target="_blank" rel="noopener noreferrer">{ prURL }</a>
+		} else {
+			<span class="empty">No PR yet.</span>
+		}
+	</div>
+}
+
+// pickToggleExpr is the data-on:click expression every chip and item-decision
+// control shares (design section 6.6, Task 6 scope: "a picked chip toggles a
+// client-visible picked state"): remove "picked" from this control's
+// siblings within its own group, then add it to the one clicked. It is
+// purely a client-visible affordance -- no signal write, no fetch -- since
+// POST /draft does not exist until Task 7 (design section 12); Task 7 wires
+// the real submit over the data-draft-* attributes these controls already
+// carry.
+const pickToggleExpr = "el.parentElement.querySelectorAll('.picked').forEach((c) => c.classList.remove('picked')); el.classList.add('picked')"
+
+// optionChips renders the four option kinds' control (design section 6.6):
+// one chip per option, numbered 1..N (N up to 4, the messages/question
+// schema's own maxItems) so console.js's pickChip (keys.go's "chip" action)
+// finds it by data-chip-index. Each chip carries data-draft-ticket,
+// data-draft-question, and data-option, the composer contract Task 7 reads
+// (matching console.js's postDraft, which already reads data-draft-ticket
+// and data-draft-question off the free reply input). Renders nothing when
+// options is empty, so a bare free reply is what a chip-less question shows
+// (design section 6.6: "A question with zero options and no items renders
+// the free reply only").
+templ optionChips(ticketID, questionID int64, options []ThreadOption) {
+	if len(options) > 0 {
+		<div class="chips">
+			for i, opt := range options {
+				<button type="button" class="chip" data-chip-index={ strconv.Itoa(i + 1) } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-option={ opt.Key } data-on:click={ pickToggleExpr }>{ strconv.Itoa(i+1) + ". " + opt.Text }</button>
+			}
+		</div>
+	}
+}
+
+// itemDecisions is the design section 8 closed set of item decisions, in
+// the order their controls render.
+var itemDecisions = []response.Decision{
+	response.DecisionAccept, response.DecisionReject, response.DecisionDrop, response.DecisionDiscuss,
+}
+
+// itemRows renders the two item kinds' control (design section 6.6): one
+// row per Item.
+templ itemRows(ticketID, questionID int64, items []ThreadItem) {
+	if len(items) > 0 {
+		<div class="items">
+			for _, item := range items {
+				@itemRow(ticketID, questionID, item)
+			}
+		</div>
+	}
+}
+
+// itemRow is one perimeter file or review finding: its ref and text, and
+// its four accept/reject/drop/discuss controls (design section 6.6, 8).
+// Each control carries data-draft-ticket, data-draft-question, data-item-ref,
+// and data-decision, the composer contract Task 7's POST /draft reads to
+// merge one ref-to-decision entry into the question's draft (design section
+// 6.7: "An item answer merges one ref->decision into the ... draft's items
+// map").
+templ itemRow(ticketID, questionID int64, item ThreadItem) {
+	<div class="item-row" data-item-ref={ item.Ref }>
+		<span class="item-ref">{ item.Ref }</span>
+		<span class="item-text">{ item.Text }</span>
+		<div class="item-decisions">
+			for _, d := range itemDecisions {
+				<button type="button" class="decision" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>
+			}
+		</div>
+	</div>
+}
+
+// freeReply is the free reply input every question kind renders beneath its
+// control (design section 6.6: "Every question kind ... also renders a free
+// reply input"). data-draft-ticket and data-draft-question are exactly what
+// console.js's postDraft (keys.go's Enter-in-input "draft" action) already
+// reads off document.activeElement, so Enter inside this input is wired
+// today; only the server side (POST /draft, Task 7) is missing.
+templ freeReply(ticketID, questionID int64) {
+	<div class="reply">
+		<input type="text" class="reply-input" placeholder="Reply…" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
+	</div>
+}
+
+// fmtFocusID builds a data-focus-id value: a namespace ("message" or
+// "question") and the row's id, matching console.js's own
+// "namespace:id" convention (openFocused, markRead, pickChip).
+func fmtFocusID(namespace string, id int64) string {
+	return namespace + ":" + strconv.FormatInt(id, 10)
 }

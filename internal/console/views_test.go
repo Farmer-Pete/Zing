@@ -188,7 +188,16 @@ func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
 // ticket's messages in id order -- a state separator, a plain row for
 // every other type, and a question as a read-only group -- with no
 // interactive chip or composer markup (design section 6.6, Task 3 scope).
-func TestThreadRendersMessagesReadOnly(t *testing.T) {
+// TestThreadRendersMessagesAndInteractiveQuestionControls proves the
+// non-question rows still render exactly as Task 3 left them (a plain
+// state separator and a plain message row), and that the question's own
+// group now carries Task 6's interactive controls -- numbered option chips
+// and a free reply input -- over the option kind's data (design section
+// 6.6). TestQuestionKindsRenderTheirControls (question_kinds_test.go) is
+// the fuller, per-kind version of this; this test's job is only to prove
+// the surrounding non-question rows are undisturbed by the switch to an
+// interactive question group.
+func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 	s := newConsoleTestStore(t)
 
 	ticketID := seedTicket(t, s, "t#1", "Thread ticket")
@@ -223,13 +232,14 @@ func TestThreadRendersMessagesReadOnly(t *testing.T) {
 		t.Errorf("thread frame missing the open question's pill label; got:\n%s", main)
 	}
 
-	// Read only: no chip button and no composer wiring (design section 6.6,
-	// Task 3 scope: "WITHOUT the interactive composer or chips").
-	if strings.Contains(main, "$answer") || strings.Contains(main, "@post('/answer')") {
-		t.Errorf("thread frame rendered interactive answer controls, want read-only; got:\n%s", main)
+	// Interactive: the question kind (an option kind) renders two numbered
+	// chips and a free reply input wired to console.js's postDraft contract
+	// (design section 6.6, 6.4; Task 6 supersedes Task 3's read-only group).
+	if !strings.Contains(main, `data-chip-index="1"`) || !strings.Contains(main, `data-chip-index="2"`) {
+		t.Errorf("thread frame missing the question's numbered chips; got:\n%s", main)
 	}
-	if strings.Contains(main, "<button") {
-		t.Errorf("thread frame rendered a button, want read-only; got:\n%s", main)
+	if !strings.Contains(main, `class="reply-input"`) {
+		t.Errorf("thread frame missing the question's free reply input; got:\n%s", main)
 	}
 }
 

@@ -12,7 +12,11 @@
 // free of any question-lifecycle or payload-decoding logic of its own.
 package templates
 
-import "zing/internal/store"
+import (
+	"github.com/a-h/templ"
+
+	"zing/internal/store"
+)
 
 // InboxGroup is one project's cluster of inbox cards, the Inbox view's
 // grouping unit (design section 6.5: "grouped by project, blocking first").
@@ -34,21 +38,42 @@ type NavThread struct {
 	OpenQuestionCount int
 }
 
-// ThreadOption is one option a read-only question group lists: a label, not
-// a control. Task 3's Thread view carries no chips or composer; Tasks 6 and
-// 7 add those over the same option data.
+// ThreadOption is one option chip a question group renders: a label plus
+// the option key the picked chip's draft answer would carry (design section
+// 6.6, 6.7). optionChips (thread.templ) numbers these 1..N for the
+// keyboard's chip action.
 type ThreadOption struct {
 	Key, Text string
 }
 
-// ThreadQuestion is the read-only detail a "question" message renders in
-// place of a plain body: its title and body (split from the stored Body,
-// design section 6.6), its recommendation, its options, and a pill label
-// for its lifecycle state.
+// ThreadItem is one row an item-kind question (perimeter, review) renders:
+// one file or finding with its own accept/reject/drop/discuss controls
+// (design section 6.6, 8: the closed set of four item decisions).
+type ThreadItem struct {
+	Ref, Text string
+}
+
+// ThreadQuestion is the detail a "question" message renders in place of a
+// plain body: its key, title, and message count for the <details> summary
+// (design section 6.6), its body and recommendation (pre-rendered through
+// the Task 5 Render helper, so this package never imports html/template of
+// its own), its kind (dispatching the control thread.templ renders: option
+// chips for the four option kinds, item rows for the two item kinds), its
+// options or items, a pill label for its lifecycle state, and PRURL, the
+// merge kind's minimal context (design section 12, Task 6 scope: gate's and
+// split's context are later tasks' placeholders; merge's is already on the
+// Ticket row, so it renders for real).
 type ThreadQuestion struct {
-	Title, Body, Recommended string
-	Options                  []ThreadOption
-	StateLabel               string
+	Key, Title      string
+	Kind            string
+	BodyHTML        templ.Component
+	Recommended     string
+	RecommendedHTML templ.Component // nil when Recommended is empty
+	Options         []ThreadOption
+	Items           []ThreadItem
+	StateLabel      string
+	MessageCount    int
+	PRURL           string // merge kind only; empty when the ticket has no PR link yet
 }
 
 // ThreadRow is one message the read-only Thread view renders: a state

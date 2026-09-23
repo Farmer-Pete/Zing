@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/a-h/templ"
@@ -145,7 +146,11 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if listErr != nil {
 			return nil, listErr
 		}
-		return templates.Thread(&ticket, buildThreadRows(rows)), nil
+		threadRows, buildErr := buildThreadRows(&ticket, rows)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return templates.Thread(&ticket, threadRows), nil
 	case errors.Is(err, sql.ErrNoRows):
 		return templates.Thread(nil, nil), nil
 	default:
@@ -185,44 +190,91 @@ func questionStateLabel(state *string) string {
 	}
 }
 
-// buildThreadRows turns store rows into the read-only Thread view's rows
-// (design section 6.6, Task 3 scope): a question message becomes a
-// read-only group (title, body, recommendation, options), never the
-// interactive chips or composer Tasks 6 and 7 add.
-func buildThreadRows(rows []store.MessageRow) []templates.ThreadRow {
+// buildThreadRows turns store rows into the Thread view's rows (design
+// section 6.6): a question message becomes an interactive group dispatching
+// on its payload's Kind (Task 6), every other type a plain row. ticket
+// carries the merge kind's PR-link context (buildThreadQuestion); it may be
+// nil only when the caller has no ticket at all (templates.Thread's own nil
+// guard), never when rows is non-empty.
+func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow) ([]templates.ThreadRow, error) {
+	// messageCounts holds, per question message id, how many other messages
+	// in this ticket name it as their parent (design section 6.6: the
+	// <details> summary shows "the message count"). Precomputed once over
+	// every row rather than per question, so counting stays O(n) instead of
+	// O(n*questions).
+	messageCounts := make(map[int64]int, len(rows))
+	for i := range rows {
+		if rows[i].ParentID != nil {
+			messageCounts[*rows[i].ParentID]++
+		}
+	}
+
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
+		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, templates.ThreadRow{
 			ID: rows[i].ID, Type: rows[i].Type, Author: rows[i].Author,
 			Body:     displayBody(&rows[i]),
-			Question: buildThreadQuestion(&rows[i]),
+			Question: question,
 		})
 	}
-	return out
+	return out, nil
 }
 
-// buildThreadQuestion returns the read-only detail a "question" message
-// renders instead of its plain Body, or nil for every other type. An
-// unparseable payload falls back to the plain Body rather than failing the
+// buildThreadQuestion returns the detail a "question" message renders
+// instead of its plain Body, or nil for every other type. messageCount is
+// the question's own message (1) plus every reply, answer, followup, or
+// resolved row that names it as a parent (buildThreadRows). An unparseable
+// payload falls back to nil (renders as a plain row) rather than failing the
 // whole thread render, since the commit that wrote it already validated it
-// against the messages/question schema.
-func buildThreadQuestion(m *store.MessageRow) *templates.ThreadQuestion {
+// against the messages/question schema; a markdown render failure, by
+// contrast, is a real error (design section 6.10: Render can fail), and is
+// returned rather than silently dropping the question's body.
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
-		return nil
+		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
 	var payload response.QuestionPayload
 	if err := json.Unmarshal(m.Payload, &payload); err != nil {
-		return nil
+		return nil, nil //nolint:nilnil,nilerr // an unparseable payload renders as a plain row, not an error
 	}
+
 	title, body := splitQuestionBody(m.Body)
+	bodyHTML, err := Render(body)
+	if err != nil {
+		return nil, fmt.Errorf("console: render question %d body: %w", m.ID, err)
+	}
+
+	var recommendedHTML templ.Component
+	if payload.Recommended != "" {
+		recommendedHTML, err = Render(payload.Recommended)
+		if err != nil {
+			return nil, fmt.Errorf("console: render question %d recommendation: %w", m.ID, err)
+		}
+	}
+
 	options := make([]templates.ThreadOption, 0, len(payload.Options))
 	for _, o := range payload.Options {
 		options = append(options, templates.ThreadOption{Key: o.Key, Text: o.Text})
 	}
-	return &templates.ThreadQuestion{
-		Title: title, Body: body, Recommended: payload.Recommended,
-		Options: options, StateLabel: questionStateLabel(m.State),
+	items := make([]templates.ThreadItem, 0, len(payload.Items))
+	for _, it := range payload.Items {
+		items = append(items, templates.ThreadItem{Ref: it.Ref, Text: it.Text})
 	}
+
+	q := &templates.ThreadQuestion{
+		Key: payload.Key, Title: title, Kind: string(payload.Kind),
+		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
+		Options: options, Items: items, StateLabel: questionStateLabel(m.State),
+		MessageCount: messageCount,
+	}
+	if payload.Kind == response.QuestionKindMerge && ticket != nil && ticket.PRURL != nil {
+		q.PRURL = *ticket.PRURL
+	}
+	return q, nil
 }
 
 // splitQuestionBody splits a question message's Body into its heading (the
