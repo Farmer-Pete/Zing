@@ -50,14 +50,14 @@ templ Nav(projects []store.Project, threads []NavThread) {
 // navLink is one clickable navigation link: shared by the view switcher and
 // the project list, the two navigations that carry no per-thread badge.
 templ navLink(view string, open, project int64, label string) {
-	<a href="#" class="nav-link" data-on:click={ zingNavExpr(view, open, project) }>{ label }</a>
+	<a href="#" class="nav-link" data-on:click__prevent={ zingNavExpr(view, open, project) }>{ label }</a>
 }
 
 // threadLink is one nav-threads row: the ticket's title, opening it on
 // click, with a badge showing the waiting flag when blocking or an unread
 // dot otherwise (design section 6.8).
 templ threadLink(th NavThread) {
-	<a href="#" class="nav-link nav-thread" data-on:click={ zingNavExpr("thread", th.Ticket.ID, 0) }>
+	<a href="#" class="nav-link nav-thread" data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
 		<span class="title">{ th.Ticket.Title }</span>
 		if th.Blocking {
 			<span class="badge badge-blocking">

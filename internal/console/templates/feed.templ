@@ -8,6 +8,10 @@ import (
 
 // Feed renders the #main region for view=feed (design section 6.5): the
 // newest messages across every ticket, newest first by id, read only.
+// data-ticket-id (code review fix) is what console.js's openFocused reads to
+// resolve a focused Feed row's "message:<id>" focus id to the ticket it
+// belongs to, since only a ticket names something 'o'/Enter can open.
+
 templ Feed(messages []store.MessageRow) {
 	<main id="main" class="view-feed">
 		<h2>Feed</h2>
@@ -15,7 +19,7 @@ templ Feed(messages []store.MessageRow) {
 			<p class="empty">No messages yet.</p>
 		} else {
 			for _, m := range messages {
-				<div class={ "message message-" + m.Type } data-focus-id={ fmt.Sprintf("message:%d", m.ID) }>
+				<div class={ "message message-" + m.Type } data-focus-id={ fmt.Sprintf("message:%d", m.ID) } data-ticket-id={ fmt.Sprintf("%d", m.TicketID) }>
 					<div class="meta"><span class="type">{ m.Type }</span> <span class="author">{ m.Author }</span></div>
 					<div class="body">{ m.Body }</div>
 				</div>

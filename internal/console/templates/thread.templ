@@ -212,7 +212,7 @@ templ itemRow(ticketID, questionID int64, item ThreadItem) {
 // today; only the server side (POST /draft, Task 7) is missing.
 templ freeReply(ticketID, questionID int64) {
 	<div class="reply">
-		<input type="text" class="reply-input" placeholder="Reply…" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
+		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
 	</div>
 }
 

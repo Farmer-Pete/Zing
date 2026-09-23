@@ -23,6 +23,7 @@ import {
 	reconcileFocus,
 	collectPatchWork,
 	navChanged,
+	reduceNav,
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
@@ -129,6 +130,26 @@ test('isSendChord: Ctrl-Enter sends off mac, not on mac', () => {
 test('isSendChord: a bare Enter, or a non-Enter key with a modifier, is never the send chord', () => {
 	assert.equal(isSendChord({ key: 'Enter' }, true), false);
 	assert.equal(isSendChord({ key: 'a', metaKey: true }, true), false);
+});
+
+// isSendChord: an extra modifier alongside the platform's own must not
+// misfire the send chord (PR #16 review, CodeRabbit console.js:567 / cubic
+// console.js:565) -- an OS chord like Ctrl-Alt-Enter, or a Cmd-Shift-Enter
+// someone fat-fingers reaching for something else, is not "send".
+
+test('isSendChord: Alt held alongside the platform modifier is not the send chord', () => {
+	assert.equal(isSendChord({ key: 'Enter', metaKey: true, altKey: true }, true), false);
+	assert.equal(isSendChord({ key: 'Enter', ctrlKey: true, altKey: true }, false), false);
+});
+
+test('isSendChord: Shift held alongside the platform modifier is not the send chord', () => {
+	assert.equal(isSendChord({ key: 'Enter', metaKey: true, shiftKey: true }, true), false);
+	assert.equal(isSendChord({ key: 'Enter', ctrlKey: true, shiftKey: true }, false), false);
+});
+
+test('isSendChord: both Ctrl and Cmd held at once is not the send chord on either platform', () => {
+	assert.equal(isSendChord({ key: 'Enter', metaKey: true, ctrlKey: true }, true), false);
+	assert.equal(isSendChord({ key: 'Enter', metaKey: true, ctrlKey: true }, false), false);
 });
 
 test('sendChordToken names the platform-correct keys.json token', () => {
@@ -254,6 +275,48 @@ test('navChanged: a differing view, open, or project each count as changed', () 
 test('navChanged: an identical destination is not a change', () => {
 	const current = { view: 'thread', open: 7, project: 0 };
 	assert.equal(navChanged(current, { view: 'thread', open: 7, project: 0 }), false);
+});
+
+// reduceNav: console.js's onZingNav runs every zing-nav event -- console.js's
+// own keyboard-triggered dispatch and nav.templ's click-triggered dispatch
+// alike -- through this one reducer (PR #16 review, CodeRabbit
+// console.js:315 / cubic console.js:57), so state.nav and the back stack
+// update the same way regardless of what triggered the navigation.
+
+test('reduceNav: a real destination change updates nav, pushes history, and reports changed', () => {
+	const current = { view: 'inbox', open: 0, project: 0 };
+	const detail = { view: 'thread', open: 7, project: 0 };
+	const result = reduceNav(current, [], detail);
+	assert.deepEqual(result.nav, detail);
+	assert.deepEqual(result.history, [current]);
+	assert.equal(result.changed, true);
+});
+
+test('reduceNav: a click-triggered event (no isBack) updates nav the same way a keyboard one does', () => {
+	// nav.templ's zingNavExpr links dispatch zing-nav with only view/open/
+	// project in the detail -- no isBack field at all -- which is exactly
+	// what previously never reached console.js's local nav mirror.
+	const current = { view: 'inbox', open: 0, project: 0 };
+	const detail = { view: 'project', open: 0, project: 3 };
+	const result = reduceNav(current, [], detail);
+	assert.deepEqual(result.nav, detail);
+	assert.deepEqual(result.history, [current]);
+});
+
+test('reduceNav: a no-op navigation does not push history', () => {
+	const current = { view: 'thread', open: 7, project: 0 };
+	const result = reduceNav(current, [{ view: 'inbox', open: 0, project: 0 }], { view: 'thread', open: 7, project: 0 });
+	assert.deepEqual(result.history, [{ view: 'inbox', open: 0, project: 0 }]);
+	assert.equal(result.changed, false);
+});
+
+test('reduceNav: a back navigation (isBack) updates nav without pushing another history entry', () => {
+	const current = { view: 'thread', open: 7, project: 0 };
+	const history = [{ view: 'inbox', open: 0, project: 0 }];
+	const result = reduceNav(current, history, { view: 'inbox', open: 0, project: 0, isBack: true });
+	assert.deepEqual(result.nav, { view: 'inbox', open: 0, project: 0 });
+	assert.deepEqual(result.history, history);
+	assert.equal(result.changed, true);
 });
 
 // stepComposerIndex: console.js's moveComposerFocus() over the composer's

@@ -110,7 +110,18 @@ export function isSendChord(descriptor, isMac) {
 	if (!descriptor || descriptor.key !== 'Enter') {
 		return false;
 	}
-	return isMac ? Boolean(descriptor.metaKey) : Boolean(descriptor.ctrlKey);
+	// Require exactly the platform modifier, nothing else held (PR #16
+	// review, CodeRabbit console.js:567 / cubic console.js:565): an OS chord
+	// that happens to also hold Alt (e.g. Ctrl-Alt-Enter) or Shift is not
+	// this app's send chord, and must not misfire it. Mac and
+	// non-mac are also mutually exclusive, so a Ctrl-Cmd-Enter (unlikely, but
+	// not impossible on an external keyboard) does not send on either read.
+	if (descriptor.altKey || descriptor.shiftKey) {
+		return false;
+	}
+	return isMac
+		? Boolean(descriptor.metaKey) && !descriptor.ctrlKey
+		: Boolean(descriptor.ctrlKey) && !descriptor.metaKey;
 }
 
 /**
@@ -206,6 +217,34 @@ export function reconcileFocus(previousIDs, currentIDs, focusedID) {
  */
 export function navChanged(current, next) {
 	return next.view !== current.view || next.open !== current.open || next.project !== current.project;
+}
+
+/**
+ * reduceNav computes console.js's next local nav mirror and back stack from
+ * one zing-nav event's detail (PR #16 review, CodeRabbit console.js:315 /
+ * cubic console.js:57): the single reducer both the keyboard nav path
+ * (navigate(), which dispatches zing-nav itself) and the click nav path
+ * (nav.templ's temporary links, which dispatch zing-nav directly on
+ * #stream-ctl) run through, so state.nav updates the same way regardless
+ * of which one triggered the navigation -- previously only the keyboard
+ * path updated it, leaving the client back-stack ("u") and focus model
+ * desynced after a mouse click.
+ *
+ * detail.isBack marks a navigation as itself a back-navigation (goUp's own
+ * pop), matching navigate's original opts.isBack: it must not push another
+ * back-stack entry, or "u" would need repeated presses to actually go up.
+ * A click-triggered detail never sets it, since only goUp ever pops.
+ *
+ * @param {{view: string, open: number, project: number}} currentNav
+ * @param {{view: string, open: number, project: number}[]} history
+ * @param {{view: string, open: number, project: number, isBack?: boolean}} detail
+ * @returns {{nav: object, history: object[], changed: boolean}}
+ */
+export function reduceNav(currentNav, history, detail) {
+	const next = { view: detail.view, open: detail.open, project: detail.project };
+	const changed = navChanged(currentNav, next);
+	const nextHistory = changed && !detail.isBack ? [...history, { ...currentNav }] : history;
+	return { nav: next, history: nextHistory, changed };
 }
 
 /**

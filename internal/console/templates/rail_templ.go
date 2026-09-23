@@ -430,7 +430,7 @@ func logRail(log LogRail) templ.Component {
 			templ_7745c5c3_Var18 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "<section class=\"rail-log\"><h3>Log</h3><div class=\"log-controls\"><select class=\"log-level-select\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "<section class=\"rail-log\"><h3>Log</h3><div class=\"log-controls\"><select class=\"log-level-select\" aria-label=\"Log level\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -634,7 +634,7 @@ func sideBox() templ.Component {
 			templ_7745c5c3_Var28 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "<section class=\"rail-side side-box\"><h3>Side</h3><textarea placeholder=\"Ask the side agent...\" rows=\"3\"></textarea> <button type=\"submit\">Send</button>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "<section class=\"rail-side side-box\"><h3>Side</h3><textarea placeholder=\"Ask the side agent...\" aria-label=\"Ask the side agent\" rows=\"3\"></textarea> <button type=\"submit\">Send</button>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -655,6 +655,14 @@ func sideBox() templ.Component {
 // fixed inert reply ... rendered in the rail"). handleSide (rail.go) renders
 // this same component as POST /side's entire response body, and
 // console.js's postSide replaces #side-reply's outerHTML with it verbatim.
+//
+// Known limitation (code review, PR #16): the next /stream frame's rail
+// patch re-renders #rail from RailModel, which calls sideBox -> SideReply("")
+// with no memory of what was just posted, so an inert reply set by postSide
+// disappears on the next patch rather than staying until the user clears it.
+// Fixing this for real needs the server to hold the last side-reply text
+// somewhere (RailModel, rail.go), which is outside this pass's frontend-only
+// scope; left as a known gap rather than reached for.
 func SideReply(text string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -683,7 +691,7 @@ func SideReply(text string) templ.Component {
 		var templ_7745c5c3_Var30 string
 		templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 167, Col: 8}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 175, Col: 8}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 		if templ_7745c5c3_Err != nil {

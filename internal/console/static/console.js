@@ -23,7 +23,7 @@ import {
 	isSendChord,
 	sendChordToken,
 	stepFocus,
-	navChanged,
+	reduceNav,
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
@@ -92,34 +92,52 @@ async function loadBindings() {
 // dispatchNav dispatches the zing-nav CustomEvent on #stream-ctl (design
 // section 6.3): the one supported way imperative code writes the view,
 // open, and project signals, since plain JavaScript has no signal-write
-// API of its own.
-function dispatchNav(detail) {
+// API of its own. isBack rides along in detail (read back out by
+// onZingNav/reduceNav below) so a "u" pop does not push its own destination
+// back onto the history it just popped from.
+function dispatchNav(next, isBack) {
 	const ctl = document.getElementById('stream-ctl');
 	if (!ctl) {
 		return;
 	}
-	ctl.dispatchEvent(new CustomEvent('zing-nav', { detail }));
+	ctl.dispatchEvent(
+		new CustomEvent('zing-nav', { detail: { view: next.view, open: next.open, project: next.project, isBack: Boolean(isBack) } }),
+	);
 }
 
-// navigate moves to next (a full {view, open, project} triple), updating
-// this module's local mirror, pushing the current position onto the back
-// stack (unless this navigation is itself a "u" pop), and clearing focus
-// state on any real view/open/project change (design section 6.4: "A view
-// change clears both focusedID and the stored previous order").
+// navigate moves to next (a full {view, open, project} triple) by
+// dispatching zing-nav. It does not touch state.nav itself; onZingNav below
+// is the one place that updates the local mirror, so a mouse click on one
+// of nav.templ's temporary links -- which dispatches this exact same event
+// directly on #stream-ctl, bypassing this function entirely -- keeps
+// state.nav in sync too (PR #16 review, CodeRabbit console.js:315 / cubic
+// console.js:57). Datastar's dispatchEvent runs
+// every listener synchronously, so state.nav already reflects next by the
+// time this call returns.
 function navigate(next, opts = {}) {
-	const changed = navChanged(state.nav, next);
-	// Only push a real destination change onto the back stack (code review
-	// fix 4): pushing a no-op navigation too would make "u" pop right back to
-	// where it already is, needing repeated presses to actually go up.
-	if (changed && !opts.isBack) {
-		state.navHistory.push({ ...state.nav });
-	}
-	state.nav = { ...next };
+	dispatchNav(next, opts.isBack);
+}
+
+// onZingNav is the zing-nav bridge's single receiver (design section 6.3,
+// PR #16 review, CodeRabbit console.js:315 / cubic console.js:57):
+// shell.templ's own data-on:zing-nav listener (which writes the Datastar
+// signals and re-fetches /stream) and this one are both bound to
+// #stream-ctl, so every navigation -- keyboard (navigate, above)
+// or mouse (nav.templ's zingNavExpr links) -- runs through here exactly
+// once, updating this module's local mirror, its back stack, and clearing
+// focus on a real destination change (design section 6.4: "A view change
+// clears both focusedID and the stored previous order"), the same way
+// regardless of what triggered the navigation. reduceNav (keyboard.mjs) is
+// the pure decision; this handler only applies its result as DOM/state
+// effects.
+function onZingNav(event) {
+	const { nav, history, changed } = reduceNav(state.nav, state.navHistory, event.detail ?? {});
+	state.nav = nav;
+	state.navHistory = history;
 	if (changed) {
 		setFocusedID('');
 		state.previousFocusableIDs = [];
 	}
-	dispatchNav(state.nav);
 }
 
 // goUp handles "u": pop the back stack, or fall back to Inbox when it is
@@ -130,22 +148,37 @@ function goUp() {
 }
 
 // openFocused handles "o"/Enter on a focused list row (design section 6.4:
-// "o or Enter on a focused list row sets open and view=thread"). Only a
-// ticket-namespaced focus id names something to open; anything else (no
-// focus, or a focus id from a namespace this task does not yet make
-// focusable) is a no-op, returning false so dispatchAction skips
+// "o or Enter on a focused list row sets open and view=thread"). A
+// ticket-namespaced focus id opens that ticket directly. A message-
+// namespaced focus id (Feed's rows; design section 6.5) opens the ticket it
+// belongs to instead, read off the row's own data-ticket-id (feed.templ,
+// PR #16 review, cubic console.js:140): a message id names nothing '/stream'
+// can render on its own, so without this a focused Feed row's 'o'/Enter did
+// nothing. Thread's own message rows carry no data-ticket-id -- there is
+// nothing more useful to open from inside the thread that already shows
+// them -- so this stays a no-op there, unchanged from before. Anything else
+// (no focus, or a focus id from a namespace this task does not yet make
+// focusable) is also a no-op, returning false so dispatchAction skips
 // preventDefault and any native behavior (e.g. a plain Enter inside a
 // non-composer control) still runs.
 function openFocused() {
-	if (!state.focusedID.startsWith('ticket:')) {
-		return false;
+	if (state.focusedID.startsWith('ticket:')) {
+		const id = Number(state.focusedID.slice('ticket:'.length));
+		if (!Number.isFinite(id) || id <= 0) {
+			return false;
+		}
+		navigate({ view: 'thread', open: id, project: 0 });
+		return true;
 	}
-	const id = Number(state.focusedID.slice('ticket:'.length));
-	if (!Number.isFinite(id) || id <= 0) {
-		return false;
+	if (state.focusedID.startsWith('message:')) {
+		const ticketID = Number(findByFocusID(state.focusedID)?.dataset?.ticketId);
+		if (!Number.isFinite(ticketID) || ticketID <= 0) {
+			return false;
+		}
+		navigate({ view: 'thread', open: ticketID, project: 0 });
+		return true;
 	}
-	navigate({ view: 'thread', open: id, project: 0 });
-	return true;
+	return false;
 }
 
 // ---- focus ring ---------------------------------------------------------
@@ -169,15 +202,27 @@ function findByFocusID(id) {
 // setFocusedID moves the focus class from the previously focused element
 // (if any) to the one named by id (if any), and scrolls the newly focused
 // element into view (design section 6.4: "adds the focus class to that
-// id's element and scrolls it into view").
+// id's element and scrolls it into view") -- but only when id actually
+// differs from the previously focused id (PR #16 review, CodeRabbit
+// console.js:180). The patch observer's runPatchWork calls this on every
+// #main/#rail mutation, most of which reconcile back to the same
+// focusedID; scrolling on every one of those made an unrelated patch
+// elsewhere on the page yank the viewport back to a row the user never
+// moved away from. The focus class is still reconciled unconditionally: a
+// patch can morph in a fresh DOM node for the same id, which starts
+// without the class the pre-patch node carried.
 function setFocusedID(id) {
+	const nextID = id ?? '';
+	const changed = nextID !== state.focusedID;
 	const prevEl = findByFocusID(state.focusedID);
 	prevEl?.classList.remove('focus');
-	state.focusedID = id ?? '';
+	state.focusedID = nextID;
 	const el = findByFocusID(state.focusedID);
 	if (el) {
 		el.classList.add('focus');
-		el.scrollIntoView({ block: 'nearest' });
+		if (changed) {
+			el.scrollIntoView({ block: 'nearest' });
+		}
 	}
 }
 
@@ -190,11 +235,15 @@ function moveFocus(direction) {
 
 // ---- the composer's inputs (Tab/Shift-Tab; Task 6/7 build the composer) -
 
-// composerInputSelector names the composer's own focusable controls (Task
-// 6 introduces the composer markup this selector targets). Until then it
-// matches nothing, so Tab and Shift-Tab fall through to the browser's
-// native tab order rather than being silently swallowed.
-const composerInputSelector = '.composer input, .composer textarea, .composer select, .composer button';
+// composerInputSelector names the composer's own focusable controls (design
+// section 6.6, PR #16 review, cubic console.js:197): an option chip, an
+// item-decision button (thread.templ's optionChips/itemRows), or a
+// free-reply input (thread.templ's freeReply). There is no wrapping
+// ".composer" element -- the original selector named one that thread.templ
+// never introduced, so it matched nothing and Tab/Shift-Tab silently fell
+// through to the browser's native tab order instead of cycling the
+// rendered controls.
+const composerInputSelector = '#main .chip, #main .decision, #main .reply-input';
 
 function moveComposerFocus(delta) {
 	const els = Array.from(document.querySelectorAll(composerInputSelector));
@@ -236,9 +285,15 @@ async function postJSON(path, body) {
 
 // postDraft handles Enter inside a question input (design section 6.4,
 // 6.7): data-draft-ticket/data-draft-question on the focused input, its
-// value as the free-text reply. On a successful save it clears the input
-// (code review fix 5), so a repeated Enter cannot re-post the same reply
-// text; the store-side reply upsert-on-repeat is a separate pass's concern.
+// value as the free-text reply. It clears the input synchronously, the
+// moment the draft is queued, rather than waiting on postJSON's fetch to
+// resolve (PR #16 review, cubic console.js:255): clearing in the async
+// .then left a window where fast typing after Enter landed in the input
+// before the response came back, and the old callback then wiped out that
+// new, unsent text along with the already-sent draft. Clearing up front
+// means a failed POST (postJSON's own console.error) loses the input's
+// echo of what was sent, which is an acceptable trade against silently
+// eating a later keystroke.
 function postDraft() {
 	const el = document.activeElement;
 	const ticket = el?.dataset?.draftTicket;
@@ -246,14 +301,12 @@ function postDraft() {
 	if (!ticket || typeof el.value !== 'string' || el.value === '') {
 		return false;
 	}
+	const text = el.value;
+	el.value = '';
 	postJSON('/draft', {
 		ticket: Number(ticket),
 		question: question ? Number(question) : null,
-		text: el.value,
-	}).then((ok) => {
-		if (ok) {
-			el.value = '';
-		}
+		text,
 	});
 	return true;
 }
@@ -552,6 +605,17 @@ function dispatchAction(action, event) {
 // character types normally) and otherwise passed through as-is for the
 // chord machine or a direct single-key lookup.
 function resolveToken(event, inInput) {
+	// An IME still composing (e.g. picking a kanji candidate) fires its own
+	// keydown with key "Enter" to confirm the composition, not to send or
+	// save a draft (PR #16 review, CodeRabbit console.js:567 / cubic
+	// console.js:565). event.isComposing is the modern signal; keyCode 229
+	// is the legacy one older/some mobile browsers still set instead.
+	// Returning null here, before either the send-chord or Enter-in-input
+	// checks below, lets the IME's own Enter handling run rather than
+	// misfiring either action.
+	if (event.key === 'Enter' && (event.isComposing || event.keyCode === 229)) {
+		return null;
+	}
 	if (isSendChord(event, isMac())) {
 		return sendChordToken(isMac());
 	}
@@ -694,9 +758,20 @@ function installPatchObserver() {
 
 // ---- install --------------------------------------------------------------
 
+// installNavBridge wires onZingNav onto #stream-ctl (PR #16 review,
+// CodeRabbit console.js:315 / cubic console.js:57): the same element every
+// zing-nav dispatch -- console.js's own dispatchNav or nav.templ's
+// zingNavExpr links -- targets, so this one listener sees every navigation
+// regardless of source.
+function installNavBridge() {
+	const ctl = document.getElementById('stream-ctl');
+	ctl?.addEventListener('zing-nav', onZingNav);
+}
+
 async function install() {
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
+	installNavBridge();
 	installPatchObserver();
 	installSideBox();
 	installLogControls();
