@@ -77,12 +77,12 @@ var stateSequenceWant = []string{"planning", "building", "reviewing", "judging",
 // end-to-end integration test (PKG3-PLAN.md section 12 rows 5 and 7, section
 // 6.10): zing serve, run against a temp config and a temp database, carries
 // the one fixture ticket from queued into planning, where it waits on the
-// one fixture question; this test answers it through a real POST /answer
-// against the running server, exactly as the browser's chip click would,
-// and the dispatcher resumes and carries the ticket the rest of the way to
-// done, in the order design section 7.1's state table lists. ctx
-// cancellation then drains the dispatcher and closes the store, and serve
-// returns nil.
+// one fixture question; this test answers it through a real POST /draft
+// then POST /send against the running server, exactly as the browser's
+// chip click and send chord would, and the dispatcher resumes and carries
+// the ticket the rest of the way to done, in the order design section 7.1's
+// state table lists. ctx cancellation then drains the dispatcher and closes
+// the store, and serve returns nil.
 func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -194,30 +194,46 @@ func waitForOpenQuestion(t *testing.T, dbPath string, serveDone <-chan error) (t
 // context's absence of a deadline.
 const answerQuestionTimeout = 10 * time.Second
 
-// answerQuestion POSTs the console's $answer signal to /answer on the
-// running server at baseURL, the same JSON shape and header a browser's chip
-// click sends (design section 6.9): {"answer":{"ticket","question","option"}}
-// with the Datastar-Request header. It fails the test on anything but 204.
+// answerQuestion drafts then sends one answer through the running server at
+// baseURL: POST /draft with {ticket, question, option}, then POST /send
+// with {ticket} (design section 6.7), the same two-step composer a
+// browser's chip click and send chord drive. Both requests carry the
+// Content-Type and Datastar-Request headers, and an Origin matching
+// baseURL, the mutation guard (mw.go, design section 6.14) requires. It
+// fails the test on anything but 204 from either step.
 func answerQuestion(t *testing.T, baseURL string, ticketID, questionID int64, option string) {
 	t.Helper()
 
-	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":%q}}`, ticketID, questionID, option)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/answer", strings.NewReader(body))
+	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, questionID, option)
+	postComposer(t, baseURL, "/draft", draftBody)
+
+	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	postComposer(t, baseURL, "/send", sendBody)
+}
+
+// postComposer POSTs body to baseURL+path with the headers every mutation
+// route requires (design section 6.14): Content-Type, Datastar-Request, and
+// an Origin equal to baseURL. It fails the test on anything but 204.
+func postComposer(t *testing.T, baseURL, path, body string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+path, strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("build POST /answer request: %v", err)
+		t.Fatalf("build POST %s request: %v", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", baseURL)
 
 	client := &http.Client{Timeout: answerQuestionTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
+		t.Fatalf("POST %s: %v", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /answer: status = %d, want 204", resp.StatusCode)
+		t.Fatalf("POST %s: status = %d, want 204", path, resp.StatusCode)
 	}
 }
 
@@ -327,7 +343,7 @@ func assertStateSequence(t *testing.T, dbPath string, ticketID int64) {
 
 // assertExactlyOneQuestionAnswered reads ticketID's messages through a fresh
 // store handle and asserts exactly one "answer" message was recorded, so the
-// POST /answer this test drove is the only one that landed.
+// POST /draft + POST /send this test drove is the only one that landed.
 func assertExactlyOneQuestionAnswered(t *testing.T, dbPath string, ticketID int64) {
 	t.Helper()
 

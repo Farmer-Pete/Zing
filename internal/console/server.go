@@ -1,8 +1,9 @@
 // Package console serves the console (design section 6.3): the shell page,
 // one live GET /stream per tab that patches the #nav, #main, and #rail
-// regions, and POST /answer for recording a chosen option. Every page and
-// fragment renders through the templ components in internal/console/templates
-// (design section 6.2); there is no html/template use in this package.
+// regions, and the composer's POST /draft, /send, and /read (design section
+// 6.7, 6.8). Every page and fragment renders through the templ components
+// in internal/console/templates (design section 6.2); there is no
+// html/template use in this package.
 package console
 
 import (
@@ -65,7 +66,9 @@ type console struct {
 //
 //	GET  /                     the shell page
 //	GET  /stream                the one live SSE stream per tab (design section 6.3)
-//	POST /answer                record the chosen option for an open question
+//	POST /draft                 save one draft answer or reply (design section 6.7)
+//	POST /send                  send the ticket's drafted batch (design section 6.7)
+//	POST /read                  mark one message read (design section 6.8)
 //	GET  /static/datastar.js    the vendored Datastar bundle
 //	GET  /static/mermaid.js     the vendored mermaid bundle
 //	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
@@ -76,16 +79,24 @@ type console struct {
 // section 5, 12): every other path, including console.test.js, package.json,
 // and ASSETS.md, has no registered route and so 404s from the mux itself.
 //
+// bindHost and port build the mutation guard's Host allowlist (mw.go,
+// design section 6.14): for this task, bindHost plus localhost and
+// 127.0.0.1, each at port. Task 11 widens the source to every resolved bind
+// authority plus Console.AllowedHosts, still through this same guard.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker) http.Handler {
+func New(st *store.Store, b *bus.Broker, bindHost string, port int) http.Handler {
 	c := &console{store: st, bus: b}
+	guard := newMutationGuard(port, bindHost, "localhost", "127.0.0.1")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
 	mux.HandleFunc("GET /stream", c.handleStream) // streaming: no write deadline
-	mux.HandleFunc("POST /answer", withWriteDeadline(requireSameOrigin(c.handleAnswer)))
+	mux.HandleFunc("POST /draft", withWriteDeadline(guard.requireSameOrigin(c.handleDraft)))
+	mux.HandleFunc("POST /send", withWriteDeadline(guard.requireSameOrigin(c.handleSend)))
+	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
 	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))
@@ -116,40 +127,6 @@ func withWriteDeadline(next http.HandlerFunc) http.HandlerFunc {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Now().Add(nonStreamWriteDeadline)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// datastarRequestHeader is the header every Datastar backend action sends
-// (datastar skill, attributes.md: "All backend actions send a
-// Datastar-Request: true header"). A plain cross-site form POST cannot set a
-// custom header without triggering a CORS preflight, so requiring it here
-// rules out that attack shape even when Sec-Fetch-Site is absent.
-const datastarRequestHeader = "Datastar-Request"
-
-// requireSameOrigin guards a mutating route against a cross-site request
-// forgery (CWE-352, design section "Console" fix 2): a cross-site fetch sent
-// as text/plain under no-cors mode still reaches datastar.ReadSignals, since
-// it decodes whatever body arrived without checking its declared content
-// type, so without this guard a hostile page could POST a crafted body to
-// /answer using the visitor's own session and silently answer an open
-// question. The check rejects the request with 403 unless both hold: the
-// Sec-Fetch-Site header, when the browser sends one, is "same-origin" or
-// "none" (a same-origin fetch, or a request with no meaningful origin, such
-// as a curl call or an older browser); and the Datastar-Request header is
-// present and "true", which the SDK always sets on every backend action but
-// a simple cross-origin form POST cannot set without a CORS preflight the
-// browser would block first.
-func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
-			http.Error(w, "cross-site request rejected", http.StatusForbidden)
-			return
-		}
-		if r.Header.Get(datastarRequestHeader) != "true" {
-			http.Error(w, "cross-site request rejected", http.StatusForbidden)
 			return
 		}
 		next(w, r)

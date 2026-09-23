@@ -53,6 +53,16 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	q.Add("_pragma", "busy_timeout(5000)")
+	// _txlock=immediate makes every transaction on this connection start
+	// with "BEGIN IMMEDIATE" rather than SQLite's default deferred BEGIN, so
+	// a transaction takes the write lock up front instead of only at its
+	// first write statement (design section 6.7: SendBatch "runs one BEGIN
+	// IMMEDIATE transaction, so it takes the write lock before it reads and
+	// max(batch_id)+1 is not racy"). SetMaxOpenConns(1) already serializes
+	// every transaction through this one connection, so this changes only
+	// when the lock is acquired, never whether two transactions can
+	// interleave.
+	q.Add("_txlock", "immediate")
 	dsn := "file:" + esc + "?" + q.Encode()
 
 	db, err := sql.Open("sqlite", dsn)

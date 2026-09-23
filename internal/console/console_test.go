@@ -3,13 +3,11 @@ package console_test
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +22,32 @@ import (
 // suite.
 const frameTimeout = 5 * time.Second
 
+// testBindHost and testConsolePort are the console.New arguments every test
+// in this package that does not itself exercise the mutation guard (mw.go,
+// design section 6.14) passes: the guard only matters to the routes it
+// wraps, so a GET-only test's httptest.NewServer port need not match
+// testConsolePort. mw_test.go and answer_test.go build their own server on
+// a reserved listener so their port does match.
+const (
+	testBindHost    = "127.0.0.1"
+	testConsolePort = 7420
+)
+
+// testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, and
+// testWaitingQuestions round up the string literals this package's tests
+// repeat three or more times: the tracker name every seeded project uses,
+// the author every zing-authored message uses, the "question" message
+// type, and the "questions" ticket.waiting_on value a seeded open question
+// sets (store's own historical spelling, commit.go's waitingFlagQuestions).
+const (
+	testTrackerGitHub    = "github"
+	testAuthorZing       = "zing"
+	testMsgTypeQuestion  = "question"
+	testWaitingQuestions = "questions"
+)
+
 var testProject = store.Project{
-	Name: "acme", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "acme", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: testTrackerGitHub,
 }
 
 // newConsoleTestStore opens a fresh Store on a temp-file database, closed on
@@ -89,7 +111,7 @@ func seedStateMessage(t *testing.T, s *store.Store, ticketID int64, from, to, re
 func seedUnreadUpdate(t *testing.T, s *store.Store, ticketID int64, body string) int64 {
 	t.Helper()
 	id, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: "update", Author: "zing", Body: body,
+		TicketID: ticketID, Type: "update", Author: testAuthorZing, Body: body,
 	})
 	if err != nil {
 		t.Fatalf("InsertMessage(update): %v", err)
@@ -117,7 +139,7 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 		t.Fatal("Claim: got false, want true")
 	}
 
-	waiting := "questions"
+	waiting := testWaitingQuestions
 	openState := "open"
 	payload := []byte(`{"key":"Q1","kind":"question","state":"open","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
@@ -126,7 +148,7 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Waiting: &waiting,
 		Messages: []store.Message{{
-			TicketID: ticketID, Type: "question", Author: "zing",
+			TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
 			State:   &openState,
 			Body:    "How should the greeting read?\n\nPick the greeting style for GET /hello.",
 			Payload: payload,
@@ -144,32 +166,12 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 		t.Fatalf("ListMessages: %v", err)
 	}
 	for i := range messages {
-		if messages[i].Type == "question" {
+		if messages[i].Type == testMsgTypeQuestion {
 			return messages[i].ID
 		}
 	}
 	t.Fatal("seedOpenQuestion: no question message found after commit")
 	return 0
-}
-
-// postAnswer POSTs body to base+"/answer" with the Content-Type and
-// Datastar-Request headers a real Datastar @post('/answer') call always
-// sends (design section "Console" fix 2: requireSameOrigin rejects a
-// same-origin POST that lacks the Datastar-Request header, so every test
-// that expects a real answer-handling response, not a 403, must set it).
-func postAnswer(t *testing.T, base, body string) *http.Response {
-	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, base+"/answer", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("build POST /answer request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Datastar-Request", "true")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
-	}
-	return resp
 }
 
 // readFrame reads one SSE frame from r, bounded by frameTimeout so a hung
@@ -246,7 +248,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
 
-	srv := httptest.NewServer(console.New(s, bus.New()))
+	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -284,7 +286,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 
 func TestStaticServesDatastarBundle(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New()))
+	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/datastar.js") //nolint:noctx // a bare GET on a test server needs no deadline
@@ -308,131 +310,6 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 	}
 }
 
-func TestAnswerAcceptsThenConflictsOnRepeat(t *testing.T) {
-	s := newConsoleTestStore(t)
-	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
-	questionID := seedOpenQuestion(t, s, ticketID)
-
-	srv := httptest.NewServer(console.New(s, bus.New()))
-	defer srv.Close()
-
-	body := `{"answer":{"ticket":` + strconv.FormatInt(ticketID, 10) +
-		`,"question":` + strconv.FormatInt(questionID, 10) + `,"option":"a"}}`
-
-	resp := postAnswer(t, srv.URL, body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("first POST /answer status = %d, want 204", resp.StatusCode)
-	}
-
-	ticket, err := s.GetTicket(t.Context(), ticketID)
-	if err != nil {
-		t.Fatalf("GetTicket: %v", err)
-	}
-	if ticket.WaitingOn != nil {
-		t.Errorf("ticket WaitingOn = %q, want nil (wait cleared)", *ticket.WaitingOn)
-	}
-
-	answered, err := s.GetMessage(t.Context(), questionID)
-	if err != nil {
-		t.Fatalf("GetMessage: %v", err)
-	}
-	if answered.State == nil || *answered.State != "answered" {
-		t.Errorf("question state after the first answer = %v, want \"answered\"", answered.State)
-	}
-
-	resp2 := postAnswer(t, srv.URL, body)
-	defer func() { _ = resp2.Body.Close() }()
-	if resp2.StatusCode != http.StatusConflict {
-		t.Fatalf("second POST /answer status = %d, want 409", resp2.StatusCode)
-	}
-	respBody, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		t.Fatalf("read second response body: %v", err)
-	}
-	if !strings.Contains(string(respBody), "already answered") {
-		t.Errorf("second POST /answer body = %q, want it to contain %q", respBody, "already answered")
-	}
-
-	stillAnswered, err := s.GetMessage(t.Context(), questionID)
-	if err != nil {
-		t.Fatalf("GetMessage after repeat: %v", err)
-	}
-	if stillAnswered.State == nil || *stillAnswered.State != "answered" {
-		t.Errorf("question state after the repeat = %v, want unchanged \"answered\"", stillAnswered.State)
-	}
-}
-
-// TestAnswerRejectsInvalidInputWith400 proves handleAnswer validates
-// $answer before it ever reaches the store: a non-positive ticket or
-// question id, or an option that is not a single lowercase letter, all
-// return 400 (design section "Console" fix 1) without needing any seeded
-// question, since validation runs first.
-func TestAnswerRejectsInvalidInputWith400(t *testing.T) {
-	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New()))
-	defer srv.Close()
-
-	cases := []struct {
-		name, body string
-	}{
-		{"zero ticket", `{"answer":{"ticket":0,"question":1,"option":"a"}}`},
-		{"negative ticket", `{"answer":{"ticket":-1,"question":1,"option":"a"}}`},
-		{"zero question", `{"answer":{"ticket":1,"question":0,"option":"a"}}`},
-		{"negative question", `{"answer":{"ticket":1,"question":-1,"option":"a"}}`},
-		{"empty option", `{"answer":{"ticket":1,"question":1,"option":""}}`},
-		{"uppercase option", `{"answer":{"ticket":1,"question":1,"option":"A"}}`},
-		{"multi-letter option", `{"answer":{"ticket":1,"question":1,"option":"ab"}}`},
-		{"digit option", `{"answer":{"ticket":1,"question":1,"option":"1"}}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := postAnswer(t, srv.URL, tc.body)
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("POST /answer(%s) status = %d, want 400", tc.body, resp.StatusCode)
-			}
-		})
-	}
-}
-
-// TestAnswerReturns500WithGenericBodyOnStoreError proves a real store error
-// (not a named conflict) never leaks its detail to the client: a question
-// id that passes validation but names no real message makes
-// store.AnswerQuestion return a genuine error (a wrapped sql.ErrNoRows,
-// not an AnswerResult conflict), and handleAnswer must turn that into 500
-// with the fixed generic body, logging the detail server-side instead
-// (design section "Console" fix 1).
-func TestAnswerReturns500WithGenericBodyOnStoreError(t *testing.T) {
-	s := newConsoleTestStore(t)
-	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
-
-	srv := httptest.NewServer(console.New(s, bus.New()))
-	defer srv.Close()
-
-	const missingQuestionID = 999999
-	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, missingQuestionID)
-
-	resp := postAnswer(t, srv.URL, body)
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("POST /answer status = %d, want 500", resp.StatusCode)
-	}
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
-	got := strings.TrimSpace(string(respBody))
-	if got != "internal error" {
-		t.Errorf(`POST /answer body = %q, want exactly "internal error"`, got)
-	}
-	if strings.Contains(got, "sql") || strings.Contains(got, strconv.Itoa(missingQuestionID)) ||
-		strings.Contains(got, "answer question") {
-		t.Errorf("POST /answer body leaked store error detail: %q", got)
-	}
-}
-
 // TestIndexReturns500WithGenericBodyOnStoreError proves a real store error
 // on GET / never leaks its detail to the client: closing the store out from
 // under a live server makes the store reads handleIndex depends on return a
@@ -441,7 +318,7 @@ func TestAnswerReturns500WithGenericBodyOnStoreError(t *testing.T) {
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New()))
+	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
 	defer srv.Close()
 
 	if err := s.Close(); err != nil {
@@ -468,113 +345,16 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	}
 }
 
-// TestAnswerRejectsOversizedBodyWith400 proves POST /answer wraps r.Body in
-// http.MaxBytesReader before ReadSignals (design section "Console" fix 12):
-// a body padded well past the limit with an otherwise-ignored field is
-// rejected with 400 before it can reach the store, rather than decoding in
-// full and failing later (which would surface as 500 for these
-// nonexistent ids, not 400).
-func TestAnswerRejectsOversizedBodyWith400(t *testing.T) {
-	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New()))
-	defer srv.Close()
-
-	filler := strings.Repeat("x", 16<<10) // far past the console's body size limit
-	body := fmt.Sprintf(`{"answer":{"ticket":1,"question":999999,"option":"a"},"filler":%q}`, filler)
-
-	resp := postAnswer(t, srv.URL, body)
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("POST /answer with an oversized body: status = %d, want 400 (rejected before it could reach the store)", resp.StatusCode)
-	}
-}
-
-// TestAnswerCSRFGuard proves the same-origin guard on POST /answer (design
-// section "Console" fix 2, CWE-352): a cross-site request -- whether flagged
-// by a Sec-Fetch-Site value other than "same-origin" or "none", or by the
-// absence of the Datastar-Request header every real Datastar backend action
-// sends -- is rejected with 403 before it ever reaches the store, leaving
-// the question untouched; a normal same-origin Datastar POST still succeeds
-// with 204. Each rejected case seeds its own ticket and question, since a
-// wrongly accepted case would answer the question and corrupt a later
-// case's expectations.
-func TestAnswerCSRFGuard(t *testing.T) {
-	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New()))
-	defer srv.Close()
-
-	postWithHeaders := func(t *testing.T, body string, headers map[string]string) *http.Response {
-		t.Helper()
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/answer", strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("build POST /answer request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("POST /answer: %v", err)
-		}
-		return resp
-	}
-
-	rejected := []struct {
-		name    string
-		headers map[string]string
-	}{
-		{"cross-site Sec-Fetch-Site", map[string]string{"Sec-Fetch-Site": "cross-site", "Datastar-Request": "true"}},
-		{"same-site Sec-Fetch-Site is not same-origin", map[string]string{"Sec-Fetch-Site": "same-site", "Datastar-Request": "true"}},
-		{"missing Datastar-Request header", map[string]string{}},
-	}
-	for i, tc := range rejected {
-		t.Run(tc.name, func(t *testing.T) {
-			ticketID := seedTicket(t, s, fmt.Sprintf("csrf-reject-%d", i), "CSRF guard fixture")
-			questionID := seedOpenQuestion(t, s, ticketID)
-			body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
-
-			resp := postWithHeaders(t, body, tc.headers)
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusForbidden {
-				t.Errorf("POST /answer status = %d, want 403", resp.StatusCode)
-			}
-
-			ticket, err := s.GetTicket(t.Context(), ticketID)
-			if err != nil {
-				t.Fatalf("GetTicket: %v", err)
-			}
-			if ticket.WaitingOn == nil || *ticket.WaitingOn != "questions" {
-				t.Errorf("ticket.WaitingOn after a rejected cross-site POST = %v, want unchanged \"questions\" (nothing answered)", ticket.WaitingOn)
-			}
-		})
-	}
-
-	t.Run("same-origin Datastar POST still succeeds", func(t *testing.T) {
-		ticketID := seedTicket(t, s, "csrf-accept", "CSRF guard fixture (accepted)")
-		questionID := seedOpenQuestion(t, s, ticketID)
-		body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
-
-		resp := postAnswer(t, srv.URL, body)
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("same-origin POST /answer status = %d, want 204", resp.StatusCode)
-		}
-	})
-}
-
 // TestNonStreamingRoutesSucceedUnderWriteDeadline proves the write-deadline
 // middleware (design section 6.10, fix 2) does not break an ordinary, fast
-// response on any of the three non-streaming routes it wraps: GET /,
-// POST /answer, and GET /static/datastar.js. It does not test the deadline
-// firing, only that its presence leaves a normal response intact.
+// response on either of the two non-streaming routes it wraps in this file:
+// GET / and GET /static/datastar.js. It does not test the deadline firing,
+// only that its presence leaves a normal response intact; answer_test.go
+// covers the same guard on the mutation routes.
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	s := newConsoleTestStore(t)
-	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
-	questionID := seedOpenQuestion(t, s, ticketID)
 
-	srv := httptest.NewServer(console.New(s, bus.New()))
+	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
 	defer srv.Close()
 
 	//nolint:noctx // a bare GET on a test server needs no deadline
@@ -595,12 +375,5 @@ func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	_ = staticResp.Body.Close()
 	if staticResp.StatusCode != http.StatusOK {
 		t.Errorf("GET /static/datastar.js status = %d, want 200", staticResp.StatusCode)
-	}
-
-	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":"a"}}`, ticketID, questionID)
-	answerResp := postAnswer(t, srv.URL, body)
-	_ = answerResp.Body.Close()
-	if answerResp.StatusCode != http.StatusNoContent {
-		t.Errorf("POST /answer status = %d, want 204", answerResp.StatusCode)
 	}
 }

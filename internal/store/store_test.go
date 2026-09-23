@@ -21,6 +21,8 @@ const (
 	testTypeScenario   = "scenario"
 	testAuthorZing     = "zing"
 	testAuthorYou      = "you"
+	testRefAGo         = "a.go"
+	testRefBGo         = "b.go"
 )
 
 var wantTables = []string{

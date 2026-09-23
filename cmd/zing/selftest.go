@@ -171,11 +171,15 @@ func selftestE2E(ctx context.Context) error {
 
 	// The real console handler, driven in-process through
 	// httptest.NewRecorder (no network port): section 11's e2e suite
-	// answers through POST /answer exactly as the browser's chip click
-	// would, not through store.AnswerQuestion directly, so this suite also
-	// proves the console's own answer path end to end (design section 11,
-	// "cmd/zing" fix 7).
-	consoleHandler := console.New(st, b)
+	// answers through POST /draft then POST /send exactly as the browser's
+	// chip click and send chord would, not through store.SaveDraft or
+	// store.SendBatch directly, so this suite also proves the console's own
+	// composer path end to end (design section 11, "cmd/zing" fix 7;
+	// design section 6.7). e2eConsoleHost and e2eConsolePort are a fixed,
+	// made-up bind, never actually listened on, that only needs to satisfy
+	// the mutation guard (mw.go, design section 6.14) the requests below
+	// carry matching Host and Origin headers for.
+	consoleHandler := console.New(st, b, e2eConsoleHost, e2eConsolePort)
 
 	var ticketID int64
 	var answered int
@@ -219,10 +223,19 @@ func selftestE2E(ctx context.Context) error {
 	return fmt.Errorf("e2e: ticket did not reach done within %d ticks", e2eMaxTicks)
 }
 
+// e2eConsoleHost and e2eConsolePort are the fixed authority
+// selftestE2E's in-process requests present as Host and Origin, so they
+// pass the mutation guard (mw.go, design section 6.14) without this suite
+// needing a real network listener.
+const (
+	e2eConsoleHost = "127.0.0.1"
+	e2eConsolePort = 7420
+)
+
 // answerOpenQuestions answers every question ticketID has open, each with
-// its first offered option, through the real console answer handler
-// in-process (design section 6.9, section 11), and returns how many it
-// answered.
+// its first offered option, by drafting then sending through the real
+// console composer handlers in-process (design section 6.7, section 11),
+// and returns how many it answered.
 func answerOpenQuestions(ctx context.Context, st *store.Store, consoleHandler http.Handler, ticketID int64) (int, error) {
 	open, err := st.QuestionsByState(ctx, ticketID, "open")
 	if err != nil {
@@ -237,32 +250,42 @@ func answerOpenQuestions(ctx context.Context, st *store.Store, consoleHandler ht
 		if len(payload.Options) == 0 {
 			return 0, fmt.Errorf("question %d has no options", q.ID)
 		}
-		if err := postAnswer(ctx, consoleHandler, ticketID, q.ID, payload.Options[0].Key); err != nil {
-			return 0, fmt.Errorf("answer question %d: %w", q.ID, err)
+		draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, q.ID, payload.Options[0].Key)
+		if err := postConsole(ctx, consoleHandler, "/draft", draftBody); err != nil {
+			return 0, fmt.Errorf("draft answer for question %d: %w", q.ID, err)
+		}
+	}
+	if len(open) > 0 {
+		sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+		if err := postConsole(ctx, consoleHandler, "/send", sendBody); err != nil {
+			return 0, fmt.Errorf("send batch for ticket %d: %w", ticketID, err)
 		}
 	}
 	return len(open), nil
 }
 
-// postAnswer sends one answer through consoleHandler's real POST /answer
-// route, in-process: an http.Request built with the same Datastar signal
-// body and Datastar-Request header a browser's chip click sends (design
-// section 6.9), served directly to an httptest.NewRecorder rather than
-// over a network port. It fails unless the handler reports 204, the same
-// contract console_test.go's own answer tests assert.
-func postAnswer(ctx context.Context, consoleHandler http.Handler, ticketID, questionID int64, option string) error {
-	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":%q}}`, ticketID, questionID, option)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/answer", strings.NewReader(body))
+// postConsole sends one JSON POST through consoleHandler's real route
+// (path), in-process: an http.Request carrying the Datastar-Request header
+// and a Host/Origin authority matching e2eConsoleHost:e2eConsolePort, the
+// same shape a browser's chip click or send chord sends (design section
+// 6.4, 6.14), served directly to an httptest.NewRecorder rather than over a
+// network port. It fails unless the handler reports 204, the same contract
+// answer_test.go's own composer tests assert.
+func postConsole(ctx context.Context, consoleHandler http.Handler, path, body string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, strings.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build POST /answer request: %w", err)
+		return fmt.Errorf("build POST %s request: %w", path, err)
 	}
+	authority := fmt.Sprintf("%s:%d", e2eConsoleHost, e2eConsolePort)
+	req.Host = authority
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", "http://"+authority)
 
 	rec := httptest.NewRecorder()
 	consoleHandler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
-		return fmt.Errorf("POST /answer: status = %d, body = %s", rec.Code, rec.Body.String())
+		return fmt.Errorf("POST %s: status = %d, body = %s", path, rec.Code, rec.Body.String())
 	}
 	return nil
 }
