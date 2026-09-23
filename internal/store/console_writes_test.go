@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -434,39 +435,75 @@ func TestSendBatch_IncompleteItemAnswerLeavesQuestionOpen(t *testing.T) {
 	}
 }
 
-func TestSendBatch_AllOrNothingOnAnInvalidDraft(t *testing.T) {
+// TestSendBatch_DiscardsStaleDraftAndSendsTheRest proves the PR review fix:
+// a draft saved against a question that closes before it sends (a race with
+// another writer, or simply time passing between the draft and the send) no
+// longer wedges the whole batch behind a permanent 409, the way the old
+// all-or-nothing revalidateBatchTx did. SendBatch instead discards the one
+// stale draft outright and sends every other draft in the batch.
+func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+
 	q1 := insertQuestionOption(t, s, ticketID, "Q1")
 	q2 := insertQuestionOption(t, s, ticketID, "Q2")
 
 	opt := "a"
-	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Option: &opt}); err != nil {
+	staleDraft, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Option: &opt})
+	if err != nil {
 		t.Fatalf("SaveDraft(q1): %v", err)
 	}
-	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q2, Option: &opt}); err != nil {
-		t.Fatalf("SaveDraft(q2): %v", err)
-	}
 
-	// q2 closes out from under its own draft (simulating a race with
+	// q1 closes out from under its own draft (simulating a race with
 	// another writer) between the draft and the send.
-	closeQuestion(t, s, q2, questionStateResolved)
+	closeQuestion(t, s, q1, questionStateResolved)
 
-	_, err := s.SendBatch(t.Context(), ticketID)
-	if err == nil {
-		t.Fatal("SendBatch: err = nil, want a conflict")
-	}
-	if got := conflictReason(t, err); got != "question closed" {
-		t.Errorf("conflict reason = %q, want %q", got, "question closed")
+	if _, saveErr := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q2, Option: &opt}); saveErr != nil {
+		t.Fatalf("SaveDraft(q2): %v", saveErr)
 	}
 
-	// Nothing sent: q1's draft is still a draft, untouched.
-	m1, err := s.GetMessage(t.Context(), q1)
+	res, err := s.SendBatch(t.Context(), ticketID)
 	if err != nil {
-		t.Fatalf("GetMessage(q1 question): %v", err)
+		t.Fatalf("SendBatch: %v", err)
 	}
-	if m1.State == nil || *m1.State != questionStateOpen {
-		t.Errorf("q1 question state = %v, want unchanged %q (whole batch rolled back)", m1.State, questionStateOpen)
+	if res.Sent != 1 || res.Discarded != 1 || res.Empty {
+		t.Errorf("SendBatch = %+v, want Sent=1 Discarded=1 Empty=false", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true: q1 was already closed and q2's send answers the only other open question of that kind")
+	}
+
+	// The stale q1 draft is gone outright, not left behind in any state.
+	if _, getErr := s.GetMessage(t.Context(), staleDraft.MessageID); !errors.Is(getErr, sql.ErrNoRows) {
+		t.Errorf("GetMessage(stale draft) err = %v, want sql.ErrNoRows (discarded)", getErr)
+	}
+
+	// q2's draft sent normally, and its question is answered.
+	q2Msg, err := s.GetMessage(t.Context(), q2)
+	if err != nil {
+		t.Fatalf("GetMessage(q2 question): %v", err)
+	}
+	if q2Msg.State == nil || *q2Msg.State != questionStateAnswered {
+		t.Errorf("q2 question state = %v, want %q", q2Msg.State, questionStateAnswered)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+
+	// A retry after the fact stays safe: nothing left to send, and no
+	// lingering stale row to keep tripping over.
+	res2, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (retry): %v", err)
+	}
+	if !res2.Empty || res2.Sent != 0 || res2.Discarded != 0 {
+		t.Errorf("SendBatch (retry) = %+v, want Empty=true and everything else zero", res2)
 	}
 }
 

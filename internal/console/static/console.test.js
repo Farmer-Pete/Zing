@@ -19,6 +19,7 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	resolveToken,
 	stepFocus,
 	reconcileFocus,
 	collectPatchWork,
@@ -155,6 +156,41 @@ test('isSendChord: both Ctrl and Cmd held at once is not the send chord on eithe
 test('sendChordToken names the platform-correct keys.json token', () => {
 	assert.equal(sendChordToken(true), 'Cmd-Enter');
 	assert.equal(sendChordToken(false), 'Ctrl-Enter');
+});
+
+// resolveToken: outside an input, a single key held with Ctrl, Meta, or Alt
+// must not resolve to a bare action token, or Ctrl-1 picks a chip and blocks
+// the browser's own Ctrl-1 (tab switch); Cmd-Enter/Ctrl-Enter, the one
+// modifier-bearing binding this app defines, must still resolve to the send
+// chord regardless (PR review fix).
+
+test('resolveToken: Ctrl+1 outside an input does not resolve to a token', () => {
+	assert.equal(resolveToken({ key: '1', ctrlKey: true }, false, false), null);
+});
+
+test('resolveToken: Cmd+1 and Alt+1 outside an input do not resolve to a token either', () => {
+	assert.equal(resolveToken({ key: '1', metaKey: true }, false, false), null);
+	assert.equal(resolveToken({ key: '1', altKey: true }, false, false), null);
+});
+
+test('resolveToken: Cmd-Enter still resolves to the send chord on mac', () => {
+	assert.equal(resolveToken({ key: 'Enter', metaKey: true }, false, true), 'Cmd-Enter');
+});
+
+test('resolveToken: Ctrl-Enter still resolves to the send chord off mac', () => {
+	assert.equal(resolveToken({ key: 'Enter', ctrlKey: true }, false, false), 'Ctrl-Enter');
+});
+
+test('resolveToken: plain "1" outside an input still resolves to itself', () => {
+	assert.equal(resolveToken({ key: '1' }, false, false), '1');
+});
+
+test('resolveToken: a modifier-free chord leader ("g") outside an input still resolves', () => {
+	assert.equal(resolveToken({ key: 'g' }, false, false), 'g');
+});
+
+test('resolveToken: Shift alone does not suppress a single-key token', () => {
+	assert.equal(resolveToken({ key: '?', shiftKey: true }, false, false), '?');
 });
 
 test('stepFocus: from no focus, next lands on the first id and prev on the last', () => {

@@ -401,6 +401,22 @@ lint = "golangci-lint run"
 			want: "zing.toml: console.bind[1]: must not be empty",
 		},
 		{
+			// PR review: " 127.0.0.1 " parsed as neither a wildcard IP
+			// (netip.ParseAddr rejects the surrounding whitespace) nor
+			// "tailscale", so it used to pass this check and reach
+			// cmd/zing/bind.go unresolved, then fail net.Listen at startup
+			// with a malformed host, long after Load had already reported
+			// success.
+			name: "bind entry with leading and trailing whitespace",
+			body: minimalValidTOML + "\n[console]\nbind = [\" 127.0.0.1 \"]\n",
+			want: "zing.toml: console.bind[0]: must not have leading or trailing whitespace",
+		},
+		{
+			name: "bind entry with only trailing whitespace",
+			body: minimalValidTOML + "\n[console]\nbind = [\"tailscale \"]\n",
+			want: "zing.toml: console.bind[0]: must not have leading or trailing whitespace",
+		},
+		{
 			name: "explicit push_token shorter than the minimum",
 			body: minimalValidTOML + "\n[console]\npush_token = \"short\"\n",
 			want: "zing.toml: console.push_token: must be at least 16 characters",

@@ -145,7 +145,16 @@ templ mergeContext(prURL string) {
 // POST /draft does not exist until Task 7 (design section 12); Task 7 wires
 // the real submit over the data-draft-* attributes these controls already
 // carry.
-const pickToggleExpr = "el.parentElement.querySelectorAll('.picked').forEach((c) => c.classList.remove('picked')); el.classList.add('picked')"
+//
+// It also keeps aria-pressed in sync with the "picked" class on both sides
+// of the toggle (PR review, accessibility fix): the picked state used to be
+// conveyed by color alone (shell.templ's .chip.picked/.decision.picked
+// border and background), which says nothing to a screen reader and nothing
+// to a sighted user who cannot tell the colors apart. Every chip and
+// decision button starts with aria-pressed="false" (optionChips, itemRow
+// below), matching a toggle button's own ARIA state, so this expression only
+// ever flips it, never introduces it.
+const pickToggleExpr = "el.parentElement.querySelectorAll('.picked').forEach((c) => c.classList.remove('picked')); el.parentElement.querySelectorAll('[aria-pressed=true]').forEach((c) => c.setAttribute('aria-pressed', 'false')); el.classList.add('picked'); el.setAttribute('aria-pressed', 'true')"
 
 // optionChips renders the four option kinds' control (design section 6.6):
 // one chip per option, numbered 1..N (N up to 4, the messages/question
@@ -161,7 +170,7 @@ templ optionChips(ticketID, questionID int64, options []ThreadOption) {
 	if len(options) > 0 {
 		<div class="chips">
 			for i, opt := range options {
-				<button type="button" class="chip" data-chip-index={ strconv.Itoa(i + 1) } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-option={ opt.Key } data-on:click={ pickToggleExpr }>{ strconv.Itoa(i+1) + ". " + opt.Text }</button>
+				<button type="button" class="chip" aria-pressed="false" data-chip-index={ strconv.Itoa(i + 1) } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-option={ opt.Key } data-on:click={ pickToggleExpr }>{ strconv.Itoa(i+1) + ". " + opt.Text }</button>
 			}
 		</div>
 	}
@@ -198,7 +207,7 @@ templ itemRow(ticketID, questionID int64, item ThreadItem) {
 		<span class="item-text">{ item.Text }</span>
 		<div class="item-decisions">
 			for _, d := range itemDecisions {
-				<button type="button" class="decision" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>
+				<button type="button" class="decision" aria-pressed="false" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>
 			}
 		</div>
 	</div>

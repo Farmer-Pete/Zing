@@ -75,10 +75,15 @@ type DraftResult struct {
 }
 
 // BatchResult reports what SendBatch did: how many drafts it flipped to
-// sent, the batch_id it allocated, whether it cleared the ticket's wait, and
-// whether there was nothing to send at all (design section 6.7).
+// sent, how many it discarded as stale (their question closed or was
+// deleted, or the exact option/item they drafted stopped being valid,
+// between the draft and the send; PR review fix), the batch_id it
+// allocated, whether it cleared the ticket's wait, and whether there was
+// nothing left to send at all -- either no drafts existed, or every one of
+// them turned out stale (design section 6.7).
 type BatchResult struct {
 	Sent        int
+	Discarded   int
 	BatchID     int64
 	WaitCleared bool
 	Empty       bool
@@ -513,9 +518,23 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		return BatchResult{Empty: true}, nil
 	}
 
-	questions, err := revalidateBatchTx(ctx, tx, ticketID, drafts)
+	valid, stale, questions, err := revalidateBatchTx(ctx, tx, ticketID, drafts)
 	if err != nil {
 		return BatchResult{}, err
+	}
+	if len(stale) > 0 {
+		if delErr := deleteStaleDraftsTx(ctx, tx, stale); delErr != nil {
+			return BatchResult{}, delErr
+		}
+	}
+	if len(valid) == 0 {
+		// Every draft in the batch turned out stale (PR review fix): still
+		// commit, so the DELETE above actually discards them, rather than
+		// rolling back into the same wedge the caller is trying to escape.
+		if err = tx.Commit(); err != nil {
+			return BatchResult{}, fmt.Errorf("send batch: commit tx: %w", err)
+		}
+		return BatchResult{Discarded: len(stale), Empty: true}, nil
 	}
 
 	var batchID int64
@@ -525,15 +544,15 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		return BatchResult{}, fmt.Errorf("send batch: next batch id: %w", err)
 	}
 
-	for i := range drafts {
+	for i := range valid {
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE messages SET state = ?, batch_id = ? WHERE id = ?`, answerStateSent, batchID, drafts[i].ID,
+			`UPDATE messages SET state = ?, batch_id = ? WHERE id = ?`, answerStateSent, batchID, valid[i].ID,
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("send batch: flip draft %d to sent: %w", drafts[i].ID, err)
+			return BatchResult{}, fmt.Errorf("send batch: flip draft %d to sent: %w", valid[i].ID, err)
 		}
 	}
 
-	if markErr := markAnsweredQuestionsTx(ctx, tx, drafts, questions); markErr != nil {
+	if markErr := markAnsweredQuestionsTx(ctx, tx, valid, questions); markErr != nil {
 		return BatchResult{}, markErr
 	}
 
@@ -545,16 +564,17 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 	if err = tx.Commit(); err != nil {
 		return BatchResult{}, fmt.Errorf("send batch: commit tx: %w", err)
 	}
-	return BatchResult{Sent: len(drafts), BatchID: batchID, WaitCleared: waitCleared}, nil
+	return BatchResult{Sent: len(valid), Discarded: len(stale), BatchID: batchID, WaitCleared: waitCleared}, nil
 }
 
 // logSendBatchOutcome logs SendBatch's major branches with their ids
 // (CLAUDE.md: "log every major branch with the ids"): a successful send
-// reports batch_id, how many drafts it sent, and whether it cleared the
-// ticket's wait; an empty batch and a named conflict each get their own
-// line. An unexpected (non-conflict) error is left to the caller: the
-// console handler already logs it (internal/console/answer.go), so logging
-// it again here would violate "log or return, never both".
+// reports batch_id, how many drafts it sent, how many it discarded as stale,
+// and whether it cleared the ticket's wait; an empty batch (nothing to send,
+// possibly because every draft turned out stale) and a named conflict each
+// get their own line. An unexpected (non-conflict) error is left to the
+// caller: the console handler already logs it (internal/console/answer.go),
+// so logging it again here would violate "log or return, never both".
 func logSendBatchOutcome(ctx context.Context, ticketID int64, result BatchResult, err error) {
 	if err != nil {
 		if ce, ok := errors.AsType[*ConflictError](err); ok {
@@ -563,11 +583,12 @@ func logSendBatchOutcome(ctx context.Context, ticketID int64, result BatchResult
 		return
 	}
 	if result.Empty {
-		slog.InfoContext(ctx, "send batch empty", "ticket_id", ticketID)
+		slog.InfoContext(ctx, "send batch empty", "ticket_id", ticketID, "discarded", result.Discarded)
 		return
 	}
 	slog.InfoContext(ctx, "batch sent",
-		"ticket_id", ticketID, "batch_id", result.BatchID, "sent", result.Sent, "wait_cleared", result.WaitCleared)
+		"ticket_id", ticketID, "batch_id", result.BatchID, "sent", result.Sent,
+		"discarded", result.Discarded, "wait_cleared", result.WaitCleared)
 }
 
 // loadDraftsTx returns every draft answer or reply row for ticketID, in id
@@ -595,46 +616,102 @@ func loadDraftsTx(ctx context.Context, tx *sql.Tx, ticketID int64) ([]MessageRow
 	return out, nil
 }
 
-// revalidateBatchTx re-checks every draft against its question exactly as
-// SaveDraft did when it was written (design section 6.7: "re-validates the
-// whole batch against current questions"), so a question that closed, or an
-// option or item ref that stopped being valid, between the draft and the
-// send is caught here rather than sent. It returns every distinct question
-// the batch touches, keyed by id, for markAnsweredQuestionsTx to reuse.
-func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts []MessageRow) (map[int64]response.QuestionPayload, error) {
-	questions := make(map[int64]response.QuestionPayload)
+// revalidateBatchTx re-checks every draft against its current question
+// exactly as SaveDraft did when it was written (design section 6.7:
+// "re-validates the whole batch against current questions"), splitting
+// drafts into valid (send them) and stale (discard them) rather than
+// rejecting the whole call on the first conflict it finds (PR review fix): a
+// draft saved against a question that later closes -- or is deleted, or
+// stops accepting the exact option/item the draft picked -- used to fail
+// openQuestionForTicketTx's re-check with a *ConflictError, which SendBatch
+// then let roll its entire transaction back, wedging every other draft on
+// the ticket (including perfectly valid ones on other questions) behind a
+// 409 that repeated forever, since the same stale draft failed the same
+// re-check on every retry. Now any *ConflictError this function's own
+// re-checks raise (question not found, wrong ticket, question closed,
+// missing option, missing item) marks only the one draft that triggered it,
+// and every other draft on the same now-stale question, as stale; the caller
+// deletes those rows and sends the rest. A decode failure on a draft's own
+// payload is not stale in this sense -- it is a hard error that still aborts
+// the whole SendBatch call (returned, not appended to stale), since
+// SaveDraft's own writers never produce a payload that fails to parse, so
+// one here points at a bug or corruption this function should not paper
+// over by silently discarding evidence of it.
+//
+// questions returned is keyed by id and holds only the questions a *valid*
+// draft still touches, for markAnsweredQuestionsTx to reuse; a question
+// backing only stale drafts is left out, since there is nothing left to mark
+// answered against it.
+func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts []MessageRow) (valid, stale []MessageRow, questions map[int64]response.QuestionPayload, err error) {
+	questions = make(map[int64]response.QuestionPayload)
+	staleQuestions := make(map[int64]bool)
+
 	for i := range drafts {
-		d := &drafts[i]
+		d := drafts[i]
 		if d.ParentID == nil {
-			continue // a thread reply targets no question
+			valid = append(valid, d) // a thread reply targets no question
+			continue
 		}
 		qid := *d.ParentID
-		payload, ok := questions[qid]
-		if !ok {
-			var err error
-			payload, err = openQuestionForTicketTx(ctx, tx, qid, ticketID)
-			if err != nil {
-				return nil, err
+
+		if staleQuestions[qid] {
+			stale = append(stale, d)
+			continue
+		}
+		payload, seen := questions[qid]
+		if !seen {
+			var openErr error
+			payload, openErr = openQuestionForTicketTx(ctx, tx, qid, ticketID)
+			if openErr != nil {
+				if ce, isConflict := errors.AsType[*ConflictError](openErr); isConflict {
+					slog.DebugContext(ctx, "send batch: question stale",
+						"ticket_id", ticketID, "question_id", qid, "reason", ce.Reason)
+					staleQuestions[qid] = true
+					stale = append(stale, d)
+					continue
+				}
+				return nil, nil, nil, openErr
 			}
 			questions[qid] = payload
 		}
+
 		if d.Type != msgTypeAnswer {
-			continue // a question-targeted reply needs no further check
+			valid = append(valid, d) // a question-targeted reply needs no further check
+			continue
 		}
 		var ap response.AnswerPayload
-		if err := json.Unmarshal(d.Payload, &ap); err != nil {
-			return nil, fmt.Errorf("send batch: unmarshal draft %d: %w", d.ID, err)
+		if unmarshalErr := json.Unmarshal(d.Payload, &ap); unmarshalErr != nil {
+			return nil, nil, nil, fmt.Errorf("send batch: unmarshal draft %d: %w", d.ID, unmarshalErr)
 		}
-		if ap.Option != nil && !validOption(payload, *ap.Option) {
-			return nil, conflict("missing option")
-		}
+		optionStale := ap.Option != nil && !validOption(payload, *ap.Option)
+		itemStale := false
 		for ref := range ap.Items {
 			if !validItemRef(payload, ref) {
-				return nil, conflict("missing item")
+				itemStale = true
+				break
 			}
 		}
+		if optionStale || itemStale {
+			stale = append(stale, d)
+			continue
+		}
+		valid = append(valid, d)
 	}
-	return questions, nil
+	return valid, stale, questions, nil
+}
+
+// deleteStaleDraftsTx removes every row in stale from the messages table
+// outright (PR review fix): a stale draft answered a question that is no
+// longer open (or no longer exists), or picked an option/item that stopped
+// being valid, so there is nothing left for it to mean. It is discarded, not
+// flipped to sent or any other state.
+func deleteStaleDraftsTx(ctx context.Context, tx *sql.Tx, stale []MessageRow) error {
+	for i := range stale {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, stale[i].ID); err != nil {
+			return fmt.Errorf("send batch: discard stale draft %d: %w", stale[i].ID, err)
+		}
+	}
+	return nil
 }
 
 // sentItemDecisionsTx returns every already-sent item decision for question

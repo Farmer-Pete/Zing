@@ -22,6 +22,7 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	resolveToken,
 	stepFocus,
 	reduceNav,
 	stepComposerIndex,
@@ -595,41 +596,12 @@ function dispatchAction(action, event) {
 
 // ---- keydown: token resolution and the chord machine ---------------------
 
-// resolveToken turns one raw keydown event, plus whether it landed in an
-// input, into the token keys.json binds (design section 6.4, 8). The send
-// chord and Esc always resolve the same way regardless of context ("Keys
-// are suppressed while an input is focused, except Esc, Enter, and the
-// send chord"); Tab/Shift-Tab likewise always resolve, since
-// moveComposerFocus itself is a no-op outside the composer. Every other
-// key is suppressed while typing in an input (returns null, so the
-// character types normally) and otherwise passed through as-is for the
-// chord machine or a direct single-key lookup.
-function resolveToken(event, inInput) {
-	// An IME still composing (e.g. picking a kanji candidate) fires its own
-	// keydown with key "Enter" to confirm the composition, not to send or
-	// save a draft (PR #16 review, CodeRabbit console.js:567 / cubic
-	// console.js:565). event.isComposing is the modern signal; keyCode 229
-	// is the legacy one older/some mobile browsers still set instead.
-	// Returning null here, before either the send-chord or Enter-in-input
-	// checks below, lets the IME's own Enter handling run rather than
-	// misfiring either action.
-	if (event.key === 'Enter' && (event.isComposing || event.keyCode === 229)) {
-		return null;
-	}
-	if (isSendChord(event, isMac())) {
-		return sendChordToken(isMac());
-	}
-	if (event.key === 'Escape') {
-		return 'Esc';
-	}
-	if (event.key === 'Tab') {
-		return event.shiftKey ? 'Shift-Tab' : 'Tab';
-	}
-	if (inInput) {
-		return event.key === 'Enter' ? 'Enter-in-input' : null;
-	}
-	return event.key;
-}
+// resolveToken (keyboard.mjs) turns the raw keydown event, plus whether it
+// landed in an input, into the token keys.json binds; it is pure and lives
+// there so node --test can cover its modifier handling directly (design
+// section 6.4, PR review: a Ctrl/Meta/Alt-held single key outside an input
+// must not resolve to a token, so Ctrl-1/Cmd-A/Ctrl-X etc. do not fire
+// console actions and block the browser's own shortcuts for them).
 
 // tokensNeverChorded are resolved directly, never fed through the "g"
 // chord machine: each already names a complete action on its own, and
@@ -640,7 +612,7 @@ const tokensNeverChorded = new Set(['Esc', 'Enter-in-input', 'Cmd-Enter', 'Ctrl-
 function onKeyDown(event) {
 	const target = event.target;
 	const inInput = isInputContext({ tagName: target?.tagName, isContentEditable: target?.isContentEditable });
-	const token = resolveToken(event, inInput);
+	const token = resolveToken(event, inInput, isMac());
 	if (token === null) {
 		return; // suppressed while typing; let the input handle the keystroke
 	}

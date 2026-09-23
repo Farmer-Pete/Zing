@@ -232,10 +232,33 @@ func checkValues(md toml.MetaData, cfg Config) error {
 // bind entry is never a legitimate value the resolver can act on (unlike
 // "tailscale" or a literal IP), so it is rejected here rather than left for
 // cmd/zing, the same way a wildcard address is.
+//
+// It also rejects an entry with leading or trailing whitespace (PR review
+// fix), rather than trimming it: a padded literal IP like " 127.0.0.1 "
+// used to pass this check (netip.ParseAddr rejects the surrounding
+// whitespace, so the entry fell through to the "not an IP, leave it for
+// cmd/zing" branch untouched) and then reached bind.go's resolveBindHosts
+// unresolved, same as "tailscale" would, but as a literal string neither
+// stripped nor recognized; serve.go's listenOnAll then built
+// net.JoinHostPort(" 127.0.0.1 ", port) and net.Listen failed at startup,
+// long after config.Load had already reported success. Trimming in place
+// here would work too -- checkValues, this function's only caller, takes
+// its Config by value, but a slice field's backing array is still shared
+// with Load's own cfg, so writing the trimmed string back into bind[i]
+// would reach cmd/zing without changing it -- but that only works because
+// of that aliasing, which is easy to break by accident in a later refactor
+// (switching checkValues to take *Config, or checkBindAddresses to copy its
+// slice, would silently stop the trim from ever reaching cmd/zing). A clear
+// rejection here does not depend on that, so it is the one this function
+// makes.
 func checkBindAddresses(bind []string) error {
 	for i, b := range bind {
-		if strings.TrimSpace(b) == "" {
+		trimmed := strings.TrimSpace(b)
+		if trimmed == "" {
 			return fmt.Errorf("zing.toml: console.bind[%d]: must not be empty", i)
+		}
+		if trimmed != b {
+			return fmt.Errorf("zing.toml: console.bind[%d]: must not have leading or trailing whitespace", i)
 		}
 		addr, err := netip.ParseAddr(b)
 		if err != nil {

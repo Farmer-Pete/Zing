@@ -1,7 +1,8 @@
 // keyboard.mjs — the console's pure keyboard logic (design section 6.4):
 // the chord state machine, key-to-action resolution over a parsed
-// keys.json, input-context detection, the send-chord platform check, the
-// id-based focus step, reconcileFocus, and collectPatchWork. No DOM
+// keys.json, event-to-token resolution (resolveToken), input-context
+// detection, the send-chord platform check, the id-based focus step,
+// reconcileFocus, and collectPatchWork. No DOM
 // access, no fetch, and no browser-absolute imports, so Node can import
 // this module directly (make test-js runs node --test against it).
 //
@@ -132,6 +133,60 @@ export function isSendChord(descriptor, isMac) {
  */
 export function sendChordToken(isMac) {
 	return isMac ? 'Cmd-Enter' : 'Ctrl-Enter';
+}
+
+/**
+ * resolveToken turns one plain keydown descriptor, plus whether it landed in
+ * an input, into the token keys.json binds (design section 6.4, 8; PR review
+ * fix: a Ctrl/Meta/Alt-held single key outside an input must not resolve to
+ * a bare action token, or Ctrl-1, Cmd-A, Ctrl-X, and so on fire console
+ * actions and block the browser's own shortcuts for them). The send chord
+ * and Esc always resolve the same way regardless of context ("Keys are
+ * suppressed while an input is focused, except Esc, Enter, and the send
+ * chord"); Tab/Shift-Tab likewise always resolve, since moveComposerFocus
+ * itself is a no-op outside the composer. Every other key is suppressed
+ * while typing in an input (returns null, so the character types normally).
+ * Outside an input, a single-key token is suppressed too when Ctrl, Meta, or
+ * Alt is held, since isSendChord above is the one modifier-bearing binding
+ * this app defines; Shift alone is not blocked, since the app binds no
+ * Ctrl/Meta/Alt chords of its own and needs plain and shifted characters
+ * (e.g. "?") to resolve the same way.
+ *
+ * @param {{key?: string, ctrlKey?: boolean, metaKey?: boolean, altKey?: boolean, shiftKey?: boolean, isComposing?: boolean, keyCode?: number}} descriptor
+ * @param {boolean} inInput
+ * @param {boolean} isMac
+ * @returns {string|null}
+ */
+export function resolveToken(descriptor, inInput, isMac) {
+	if (!descriptor) {
+		return null;
+	}
+	// An IME still composing (e.g. picking a kanji candidate) fires its own
+	// keydown with key "Enter" to confirm the composition, not to send or save
+	// a draft (PR #16 review, CodeRabbit console.js:567 / cubic console.js:565).
+	// isComposing is the modern signal; keyCode 229 is the legacy one
+	// older/some mobile browsers still set instead. Returning null here, before
+	// either the send-chord or Enter-in-input checks below, lets the IME's own
+	// Enter handling run rather than misfiring either action.
+	if (descriptor.key === 'Enter' && (descriptor.isComposing || descriptor.keyCode === 229)) {
+		return null;
+	}
+	if (isSendChord(descriptor, isMac)) {
+		return sendChordToken(isMac);
+	}
+	if (descriptor.key === 'Escape') {
+		return 'Esc';
+	}
+	if (descriptor.key === 'Tab') {
+		return descriptor.shiftKey ? 'Shift-Tab' : 'Tab';
+	}
+	if (inInput) {
+		return descriptor.key === 'Enter' ? 'Enter-in-input' : null;
+	}
+	if (descriptor.ctrlKey || descriptor.metaKey || descriptor.altKey) {
+		return null;
+	}
+	return descriptor.key;
 }
 
 /**

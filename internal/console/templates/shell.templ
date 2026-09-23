@@ -153,11 +153,20 @@ templ palette() {
 		   option chip or an item-decision button (design section 6.6): a
 		   client-only class, matching .focus above, so a selected control
 		   reads clearly before POST /draft's response round trips back
-		   through /stream. */
+		   through /stream. pickToggleExpr keeps aria-pressed in sync with
+		   this class (PR review, accessibility fix), so a screen reader
+		   announces the pick even though the color change alone says
+		   nothing to it; the ::after checkmark below is the same fix for a
+		   sighted user who cannot distinguish the border/background color
+		   shift (e.g. color-blindness), so picked is never conveyed by
+		   color alone. */
 		.chip.picked, .decision.picked {
 			border-color: var(--zing-picked);
 			background: var(--zing-picked-soft);
 			color: var(--zing-picked);
+		}
+		.chip.picked::after, .decision.picked::after {
+			content: " \2713";
 		}
 
 		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the
