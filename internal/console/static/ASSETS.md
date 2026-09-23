@@ -4,8 +4,8 @@ Every file here is served only through the explicit allowlist in
 `internal/console/server.go` (design section 6.14, section 5): a request
 for anything else under `/static/` gets a 404 from the mux itself, since
 no catch-all file server is registered. `console.test.js`, `package.json`,
-and this file are never served; they exist for `node --test` and for
-repo-side bookkeeping only.
+`datastar.js.LICENSE`, and this file are never served; they exist for
+`node --test` and for repo-side bookkeeping only.
 
 ## datastar.js
 

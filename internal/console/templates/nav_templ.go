@@ -259,12 +259,33 @@ func threadLink(th NavThread) templ.Component {
 	})
 }
 
+// validNavViews is the closed set of view names every call site in this
+// file passes today (Nav's three view-switcher links, its per-project
+// links, and threadLink's "thread"; matches console.viewInbox/Recent/
+// Feed/Project/Thread one for one, kept as literals here rather than
+// imported, since internal/console already imports this package and
+// importing back would cycle).
+var validNavViews = map[string]bool{
+	"inbox": true, "recent": true, "feed": true, "project": true, "thread": true,
+}
+
 // zingNavExpr builds the data-on:click expression a temporary nav link uses
 // to dispatch zing-nav on #stream-ctl (design section 6.3): the same event
 // shape console.js will dispatch from the real keyboard layer (Task 4), so
 // these links exercise the actual navigation path rather than a shortcut
 // around it.
+//
+// Every caller today passes a hardcoded literal, so view can never actually
+// carry anything but one of validNavViews' five names. Constraining it to
+// that set anyway, rather than interpolating it unescaped into the
+// single-quoted JS string below, closes the injection seam a future
+// non-literal caller (a view name threaded through from a query parameter,
+// say) would otherwise open: an out-of-set view renders no click handler at
+// all, an inert link over emitting broken or attacker-controlled JS.
 func zingNavExpr(view string, open, project int64) string {
+	if !validNavViews[view] {
+		return ""
+	}
 	return fmt.Sprintf(
 		"document.getElementById('stream-ctl').dispatchEvent(new CustomEvent('zing-nav',{detail:{view:'%s',open:%d,project:%d}}))",
 		view, open, project,

@@ -153,8 +153,10 @@ func TestPublicKey_ConcurrentCallsReturnSameKeyAndPersistOnce(t *testing.T) {
 
 // TestSubscribe_StoresThroughUpsertPushSubscription proves Subscribe
 // serializes Keys into keys_json and writes it via
-// store.UpsertPushSubscription, and that an invalid keys map (missing the
-// required auth field) is rejected by the underlying schema validation.
+// store.UpsertPushSubscription, and that a re-subscribe with the same
+// endpoint replaces the row instead of erroring
+// (TestSubscribe_RejectsKeysMissingRequiredFields below covers the invalid
+// keys map case).
 func TestSubscribe_StoresThroughUpsertPushSubscription(t *testing.T) {
 	s := newTestStore(t)
 	w := notify.New(s)

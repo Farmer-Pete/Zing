@@ -46,10 +46,9 @@ templ phaseRail(dots []PhaseDot) {
 
 // artifactsRail renders the mock's seven labeled artifact slots (design
 // section 6.11): a present artifact's version, opened inline through a
-// <details> disclosure showing its stored payload (rail.templ's own doc
-// comment on PayloadText explains why this is in-page rather than a link to
-// a dedicated route); an absent slot's "after <phase>" placeholder
-// otherwise.
+// <details> disclosure showing its stored payload (views.go's doc comment
+// on PayloadText explains why this is in-page rather than a link to a
+// dedicated route); an absent slot's "after <phase>" placeholder otherwise.
 templ artifactsRail(slots []ArtifactSlot) {
 	<section class="rail-artifacts">
 		<h3>Artifacts</h3>
@@ -73,7 +72,7 @@ templ artifactsRail(slots []ArtifactSlot) {
 // Model, Agent time, Attempts, Worktree, Branch. Every field arrives
 // pre-formatted (console.buildRunRail, rail.go), including the "-" for a
 // value this package cannot supply (Worktree, Branch) or a fixture run
-// leaves nil (Model, AgentSeconds).
+// leaves nil (Model, AgentTime).
 templ runRail(run RunRail) {
 	<section class="rail-run">
 		<h3>Run</h3>

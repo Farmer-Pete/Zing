@@ -290,3 +290,46 @@ export function collectPatchWork(descriptors, focusedID) {
 	const previousIDs = descriptors?.previousFocusableIDs ?? [];
 	return { diagramIDs, focusID: reconcileFocus(previousIDs, currentIDs, focusedID) };
 }
+
+/**
+ * ACTION_LABELS maps every keys.json action name (internal/console/keys.go's
+ * Bindings, the closed set design section 8 names) to the plain-English
+ * copy the "?" help overlay shows instead of the bare identifier
+ * (console.js's buildHelpOverlay). Kept here, not in console.js, so it
+ * stays Node-testable like every other piece of this module's data.
+ * @type {Record<string, string>}
+ */
+export const ACTION_LABELS = {
+	'nav-inbox': 'Go to inbox',
+	'nav-recent': 'Go to recent',
+	'nav-feed': 'Go to feed',
+	'focus-next': 'Focus next item',
+	'focus-prev': 'Focus previous item',
+	open: 'Open focused item',
+	up: 'Go up',
+	'input-next': 'Next field',
+	'input-prev': 'Previous field',
+	draft: 'Save draft',
+	chip: 'Pick numbered option',
+	send: 'Send',
+	'toggle-rail': 'Toggle rail',
+	'focus-side': 'Focus side box',
+	stop: 'Stop ticket',
+	'stop-all': 'Stop everything',
+	'mark-read': 'Mark read',
+	help: 'Toggle this help',
+	blur: 'Close / leave input',
+};
+
+/**
+ * describeAction returns ACTION_LABELS' copy for action, or action itself
+ * when it names nothing in that closed set (a future keys.go action this
+ * map has not yet been given a label for), so the help overlay always shows
+ * something rather than an empty row.
+ *
+ * @param {string} action
+ * @returns {string}
+ */
+export function describeAction(action) {
+	return ACTION_LABELS[action] ?? action;
+}

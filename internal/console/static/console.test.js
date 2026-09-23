@@ -26,6 +26,8 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	describeAction,
+	ACTION_LABELS,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -292,4 +294,54 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 		question: 34,
 		item: { ref: 'src/main.go', decision: 'accept' },
 	});
+});
+
+// describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw
+// keys.json action name (console.js's buildHelpOverlay used to render the
+// bare identifier, e.g. "nav-inbox" or "stop-all", straight into the
+// overlay). allKeysGoActions mirrors internal/console/keys.go's Bindings()
+// action column one for one; keys_test.go already pins that file's own
+// shape (TestBindingsCoverEvery14KeyExactlyOnce and its neighbors), so this
+// list only needs to be kept in sync by hand when a future action is added
+// there, which the completeness test below catches.
+
+const allKeysGoActions = [
+	'nav-inbox',
+	'nav-recent',
+	'nav-feed',
+	'focus-next',
+	'focus-prev',
+	'open',
+	'up',
+	'input-next',
+	'input-prev',
+	'draft',
+	'chip',
+	'send',
+	'toggle-rail',
+	'focus-side',
+	'stop',
+	'stop-all',
+	'mark-read',
+	'help',
+	'blur',
+];
+
+test('ACTION_LABELS has a human label for every keys.go action', () => {
+	for (const action of allKeysGoActions) {
+		assert.ok(
+			Object.hasOwn(ACTION_LABELS, action),
+			`ACTION_LABELS is missing a label for action ${JSON.stringify(action)}`,
+		);
+		assert.notEqual(ACTION_LABELS[action], action, `ACTION_LABELS[${JSON.stringify(action)}] just repeats the raw identifier`);
+	}
+});
+
+test('describeAction returns the mapped label for a known action', () => {
+	assert.equal(describeAction('nav-inbox'), 'Go to inbox');
+	assert.equal(describeAction('stop-all'), 'Stop everything');
+});
+
+test('describeAction falls back to the raw action name for one outside ACTION_LABELS', () => {
+	assert.equal(describeAction('some-future-action'), 'some-future-action');
 });

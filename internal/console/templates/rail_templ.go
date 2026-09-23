@@ -190,10 +190,9 @@ func phaseRail(dots []PhaseDot) templ.Component {
 
 // artifactsRail renders the mock's seven labeled artifact slots (design
 // section 6.11): a present artifact's version, opened inline through a
-// <details> disclosure showing its stored payload (rail.templ's own doc
-// comment on PayloadText explains why this is in-page rather than a link to
-// a dedicated route); an absent slot's "after <phase>" placeholder
-// otherwise.
+// <details> disclosure showing its stored payload (views.go's doc comment
+// on PayloadText explains why this is in-page rather than a link to a
+// dedicated route); an absent slot's "after <phase>" placeholder otherwise.
 func artifactsRail(slots []ArtifactSlot) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -227,7 +226,7 @@ func artifactsRail(slots []ArtifactSlot) templ.Component {
 			var templ_7745c5c3_Var8 string
 			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(slot.Label)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 58, Col: 45}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 57, Col: 45}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 			if templ_7745c5c3_Err != nil {
@@ -245,7 +244,7 @@ func artifactsRail(slots []ArtifactSlot) templ.Component {
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(slot.Version))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 61, Col: 44}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 60, Col: 44}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
@@ -258,7 +257,7 @@ func artifactsRail(slots []ArtifactSlot) templ.Component {
 				var templ_7745c5c3_Var10 string
 				templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(slot.PayloadText)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 62, Col: 54}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 61, Col: 54}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 				if templ_7745c5c3_Err != nil {
@@ -276,7 +275,7 @@ func artifactsRail(slots []ArtifactSlot) templ.Component {
 				var templ_7745c5c3_Var11 string
 				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(slot.AfterPhase)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 65, Col: 48}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 64, Col: 48}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 				if templ_7745c5c3_Err != nil {
@@ -304,7 +303,7 @@ func artifactsRail(slots []ArtifactSlot) templ.Component {
 // Model, Agent time, Attempts, Worktree, Branch. Every field arrives
 // pre-formatted (console.buildRunRail, rail.go), including the "-" for a
 // value this package cannot supply (Worktree, Branch) or a fixture run
-// leaves nil (Model, AgentSeconds).
+// leaves nil (Model, AgentTime).
 func runRail(run RunRail) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -333,7 +332,7 @@ func runRail(run RunRail) templ.Component {
 		var templ_7745c5c3_Var13 string
 		templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(run.Model)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 82, Col: 18}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 81, Col: 18}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 		if templ_7745c5c3_Err != nil {
@@ -346,7 +345,7 @@ func runRail(run RunRail) templ.Component {
 		var templ_7745c5c3_Var14 string
 		templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(run.AgentTime)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 84, Col: 22}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 83, Col: 22}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 		if templ_7745c5c3_Err != nil {
@@ -359,7 +358,7 @@ func runRail(run RunRail) templ.Component {
 		var templ_7745c5c3_Var15 string
 		templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(run.Attempts)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 86, Col: 21}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 85, Col: 21}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
 		if templ_7745c5c3_Err != nil {
@@ -372,7 +371,7 @@ func runRail(run RunRail) templ.Component {
 		var templ_7745c5c3_Var16 string
 		templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(run.Worktree)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 88, Col: 21}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 87, Col: 21}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 		if templ_7745c5c3_Err != nil {
@@ -385,7 +384,7 @@ func runRail(run RunRail) templ.Component {
 		var templ_7745c5c3_Var17 string
 		templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs(run.Branch)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 90, Col: 19}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 89, Col: 19}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 		if templ_7745c5c3_Err != nil {
@@ -444,7 +443,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var19 string
 				templ_7745c5c3_Var19, templ_7745c5c3_Err = templ.ResolveAttributeValue(lvl)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 113, Col: 25}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 112, Col: 25}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var19)
 				if templ_7745c5c3_Err != nil {
@@ -457,7 +456,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var20 string
 				templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(lvl)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 113, Col: 42}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 112, Col: 42}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 				if templ_7745c5c3_Err != nil {
@@ -475,7 +474,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var21 string
 				templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.ResolveAttributeValue(lvl)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 115, Col: 25}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 114, Col: 25}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var21)
 				if templ_7745c5c3_Err != nil {
@@ -488,7 +487,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var22 string
 				templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(lvl)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 115, Col: 33}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 114, Col: 33}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var22))
 				if templ_7745c5c3_Err != nil {
@@ -555,7 +554,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var25 string
 				templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(line.Time)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 133, Col: 40}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 132, Col: 40}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 				if templ_7745c5c3_Err != nil {
@@ -568,7 +567,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var26 string
 				templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(line.Level)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 134, Col: 42}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 133, Col: 42}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
 				if templ_7745c5c3_Err != nil {
@@ -581,7 +580,7 @@ func logRail(log LogRail) templ.Component {
 				var templ_7745c5c3_Var27 string
 				templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(line.Message)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 135, Col: 46}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 134, Col: 46}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
 				if templ_7745c5c3_Err != nil {
@@ -684,7 +683,7 @@ func SideReply(text string) templ.Component {
 		var templ_7745c5c3_Var30 string
 		templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 168, Col: 8}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/rail.templ`, Line: 167, Col: 8}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 		if templ_7745c5c3_Err != nil {

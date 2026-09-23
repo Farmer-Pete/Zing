@@ -6,10 +6,12 @@
 // directory; internal/console (server.go, handlers.go, views.go, stream.go)
 // builds the view models this package renders and imports it to do so.
 //
-// This file holds the small view-model types the five views' components
-// take as parameters: the presentation shape internal/console/views.go
-// builds from store rows, not store rows themselves, so this package stays
-// free of any question-lifecycle or payload-decoding logic of its own.
+// This file holds the small view-model types the components take as
+// parameters: the five views, #nav's per-thread badge list (NavThread), and
+// the rail (PhaseDot, ArtifactSlot, RunRail, LogLine, LogRail, RailModel).
+// Each is the presentation shape internal/console/views.go builds from
+// store rows, not a store row itself, so this package stays free of any
+// question-lifecycle or payload-decoding logic of its own.
 package templates
 
 import (
@@ -129,7 +131,7 @@ type ArtifactSlot struct {
 // session's newest run. Every field is pre-formatted by
 // console.buildRunRail (rail.go), "-" standing in for a value this package
 // cannot supply yet (Worktree, Branch -- design section 6.11: "arrive with
-// Package 5") or that a fixture run left nil (Model, AgentSeconds).
+// Package 5") or that a fixture run left nil (Model, AgentTime).
 type RunRail struct {
 	Model, AgentTime, Attempts, Worktree, Branch string
 }

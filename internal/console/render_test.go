@@ -58,7 +58,7 @@ func TestRenderReturnsTemplComponent(t *testing.T) {
 // TestRenderMermaidFenceBecomesClientSideBlock proves a ```mermaid fence
 // renders as a client-side <pre class="mermaid"> block (design section
 // 6.10) and, load-bearingly, that goldmark-diagram's own document-level
-// script injection never fires (see render.go's newDiagramExtension doc
+// script injection never fires (see render.go's diagramExtension doc
 // comment for why the stock NewMermaidClientRenderer cannot be used
 // directly): the design requires the classic <script src="/static/
 // mermaid.js"> in shell.templ's head to be the only mermaid load.
@@ -112,7 +112,7 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 // goldmark-diagram's server-side PlantUML renderer (design section 0: "Never
 // use the default HTMLRenderer; it seeds a PlantUML server-side
 // shell-out"). WithExcludeLanguages("plantuml") (render.go,
-// newDiagramExtension) makes it fall through to goldmark's ordinary escaped
+// diagramExtension) makes it fall through to goldmark's ordinary escaped
 // fenced-code-block rendering instead, so this also proves the plantuml
 // binary is never invoked: there is no SVG in the output, and no
 // plantuml-error placeholder (the shape NewPlantUMLRenderer emits on a

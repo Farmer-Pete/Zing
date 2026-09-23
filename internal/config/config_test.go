@@ -93,7 +93,7 @@ user = "peter"
 [console]
 bind = ["127.0.0.1"]
 port = 8080
-push_token = "explicit-token"
+push_token = "explicit-token-16+"
 allowed_hosts = ["example.tailnet", "another.example"]
 
 [models]
@@ -143,7 +143,7 @@ lint = "golangci-lint run"
 		Console: Console{
 			Bind:         []string{"127.0.0.1"},
 			Port:         8080,
-			PushToken:    "explicit-token",
+			PushToken:    "explicit-token-16+",
 			AllowedHosts: []string{"example.tailnet", "another.example"},
 		},
 		Models: Models{
@@ -363,6 +363,16 @@ lint = "golangci-lint run"
 			name: "allowed_hosts entry with a port",
 			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet:7420\"]\n",
 			want: "zing.toml: console.allowed_hosts[0]: must not include a port",
+		},
+		{
+			name: "explicit push_token shorter than the minimum",
+			body: minimalValidTOML + "\n[console]\npush_token = \"short\"\n",
+			want: "zing.toml: console.push_token: must be at least 16 characters",
+		},
+		{
+			name: "explicit push_token empty string is still rejected, not left to the auto-generated default",
+			body: minimalValidTOML + "\n[console]\npush_token = \"\"\n",
+			want: "zing.toml: console.push_token: must be at least 16 characters",
 		},
 	}
 

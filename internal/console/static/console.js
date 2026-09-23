@@ -28,6 +28,7 @@ import {
 	buildChipDraftBody,
 	buildItemDraftBody,
 	collectPatchWork,
+	describeAction,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -474,7 +475,7 @@ function buildHelpOverlay() {
 	overlay.style.padding = '1rem';
 
 	const rows = state.bindings
-		.map((b) => `<div><strong>${b.keys.join(' / ')}</strong> — ${b.action}</div>`)
+		.map((b) => `<div><strong>${b.keys.join(' / ')}</strong> — ${describeAction(b.action)}</div>`)
 		.join('');
 	overlay.innerHTML = `<h2>Keyboard map</h2>${rows || '<p>Loading…</p>'}`;
 	document.body.appendChild(overlay);

@@ -293,7 +293,12 @@ func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.L
 	for _, run := range runs {
 		entries = append(entries, c.log.Tail(run.ID)...)
 	}
-	slices.SortFunc(entries, func(a, b LogEntry) int { return a.Time.Compare(b.Time) })
+	// SortStableFunc, not SortFunc: entries arrives in run order (runs, from
+	// store.RunsForTicket) with each run's own entries already in append
+	// order (c.log.Tail). A plain, non-stable sort is free to interleave two
+	// runs' lines that share a Time value in either order; the stable sort
+	// keeps that run/append order as the tiebreak instead.
+	slices.SortStableFunc(entries, func(a, b LogEntry) int { return a.Time.Compare(b.Time) })
 
 	lines := make([]templates.LogLine, 0, len(entries))
 	for _, e := range entries {

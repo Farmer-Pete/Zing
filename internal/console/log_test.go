@@ -207,3 +207,32 @@ func TestConcurrentTogglesAreSafe(t *testing.T) {
 
 	_ = h.Tail(0) // reads the ring after the race, proving it is still consistent
 }
+
+// TestToggleDebug_ConcurrentTogglesLandOnDeterministicNetResult proves
+// ToggleDebug's one critical section (debugSet.toggle) makes the final
+// on/off state a function of how many toggles landed, not of how they
+// interleaved: toggling is its own inverse, so any serial order of an even
+// number of flips nets back to the starting (off) state. control.go's old
+// handleDebug called SetDebug(!IsDebug(...)) instead, a read and a write in
+// two separate critical sections; two concurrent requests for the same
+// ticket could both read "off" and both write "on", losing one flip and
+// leaving the ticket on instead of off. Run under `go test -race`.
+func TestToggleDebug_ConcurrentTogglesLandOnDeterministicNetResult(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	const ticketID = int64(55)
+	const goroutines = 64 // even: every flip must net back to "off"
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			h.ToggleDebug(ticketID)
+		}()
+	}
+	wg.Wait()
+
+	if h.IsDebug(ticketID) {
+		t.Errorf("IsDebug(%d) = true after %d concurrent ToggleDebug calls, want false (an even count must net back to the starting state)", ticketID, goroutines)
+	}
+}

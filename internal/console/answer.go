@@ -17,11 +17,12 @@ import (
 	"zing/internal/store"
 )
 
-// maxDraftBodyBytes bounds POST /draft's request body (design section 6.7:
-// "The body cap is 64 KiB"). Wrapping r.Body in http.MaxBytesReader before
-// decoding keeps an oversized body from being buffered in full before any
-// validation runs, and lets the handler tell "too large" (413) apart from
-// "malformed" (400).
+// maxDraftBodyBytes bounds the request body of every JSON-decoding POST
+// route in this package: /draft, /send, /read (this file), /stop (stop.go),
+// and /loglevel, /debug (control.go) (design section 6.7: "The body cap is
+// 64 KiB"). Wrapping r.Body in http.MaxBytesReader before decoding keeps an
+// oversized body from being buffered in full before any validation runs,
+// and lets the handler tell "too large" (413) apart from "malformed" (400).
 const maxDraftBodyBytes = 64 << 10 // 64 KiB
 
 // maxDraftTextLen is the longest a free-text draft body may be (design

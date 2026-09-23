@@ -78,7 +78,7 @@ var (
 
 // renderMermaidBlock renders one ```mermaid fence as a client-side
 // <pre class="mermaid"> block, matching goldmark-diagram's own
-// NewMermaidClientRenderer output, but see newDiagramExtension for why it is
+// NewMermaidClientRenderer output, but see diagramExtension for why it is
 // a separate, hand-written renderer rather than that one.
 func renderMermaidBlock(w util.BufWriter, source []byte, n *ast.CodeBlock, rc renderer.Context) error {
 	if _, err := w.WriteString(`<pre class="mermaid">`); err != nil {

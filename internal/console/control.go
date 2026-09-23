@@ -78,8 +78,10 @@ type debugRequest struct {
 
 // handleDebug is POST /debug (design section 6.12, 7.1): toggle the
 // per-ticket debug override for the given ticket id, on if it was off and
-// off if it was on. 400 on a malformed body or non-positive ticket, 204 and
-// a bus publish on success.
+// off if it was on, through the log Handler's own atomic ToggleDebug so two
+// concurrent requests for the same ticket cannot race a
+// read-then-write pair into dropping one toggle. 400 on a malformed body or
+// non-positive ticket, 204 and a bus publish on success.
 func (c *console) handleDebug(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
 
@@ -93,7 +95,7 @@ func (c *console) handleDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.log.SetDebug(req.Ticket, !c.log.IsDebug(req.Ticket))
+	c.log.ToggleDebug(req.Ticket)
 
 	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)

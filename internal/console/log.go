@@ -159,6 +159,19 @@ func (h *Handler) IsDebug(ticketID int64) bool {
 	return h.debug.has(ticketID)
 }
 
+// ToggleDebug flips ticketID's per-ticket debug override under debugSet's
+// one lock (design section 6.12, POST /debug: "on if it was off and off if
+// it was on") and returns the state after the flip. control.go's
+// handleDebug calls this instead of reading IsDebug and then calling
+// SetDebug with its negation, which is a check-then-act pair: two
+// concurrent toggles for the same ticket can both read the same starting
+// state and both write the same ending state, silently dropping one
+// toggle. Folding the read and the write into one critical section removes
+// that race.
+func (h *Handler) ToggleDebug(ticketID int64) (on bool) {
+	return h.debug.toggle(ticketID)
+}
+
 // Tail returns the ring's entries for one run, oldest first, filtered by
 // run_id (design section 6.11: "the ring buffer ... filtered by the open
 // ticket's run_ids"). The returned slice is a fresh copy; the caller may
@@ -311,4 +324,19 @@ func (d *debugSet) has(ticketID int64) bool {
 	defer d.mu.RUnlock()
 	_, ok := d.ids[ticketID]
 	return ok
+}
+
+// toggle flips ticketID's membership under one lock -- on if it was off,
+// off if it was on -- and returns the state after the flip, so a caller
+// need not pair a has() read with a set() write across two separate
+// critical sections.
+func (d *debugSet) toggle(ticketID int64) (on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.ids[ticketID]; ok {
+		delete(d.ids, ticketID)
+		return false
+	}
+	d.ids[ticketID] = struct{}{}
+	return true
 }

@@ -5,7 +5,9 @@ package console_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"zing/internal/bus"
+	"zing/internal/console"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -194,6 +197,108 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	} {
 		if !strings.Contains(rail, want) {
 			t.Errorf("rail run section missing %q; got:\n%s", want, rail)
+		}
+	}
+}
+
+// logLine calls console.Handler.Handle directly with a hand-built
+// slog.Record so the entry lands at an exact, caller-chosen Time -- the
+// equal-Time collision TestBuildLogRail_TiesKeepRunAppendOrder needs, which
+// logging through a *slog.Logger cannot arrange since that stamps Time from
+// slog's own clock at the call site.
+func logLine(t *testing.T, h *console.Handler, at time.Time, msg string, runID int64) {
+	t.Helper()
+	r := slog.NewRecord(at, slog.LevelInfo, msg, 0)
+	r.AddAttrs(slog.Int64("run_id", runID))
+	if err := h.Handle(t.Context(), r); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+}
+
+// TestBuildLogRail_TiesKeepRunAppendOrder proves buildLogRail's merge across
+// runs breaks an equal-Time tie by run order then append order
+// (rail.go's slices.SortStableFunc), not the unspecified order a plain,
+// non-stable sort would allow.
+func TestBuildLogRail_TiesKeepRunAppendOrder(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	const owner = "rail-log-tiebreak-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	waiting := testWaitingGate
+	model := "sonnet"
+	outcome := "ok"
+	agentSeconds := 1
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: string(response.TicketStateBuilding), Reason: "rail log-tiebreak test",
+		Waiting: &waiting,
+		Session: &store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: "fake"},
+		Runs: []store.Run{
+			{Turn: 0, Model: &model, Outcome: &outcome, AgentSeconds: &agentSeconds},
+			{Turn: 1, Model: &model, Outcome: &outcome, AgentSeconds: &agentSeconds},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("RunsForTicket = %d runs, want 2", len(runs))
+	}
+
+	// Both runs log at the same seven instants, an overlapping window real
+	// concurrent runs produce, with run 0's whole block appended before run
+	// 1's (buildLogRail's own per-run append order). This specific shape --
+	// seven shared instants, not two or three -- is load-bearing: a plain
+	// slices.SortFunc leaves a short tied run undisturbed (its introsort
+	// falls back to insertion sort, or its already-sorted-run detection
+	// short-circuits, for anything much smaller than this), so a shorter
+	// repro would pass against the very bug this test exists to catch.
+	logHandler := newTestLogHandler(t)
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	const tiedInstants = 7
+	for i := range tiedInstants {
+		at := base.Add(time.Duration(i) * time.Second)
+		logLine(t, logHandler, at, fmt.Sprintf("run0-line-%d", i), runs[0].ID)
+	}
+	for i := range tiedInstants {
+		at := base.Add(time.Duration(i) * time.Second)
+		logLine(t, logHandler, at, fmt.Sprintf("run1-line-%d", i), runs[1].ID)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), logHandler)
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail := readInitialFrames(t, r)
+
+	for i := range tiedInstants {
+		run0Msg := fmt.Sprintf("run0-line-%d", i)
+		run1Msg := fmt.Sprintf("run1-line-%d", i)
+		i0 := strings.Index(rail, run0Msg)
+		i1 := strings.Index(rail, run1Msg)
+		if i0 < 0 || i1 < 0 {
+			t.Fatalf("rail missing %q or %q; got:\n%s", run0Msg, run1Msg, rail)
+		}
+		if i0 > i1 {
+			t.Errorf("rail rendered %q before %q for an equal-Time tie, want run/append order (run 0 before run 1); got:\n%s", run1Msg, run0Msg, rail)
 		}
 	}
 }

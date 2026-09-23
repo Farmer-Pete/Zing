@@ -182,8 +182,8 @@ func resolveTailnetAddr(ctx context.Context, runCLI tailscaleCLIRunner, listIfac
 	}
 }
 
-// bindToken is the literal string every config.Console.Bind entry that
-// means "resolve the tailnet address" (design section 6.14).
+// bindTokenTailscale is the literal string every config.Console.Bind entry
+// that means "resolve the tailnet address" (design section 6.14).
 const bindTokenTailscale = "tailscale"
 
 // resolveBindHosts resolves every entry in tokens to a concrete host
