@@ -117,12 +117,21 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 // ordering key, per section 7.2's "never by timestamp ... id is the only
 // correct sort". Rows are grouped back into InboxItems in Go, by ticket id
 // change; the ORDER BY guarantees one ticket's rows are contiguous.
+// inboxQuery's two "newest message" correlated subqueries (the display
+// time and the sort key) both exclude state=draft rows (code review fix 2):
+// an unsent draft is only visible in the composer queue, so it must not
+// count as a ticket's newest message for the inbox's display time or its
+// blocking-first, newest-first sort, even though it is a real row with the
+// greatest id. Bound as "?" rather than inlined, so this stays an ordinary
+// parameterized literal rather than string-built SQL; InboxItems passes
+// draftState (console_writes.go) for both placeholders, in the order they
+// appear here.
 const inboxQuery = `
 SELECT
 	t.id, t.project_id, t.tracker_ref, t.title, t.body, t.kind, t.state, t.waiting_on,
 	t.parent_ticket_id, t.branch, t.pr_url, t.claim_owner, t.claim_expires_at,
 	p.name,
-	(SELECT created_at FROM messages nm WHERE nm.ticket_id = t.id ORDER BY nm.id DESC LIMIT 1),
+	(SELECT created_at FROM messages nm WHERE nm.ticket_id = t.id AND (nm.state IS NULL OR nm.state != ?) ORDER BY nm.id DESC LIMIT 1),
 	q.id, q.body, q.payload, q.created_at
 FROM tickets t
 JOIN projects p ON p.id = t.project_id
@@ -131,18 +140,22 @@ WHERE t.waiting_on IS NOT NULL
    OR EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `)
 ORDER BY
 	(t.waiting_on IS NOT NULL) DESC,
-	(SELECT MAX(mm.id) FROM messages mm WHERE mm.ticket_id = t.id) DESC,
+	(SELECT MAX(mm.id) FROM messages mm WHERE mm.ticket_id = t.id AND (mm.state IS NULL OR mm.state != ?)) DESC,
 	t.id,
 	q.id
 `
 
 // InboxItems returns every ticket that is blocking (waiting_on IS NOT NULL)
 // or has an unread message, blocking first, then by the ticket's greatest
-// message id descending, then ticket id (design section 7.2). Each item
-// carries its open questions, ordered by message id, and the display-only
-// time of its newest message.
+// SENT message id descending, then ticket id (design section 7.2; "sent"
+// per code review fix 2 -- see inboxQuery). unreadMessageWhere's own
+// author='zing' clause already excludes a draft from the unread check
+// itself, since every draft SaveDraft or SendBatch writes is author="you"
+// (console_writes.go); only the two newest-message subqueries need the
+// explicit exclusion inboxQuery adds. Each item carries its open questions,
+// ordered by message id, and the display-only time of its newest message.
 func (s *Store) InboxItems(ctx context.Context) ([]InboxItem, error) {
-	rows, err := s.db.QueryContext(ctx, inboxQuery)
+	rows, err := s.db.QueryContext(ctx, inboxQuery, draftState, draftState)
 	if err != nil {
 		return nil, fmt.Errorf("inbox items: %w", err)
 	}
@@ -293,11 +306,14 @@ func clampFeedLimit(limit int) int {
 	}
 }
 
-// FeedMessages returns the newest messages across every ticket, newest
-// first by id, capped at limit clamped to 1..200.
+// FeedMessages returns the newest SENT messages across every ticket
+// (excluding state=draft: an unsent draft belongs to the composer queue,
+// not the Feed, code review fix 2), newest first by id, capped at limit
+// clamped to 1..200.
 func (s *Store) FeedMessages(ctx context.Context, limit int) ([]MessageRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+messageColumns+` FROM messages ORDER BY id DESC LIMIT ?`, clampFeedLimit(limit))
+		`SELECT `+messageColumns+` FROM messages WHERE state IS NULL OR state != ? ORDER BY id DESC LIMIT ?`,
+		draftState, clampFeedLimit(limit))
 	if err != nil {
 		return nil, fmt.Errorf("feed messages: %w", err)
 	}

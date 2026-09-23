@@ -284,6 +284,123 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 	}
 }
 
+// TestThreadExcludesDraftRows proves the read-only Thread view renders only
+// posted messages: a queued-but-unsent draft answer or reply must not
+// appear (design section 6.6, 6.7, code review fix 2).
+func TestThreadExcludesDraftRows(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#2", "Thread draft ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	option := "a"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, Text: "an undrafted reply",
+	}); err != nil {
+		t.Fatalf("SaveDraft(text): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if strings.Contains(main, "an undrafted reply") {
+		t.Errorf("thread frame leaked an unsent draft reply's body; got:\n%s", main)
+	}
+	if strings.Contains(main, `class="message message-answer"`) {
+		t.Errorf("thread frame leaked an unsent draft answer row; got:\n%s", main)
+	}
+}
+
+// TestThreadRendersSentAnswerFromPayload proves a SENT answer row (design
+// section 6.6, 6.7, code review fix 2) renders its chosen option out of
+// Payload, since AnswerPayload messages never carry a Body: this is the
+// "pick then send" path -- SaveDraft's option mode (what a fixed chip
+// activation posts), then SendBatch -- rendering something visible, not
+// the blank row the bug left behind.
+func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#3", "Thread sent answer ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	option := "b"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, "Option: b") {
+		t.Errorf("thread frame missing the sent answer's chosen option; got:\n%s", main)
+	}
+}
+
+// TestFeedExcludesDraftMessages proves the Feed view (design section 6.5,
+// 7.2) shows only sent messages, not a queued-but-unsent draft (code review
+// fix 2).
+func TestFeedExcludesDraftMessages(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "f#2", "Feed draft ticket")
+	seedUnreadUpdate(t, s, ticketID, "a real feed update")
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, Text: "a queued draft reply",
+	}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	if !strings.Contains(main, "a real feed update") {
+		t.Errorf("feed missing the real, sent update; got:\n%s", main)
+	}
+	if strings.Contains(main, "a queued draft reply") {
+		t.Errorf("feed leaked an unsent draft row; got:\n%s", main)
+	}
+}
+
+// TestInboxOrdersByNewestSentMessageIgnoringDrafts proves InboxItems' sort
+// and its newest-message display time are computed off each ticket's
+// newest SENT message, not a later, still-queued draft (design section 7.2,
+// code review fix 2): a draft's higher message id must not let its ticket
+// jump ahead of one whose real message is newer. ticketA's real update (id
+// 1) precedes ticketB's (id 2), but ticketA's draft (id 3, inserted last)
+// has the greatest id of all three; without the fix that draft would make
+// ticketA sort as the newest.
+func TestInboxOrdersByNewestSentMessageIgnoringDrafts(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketA := seedTicket(t, s, "d#1", "Ticket A older real update")
+	seedUnreadUpdate(t, s, ticketA, "A's real update")
+
+	ticketB := seedTicket(t, s, "d#2", "Ticket B newer real update")
+	seedUnreadUpdate(t, s, ticketB, "B's real update")
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketA, Text: "a draft reply after both real updates",
+	}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "inbox", 0, 0)
+
+	a := mustIndex(t, main, "Ticket A older real update")
+	b := mustIndex(t, main, "Ticket B newer real update")
+	if b > a {
+		t.Errorf("expected ticket B (newer real update) before ticket A despite A's later draft; got:\n%s", main)
+	}
+}
+
 // TestThreadOpenZeroOrMissingRendersEmptyThread proves the Thread view's
 // nil-ticket guard: open=0 (no ticket open, including an absent signal,
 // which ReadSignals leaves at its zero value) or an id naming no ticket

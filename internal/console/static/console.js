@@ -23,6 +23,10 @@ import {
 	isSendChord,
 	sendChordToken,
 	stepFocus,
+	navChanged,
+	stepComposerIndex,
+	buildChipDraftBody,
+	buildItemDraftBody,
 	collectPatchWork,
 } from './keyboard.mjs';
 
@@ -102,8 +106,11 @@ function dispatchNav(detail) {
 // state on any real view/open/project change (design section 6.4: "A view
 // change clears both focusedID and the stored previous order").
 function navigate(next, opts = {}) {
-	const changed = next.view !== state.nav.view || next.open !== state.nav.open || next.project !== state.nav.project;
-	if (!opts.isBack) {
+	const changed = navChanged(state.nav, next);
+	// Only push a real destination change onto the back stack (code review
+	// fix 4): pushing a no-op navigation too would make "u" pop right back to
+	// where it already is, needing repeated presses to actually go up.
+	if (changed && !opts.isBack) {
 		state.navHistory.push({ ...state.nav });
 	}
 	state.nav = { ...next };
@@ -194,11 +201,7 @@ function moveComposerFocus(delta) {
 		return false; // nothing to move across yet; let the browser handle Tab
 	}
 	const i = els.indexOf(document.activeElement);
-	// JS "%" keeps the dividend's sign, so a plain (i + delta) % length can
-	// come out negative when i is -1 (activeElement not among els) and delta
-	// is -1; the extra "+ length) % length" normalizes it back to [0, length).
-	const next = els[((i + delta) % els.length + els.length) % els.length];
-	next.focus();
+	els[stepComposerIndex(els.length, i, delta)].focus();
 	return true;
 }
 
@@ -207,7 +210,11 @@ function moveComposerFocus(delta) {
 // postJSON is the one small fetch wrapper every forward-wired mutation
 // below shares: same-origin, Datastar-Request set so mw.go's guard (or its
 // Task 7/10 successors) treats it as a first-party call, and errors logged
-// rather than thrown into the keydown handler.
+// rather than thrown into the keydown handler. It resolves true on a 2xx
+// response and false otherwise (a non-ok status or a thrown fetch error),
+// so a caller that needs to know (postDraft, to clear its input only on
+// success) can await it; every fire-and-forget caller below just ignores
+// the resolved value, same as before.
 async function postJSON(path, body) {
 	try {
 		const resp = await fetch(path, {
@@ -217,18 +224,20 @@ async function postJSON(path, body) {
 		});
 		if (!resp.ok) {
 			console.error(`console.js: POST ${path}`, resp.status);
+			return false;
 		}
+		return true;
 	} catch (err) {
 		console.error(`console.js: POST ${path}`, err);
+		return false;
 	}
 }
 
 // postDraft handles Enter inside a question input (design section 6.4,
-// 6.7). POST /draft does not exist until Task 7; this reaches for it ahead
-// of time from the composer contract Task 6 will introduce
-// (data-draft-ticket/data-draft-question on the focused input, its value
-// as the free-text reply), and is a no-op today since no such input exists
-// yet.
+// 6.7): data-draft-ticket/data-draft-question on the focused input, its
+// value as the free-text reply. On a successful save it clears the input
+// (code review fix 5), so a repeated Enter cannot re-post the same reply
+// text; the store-side reply upsert-on-repeat is a separate pass's concern.
 function postDraft() {
 	const el = document.activeElement;
 	const ticket = el?.dataset?.draftTicket;
@@ -240,14 +249,46 @@ function postDraft() {
 		ticket: Number(ticket),
 		question: question ? Number(question) : null,
 		text: el.value,
+	}).then((ok) => {
+		if (ok) {
+			el.value = '';
+		}
 	});
 	return true;
 }
 
+// installChipActivation wires a delegated click listener for the
+// composer's option chips (thread.templ's optionChips) and per-item
+// accept/reject/drop/discuss controls (itemRow) -- the missing half of
+// "pick then save" (design section 6.6, 6.7, code review fix 1). Each
+// control's own data-on:click (thread.templ's pickToggleExpr) already
+// toggles its "picked" class; this listener is what actually POSTs /draft
+// with the picked value, so an option or item answer queues before /send
+// runs. Delegated from document, like installSideBox and
+// installLogControls, because #main is morphed by every /stream patch. A
+// direct mouse click and pickChip's chip.click() (the 1..9 key path) both
+// dispatch the same bubbling click event, so this one listener covers both
+// activation paths.
+function installChipActivation() {
+	document.addEventListener('click', (event) => {
+		const chip = event.target.closest?.('.chip');
+		if (chip) {
+			postJSON('/draft', buildChipDraftBody(chip.dataset));
+			return;
+		}
+		const decision = event.target.closest?.('.item-decisions .decision');
+		if (decision) {
+			postJSON('/draft', buildItemDraftBody(decision.dataset));
+		}
+	});
+}
+
 // pickChip handles 1..9 on the focused question (design section 6.4: "1 to
-// 9 click the nth option chip of the focused question"). Chip controls
-// arrive with Task 6; until then the focused element never has a
-// data-focus-id in the "question:" namespace, so this is a no-op.
+// 9 click the nth option chip of the focused question"). chip.click()
+// dispatches a real click event, which installChipActivation's delegated
+// listener catches the same as a direct mouse click, so this keyboard path
+// saves a draft too (code review fix 1), not just the visual "picked"
+// toggle.
 function pickChip(n) {
 	if (!state.focusedID.startsWith('question:')) {
 		return false;
@@ -658,6 +699,7 @@ async function install() {
 	installPatchObserver();
 	installSideBox();
 	installLogControls();
+	installChipActivation();
 }
 
 install();

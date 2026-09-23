@@ -193,6 +193,84 @@ export function reconcileFocus(previousIDs, currentIDs, focusedID) {
 }
 
 /**
+ * navChanged reports whether next's view, open, and project differ from
+ * current's (design section 6.4): navigate's own "did the destination
+ * actually change" check, used both to decide whether to push the back
+ * stack and whether to clear focus. A no-op navigation (the destination
+ * equals the current position) must not push, or "u" needs one press per
+ * repeated no-op navigation to undo (code review fix 4).
+ *
+ * @param {{view: string, open: number, project: number}} current
+ * @param {{view: string, open: number, project: number}} next
+ * @returns {boolean}
+ */
+export function navChanged(current, next) {
+	return next.view !== current.view || next.open !== current.open || next.project !== current.project;
+}
+
+/**
+ * stepComposerIndex returns the next composer-control index for Tab (delta
+ * 1) or Shift-Tab (delta -1) stepping over count controls, given the
+ * currently focused control's index or -1 when none of them has focus
+ * (design section 6.4). From no focus, Tab lands on the first control
+ * (index 0) and Shift-Tab on the last (count - 1) -- handled as its own
+ * case rather than folded into the wrap formula below, which would
+ * otherwise treat "no focus" as index -1 and land Shift-Tab one short of
+ * the last control (code review fix 3).
+ *
+ * @param {number} count - number of composer controls; must be > 0
+ * @param {number} index - the currently focused control's index, or -1
+ * @param {number} delta - 1 for Tab, -1 for Shift-Tab
+ * @returns {number}
+ */
+export function stepComposerIndex(count, index, delta) {
+	if (index === -1) {
+		return delta > 0 ? 0 : count - 1;
+	}
+	// JS "%" keeps the dividend's sign, so a plain (index + delta) % count can
+	// come out negative; the extra "+ count) % count" normalizes it back into
+	// [0, count).
+	return ((index + delta) % count + count) % count;
+}
+
+/**
+ * buildChipDraftBody builds POST /draft's JSON body for an option chip's
+ * activation (design section 6.6, 6.7, code review fix 1): the chip's
+ * data-draft-ticket, data-draft-question, and data-option, read off its
+ * DOM dataset by console.js and passed here as plain data, matching
+ * store.DraftInput's option mode (answer.go's draftRequest: {ticket,
+ * question, option}).
+ *
+ * @param {{draftTicket?: string, draftQuestion?: string, option?: string}} dataset
+ * @returns {{ticket: number, question: number, option: string}}
+ */
+export function buildChipDraftBody(dataset) {
+	return {
+		ticket: Number(dataset?.draftTicket),
+		question: Number(dataset?.draftQuestion),
+		option: dataset?.option ?? '',
+	};
+}
+
+/**
+ * buildItemDraftBody builds POST /draft's JSON body for a per-item
+ * accept/reject/drop/discuss control's activation (design section 6.6, 6.7,
+ * code review fix 1): the control's data-draft-ticket, data-draft-question,
+ * data-item-ref, and data-decision, matching store.DraftInput's item mode
+ * (answer.go's draftRequest: {ticket, question, item: {ref, decision}}).
+ *
+ * @param {{draftTicket?: string, draftQuestion?: string, itemRef?: string, decision?: string}} dataset
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string}}}
+ */
+export function buildItemDraftBody(dataset) {
+	return {
+		ticket: Number(dataset?.draftTicket),
+		question: Number(dataset?.draftQuestion),
+		item: { ref: dataset?.itemRef ?? '', decision: dataset?.decision ?? '' },
+	};
+}
+
+/**
  * collectPatchWork is the one call the MutationObserver callback makes each
  * patch (design section 6.3, 6.4): descriptors.diagramIDs passes straight
  * through (collecting which nodes are new mermaid diagrams is

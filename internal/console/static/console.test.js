@@ -22,6 +22,10 @@ import {
 	stepFocus,
 	reconcileFocus,
 	collectPatchWork,
+	navChanged,
+	stepComposerIndex,
+	buildChipDraftBody,
+	buildItemDraftBody,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -233,4 +237,59 @@ test('collectPatchWork: an unchanged focusable list keeps the same focus and emp
 test('collectPatchWork: missing descriptor fields default to empty', () => {
 	const work = collectPatchWork({}, '');
 	assert.deepEqual(work, { diagramIDs: [], focusID: '' });
+});
+
+// navChanged: console.js's navigate() only pushes the back stack and clears
+// focus on a real destination change (code review fix 4).
+
+test('navChanged: a differing view, open, or project each count as changed', () => {
+	const current = { view: 'inbox', open: 0, project: 0 };
+	assert.equal(navChanged(current, { view: 'thread', open: 0, project: 0 }), true);
+	assert.equal(navChanged(current, { view: 'inbox', open: 5, project: 0 }), true);
+	assert.equal(navChanged(current, { view: 'inbox', open: 0, project: 5 }), true);
+});
+
+test('navChanged: an identical destination is not a change', () => {
+	const current = { view: 'thread', open: 7, project: 0 };
+	assert.equal(navChanged(current, { view: 'thread', open: 7, project: 0 }), false);
+});
+
+// stepComposerIndex: console.js's moveComposerFocus() over the composer's
+// own controls (code review fix 3).
+
+test('stepComposerIndex: from no focus, Tab goes to the first control and Shift-Tab to the last', () => {
+	assert.equal(stepComposerIndex(3, -1, 1), 0);
+	assert.equal(stepComposerIndex(3, -1, -1), 2);
+});
+
+test('stepComposerIndex: steps by one from the current index', () => {
+	assert.equal(stepComposerIndex(3, 0, 1), 1);
+	assert.equal(stepComposerIndex(3, 1, 1), 2);
+	assert.equal(stepComposerIndex(3, 1, -1), 0);
+});
+
+test('stepComposerIndex: wraps past either end', () => {
+	assert.equal(stepComposerIndex(3, 2, 1), 0);
+	assert.equal(stepComposerIndex(3, 0, -1), 2);
+});
+
+// buildChipDraftBody / buildItemDraftBody: the /draft POST body a chip or
+// item-decision activation builds from its element's dataset (code review
+// fix 1). These are what installChipActivation (console.js) hands to
+// postJSON, so this is the "pick then send" path's pure-logic coverage: a
+// wrong body here means the composer queues nothing, the same way the
+// bug shipped (chip.click() toggled "picked" and never posted at all).
+
+test('buildChipDraftBody: reads ticket, question, and option off the dataset', () => {
+	const dataset = { draftTicket: '12', draftQuestion: '34', option: 'b' };
+	assert.deepEqual(buildChipDraftBody(dataset), { ticket: 12, question: 34, option: 'b' });
+});
+
+test('buildItemDraftBody: reads ticket, question, item ref, and decision off the dataset', () => {
+	const dataset = { draftTicket: '12', draftQuestion: '34', itemRef: 'src/main.go', decision: 'accept' };
+	assert.deepEqual(buildItemDraftBody(dataset), {
+		ticket: 12,
+		question: 34,
+		item: { ref: 'src/main.go', decision: 'accept' },
+	});
 });

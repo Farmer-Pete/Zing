@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/a-h/templ"
@@ -191,17 +192,43 @@ func (c *console) loadPlan(ctx context.Context, ticketID int64) (*templates.Rend
 	return &rendered, nil
 }
 
-// msgTypeState, msgTypeQuestion, and msgTypeEscalation name the message
-// types the read-only Thread view renders specially (design section 6.6): a
-// state message as a centered separator, a question message as a read-only
-// group, and an escalation message (whose Body a commit may leave empty,
-// like state) decoded into one line. Every other type (update, answer,
-// followup, resolved, reply) is a plain row using its own Body.
+// msgTypeState, msgTypeQuestion, msgTypeEscalation, and msgTypeAnswer name
+// the message types the read-only Thread view renders specially (design
+// section 6.6): a state message as a centered separator, a question message
+// as a read-only group, an escalation message (whose Body a commit may
+// leave empty, like state) decoded into one line, and an answer message
+// (whose Body SaveDraft and SendBatch never set, the choice living in
+// Payload instead) decoded into its chosen option or item decisions. Every
+// other type (update, followup, resolved, reply) is a plain row using its
+// own Body.
 const (
 	msgTypeState      = "state"
 	msgTypeQuestion   = "question"
 	msgTypeEscalation = "escalation"
+	msgTypeAnswer     = "answer"
 )
+
+// draftMessageState mirrors store's own unexported draft-state literal
+// (store.DraftInput's SaveDraft writes state="draft", console_writes.go);
+// this package needs its own copy of that one literal to recognize an
+// unsent draft row, the same way it already copies the message-type
+// literals above rather than importing package store's unexported
+// constants.
+const draftMessageState = "draft"
+
+// visibleRows drops every unsent draft row (design section 6.6, 6.7, code
+// review fix 2): a draft answer or reply belongs to the composer queue, not
+// the read-only Thread view, until POST /send flips its state to sent.
+func visibleRows(rows []store.MessageRow) []store.MessageRow {
+	out := make([]store.MessageRow, 0, len(rows))
+	for i := range rows {
+		if rows[i].State != nil && *rows[i].State == draftMessageState {
+			continue
+		}
+		out = append(out, rows[i])
+	}
+	return out
+}
 
 // questionStateLabel maps messages.state to the pill label the mock's group
 // summary shows (design section 6.6): "resolved" when resolved, "waiting on
@@ -231,6 +258,8 @@ func questionStateLabel(state *string) string {
 // ticket at all (templates.Thread's own nil guard), never when rows is
 // non-empty. plan is nil when the ticket has no stored plan artifact yet.
 func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan) ([]templates.ThreadRow, error) {
+	rows = visibleRows(rows)
+
 	// messageCounts holds, per question message id, how many other messages
 	// in this ticket name it as their parent (design section 6.6: the
 	// <details> summary shows "the message count"). Precomputed once over
@@ -327,17 +356,55 @@ func splitQuestionBody(raw string) (title, body string) {
 
 // displayBody returns what the Thread view renders for one message: a
 // decoded system line for "state" and "escalation" (whose Body a commit
-// leaves empty, the transition or the report living in Payload instead),
-// or the row's own Body for every other type.
+// leaves empty, the transition or the report living in Payload instead), a
+// decoded choice for "answer" (whose Body SaveDraft and SendBatch never
+// set, code review fix 2), or the row's own Body for every other type. A
+// row reaching here is always sent, never a draft: buildThreadRows already
+// filters state=draft rows out via visibleRows before this runs.
 func displayBody(m *store.MessageRow) string {
 	switch m.Type {
 	case msgTypeState:
 		return stateLine(m)
 	case msgTypeEscalation:
 		return escalationLine(m)
+	case msgTypeAnswer:
+		return answerLine(m)
 	default:
 		return m.Body
 	}
+}
+
+// answerLine decodes a sent "answer" message's payload into the text its
+// Body never carries (design section 6.6, 6.7, code review fix 2): the
+// chosen option's key, or its item ref-to-decision picks joined into one
+// line, ref order sorted so the rendered line is deterministic regardless
+// of map iteration order. An unparseable or empty payload falls back to the
+// (empty) Body rather than erroring, matching stateLine's and
+// escalationLine's own defensive fallback.
+func answerLine(m *store.MessageRow) string {
+	if len(m.Payload) == 0 {
+		return m.Body
+	}
+	var ap response.AnswerPayload
+	if err := json.Unmarshal(m.Payload, &ap); err != nil {
+		return m.Body
+	}
+	if ap.Option != nil {
+		return "Option: " + *ap.Option
+	}
+	if len(ap.Items) == 0 {
+		return m.Body
+	}
+	refs := make([]string, 0, len(ap.Items))
+	for ref := range ap.Items {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		parts = append(parts, ref+": "+string(ap.Items[ref]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // stateLine decodes a "state" message's payload into its "from -> to
