@@ -2,15 +2,15 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -30,6 +30,10 @@ type Console struct {
 	Bind      []string `toml:"bind"`
 	Port      int      `toml:"port"`
 	PushToken string   `toml:"push_token"`
+	// AllowedHosts extends the mutation middleware's Host allowlist (design
+	// section 6.14) with hostnames the middleware cannot derive on its own,
+	// such as a tailnet DNS name: bare hostnames, no port. Empty by default.
+	AllowedHosts []string `toml:"allowed_hosts"`
 }
 
 type Models struct {
@@ -93,9 +97,29 @@ var (
 	validMergeMethods = []string{"squash", "merge", "rebase"}
 )
 
+// minPushTokenLen is the shortest console.push_token Load accepts when
+// zing.toml sets one explicitly (design section 6.13's bearer token gates
+// every POST /subscribe and /push route), counted in runes
+// (utf8.RuneCountInString) to match the "16 characters" wording in the error
+// message below -- a byte-length check under-counts a multi-byte character
+// as more than one toward the floor, and over-counts a rune-short token that
+// happens to use multi-byte characters as long enough. It is not applied to
+// the auto-generated token cmd/zing/serve.go creates and persists to
+// settings.push_token when zing.toml sets none; that value is generated at
+// a fixed, already-adequate length, so this floor only catches a
+// hand-written value weak enough to downgrade push auth toward a guessable
+// bearer token.
+const minPushTokenLen = 16
+
 // Load reads and validates the zing.toml at path, in this exact order so the
 // first reported error is deterministic: decode, unknown-key check,
-// missing-required check, value checks, defaults, then push-token generation.
+// missing-required check, value checks, then defaults. Console.PushToken is
+// left empty when zing.toml omits it (design section 6.13): cmd/zing/serve.go
+// is the one place that resolves the effective bearer token, since only it
+// can tell an explicit zing.toml value apart from a value that needs to be
+// generated once and persisted to settings.push_token for stability across
+// restarts -- a distinction a value regenerated fresh on every Load call
+// could not preserve.
 func Load(path string) (*Config, error) {
 	var cfg Config
 	md, err := toml.DecodeFile(path, &cfg)
@@ -114,14 +138,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(md, &cfg)
-
-	if cfg.Console.PushToken == "" {
-		token, err := generatePushToken()
-		if err != nil {
-			return nil, fmt.Errorf("zing.toml: generate push token: %w", err)
-		}
-		cfg.Console.PushToken = token
-	}
 
 	return &cfg, nil
 }
@@ -185,9 +201,90 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("console", "port") && (cfg.Console.Port < 1 || cfg.Console.Port > 65535) {
 		return errors.New("zing.toml: console.port: must be 1 to 65535")
 	}
+	if err := checkBindAddresses(cfg.Console.Bind); err != nil {
+		return err
+	}
+	if err := checkAllowedHosts(cfg.Console.AllowedHosts); err != nil {
+		return err
+	}
 	if md.IsDefined("budget", "usage_hold_percent") &&
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
+	}
+	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
+		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)
+	}
+	return nil
+}
+
+// checkBindAddresses rejects a wildcard console.bind entry (design section
+// 6.14: "netip.Addr.IsUnspecified, that is 0.0.0.0 or ::"), because a
+// wildcard listener has no single browser Host authority and the no-login
+// console must bind concrete addresses only. A "tailscale" token, or any
+// other entry that does not parse as an IP at all, is left for cmd/zing's
+// resolver to handle and is not an error here.
+//
+// It also rejects an empty or whitespace-only entry (security fix, PR #16
+// review): cmd/zing/bind.go's resolveBindHosts passes a non-"tailscale"
+// token straight through unresolved, and serve.go's listenOnAll then builds
+// its listen address with net.JoinHostPort(host, port); JoinHostPort("",
+// port) yields ":port", which net.Listen binds to every interface. A blank
+// bind entry is never a legitimate value the resolver can act on (unlike
+// "tailscale" or a literal IP), so it is rejected here rather than left for
+// cmd/zing, the same way a wildcard address is.
+//
+// It also rejects an entry with leading or trailing whitespace (PR review
+// fix), rather than trimming it: a padded literal IP like " 127.0.0.1 "
+// used to pass this check (netip.ParseAddr rejects the surrounding
+// whitespace, so the entry fell through to the "not an IP, leave it for
+// cmd/zing" branch untouched) and then reached bind.go's resolveBindHosts
+// unresolved, same as "tailscale" would, but as a literal string neither
+// stripped nor recognized; serve.go's listenOnAll then built
+// net.JoinHostPort(" 127.0.0.1 ", port) and net.Listen failed at startup,
+// long after config.Load had already reported success. Trimming in place
+// here would work too -- checkValues, this function's only caller, takes
+// its Config by value, but a slice field's backing array is still shared
+// with Load's own cfg, so writing the trimmed string back into bind[i]
+// would reach cmd/zing without changing it -- but that only works because
+// of that aliasing, which is easy to break by accident in a later refactor
+// (switching checkValues to take *Config, or checkBindAddresses to copy its
+// slice, would silently stop the trim from ever reaching cmd/zing). A clear
+// rejection here does not depend on that, so it is the one this function
+// makes.
+func checkBindAddresses(bind []string) error {
+	for i, b := range bind {
+		trimmed := strings.TrimSpace(b)
+		if trimmed == "" {
+			return fmt.Errorf("zing.toml: console.bind[%d]: must not be empty", i)
+		}
+		if trimmed != b {
+			return fmt.Errorf("zing.toml: console.bind[%d]: must not have leading or trailing whitespace", i)
+		}
+		addr, err := netip.ParseAddr(b)
+		if err != nil {
+			continue
+		}
+		if addr.IsUnspecified() {
+			return errors.New("zing.toml: console.bind: wildcard address not allowed")
+		}
+	}
+	return nil
+}
+
+// checkAllowedHosts rejects a console.allowed_hosts entry that is not a
+// bare hostname (design section 6.14: "allowed_hosts entries are hostnames
+// without a port, validated at config load"). A hostname never contains a
+// colon, so testing for one catches both a well-formed "host:port" entry
+// and a malformed authority (cubic review fix, PR #16: net.SplitHostPort's
+// error varies by shape -- "host:80" parses clean, but "host:" and
+// "h:o:st" each fail differently -- so gating on SplitHostPort's error
+// alone let a malformed colon-bearing entry like "h:o:st" slip through
+// unrejected; a plain colon check has no such gap).
+func checkAllowedHosts(hosts []string) error {
+	for i, h := range hosts {
+		if strings.Contains(h, ":") {
+			return fmt.Errorf("zing.toml: console.allowed_hosts[%d]: must not include a port", i)
+		}
 	}
 	return nil
 }
@@ -241,12 +338,4 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 			cfg.Projects[i].Intake.AssignedTo = cfg.User
 		}
 	}
-}
-
-func generatePushToken() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("read random bytes: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

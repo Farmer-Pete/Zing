@@ -9,6 +9,15 @@ import (
 
 const testUser = "peter"
 
+// wantWildcardBindError is the exact error checkBindAddresses returns for a
+// wildcard console.bind entry (config.go, design section 6.14).
+const wantWildcardBindError = "zing.toml: console.bind: wildcard address not allowed"
+
+// wantAllowedHostsPortError is the exact error checkAllowedHosts returns
+// for any console.allowed_hosts[0] entry that carries a colon, well-formed
+// or malformed alike (config.go, design section 6.14).
+const wantAllowedHostsPortError = "zing.toml: console.allowed_hosts[0]: must not include a port"
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -46,7 +55,9 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		Console: Console{
 			Bind: []string{"127.0.0.1", "tailscale"},
 			Port: 7420,
-			// PushToken is randomly generated; checked separately below.
+			// PushToken defaults to empty: cmd/zing/serve.go resolves and
+			// persists the effective token (design section 6.13), not Load.
+			// AllowedHosts defaults to empty too.
 		},
 		Models: Models{
 			Sonnet: "claude-sonnet-5",
@@ -73,17 +84,8 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 	}
 
-	if cfg.Console.PushToken == "" {
-		t.Error("Console.PushToken was not generated")
-	}
-	gotToken := cfg.Console.PushToken
-	cfg.Console.PushToken = ""
-
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
-	}
-	if len(gotToken) < 32 {
-		t.Errorf("Console.PushToken = %q, too short for 32 random bytes base64-encoded", gotToken)
 	}
 }
 
@@ -96,7 +98,8 @@ user = "peter"
 [console]
 bind = ["127.0.0.1"]
 port = 8080
-push_token = "explicit-token"
+push_token = "explicit-token-16+"
+allowed_hosts = ["example.tailnet", "another.example"]
 
 [models]
 sonnet = "custom-sonnet"
@@ -143,9 +146,10 @@ lint = "golangci-lint run"
 	want := &Config{
 		User: testUser,
 		Console: Console{
-			Bind:      []string{"127.0.0.1"},
-			Port:      8080,
-			PushToken: "explicit-token",
+			Bind:         []string{"127.0.0.1"},
+			Port:         8080,
+			PushToken:    "explicit-token-16+",
+			AllowedHosts: []string{"example.tailnet", "another.example"},
 		},
 		Models: Models{
 			Sonnet: "custom-sonnet",
@@ -174,6 +178,31 @@ lint = "golangci-lint run"
 
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
+	}
+}
+
+// TestLoad_AllowedHostsParsesAndDefaultsEmpty proves design section 6.14's
+// console.allowed_hosts is nil (empty) by default and parses to a plain
+// string slice when set.
+func TestLoad_AllowedHostsParsesAndDefaultsEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Console.AllowedHosts) != 0 {
+		t.Errorf("Console.AllowedHosts = %v, want empty by default", cfg.Console.AllowedHosts)
+	}
+
+	const withHosts = minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet\", \"box.local\"]\n"
+	cfg, err = Load(writeTOML(t, withHosts))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"example.tailnet", "box.local"}
+	if !reflect.DeepEqual(cfg.Console.AllowedHosts, want) {
+		t.Errorf("Console.AllowedHosts = %v, want %v", cfg.Console.AllowedHosts, want)
 	}
 }
 
@@ -320,6 +349,83 @@ lint = "golangci-lint run"
 			body: minimalValidTOML + "\n[budget]\nusage_hold_percent = 150\n",
 			want: "zing.toml: budget.usage_hold_percent: must be 0 to 100",
 		},
+		{
+			name: "wildcard bind IPv4",
+			body: minimalValidTOML + "\n[console]\nbind = [\"0.0.0.0\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "wildcard bind IPv6",
+			body: minimalValidTOML + "\n[console]\nbind = [\"::\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "wildcard bind among other entries",
+			body: minimalValidTOML + "\n[console]\nbind = [\"127.0.0.1\", \"0.0.0.0\"]\n",
+			want: wantWildcardBindError,
+		},
+		{
+			name: "allowed_hosts entry with a port",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"example.tailnet:7420\"]\n",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// PR #16 review: net.SplitHostPort("h:o:st") itself errors ("too
+			// many colons in address"), so gating the old check on
+			// SplitHostPort's error alone let this malformed entry through
+			// unrejected.
+			name: "allowed_hosts entry malformed with multiple colons",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"h:o:st\"]\n",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// PR #16 review: net.SplitHostPort("host:") succeeds with an
+			// empty port, so the old check already caught this one; kept as
+			// a regression case alongside the multi-colon one above.
+			name: "allowed_hosts entry with a trailing colon and no port",
+			body: minimalValidTOML + "\n[console]\nallowed_hosts = [\"host:\"]\n",
+			want: wantAllowedHostsPortError,
+		},
+		{
+			// SECURITY, PR #16 review: an empty bind entry parses as neither
+			// a wildcard IP nor "tailscale", so cmd/zing/bind.go passed it
+			// through unresolved and net.JoinHostPort("", port) bound every
+			// interface.
+			name: "empty bind entry",
+			body: minimalValidTOML + "\n[console]\nbind = [\"\"]\n",
+			want: "zing.toml: console.bind[0]: must not be empty",
+		},
+		{
+			name: "whitespace-only bind entry",
+			body: minimalValidTOML + "\n[console]\nbind = [\"127.0.0.1\", \"   \"]\n",
+			want: "zing.toml: console.bind[1]: must not be empty",
+		},
+		{
+			// PR review: " 127.0.0.1 " parsed as neither a wildcard IP
+			// (netip.ParseAddr rejects the surrounding whitespace) nor
+			// "tailscale", so it used to pass this check and reach
+			// cmd/zing/bind.go unresolved, then fail net.Listen at startup
+			// with a malformed host, long after Load had already reported
+			// success.
+			name: "bind entry with leading and trailing whitespace",
+			body: minimalValidTOML + "\n[console]\nbind = [\" 127.0.0.1 \"]\n",
+			want: "zing.toml: console.bind[0]: must not have leading or trailing whitespace",
+		},
+		{
+			name: "bind entry with only trailing whitespace",
+			body: minimalValidTOML + "\n[console]\nbind = [\"tailscale \"]\n",
+			want: "zing.toml: console.bind[0]: must not have leading or trailing whitespace",
+		},
+		{
+			name: "explicit push_token shorter than the minimum",
+			body: minimalValidTOML + "\n[console]\npush_token = \"short\"\n",
+			want: "zing.toml: console.push_token: must be at least 16 characters",
+		},
+		{
+			name: "explicit push_token empty string is still rejected, not left to the auto-generated default",
+			body: minimalValidTOML + "\n[console]\npush_token = \"\"\n",
+			want: "zing.toml: console.push_token: must be at least 16 characters",
+		},
 	}
 
 	for _, tt := range tests {
@@ -333,6 +439,36 @@ lint = "golangci-lint run"
 				t.Errorf("Load() = %q, want %q", err.Error(), tt.want)
 			}
 		})
+	}
+}
+
+// TestLoad_PushTokenCountsRunesNotBytes proves minPushTokenLen's floor is
+// counted in runes (config.go's utf8.RuneCountInString), matching the error
+// message's "16 characters" wording: a token built from eight 4-byte emoji
+// is 32 bytes long but only 8 runes, short of the 16-character floor, and
+// must be rejected even though a byte-length check would have wrongly
+// accepted it.
+func TestLoad_PushTokenCountsRunesNotBytes(t *testing.T) {
+	t.Parallel()
+
+	const eightEmoji = "😀😀😀😀😀😀😀😀" // 8 runes, 32 bytes
+	_, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_token = \""+eightEmoji+"\"\n"))
+	if err == nil {
+		t.Fatal("Load() = nil, want an error for an 8-rune (32-byte) push_token")
+	}
+	const want = "zing.toml: console.push_token: must be at least 16 characters"
+	if err.Error() != want {
+		t.Errorf("Load() = %q, want %q", err.Error(), want)
+	}
+
+	// A genuinely 16-rune multi-byte token clears the same floor.
+	const sixteenEmoji = eightEmoji + eightEmoji // 16 runes, 64 bytes
+	cfg, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_token = \""+sixteenEmoji+"\"\n"))
+	if err != nil {
+		t.Fatalf("Load() with a 16-rune push_token: %v", err)
+	}
+	if cfg.Console.PushToken != sixteenEmoji {
+		t.Errorf("Console.PushToken = %q, want %q", cfg.Console.PushToken, sixteenEmoji)
 	}
 }
 

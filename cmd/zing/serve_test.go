@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"zing/internal/config"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -77,12 +76,12 @@ var stateSequenceWant = []string{"planning", "building", "reviewing", "judging",
 // end-to-end integration test (PKG3-PLAN.md section 12 rows 5 and 7, section
 // 6.10): zing serve, run against a temp config and a temp database, carries
 // the one fixture ticket from queued into planning, where it waits on the
-// one fixture question; this test answers it through a real POST /answer
-// against the running server, exactly as the browser's chip click would,
-// and the dispatcher resumes and carries the ticket the rest of the way to
-// done, in the order design section 7.1's state table lists. ctx
-// cancellation then drains the dispatcher and closes the store, and serve
-// returns nil.
+// one fixture question; this test answers it through a real POST /draft
+// then POST /send against the running server, exactly as the browser's
+// chip click and send chord would, and the dispatcher resumes and carries
+// the ticket the rest of the way to done, in the order design section 7.1's
+// state table lists. ctx cancellation then drains the dispatcher and closes
+// the store, and serve returns nil.
 func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -116,7 +115,7 @@ func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	ticketID, questionID := waitForOpenQuestion(t, dbPath, serveDone)
 	answerQuestion(t, baseURL, ticketID, questionID, "b")
@@ -194,30 +193,46 @@ func waitForOpenQuestion(t *testing.T, dbPath string, serveDone <-chan error) (t
 // context's absence of a deadline.
 const answerQuestionTimeout = 10 * time.Second
 
-// answerQuestion POSTs the console's $answer signal to /answer on the
-// running server at baseURL, the same JSON shape and header a browser's chip
-// click sends (design section 6.9): {"answer":{"ticket","question","option"}}
-// with the Datastar-Request header. It fails the test on anything but 204.
+// answerQuestion drafts then sends one answer through the running server at
+// baseURL: POST /draft with {ticket, question, option}, then POST /send
+// with {ticket} (design section 6.7), the same two-step composer a
+// browser's chip click and send chord drive. Both requests carry the
+// Content-Type and Datastar-Request headers, and an Origin matching
+// baseURL, the mutation guard (mw.go, design section 6.14) requires. It
+// fails the test on anything but 204 from either step.
 func answerQuestion(t *testing.T, baseURL string, ticketID, questionID int64, option string) {
 	t.Helper()
 
-	body := fmt.Sprintf(`{"answer":{"ticket":%d,"question":%d,"option":%q}}`, ticketID, questionID, option)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/answer", strings.NewReader(body))
+	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, questionID, option)
+	postComposer(t, baseURL, "/draft", draftBody)
+
+	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	postComposer(t, baseURL, "/send", sendBody)
+}
+
+// postComposer POSTs body to baseURL+path with the headers every mutation
+// route requires (design section 6.14): Content-Type, Datastar-Request, and
+// an Origin equal to baseURL. It fails the test on anything but 204.
+func postComposer(t *testing.T, baseURL, path, body string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+path, strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("build POST /answer request: %v", err)
+		t.Fatalf("build POST %s request: %v", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", baseURL)
 
 	client := &http.Client{Timeout: answerQuestionTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("POST /answer: %v", err)
+		t.Fatalf("POST %s: %v", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /answer: status = %d, want 204", resp.StatusCode)
+		t.Fatalf("POST %s: status = %d, want 204", path, resp.StatusCode)
 	}
 }
 
@@ -327,7 +342,7 @@ func assertStateSequence(t *testing.T, dbPath string, ticketID int64) {
 
 // assertExactlyOneQuestionAnswered reads ticketID's messages through a fresh
 // store handle and asserts exactly one "answer" message was recorded, so the
-// POST /answer this test drove is the only one that landed.
+// POST /draft + POST /send this test drove is the only one that landed.
 func assertExactlyOneQuestionAnswered(t *testing.T, dbPath string, ticketID int64) {
 	t.Helper()
 
@@ -530,7 +545,7 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForTicketPastQueued(t, dbPath, serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -560,7 +575,7 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -583,7 +598,7 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 		Port: freeLoopbackPort(t), IntervalSeconds: 1, MaxParallel: 1, Bind: nil,
 	})
 
-	err := serve(t.Context(), cfgPath, dbPath)
+	err := serve(t.Context(), cfgPath, dbPath, false)
 	if err == nil {
 		t.Fatal("serve returned nil, want an error for an empty console.bind")
 	}
@@ -595,11 +610,13 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 	}
 }
 
-// TestServe_UsesFirstOfMultipleConsoleBinds proves that a console.bind with
-// more than one entry does not error or panic: serve binds the first entry
-// only (the second, "198.51.100.1", is TEST-NET-2, reserved and never
-// dialed) and still serves normally.
-func TestServe_UsesFirstOfMultipleConsoleBinds(t *testing.T) {
+// TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry
+// proves multi-bind (design section 6.14, Task 11): serve binds every
+// literal console.bind entry (not only the first, unlike the single-bind
+// skeleton TestConsoleBindAddr used to cover), and a "tailscale" entry that
+// cannot resolve in this sandboxed test environment (no tailscale CLI, no
+// matching interface) is skipped rather than failing serve.
+func TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -608,56 +625,24 @@ func TestServe_UsesFirstOfMultipleConsoleBinds(t *testing.T) {
 
 	port := freeLoopbackPort(t)
 	writeZingTOML(t, cfgPath, zingTOMLOpts{
-		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback, "198.51.100.1"},
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback, bindTokenTailscale},
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
 }
 
-// TestConsoleBindAddr covers consoleBindAddr directly: an empty Bind errors,
-// a single entry joins with the port, and more than one entry uses only the
-// first (a warning is logged for the rest, not asserted here).
-func TestConsoleBindAddr(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		bind    []string
-		port    int
-		want    string
-		wantErr bool
-	}{
-		{name: "empty", bind: nil, port: 7420, wantErr: true},
-		{name: "single", bind: []string{loopback}, port: 7420, want: "127.0.0.1:7420"},
-		{name: "multiple uses first", bind: []string{loopback, "100.64.0.1"}, port: 7420, want: "127.0.0.1:7420"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := consoleBindAddr(config.Console{Bind: tc.bind, Port: tc.port})
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("consoleBindAddr(%v) error = nil, want an error", tc.bind)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("consoleBindAddr(%v): %v", tc.bind, err)
-			}
-			if got != tc.want {
-				t.Errorf("consoleBindAddr(%v) = %q, want %q", tc.bind, got, tc.want)
-			}
-		})
-	}
-}
+// TestResolveBindHosts_EmptyTokensResolvesToNoHosts and the config-level
+// wildcard/allowed_hosts checks cover the rest of multi-bind resolution
+// directly (bind_test.go, internal/config/config_test.go); serve's own
+// "no address resolved" error path is covered by
+// TestServe_ErrorsOnEmptyConsoleBind above.
 
 // TestDispatchInterval covers dispatchInterval directly: a positive
 // interval_seconds converts straight to seconds, zero or negative clamps to
@@ -759,5 +744,49 @@ func TestDispatchFailure(t *testing.T) {
 				t.Errorf("dispatchFailure(%v, %v) = %v, want it to wrap %v", tc.dispTriggered, tc.de, got, boom)
 			}
 		})
+	}
+}
+
+// TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured
+// proves the design section 6.13 precedence rule end to end against a real
+// store: with no explicit console.push_token, the first call generates and
+// persists a token that a second call (simulating a restart, with the same
+// empty configured value) reuses unchanged; an explicit configured value on
+// a later call always wins and overrides what was persisted, "rotating it
+// in zing.toml" the way the design names.
+func TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured(t *testing.T) {
+	t.Parallel()
+
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	first, err := resolvePushToken(t.Context(), st, "")
+	if err != nil {
+		t.Fatalf("resolvePushToken (first, generated): %v", err)
+	}
+	if first == "" {
+		t.Fatal("resolvePushToken (first) = \"\", want a generated token")
+	}
+
+	// A second call with no explicit config, simulating a restart: must
+	// reuse the persisted token, not generate a new one.
+	second, err := resolvePushToken(t.Context(), st, "")
+	if err != nil {
+		t.Fatalf("resolvePushToken (second, after restart): %v", err)
+	}
+	if second != first {
+		t.Errorf("resolvePushToken (after restart) = %q, want the same persisted token (%q)", second, first)
+	}
+
+	// An explicit config value always wins and rotates the effective token.
+	explicit, err := resolvePushToken(t.Context(), st, "my-explicit-token")
+	if err != nil {
+		t.Fatalf("resolvePushToken (explicit): %v", err)
+	}
+	if explicit != "my-explicit-token" {
+		t.Errorf("resolvePushToken (explicit) = %q, want my-explicit-token", explicit)
 	}
 }

@@ -54,13 +54,28 @@ func (childrenPayload) JSONSchemaExtend(s *jsonschema.Schema) {
 	s.MinItems = &two
 }
 
-// The two artifact tables a stored type belongs to.
+// pushKeys is the stored shape of push_subscriptions.keys_json (design
+// section 6.13): a small source type declared here, in internal/schemagen
+// itself, rather than reusing internal/notify.Subscription's Keys field, so
+// schemagen gains no import of internal/notify and no import cycle forms
+// (internal/notify already imports internal/store, which embeds this
+// package's generated output). Bounded lengths: a real p256dh (the
+// uncompressed P-256 point, base64url) is about 87 characters and a real
+// auth secret about 22, so 512 gives generous headroom without leaving the
+// column unbounded.
+type pushKeys struct {
+	P256dh string `json:"p256dh" jsonschema:"minLength=1,maxLength=512"`
+	Auth   string `json:"auth" jsonschema:"minLength=1,maxLength=512"`
+}
+
+// The three tables a stored type belongs to.
 const (
-	tableMessages  = "messages"
-	tableArtifacts = "artifacts"
+	tableMessages          = "messages"
+	tableArtifacts         = "artifacts"
+	tablePushSubscriptions = "push_subscriptions"
 )
 
-// Registry lists the 16 stored types, each mapped to its committed schema path.
+// Registry lists the 17 stored types, each mapped to its committed schema path.
 func Registry() []Entry {
 	return []Entry{
 		{tableMessages, "question", response.QuestionPayload{}},
@@ -79,6 +94,7 @@ func Registry() []Entry {
 		{tableArtifacts, "finding", response.Finding{}},
 		{tableArtifacts, "verdict", response.Verdict{}},
 		{tableArtifacts, "respond", respondPayload{}},
+		{tablePushSubscriptions, "keys", pushKeys{}},
 	}
 }
 

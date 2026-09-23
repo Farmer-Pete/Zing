@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "p256dh": {
+      "type": "string",
+      "maxLength": 512,
+      "minLength": 1
+    },
+    "auth": {
+      "type": "string",
+      "maxLength": 512,
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "p256dh",
+    "auth"
+  ]
+}

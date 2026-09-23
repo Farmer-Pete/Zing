@@ -1,0 +1,230 @@
+package templates
+
+// Shell renders the "/" page (design section 6.3, 7.1): the palette, the
+// three regions (#nav, #main, #rail, each rendered once by the caller for
+// the shell's default signals) and the #stream-ctl bridge that hands
+// navigation over to GET /stream. nav, main, and rail are the same
+// templ.Component values GET /stream itself patches with on every frame, so
+// the very first paint and the live stream render through one code path.
+//
+// The body's data-signals declares the three navigation signals with their
+// defaults (design section 6.3): the first /stream request this fires
+// always carries real state, never an empty query. #stream-ctl sits outside
+// #nav, #main, and #rail so a region morph never re-initializes it, and it
+// is the one element every /stream request goes through (data-init for the
+// first, data-on:zing-nav for every navigation after), so Datastar's
+// requestCancellation (default "auto", keyed by trigger element) aborts the
+// prior stream before the next one starts.
+//
+// The head loads the vendored mermaid UMD bundle with a classic, non-module
+// script tag (design section 6.10, v10 change log): the vendored build
+// (static/ASSETS.md) is esbuild's self-contained UMD output, which sets the
+// `mermaid` global directly and needs no module resolution, unlike the
+// ES-module entry point Task 1 first vendored and Task 5 replaced. Loading
+// it here, once, is the only mermaid script on the page: render.go's
+// goldmark-diagram wiring never emits a second one (design section 6.10).
+templ Shell(nav, main, rail templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>Zing</title>
+			@palette()
+			<script src="/static/mermaid.js"></script>
+		</head>
+		<body data-signals="{view: 'inbox', open: 0, project: 0}">
+			<div class="layout">
+				@nav
+				@main
+				@rail
+			</div>
+			<span
+				id="stream-ctl"
+				style="display:none"
+				data-init="@get('/stream')"
+				data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream')"
+			></span>
+			<script type="module" src="/static/datastar.js"></script>
+			<script type="module" src="/static/console.js"></script>
+		</body>
+	</html>
+}
+
+// palette is the console's color and layout system: a dark, low-chroma
+// ground with one accent hue, and a three-column grid (#nav, #main, #rail)
+// matching the mock's layout (design section 0, "fidelity to the approved
+// mock"; section 6.3's region scheme).
+templ palette() {
+	<style>
+		:root {
+			--zing-bg: #14161c;
+			--zing-surface: #1c1f28;
+			--zing-border: #2b2f3a;
+			--zing-text: #e4e6ec;
+			--zing-text-dim: #9aa0b0;
+			--zing-accent: #6ea8fe;
+			--zing-warn: #f0b429;
+			--zing-danger: #f0616d;
+			/* The mock's teal accent (PKG4-DESIGN.html: --accent #0f766e
+			   light / #5ec8bd dark), reserved for a user-picked selection so
+			   it reads distinctly from --zing-accent's blue focus ring. */
+			--zing-picked: #2dd4bf;
+			--zing-picked-soft: #163430;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			background: var(--zing-bg);
+			color: var(--zing-text);
+			font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		}
+		.layout {
+			display: grid;
+			grid-template-columns: 18rem 1fr 18rem;
+			min-height: 100vh;
+		}
+		#nav {
+			border-right: 1px solid var(--zing-border);
+			padding: 1rem;
+			overflow-y: auto;
+		}
+		#main { padding: 1.5rem; overflow-y: auto; }
+		#rail {
+			border-left: 1px solid var(--zing-border);
+			padding: 1rem;
+			overflow-y: auto;
+		}
+		h2, h3 { margin-top: 0; }
+		.empty { color: var(--zing-text-dim); }
+		.nav-link {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			width: 100%;
+			padding: 0.375rem 0.5rem;
+			margin-bottom: 0.125rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			color: inherit;
+			text-decoration: none;
+		}
+		.nav-link:hover { border-color: var(--zing-accent); }
+		.badge, .pill {
+			font-size: 0.75rem;
+			padding: 0.125rem 0.5rem;
+			border-radius: 999px;
+			background: var(--zing-border);
+			color: var(--zing-text-dim);
+		}
+		.badge-blocking, .pill-waiting { background: var(--zing-warn); color: var(--zing-bg); }
+		.badge-unread { background: var(--zing-accent); color: var(--zing-bg); }
+		.ib-thread, .ticket-row, .message, .q {
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 0.75rem 1rem;
+			margin-bottom: 0.75rem;
+			background: var(--zing-surface);
+		}
+		.ib-thread-row, .ticket-row {
+			display: flex;
+			align-items: center;
+			gap: 0.5rem;
+		}
+		.ib-q {
+			margin: 0.375rem 0 0 1rem;
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+		}
+		.meta { color: var(--zing-text-dim); font-size: 0.8rem; margin-bottom: 0.25rem; }
+		.state-separator {
+			text-align: center;
+			color: var(--zing-text-dim);
+			font-size: 0.8rem;
+			margin: 0.75rem 0;
+		}
+		/* The focus ring console.js's keyboard layer moves with j/k
+		   (design section 6.4): a client-only class, never a Datastar
+		   signal, so a patch never needs to know about it. */
+		.focus { outline: 2px solid var(--zing-accent); outline-offset: 2px; }
+
+		/* The "picked" state pickToggleExpr (thread.templ) toggles on an
+		   option chip or an item-decision button (design section 6.6): a
+		   client-only class, matching .focus above, so a selected control
+		   reads clearly before POST /draft's response round trips back
+		   through /stream. pickToggleExpr keeps aria-pressed in sync with
+		   this class (PR review, accessibility fix), so a screen reader
+		   announces the pick even though the color change alone says
+		   nothing to it; the ::after checkmark below is the same fix for a
+		   sighted user who cannot distinguish the border/background color
+		   shift (e.g. color-blindness), so picked is never conveyed by
+		   color alone. */
+		.chip.picked, .decision.picked {
+			border-color: var(--zing-picked);
+			background: var(--zing-picked-soft);
+			color: var(--zing-picked);
+		}
+		.chip.picked::after, .decision.picked::after {
+			content: " \2713";
+		}
+
+		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the
+		   side box, in the mock's order. */
+		#rail section { margin-bottom: 1.25rem; }
+		#rail h3 {
+			font-size: 0.75rem;
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			color: var(--zing-text-dim);
+			margin-bottom: 0.5rem;
+		}
+		.phase-dots { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+		.phase-dot {
+			display: inline-flex;
+			align-items: center;
+			gap: 0.375rem;
+			font-size: 0.75rem;
+			padding: 0.25rem 0.5rem;
+			border-radius: 999px;
+			border: 1px solid var(--zing-border);
+			color: var(--zing-text-dim);
+		}
+		.phase-now { border-color: var(--zing-accent); color: var(--zing-text); }
+		.phase-done { color: var(--zing-text); }
+		.artifact-slot {
+			display: flex;
+			justify-content: space-between;
+			align-items: baseline;
+			gap: 0.5rem;
+			padding: 0.25rem 0;
+			border-bottom: 1px solid var(--zing-border);
+		}
+		.artifact-payload {
+			white-space: pre-wrap;
+			word-break: break-word;
+			font-size: 0.75rem;
+			max-height: 12rem;
+			overflow-y: auto;
+		}
+		.run-fields { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.5rem; margin: 0; }
+		.run-fields dt { color: var(--zing-text-dim); font-size: 0.8rem; }
+		.run-fields dd { margin: 0; }
+		.side-box textarea {
+			width: 100%;
+			background: var(--zing-surface);
+			color: var(--zing-text);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			resize: vertical;
+		}
+		.side-reply:not(:empty) {
+			margin-top: 0.5rem;
+			padding: 0.5rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			font-size: 0.85rem;
+		}
+	</style>
+}

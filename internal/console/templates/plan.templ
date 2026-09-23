@@ -1,0 +1,347 @@
+package templates
+
+import (
+	"strconv"
+
+	"zing/internal/response"
+)
+
+// PlanView renders a stored plan in full (design section 6.9's
+// field-to-render map, exhaustive): the four parts (Overview, Design,
+// Delivery, Review) as <h2>, their children as <h3>, and every field --
+// prose already pre-rendered onto p by internal/console/plan.go, every
+// list, table, and "none" line built straight from what is stored. It
+// never recomputes files, tasks, or fences into rows of its own.
+templ PlanView(p RenderedPlan) {
+	<article class="plan">
+		<h2>Overview</h2>
+		<h3>Objective</h3>
+		<p>{ p.Overview.Objective }</p>
+		<h3>Context</h3>
+		@p.Overview.ContextHTML
+		<h3>Problem</h3>
+		@planProblem(p.Overview.Problem)
+		<h3>Goals</h3>
+		@stringList(p.Overview.Goals)
+		<h3>Non-goals</h3>
+		@stringList(p.Overview.NonGoals)
+		<h2>Design</h2>
+		<h3>Demo</h3>
+		@cmdBlock(p.Design.Demo.Cmd, p.Design.Demo.Text)
+		<h3>Shape</h3>
+		@p.Design.ShapeHTML
+		<h3>Changes</h3>
+		@changesTable(p.Design.Changes)
+		<h3>Types</h3>
+		@typesSection(p.Design.Types)
+		<h3>Migrations</h3>
+		@migrationsSection(p.Design.Migrations)
+		<h2>Delivery</h2>
+		<h3>Files</h3>
+		@filesTable(p.Delivery.Files)
+		<h3>Deletions</h3>
+		@deletionsSection(p.Delivery.Deletions)
+		<h3>Tests</h3>
+		@testsTable(p.Delivery.Tests)
+		<h3>Tasks</h3>
+		@tasksTable(p.Delivery.Tasks)
+		<h2>Review</h2>
+		<h3>Trust root</h3>
+		<p>{ p.Review.TrustRoot }</p>
+		<h3>Alternatives</h3>
+		@stringList(p.Review.Alternatives)
+		<h3>Risks</h3>
+		@stringList(p.Review.Risks)
+	</article>
+}
+
+// stringList renders Goals, Non-goals, Alternatives, and Risks (design
+// section 6.9): every one of the plan's plain string lists.
+templ stringList(items []string) {
+	<ul>
+		for _, s := range items {
+			<li>{ s }</li>
+		}
+	</ul>
+}
+
+// cmdBlock renders a Demo or a bug Loop as its cmd plus its text (design
+// section 6.9: "Demo (the cmd and its text)"; "the Loop as a cmd plus its
+// text"), the two fields that share this exact shape.
+templ cmdBlock(cmd, text string) {
+	<p><code class="cmd">{ cmd }</code></p>
+	<p>{ text }</p>
+}
+
+// planProblem renders Overview.Problem (design section 6.9): its markdown
+// text, then, for a bug, the Loop, the Repro, and the ranked Hypotheses
+// table. Loop is nil for a feature, so this renders nothing beyond the
+// prose in that case.
+templ planProblem(p RenderedProblem) {
+	@p.TextHTML
+	if p.Loop != nil {
+		<h4>Loop</h4>
+		@cmdBlock(p.Loop.Cmd, p.Loop.Text)
+	}
+	if p.Repro != "" {
+		<h4>Repro</h4>
+		<pre>{ p.Repro }</pre>
+	}
+	if len(p.Hypotheses) > 0 {
+		<h4>Hypotheses</h4>
+		<table class="hypotheses">
+			<thead>
+				<tr>
+					<th>Rank</th>
+					<th>Cause</th>
+					<th>Prediction</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, h := range p.Hypotheses {
+					<tr>
+						<td>{ strconv.Itoa(h.Rank) }</td>
+						<td>{ h.Cause }</td>
+						<td>{ h.Prediction }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// changesTable renders Design.Changes (design section 6.9): a table of
+// path, symbol, kind, callers, callees, before, after, simple_call.
+templ changesTable(changes []response.Change) {
+	if len(changes) > 0 {
+		<table class="changes">
+			<thead>
+				<tr>
+					<th>Path</th>
+					<th>Symbol</th>
+					<th>Kind</th>
+					<th>Callers</th>
+					<th>Callees</th>
+					<th>Before</th>
+					<th>After</th>
+					<th>Simple call</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, c := range changes {
+					<tr>
+						<td>{ c.Path }</td>
+						<td>{ c.Symbol }</td>
+						<td>{ string(c.Kind) }</td>
+						<td>{ c.Callers }</td>
+						<td>{ c.Callees }</td>
+						<td><pre>{ c.Before }</pre></td>
+						<td><pre>{ c.After }</pre></td>
+						<td>{ c.SimpleCall }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// typesSection renders Design.Types (design section 6.9): a table per type
+// of name, file, kind, a fields table (type, required, default,
+// constraints), and, when the type has any, a transitions sub-table of
+// from, to, when.
+templ typesSection(types []response.TypeDef) {
+	for _, t := range types {
+		<div class="type-def">
+			<table class="type-meta">
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>File</th>
+						<th>Kind</th>
+					</tr>
+				</thead>
+				<tbody>
+					<tr>
+						<td>{ t.Name }</td>
+						<td>{ t.File }</td>
+						<td>{ string(t.Kind) }</td>
+					</tr>
+				</tbody>
+			</table>
+			<table class="fields">
+				<caption>Fields</caption>
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>Type</th>
+						<th>Required</th>
+						<th>Default</th>
+						<th>Constraints</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, f := range t.Fields {
+						<tr>
+							<td>{ f.Name }</td>
+							<td>{ f.Type }</td>
+							<td>{ strconv.FormatBool(f.Required) }</td>
+							<td>{ f.Default }</td>
+							<td>{ f.Constraints }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+			if len(t.Transitions) > 0 {
+				<table class="transitions">
+					<caption>Transitions</caption>
+					<thead>
+						<tr>
+							<th>From</th>
+							<th>To</th>
+							<th>When</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, tr := range t.Transitions {
+							<tr>
+								<td>{ tr.From }</td>
+								<td>{ tr.To }</td>
+								<td>{ tr.When }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+	}
+}
+
+// migrationsSection renders Design.Migrations (design section 6.9): each
+// migration as file, schema, backfill, locks, compat, rollback, or, when
+// Migrations.None, a "none" line rather than an empty table.
+templ migrationsSection(m response.Migrations) {
+	if m.None {
+		<p class="none">No migrations.</p>
+	} else {
+		for _, mig := range m.Items {
+			<div class="migration">
+				<h4>{ mig.File }</h4>
+				<p><strong>Schema</strong></p>
+				<pre>{ mig.Schema }</pre>
+				<p><strong>Backfill</strong></p>
+				<pre>{ mig.Backfill }</pre>
+				<p><strong>Locks</strong></p>
+				<pre>{ mig.Locks }</pre>
+				<p><strong>Compat</strong></p>
+				<pre>{ mig.Compat }</pre>
+				<p><strong>Rollback</strong></p>
+				<pre>{ mig.Rollback }</pre>
+			</div>
+		}
+	}
+}
+
+// filesTable renders Delivery.Files (design section 6.9): a table of path,
+// action, reason. Delivery.Files carries no "none" case (jsonschema
+// minItems=1, internal/response/types.go): the perimeter is never empty.
+templ filesTable(files []response.FileChange) {
+	<table class="files">
+		<thead>
+			<tr>
+				<th>Path</th>
+				<th>Action</th>
+				<th>Reason</th>
+			</tr>
+		</thead>
+		<tbody>
+			for _, f := range files {
+				<tr>
+					<td>{ f.Path }</td>
+					<td>{ string(f.Action) }</td>
+					<td>{ f.Reason }</td>
+				</tr>
+			}
+		</tbody>
+	</table>
+}
+
+// deletionsSection renders Delivery.Deletions (design section 6.9): a table
+// of path, symbol, existed-because, or, when Deletions.None, a "none" line.
+templ deletionsSection(d response.Deletions) {
+	if d.None {
+		<p class="none">Nothing deleted.</p>
+	} else {
+		<table class="deletions">
+			<thead>
+				<tr>
+					<th>Path</th>
+					<th>Symbol</th>
+					<th>Existed because</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, f := range d.Items {
+					<tr>
+						<td>{ f.Path }</td>
+						<td>{ f.Symbol }</td>
+						<td>{ f.ExistedBecause }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// testsTable renders Delivery.Tests (design section 6.9): a table of name,
+// seam, kind, mocks, asserts.
+templ testsTable(tests []response.TestCase) {
+	<table class="tests">
+		<thead>
+			<tr>
+				<th>Name</th>
+				<th>Seam</th>
+				<th>Kind</th>
+				<th>Mocks</th>
+				<th>Asserts</th>
+			</tr>
+		</thead>
+		<tbody>
+			for _, tc := range tests {
+				<tr>
+					<td>{ tc.Name }</td>
+					<td>{ tc.Seam }</td>
+					<td>{ string(tc.Kind) }</td>
+					<td>{ tc.Mocks }</td>
+					<td>{ tc.Asserts }</td>
+				</tr>
+			}
+		</tbody>
+	</table>
+}
+
+// tasksTable renders Delivery.Tasks (design section 6.9): a table of n,
+// demo, test, text, with each task's markdown Text pre-rendered onto it.
+templ tasksTable(tasks []RenderedTask) {
+	<table class="tasks">
+		<thead>
+			<tr>
+				<th>N</th>
+				<th>Demo</th>
+				<th>Test</th>
+				<th>Text</th>
+			</tr>
+		</thead>
+		<tbody>
+			for _, t := range tasks {
+				<tr>
+					<td>{ strconv.Itoa(t.N) }</td>
+					<td>{ strconv.FormatBool(t.Demo) }</td>
+					<td>{ t.Test }</td>
+					<td>
+						@t.TextHTML
+					</td>
+				</tr>
+			}
+		</tbody>
+	</table>
+}

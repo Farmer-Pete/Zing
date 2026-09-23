@@ -1,0 +1,126 @@
+[
+  {
+    "keys": [
+      "g i"
+    ],
+    "action": "nav-inbox"
+  },
+  {
+    "keys": [
+      "g r"
+    ],
+    "action": "nav-recent"
+  },
+  {
+    "keys": [
+      "g f"
+    ],
+    "action": "nav-feed"
+  },
+  {
+    "keys": [
+      "j"
+    ],
+    "action": "focus-next"
+  },
+  {
+    "keys": [
+      "k"
+    ],
+    "action": "focus-prev"
+  },
+  {
+    "keys": [
+      "o",
+      "Enter"
+    ],
+    "action": "open"
+  },
+  {
+    "keys": [
+      "u"
+    ],
+    "action": "up"
+  },
+  {
+    "keys": [
+      "Tab"
+    ],
+    "action": "input-next"
+  },
+  {
+    "keys": [
+      "Shift-Tab"
+    ],
+    "action": "input-prev"
+  },
+  {
+    "keys": [
+      "Enter-in-input"
+    ],
+    "action": "draft"
+  },
+  {
+    "keys": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9"
+    ],
+    "action": "chip"
+  },
+  {
+    "keys": [
+      "Cmd-Enter",
+      "Ctrl-Enter"
+    ],
+    "action": "send"
+  },
+  {
+    "keys": [
+      "a"
+    ],
+    "action": "toggle-rail"
+  },
+  {
+    "keys": [
+      "b"
+    ],
+    "action": "focus-side"
+  },
+  {
+    "keys": [
+      "s"
+    ],
+    "action": "stop"
+  },
+  {
+    "keys": [
+      "S"
+    ],
+    "action": "stop-all"
+  },
+  {
+    "keys": [
+      "x"
+    ],
+    "action": "mark-read"
+  },
+  {
+    "keys": [
+      "?"
+    ],
+    "action": "help"
+  },
+  {
+    "keys": [
+      "Esc"
+    ],
+    "action": "blur"
+  }
+]

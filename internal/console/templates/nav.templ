@@ -1,0 +1,107 @@
+package templates
+
+import (
+	"fmt"
+
+	"zing/internal/store"
+)
+
+// Nav renders the #nav region: a view switcher, the project list, and the
+// per-thread blocking/unread badge list (design section 6.3, 6.5, 6.8).
+//
+// Every link here is a temporary, clickable stand-in for the keyboard
+// module Task 4 builds (design section 12, Task 3 scope note: "the shell
+// can also carry temporary clickable links that set the signals and
+// dispatch zing-nav, so navigation is testable now without the keyboard
+// module"). Each one dispatches zing-nav on #stream-ctl itself, the exact
+// bridge design section 6.3 gives console.js, so navigation goes through
+// the one authoritative trigger element from day one, not a shortcut around
+// it.
+templ Nav(projects []store.Project, threads []NavThread) {
+	<nav id="nav">
+		<section class="nav-views">
+			@navLink("inbox", 0, 0, "Inbox")
+			@navLink("recent", 0, 0, "Recent")
+			@navLink("feed", 0, 0, "Feed")
+		</section>
+		<section class="nav-projects">
+			<h2>Projects</h2>
+			if len(projects) == 0 {
+				<p class="empty">No projects yet.</p>
+			} else {
+				for _, p := range projects {
+					@navLink("project", 0, p.ID, p.Name)
+				}
+			}
+		</section>
+		<section class="nav-threads">
+			<h2>Threads</h2>
+			if len(threads) == 0 {
+				<p class="empty">All clear.</p>
+			} else {
+				for _, th := range threads {
+					@threadLink(th)
+				}
+			}
+		</section>
+	</nav>
+}
+
+// navLink is one clickable navigation link: shared by the view switcher and
+// the project list, the two navigations that carry no per-thread badge.
+templ navLink(view string, open, project int64, label string) {
+	<a href="#" class="nav-link" data-on:click__prevent={ zingNavExpr(view, open, project) }>{ label }</a>
+}
+
+// threadLink is one nav-threads row: the ticket's title, opening it on
+// click, with a badge showing the waiting flag when blocking or an unread
+// dot otherwise (design section 6.8).
+templ threadLink(th NavThread) {
+	<a href="#" class="nav-link nav-thread" data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
+		<span class="title">{ th.Ticket.Title }</span>
+		if th.Blocking {
+			<span class="badge badge-blocking">
+				if th.OpenQuestionCount > 0 {
+					{ fmt.Sprintf("%s (%d)", th.WaitingOn, th.OpenQuestionCount) }
+				} else {
+					{ th.WaitingOn }
+				}
+			</span>
+		} else {
+			<span class="badge badge-unread">unread</span>
+		}
+	</a>
+}
+
+// validNavViews is the closed set of view names every call site in this
+// file passes today (Nav's three view-switcher links, its per-project
+// links, and threadLink's "thread"; matches console.viewInbox/Recent/
+// Feed/Project/Thread one for one, kept as literals here rather than
+// imported, since internal/console already imports this package and
+// importing back would cycle).
+var validNavViews = map[string]bool{
+	"inbox": true, "recent": true, "feed": true, "project": true, "thread": true,
+}
+
+// zingNavExpr builds the data-on:click expression a temporary nav link uses
+// to dispatch zing-nav on #stream-ctl (design section 6.3): the same event
+// shape console.js will dispatch from the real keyboard layer (Task 4), so
+// these links exercise the actual navigation path rather than a shortcut
+// around it.
+//
+// Every caller today passes a hardcoded literal, so view can never actually
+// carry anything but one of validNavViews' five names. Constraining it to
+// that set anyway, rather than interpolating it unescaped into the
+// single-quoted JS string below, closes the injection seam a future
+// non-literal caller (a view name threaded through from a query parameter,
+// say) would otherwise open: an out-of-set view renders no click handler at
+// all, an inert link over emitting broken or attacker-controlled JS.
+func zingNavExpr(view string, open, project int64) string {
+	if !validNavViews[view] {
+		return ""
+	}
+	return fmt.Sprintf(
+		"document.getElementById('stream-ctl').dispatchEvent(new CustomEvent('zing-nav',{detail:{view:'%s',open:%d,project:%d}}))",
+		view, open, project,
+	)
+}

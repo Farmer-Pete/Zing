@@ -1,0 +1,177 @@
+package templates
+
+import "strconv"
+
+// Rail renders the #rail region (design section 6.3, 6.11). model is nil
+// for every non-thread view and for a thread with no open ticket (view !=
+// thread, or open == 0, or the ticket names no row): the same empty shell
+// Task 3 built, so every /stream frame still patches #rail to something,
+// clearing a stale rail the instant the client leaves a thread. A non-nil
+// model renders the four rail sections plus the side box, in the mock's
+// order (design section 6.11: "Phase ... Artifacts ... Run ... Log ... Side
+// box").
+templ Rail(model *RailModel) {
+	<aside id="rail">
+		if model != nil {
+			@phaseRail(model.Phase)
+			@artifactsRail(model.Artifacts)
+			@runRail(model.Run)
+			@logRail(model.Log)
+			@sideBox()
+		}
+	</aside>
+}
+
+// phaseRail draws machine.States.Order as dots (design section 6.11):
+// states before the ticket's state are done, its own state is now (shown
+// with a "waiting" pill when the ticket's waiting_on is set), and later
+// states are upcoming. An empty dots slice (console.buildPhaseRail's result
+// when the console holds no machine) renders the section heading with
+// nothing under it, rather than omitting the section.
+templ phaseRail(dots []PhaseDot) {
+	<section class="rail-phase">
+		<h3>Phase</h3>
+		<div class="phase-dots">
+			for _, d := range dots {
+				<span class={ "phase-dot phase-" + d.Status } data-phase-state={ d.State }>
+					{ d.State }
+					if d.Status == "now" && d.Waiting {
+						<span class="pill pill-waiting">waiting</span>
+					}
+				</span>
+			}
+		</div>
+	</section>
+}
+
+// artifactsRail renders the mock's seven labeled artifact slots (design
+// section 6.11): a present artifact's version, opened inline through a
+// <details> disclosure showing its stored payload (views.go's doc comment
+// on PayloadText explains why this is in-page rather than a link to a
+// dedicated route); an absent slot's "after <phase>" placeholder otherwise.
+templ artifactsRail(slots []ArtifactSlot) {
+	<section class="rail-artifacts">
+		<h3>Artifacts</h3>
+		for _, slot := range slots {
+			<div class="artifact-slot">
+				<span class="artifact-label">{ slot.Label }</span>
+				if slot.Present {
+					<details class="artifact-open">
+						<summary>v{ strconv.Itoa(slot.Version) }</summary>
+						<pre class="artifact-payload">{ slot.PayloadText }</pre>
+					</details>
+				} else {
+					<span class="empty">after { slot.AfterPhase }</span>
+				}
+			</div>
+		}
+	</section>
+}
+
+// runRail renders the newest session's newest run (design section 6.11):
+// Model, Agent time, Attempts, Worktree, Branch. Every field arrives
+// pre-formatted (console.buildRunRail, rail.go), including the "-" for a
+// value this package cannot supply (Worktree, Branch) or a fixture run
+// leaves nil (Model, AgentTime).
+templ runRail(run RunRail) {
+	<section class="rail-run">
+		<h3>Run</h3>
+		<dl class="run-fields">
+			<dt>Model</dt>
+			<dd>{ run.Model }</dd>
+			<dt>Agent time</dt>
+			<dd>{ run.AgentTime }</dd>
+			<dt>Attempts</dt>
+			<dd>{ run.Attempts }</dd>
+			<dt>Worktree</dt>
+			<dd>{ run.Worktree }</dd>
+			<dt>Branch</dt>
+			<dd>{ run.Branch }</dd>
+		</dl>
+	</section>
+}
+
+// logLevelOptions is POST /loglevel's closed set (design section 6.12,
+// console.ParseLogLevel, control.go), in the fixed order the level select
+// renders them.
+var logLevelOptions = []string{"debug", "info", "warn", "error"}
+
+// logRail renders the Log section (design section 6.11, 6.12): a level
+// select and a debug toggle affordance for the open ticket -- console.js
+// wires both to POST /loglevel and POST /debug -- above the ring buffer's
+// tail, filtered to the open ticket's own run_ids and pre-formatted by
+// console.buildLogRail (rail.go), oldest first. An empty Lines renders a
+// placeholder rather than an empty list.
+templ logRail(log LogRail) {
+	<section class="rail-log">
+		<h3>Log</h3>
+		<div class="log-controls">
+			<select class="log-level-select" aria-label="Log level">
+				for _, lvl := range logLevelOptions {
+					if lvl == log.Level {
+						<option value={ lvl } selected>{ lvl }</option>
+					} else {
+						<option value={ lvl }>{ lvl }</option>
+					}
+				}
+			</select>
+			<button type="button" class="log-debug-toggle">
+				if log.Debug {
+					Debug: on
+				} else {
+					Debug: off
+				}
+			</button>
+		</div>
+		if len(log.Lines) == 0 {
+			<p class="empty">No log lines yet.</p>
+		} else {
+			<ul class="log-lines">
+				for _, line := range log.Lines {
+					<li class={ "log-line log-level-" + line.Level }>
+						<span class="log-time">{ line.Time }</span>
+						<span class="log-level">{ line.Level }</span>
+						<span class="log-message">{ line.Message }</span>
+					</li>
+				}
+			</ul>
+		}
+	</section>
+}
+
+// sideBox renders the inert side box (design section 6.11, 7.1): a text
+// area and a submit, focusable by the b key. console.js's focusSideBox
+// (Task 4) already selects ".side-box textarea, .side-box input" ahead of
+// this task building the box itself, so this markup matches that selector
+// rather than introducing a second, inconsistent id. Its submit posts to
+// POST /side; console.js's postSide (this task) swaps #side-reply's
+// outerHTML with the response instead of waiting for the live stream,
+// since the side box never touches a run or posts to the thread (design
+// section 6.11: "It never touches a run and never posts to the thread").
+templ sideBox() {
+	<section class="rail-side side-box">
+		<h3>Side</h3>
+		<textarea placeholder="Ask the side agent..." aria-label="Ask the side agent" rows="3"></textarea>
+		<button type="submit">Send</button>
+		@SideReply("")
+	</section>
+}
+
+// SideReply renders the side box's reply slot: empty on first paint, or
+// POST /side's fixed inert text after a submit (design section 6.11: "a
+// fixed inert reply ... rendered in the rail"). handleSide (rail.go) renders
+// this same component as POST /side's entire response body, and
+// console.js's postSide replaces #side-reply's outerHTML with it verbatim.
+//
+// Known limitation (code review, PR #16): the next /stream frame's rail
+// patch re-renders #rail from RailModel, which calls sideBox -> SideReply("")
+// with no memory of what was just posted, so an inert reply set by postSide
+// disappears on the next patch rather than staying until the user clears it.
+// Fixing this for real needs the server to hold the last side-reply text
+// somewhere (RailModel, rail.go), which is outside this pass's frontend-only
+// scope; left as a known gap rather than reached for.
+templ SideReply(text string) {
+	<div id="side-reply" class="side-reply">
+		{ text }
+	</div>
+}

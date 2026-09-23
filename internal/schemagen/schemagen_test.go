@@ -16,21 +16,23 @@ var update = flag.Bool("update", false, "update the committed schema files in in
 
 const schemaDir = "../store/schemas"
 
-func TestRegistry_Has16Entries(t *testing.T) {
+func TestRegistry_Has17Entries(t *testing.T) {
 	t.Parallel()
 
 	entries := Registry()
-	if len(entries) != 16 {
-		t.Fatalf("len(Registry()) = %d, want 16", len(entries))
+	if len(entries) != 17 {
+		t.Fatalf("len(Registry()) = %d, want 17", len(entries))
 	}
 
-	var messages, artifacts int
+	var messages, artifacts, pushSubscriptions int
 	for _, e := range entries {
 		switch e.Table {
 		case "messages":
 			messages++
 		case "artifacts":
 			artifacts++
+		case "push_subscriptions":
+			pushSubscriptions++
 		default:
 			t.Errorf("unexpected table %q for %s", e.Table, e.Name)
 		}
@@ -40,6 +42,9 @@ func TestRegistry_Has16Entries(t *testing.T) {
 	}
 	if artifacts != 12 {
 		t.Errorf("artifacts entries = %d, want 12", artifacts)
+	}
+	if pushSubscriptions != 1 {
+		t.Errorf("push_subscriptions entries = %d, want 1", pushSubscriptions)
 	}
 }
 
@@ -189,7 +194,7 @@ func TestEnumMapper_EmitsExactEnum(t *testing.T) {
 	}
 }
 
-// enumFieldTests names one representative field, inside one of the 16
+// enumFieldTests names one representative field, inside one of the 17
 // generated STORED schemas, for every enum type that actually appears as a
 // field in a stored payload. TestEnumMapper_EmitsExactEnum above reflects
 // each enum type at the schema root; this test instead inspects the real
@@ -198,7 +203,7 @@ func TestEnumMapper_EmitsExactEnum(t *testing.T) {
 // property) cannot slip past the root-only check.
 //
 // ErrorCode, Job, and Outcome are Go enum types with a Values() method, but
-// none of them is a field on any of the 16 stored types: ErrorCode and Job
+// none of them is a field on any of the 17 stored types: ErrorCode and Job
 // only appear on RunError and Head, and Outcome only appears on Head, and
 // none of the response-wrapper types that embed Head or RunError are
 // stored types (see the schemagen.Registry doc comment). So those three

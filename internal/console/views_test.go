@@ -1,0 +1,523 @@
+package console_test
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"zing/internal/bus"
+	"zing/internal/console"
+	"zing/internal/store"
+)
+
+// otherProject is a second project, distinct from testProject, so the
+// Inbox grouping test can prove groups cluster by project rather than by
+// insertion order.
+var otherProject = store.Project{
+	Name: "other", RepoURL: "https://github.com/x/other", LocalPath: "/tmp/other", Tracker: testTrackerGitHub,
+}
+
+// mainFrame opens one /stream connection for (view, open, project), reads
+// its three initial frames, and returns just the #main one: the seam every
+// test in this file reads a view's rendered content through (design
+// section 11, "views": "real store").
+func mainFrame(t *testing.T, base, view string, open, project int64) string {
+	t.Helper()
+	resp, r, cancel := openStream(t, base, view, open, project)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _ := readInitialFrames(t, r)
+	return main
+}
+
+// mustIndex fails the test unless needle appears in haystack, and returns
+// its position so callers can compare two needles' relative order.
+func mustIndex(t *testing.T, haystack, needle string) int {
+	t.Helper()
+	i := strings.Index(haystack, needle)
+	if i < 0 {
+		t.Fatalf("wanted %q in:\n%s", needle, haystack)
+	}
+	return i
+}
+
+// TestInboxGroupsByProjectBlockingFirst proves the Inbox view groups
+// InboxItems by project under the heading of each project's
+// first-encountered item, and that within a group the store's own
+// blocking-first, newest-message-id-first order survives (design section
+// 6.5, 7.2).
+//
+// Two blocking tickets (one per project) and one unread-only ticket are
+// seeded so that store.InboxItems' own order (blocking first, then newest
+// message id descending) interleaves the two projects: ticketB1 (project
+// "other") gets the newer question, so it sorts before ticketA1 (project
+// "acme"), and ticketA2 (project "acme", unread only) sorts last of the
+// three but still lands in the "acme" group opened by ticketA1.
+func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketA1 := seedTicketIn(t, s, testProject, "acme#1", "A1 blocking")
+	seedOpenQuestion(t, s, ticketA1)
+
+	ticketB1 := seedTicketIn(t, s, otherProject, "other#1", "B1 blocking")
+	seedOpenQuestion(t, s, ticketB1)
+
+	ticketA2 := seedTicketIn(t, s, testProject, "acme#2", "A2 unread")
+	seedUnreadUpdate(t, s, ticketA2, "an update")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "inbox", 0, 0)
+
+	otherHeading := mustIndex(t, main, ">other<")
+	acmeHeading := mustIndex(t, main, ">acme<")
+	if otherHeading > acmeHeading {
+		t.Errorf("expected the \"other\" project group (newer blocking ticket) before \"acme\"; got:\n%s", main)
+	}
+
+	a1 := mustIndex(t, main, "A1 blocking")
+	a2 := mustIndex(t, main, "A2 unread")
+	if a1 > a2 {
+		t.Errorf("expected A1 (blocking) before A2 (unread only) within the acme group; got:\n%s", main)
+	}
+	if a1 < acmeHeading {
+		t.Errorf("expected A1 to render under the acme heading, not before it; got:\n%s", main)
+	}
+
+	// The exact class="ib-thread" attribute, not a bare substring match:
+	// "ib-thread" is also a substring of the row div's class="ib-thread-row",
+	// which would otherwise double-count every card.
+	if got := strings.Count(main, `class="ib-thread"`); got != 3 {
+		t.Errorf("ib-thread card count = %d, want 3; got:\n%s", got, main)
+	}
+	if got := strings.Count(main, `class="ib-q"`); got != 2 {
+		t.Errorf("ib-q row count = %d, want 2 (one per blocking ticket's open question); got:\n%s", got, main)
+	}
+}
+
+// TestRecentOrdersByNewestMessageThenNoMessageLast proves Recent's order:
+// newest message id descending, a ticket with no message sorting last
+// (design section 7.2).
+func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	seedTicket(t, s, "r#1", "Ticket X no messages")
+	ticketY := seedTicket(t, s, "r#2", "Ticket Y older message")
+	seedStateMessage(t, s, ticketY, "queued", "planning", "start Y")
+	ticketZ := seedTicket(t, s, "r#3", "Ticket Z newer message")
+	seedStateMessage(t, s, ticketZ, "queued", "planning", "start Z")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "recent", 0, 0)
+
+	z := mustIndex(t, main, "Ticket Z newer message")
+	y := mustIndex(t, main, "Ticket Y older message")
+	x := mustIndex(t, main, "Ticket X no messages")
+	if z >= y || y >= x {
+		t.Errorf("expected order Z, Y, X (newest message first, no-message ticket last); got:\n%s", main)
+	}
+}
+
+// TestFeedOrdersNewestMessageFirst proves Feed renders the newest messages
+// across every ticket, newest first by id (design section 7.2).
+func TestFeedOrdersNewestMessageFirst(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketID := seedTicket(t, s, "f#1", "Feed ticket")
+	seedUnreadUpdate(t, s, ticketID, "first update")
+	seedUnreadUpdate(t, s, ticketID, "second update")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	second := mustIndex(t, main, "second update")
+	first := mustIndex(t, main, "first update")
+	if second > first {
+		t.Errorf("expected the second (newer) transition before the first; got:\n%s", main)
+	}
+}
+
+// TestFeedRendersStateAndAnswerContentNotBlank proves the Feed view decodes
+// a state row's transition and a sent answer row's chosen option through
+// the same displayBody logic the Thread view already used (design section
+// 6.5, 6.6; code review fix, PR #16), rather than showing each row's raw
+// Body -- always empty for these two types, since a commit never sets a
+// state row's Body (the transition lives in Payload) and SaveDraft/
+// SendBatch never set an answer row's Body (the choice lives in Payload).
+func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketID := seedTicket(t, s, "f#3", "Feed decode ticket")
+	// A transition other than every other call site's queued->planning, so
+	// this fixture does not make seedStateMessage's from/to params look
+	// unconditionally hardcodable to golangci-lint's unparam check.
+	seedStateMessage(t, s, ticketID, "planning", "building", "start")
+
+	questionID := seedOpenQuestion(t, s, ticketID)
+	option := "b"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	if !strings.Contains(main, "planning -&gt; building") {
+		t.Errorf("feed missing the state row's decoded transition; got:\n%s", main)
+	}
+	if !strings.Contains(main, "Option: b") {
+		t.Errorf("feed missing the sent answer row's decoded option; got:\n%s", main)
+	}
+}
+
+// TestProjectScopesAndOrdersByTrackerRef proves Project shows only the
+// requested project's tickets, ordered by tracker_ref then id, regardless
+// of insertion order (design section 6.5, 7.2), and that a ticket from a
+// different project never appears.
+func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	// Inserted out of tracker_ref order (b before a) so the assertion below
+	// proves the view sorts by tracker_ref, not by insertion or id order.
+	seedTicketIn(t, s, testProject, "p#b", "Project ticket B")
+	seedTicketIn(t, s, testProject, "p#a", "Project ticket A")
+	seedTicketIn(t, s, otherProject, "p#z", "Other project's ticket")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	projects, err := s.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var projectID int64
+	for _, p := range projects {
+		if p.Name == testProject.Name {
+			projectID = p.ID
+		}
+	}
+	if projectID == 0 {
+		t.Fatalf("could not find project id for %q among %+v", testProject.Name, projects)
+	}
+
+	main := mainFrame(t, srv.URL, "project", 0, projectID)
+
+	a := mustIndex(t, main, "Project ticket A")
+	b := mustIndex(t, main, "Project ticket B")
+	if a > b {
+		t.Errorf("expected tracker_ref order (p#a before p#b); got:\n%s", main)
+	}
+	if strings.Contains(main, "Other project's ticket") {
+		t.Errorf("Project view leaked a ticket from a different project; got:\n%s", main)
+	}
+}
+
+// TestThreadRendersMessagesReadOnly proves the Thread view renders a
+// ticket's messages in id order -- a state separator, a plain row for
+// every other type, and a question as a read-only group -- with no
+// interactive chip or composer markup (design section 6.6, Task 3 scope).
+// TestThreadRendersMessagesAndInteractiveQuestionControls proves the
+// non-question rows still render exactly as Task 3 left them (a plain
+// state separator and a plain message row), and that the question's own
+// group now carries Task 6's interactive controls -- numbered option chips
+// and a free reply input -- over the option kind's data (design section
+// 6.6). TestQuestionKindsRenderTheirControls (question_kinds_test.go) is
+// the fuller, per-kind version of this; this test's job is only to prove
+// the surrounding non-question rows are undisturbed by the switch to an
+// interactive question group.
+func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketID := seedTicket(t, s, "t#1", "Thread ticket")
+	seedStateMessage(t, s, ticketID, "queued", "planning", "picked up")
+	seedUnreadUpdate(t, s, ticketID, "working on it")
+	seedOpenQuestion(t, s, ticketID)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, "Thread ticket") {
+		t.Errorf("thread frame missing the ticket title; got:\n%s", main)
+	}
+	if !strings.Contains(main, "state-separator") || !strings.Contains(main, "queued -&gt; planning") {
+		t.Errorf("thread frame missing the state separator; got:\n%s", main)
+	}
+	if !strings.Contains(main, "working on it") {
+		t.Errorf("thread frame missing the update row's body; got:\n%s", main)
+	}
+	if !strings.Contains(main, "How should the greeting read?") {
+		t.Errorf("thread frame missing the question's title; got:\n%s", main)
+	}
+	if !strings.Contains(main, "Pick the greeting style for GET /hello.") {
+		t.Errorf("thread frame missing the question's body; got:\n%s", main)
+	}
+	if !strings.Contains(main, "Plain hello") || !strings.Contains(main, "hello, world") {
+		t.Errorf("thread frame missing both option labels; got:\n%s", main)
+	}
+	if !strings.Contains(main, "waiting on you") {
+		t.Errorf("thread frame missing the open question's pill label; got:\n%s", main)
+	}
+
+	// Interactive: the question kind (an option kind) renders two numbered
+	// chips and a free reply input wired to console.js's postDraft contract
+	// (design section 6.6, 6.4; Task 6 supersedes Task 3's read-only group).
+	if !strings.Contains(main, `data-chip-index="1"`) || !strings.Contains(main, `data-chip-index="2"`) {
+		t.Errorf("thread frame missing the question's numbered chips; got:\n%s", main)
+	}
+	if !strings.Contains(main, `class="reply-input"`) {
+		t.Errorf("thread frame missing the question's free reply input; got:\n%s", main)
+	}
+}
+
+// TestThreadAnsweredAndResolvedQuestionsRenderReadOnly proves an answered or
+// resolved question's group drops its active controls -- option chips and
+// the free reply input -- while still showing its context and lifecycle
+// pill (design section 6.6, 6.7; code review fix, PR #16: questionGroup
+// used to render those controls for every question regardless of state).
+func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#5", "Thread answered/resolved ticket")
+
+	answeredPayload := []byte(`{"key":"Q1","kind":"question","state":"answered","recommended":"a",` +
+		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
+	answeredState := "answered"
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "question", Author: "zing", State: &answeredState,
+		Body: "Answered question\n\nAlready decided.", Payload: answeredPayload,
+	}); err != nil {
+		t.Fatalf("InsertMessage(answered question): %v", err)
+	}
+
+	resolvedState := "resolved" // named once; reused below so this file's literal "resolved" stays under goconst's threshold
+	resolvedPayload := []byte(`{"key":"Q2","kind":"question","state":"` + resolvedState + `","recommended":"a",` +
+		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "question", Author: "zing", State: &resolvedState,
+		Body: "Resolved question\n\nSettled.", Payload: resolvedPayload,
+	}); err != nil {
+		t.Fatalf("InsertMessage(resolved question): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	for _, tc := range []struct {
+		name, title, pill string
+	}{
+		{"answered", "Answered question", "resuming"}, // questionStateLabel's answered->resuming mapping (views.go)
+		{resolvedState, "Resolved question", resolvedState},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := findGroup(t, groups, tc.title)
+			if strings.Contains(g, "data-chip-index") {
+				t.Errorf("%s question still renders option chips; got:\n%s", tc.name, g)
+			}
+			if strings.Contains(g, `class="reply-input"`) {
+				t.Errorf("%s question still renders the free reply input; got:\n%s", tc.name, g)
+			}
+			if !strings.Contains(g, tc.pill) {
+				t.Errorf("%s question missing its %q lifecycle pill; got:\n%s", tc.name, tc.pill, g)
+			}
+		})
+	}
+}
+
+// TestThreadGateContextRendersStoredPlan proves the seam Task 8 wires
+// (design section 6.9): a gate question's context region renders the
+// ticket's stored plan artifact in full, through the same RenderPlan path
+// plan_test.go proves field by field, rather than the Task 6 placeholder.
+func TestThreadGateContextRendersStoredPlan(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "gate#1", "Gate ticket")
+	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
+		t.Fatalf("SeedQuestionFixtures: %v", err)
+	}
+
+	payload, err := json.Marshal(fixturePlan())
+	if err != nil {
+		t.Fatalf("marshal fixture plan: %v", err)
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, Type: "plan", Payload: payload,
+	}); err != nil {
+		t.Fatalf("InsertArtifact(plan): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	gate := findGroup(t, groups, "Approve the plan?")
+
+	if !strings.Contains(gate, `class="q-context gate-context"`) {
+		t.Fatalf("gate group missing its gate-context region; got:\n%s", gate)
+	}
+	if strings.Contains(gate, "No plan stored for this ticket yet.") {
+		t.Errorf("gate context still shows the no-plan placeholder despite a stored plan; got:\n%s", gate)
+	}
+	for _, want := range []string{
+		"<h2>Overview</h2>", "<h2>Design</h2>", "<h2>Delivery</h2>", "<h2>Review</h2>",
+		"Ship a plan renderer that drops nothing.", // Overview.Objective
+		"<pre class=\"mermaid\">",                  // Design.Shape's mermaid fence
+		planMigrationFile,                          // a Migration
+	} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("gate context missing %q from the stored plan; got:\n%s", want, gate)
+		}
+	}
+}
+
+// TestThreadExcludesDraftRows proves the read-only Thread view renders only
+// posted messages: a queued-but-unsent draft answer or reply must not
+// appear (design section 6.6, 6.7, code review fix 2).
+func TestThreadExcludesDraftRows(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#2", "Thread draft ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	option := "a"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, Text: "an undrafted reply",
+	}); err != nil {
+		t.Fatalf("SaveDraft(text): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if strings.Contains(main, "an undrafted reply") {
+		t.Errorf("thread frame leaked an unsent draft reply's body; got:\n%s", main)
+	}
+	if strings.Contains(main, `class="message message-answer"`) {
+		t.Errorf("thread frame leaked an unsent draft answer row; got:\n%s", main)
+	}
+}
+
+// TestThreadRendersSentAnswerFromPayload proves a SENT answer row (design
+// section 6.6, 6.7, code review fix 2) renders its chosen option out of
+// Payload, since AnswerPayload messages never carry a Body: this is the
+// "pick then send" path -- SaveDraft's option mode (what a fixed chip
+// activation posts), then SendBatch -- rendering something visible, not
+// the blank row the bug left behind.
+func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#3", "Thread sent answer ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	option := "b"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, "Option: b") {
+		t.Errorf("thread frame missing the sent answer's chosen option; got:\n%s", main)
+	}
+}
+
+// TestFeedExcludesDraftMessages proves the Feed view (design section 6.5,
+// 7.2) shows only sent messages, not a queued-but-unsent draft (code review
+// fix 2).
+func TestFeedExcludesDraftMessages(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "f#2", "Feed draft ticket")
+	seedUnreadUpdate(t, s, ticketID, "a real feed update")
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, Text: "a queued draft reply",
+	}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	if !strings.Contains(main, "a real feed update") {
+		t.Errorf("feed missing the real, sent update; got:\n%s", main)
+	}
+	if strings.Contains(main, "a queued draft reply") {
+		t.Errorf("feed leaked an unsent draft row; got:\n%s", main)
+	}
+}
+
+// TestInboxOrdersByNewestSentMessageIgnoringDrafts proves InboxItems' sort
+// and its newest-message display time are computed off each ticket's
+// newest SENT message, not a later, still-queued draft (design section 7.2,
+// code review fix 2): a draft's higher message id must not let its ticket
+// jump ahead of one whose real message is newer. ticketA's real update (id
+// 1) precedes ticketB's (id 2), but ticketA's draft (id 3, inserted last)
+// has the greatest id of all three; without the fix that draft would make
+// ticketA sort as the newest.
+func TestInboxOrdersByNewestSentMessageIgnoringDrafts(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	ticketA := seedTicket(t, s, "d#1", "Ticket A older real update")
+	seedUnreadUpdate(t, s, ticketA, "A's real update")
+
+	ticketB := seedTicket(t, s, "d#2", "Ticket B newer real update")
+	seedUnreadUpdate(t, s, ticketB, "B's real update")
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketA, Text: "a draft reply after both real updates",
+	}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "inbox", 0, 0)
+
+	a := mustIndex(t, main, "Ticket A older real update")
+	b := mustIndex(t, main, "Ticket B newer real update")
+	if b > a {
+		t.Errorf("expected ticket B (newer real update) before ticket A despite A's later draft; got:\n%s", main)
+	}
+}
+
+// TestThreadOpenZeroOrMissingRendersEmptyThread proves the Thread view's
+// nil-ticket guard: open=0 (no ticket open, including an absent signal,
+// which ReadSignals leaves at its zero value) or an id naming no ticket
+// both render the empty placeholder rather than erroring (design section
+// 6.6, carried over from Package 3's patchThread guard).
+func TestThreadOpenZeroOrMissingRendersEmptyThread(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	cases := []struct {
+		name string
+		open int64
+	}{
+		{"zero", 0},
+		{"missing ticket", 999999},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			main := mainFrame(t, srv.URL, "thread", tc.open, 0)
+			if !strings.Contains(main, `id="main"`) {
+				t.Errorf("GET /stream(view=thread,open=%d) frame missing #main; got:\n%s", tc.open, main)
+			}
+			if !strings.Contains(main, "Select a ticket.") {
+				t.Errorf("GET /stream(view=thread,open=%d) frame missing the empty placeholder; got:\n%s", tc.open, main)
+			}
+		})
+	}
+}

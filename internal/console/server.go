@@ -1,23 +1,30 @@
-// Package console serves the console (design section 6.9): a ticket list
-// and one ticket's messages, live over two Server-Sent Events streams, plus
-// the open-question block and POST /answer for recording a chosen option.
+// Package console serves the console (design section 6.3): the shell page,
+// one live GET /stream per tab that patches the #nav, #main, and #rail
+// regions, and the composer's POST /draft, /send, and /read (design section
+// 6.7, 6.8). Every page and fragment renders through the templ components
+// in internal/console/templates (design section 6.2); there is no
+// html/template use in this package.
 package console
 
 import (
-	"embed"
+	_ "embed"
 	"errors"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"zing/internal/bus"
+	"zing/internal/machine"
 	"zing/internal/store"
 )
 
-// contentTypeJS is the MIME type the vendored Datastar bundle is served
-// with; named once so goconst has nothing to flag.
-const contentTypeJS = "text/javascript"
+// contentTypeJS and contentTypeJSON are the MIME types the vendored and
+// authored static assets are served with; named once so goconst has
+// nothing to flag.
+const (
+	contentTypeJS   = "text/javascript"
+	contentTypeJSON = "application/json"
+)
 
 // nonStreamWriteDeadline bounds how long one of the non-streaming routes
 // has to finish writing its response (design section 6.10). It must never
@@ -25,44 +32,120 @@ const contentTypeJS = "text/javascript"
 // bound on purpose (datastar skill, "Long-lived streams").
 const nonStreamWriteDeadline = 5 * time.Second
 
+// The five public static assets (design section 5, 12): the vendored
+// Datastar bundle (Package 3), the vendored mermaid.js (static/ASSETS.md
+// records its source, version, and digest), and three assets authored in
+// this repo (console.js, keyboard.mjs, keys.json are Task 1 skeletons or
+// placeholders; Task 4 fills them in for real). Each is embedded by its
+// own exact path, never as a directory tree, so the mux below can register
+// an explicit allowlist: console.test.js, package.json, and ASSETS.md have
+// no route and so 404, the same as any other unlisted path under /static/.
+//
 //go:embed static/datastar.js
 var datastarJS []byte
 
-//go:embed templates/*.gohtml
-var templatesFS embed.FS
+//go:embed static/mermaid.js
+var mermaidJS []byte
 
-// tmpl holds every named template in templates/*.gohtml, parsed once at
-// package init. html/template escapes every dynamic value it renders, so no
-// message body or ticket title can inject markup into the page.
-var tmpl = template.Must(template.ParseFS(templatesFS, "templates/*.gohtml"))
+//go:embed static/console.js
+var consoleJS []byte
+
+//go:embed static/keyboard.mjs
+var keyboardMJS []byte
+
+//go:embed static/keys.json
+var keysJSON []byte
 
 // console holds the read access every handler needs: the store to render
-// from and the bus every SSE stream subscribes to for its wake-up signal.
+// from, the bus every SSE stream subscribes to for its wake-up signal, the
+// machine (nilable) the rail's Phase section reads States.Order from
+// (design section 6.1, 6.11), and log, the Task 5 slog.Handler (design
+// section 6.12) cmd/zing installs as slog's default and this package reads
+// from and mutates live: the Log rail's tail (rail.go's buildLogRail) and
+// POST /loglevel and /debug (control.go). A nil machine (every test that
+// does not exercise the rail passes one) renders no phase dots rather than
+// panicking (rail.go's buildPhaseRail); log has no such nil case, since
+// every caller of New, including every test, now builds one (design
+// section 12, Task 10). push and pushToken back GET /push/key and POST
+// /push/subscribe (push.go, design section 6.13): push is nilable the same
+// way machine is, for a test that never exercises those two routes.
 type console struct {
-	store *store.Store
-	bus   *bus.Broker
+	store     *store.Store
+	bus       *bus.Broker
+	machine   *machine.Machine
+	log       *Handler
+	push      PushKeys
+	pushToken string
 }
 
 // New builds the console and returns it as an http.Handler:
 //
-//	GET  /                   the shell page
-//	GET  /updates             the ticket-list SSE stream
-//	GET  /thread?id=<n>       one ticket's message-thread SSE stream
-//	POST /answer              record the chosen option for an open question
-//	GET  /static/datastar.js  the vendored Datastar bundle
+//	GET  /                     the shell page
+//	GET  /stream                the one live SSE stream per tab (design section 6.3)
+//	POST /draft                 save one draft answer or reply (design section 6.7)
+//	POST /send                  send the ticket's drafted batch (design section 6.7)
+//	POST /read                  mark one message read (design section 6.8)
+//	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
+//	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
+//	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
+//	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
+//	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
+//	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
+//	GET  /static/datastar.js    the vendored Datastar bundle
+//	GET  /static/mermaid.js     the vendored mermaid bundle
+//	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
+//	GET  /static/keyboard.mjs   the console's pure keyboard logic (Task 1 skeleton)
+//	GET  /static/keys.json      the keyboard binding table (Task 1 placeholder)
+//
+// /static/ is an explicit allowlist of exactly those five assets (design
+// section 5, 12): every other path, including console.test.js, package.json,
+// and ASSETS.md, has no registered route and so 404s from the mux itself.
+//
+// hosts and port build the mutation guard's Host allowlist (mw.go, design
+// section 6.14): every entry in hosts, plus localhost and 127.0.0.1, each
+// at port. cmd/zing/serve.go builds hosts from every resolved console.bind
+// authority plus Console.AllowedHosts (design section 6.14, Task 11).
+//
+// log is the Task 5 slog.Handler (log.go): cmd/zing builds it, seeds its
+// LevelVar from settings.log_level, and installs it as slog's default
+// before calling New (design section 6.12, cmd/zing/serve.go), so this
+// same instance backs both the process's own logging and the console's
+// live level control, per-ticket debug toggle, and Log rail tail.
+//
+// push and pushToken back GET /push/key and POST /push/subscribe (push.go,
+// design section 6.13): push may be nil for a caller (most tests) that
+// never exercises those two routes.
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
-// BaseContext and shutdown sequence (Task 5c, design section 6.10).
-func New(st *store.Store, b *bus.Broker) http.Handler {
-	c := &console{store: st, bus: b}
+// BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string) http.Handler {
+	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken}
+	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", withWriteDeadline(c.handleIndex))
-	mux.HandleFunc("GET /updates", c.handleUpdates) // streaming: no write deadline
-	mux.HandleFunc("GET /thread", c.handleThread)   // streaming: no write deadline
-	mux.HandleFunc("POST /answer", withWriteDeadline(requireSameOrigin(c.handleAnswer)))
-	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(handleStatic))
+	mux.HandleFunc("GET /{$}", withWriteDeadline(guard.requireAllowedHost(c.handleIndex)))
+	mux.HandleFunc("GET /stream", guard.requireAllowedHost(c.handleStream)) // streaming: no write deadline
+	mux.HandleFunc("POST /draft", withWriteDeadline(guard.requireSameOrigin(c.handleDraft)))
+	mux.HandleFunc("POST /send", withWriteDeadline(guard.requireSameOrigin(c.handleSend)))
+	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
+	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
+	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
+	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
+	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
+	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
+	// POST /push/subscribe is token-only (push.go's checkPushToken), not
+	// behind the same-origin guard: a phone subscribing is authenticated by
+	// the bearer token it was handed, not by browser same-origin, and its
+	// MagicDNS host need not be in allowed_hosts. This matches GET
+	// /push/key, already token-only for the same reason (design section
+	// 6.13).
+	mux.HandleFunc("POST /push/subscribe", withWriteDeadline(c.handlePushSubscribe))
+	mux.HandleFunc("GET /static/datastar.js", withWriteDeadline(staticAsset(datastarJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/mermaid.js", withWriteDeadline(staticAsset(mermaidJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/console.js", withWriteDeadline(staticAsset(consoleJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/keyboard.mjs", withWriteDeadline(staticAsset(keyboardMJS, contentTypeJS)))
+	mux.HandleFunc("GET /static/keys.json", withWriteDeadline(staticAsset(keysJSON, contentTypeJSON)))
 	return mux
 }
 
@@ -70,11 +153,11 @@ func New(st *store.Store, b *bus.Broker) http.Handler {
 // deadline set through http.ResponseController, so a stalled write cannot
 // hang a connection open indefinitely (design section 6.10). It must wrap
 // only the non-streaming routes: New (above) is the one place that knows
-// which routes stream and which do not, so the SSE handlers never get
-// wrapped here, matching the two handlers' own SetWriteDeadline(time.Time{})
-// call that clears any deadline before they start writing.
+// which routes stream and which do not, so /stream never gets wrapped
+// here, matching its own SetWriteDeadline(time.Time{}) call that clears any
+// deadline before it starts writing.
 //
-// http.ErrNotSupported is not fatal here, unlike in the SSE handlers: it
+// http.ErrNotSupported is not fatal here, unlike in the streaming handler: it
 // means w does not implement the optional deadline interface at all, which
 // on a real connection never happens (net/http's own ResponseWriter always
 // does) and only arises when a handler is driven directly against an
@@ -94,46 +177,16 @@ func withWriteDeadline(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// datastarRequestHeader is the header every Datastar backend action sends
-// (datastar skill, attributes.md: "All backend actions send a
-// Datastar-Request: true header"). A plain cross-site form POST cannot set a
-// custom header without triggering a CORS preflight, so requiring it here
-// rules out that attack shape even when Sec-Fetch-Site is absent.
-const datastarRequestHeader = "Datastar-Request"
-
-// requireSameOrigin guards a mutating route against a cross-site request
-// forgery (CWE-352, design section "Console" fix 2): a cross-site fetch sent
-// as text/plain under no-cors mode still reaches datastar.ReadSignals, since
-// it decodes whatever body arrived without checking its declared content
-// type, so without this guard a hostile page could POST a crafted body to
-// /answer using the visitor's own session and silently answer an open
-// question. The check rejects the request with 403 unless both hold: the
-// Sec-Fetch-Site header, when the browser sends one, is "same-origin" or
-// "none" (a same-origin fetch, or a request with no meaningful origin, such
-// as a curl call or an older browser); and the Datastar-Request header is
-// present and "true", which the SDK always sets on every backend action but
-// a simple cross-origin form POST cannot set without a CORS preflight the
-// browser would block first.
-func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
-			http.Error(w, "cross-site request rejected", http.StatusForbidden)
-			return
+// staticAsset returns a handler serving one embedded static asset with a
+// fixed content type. Every asset served this way is either vendored and
+// reviewed once, not fetched at runtime (datastar.js, mermaid.js; design
+// section 0, dependency set, and static/ASSETS.md), or authored in this
+// repo (console.js, keyboard.mjs, keys.json).
+func staticAsset(body []byte, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		if _, err := w.Write(body); err != nil {
+			slog.Error("console: write static asset", "content_type", contentType, "err", err)
 		}
-		if r.Header.Get(datastarRequestHeader) != "true" {
-			http.Error(w, "cross-site request rejected", http.StatusForbidden)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// handleStatic serves the embedded, vendored Datastar bundle. It is not
-// fetched at runtime; the file is reviewed and copied into static/ once
-// (design section 0, dependency set).
-func handleStatic(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", contentTypeJS)
-	if _, err := w.Write(datastarJS); err != nil {
-		slog.Error("console: write static bundle", "err", err)
 	}
 }

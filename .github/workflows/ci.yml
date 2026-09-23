@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22" # LTS; make ci runs test-js (node --test) against internal/console/static
       - name: Install golangci-lint
         # The script is fetched from an immutable commit, and it verifies the binary against the release checksums.
         run: curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/$GOLANGCI_LINT_COMMIT/install.sh" | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"

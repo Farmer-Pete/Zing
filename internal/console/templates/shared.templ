@@ -1,0 +1,31 @@
+package templates
+
+import (
+	"fmt"
+
+	"zing/internal/store"
+)
+
+// statePill renders a ticket's compact state indicator: its bare state, or
+// "state · waiting_on" when blocking (design section 6.5). Reused across
+// Inbox, Recent, and Project -- three call sites, this file's one
+// abstraction (repo style: "three repetitions before an abstraction").
+templ statePill(t store.Ticket) {
+	if t.WaitingOn != nil {
+		<span class="pill pill-waiting">{ t.State } · { *t.WaitingOn }</span>
+	} else {
+		<span class="pill">{ t.State }</span>
+	}
+}
+
+// ticketRow renders one read-only ticket line: ref, title, and its state
+// pill. Recent and Project share it (design section 6.5, Q3: both are
+// "real but thin" and "reuse the inbox row renderer"); Feed renders
+// messages, not tickets, so it does not use this.
+templ ticketRow(t store.Ticket) {
+	<div class="ticket-row" data-focus-id={ fmt.Sprintf("ticket:%d", t.ID) }>
+		<span class="ref">{ t.TrackerRef }</span>
+		<span class="title">{ t.Title }</span>
+		@statePill(t)
+	</div>
+}
