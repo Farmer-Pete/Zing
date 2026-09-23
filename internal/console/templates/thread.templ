@@ -73,7 +73,7 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		}
 		switch row.Question.Kind {
 			case string(response.QuestionKindGate):
-				@gateContext()
+				@gateContext(row.Question.Plan)
 				@optionChips(ticketID, row.ID, row.Question.Options)
 			case string(response.QuestionKindSplit):
 				@splitContext()
@@ -90,13 +90,20 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 	</details>
 }
 
-// gateContext is the gate kind's context region (design section 6.6, Task 6
-// scope note: "the plan via the Task 8 renderer is not ready yet, so render
-// the plan/scenarios/decisions area as a placeholder region that Task 8
-// fills"). Its class and data-context name are the seam Task 8 renders into.
-templ gateContext() {
+// gateContext is the gate kind's context region (design section 6.6, 6.9):
+// the ticket's stored plan, rendered in full by plan.templ's PlanView, or a
+// placeholder when the ticket has no plan artifact yet (a gate question can
+// only exist once a plan does, but the artifact read is defensive, matching
+// mergeContext's own "No PR yet." fallback for a value that is not always
+// there). Its class and data-context name are the seam Task 6 reserved and
+// Task 8 now fills.
+templ gateContext(plan *RenderedPlan) {
 	<div class="q-context gate-context" data-context="plan">
-		<p class="placeholder">The plan, scenarios, and decisions render here once the plan renderer (Task 8) is wired.</p>
+		if plan != nil {
+			@PlanView(*plan)
+		} else {
+			<p class="placeholder">No plan stored for this ticket yet.</p>
+		}
 	</div>
 }
 

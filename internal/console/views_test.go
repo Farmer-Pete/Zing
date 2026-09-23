@@ -1,6 +1,7 @@
 package console_test
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -240,6 +241,53 @@ func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 	}
 	if !strings.Contains(main, `class="reply-input"`) {
 		t.Errorf("thread frame missing the question's free reply input; got:\n%s", main)
+	}
+}
+
+// TestThreadGateContextRendersStoredPlan proves the seam Task 8 wires
+// (design section 6.9): a gate question's context region renders the
+// ticket's stored plan artifact in full, through the same RenderPlan path
+// plan_test.go proves field by field, rather than the Task 6 placeholder.
+func TestThreadGateContextRendersStoredPlan(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "gate#1", "Gate ticket")
+	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
+		t.Fatalf("SeedQuestionFixtures: %v", err)
+	}
+
+	payload, err := json.Marshal(fixturePlan())
+	if err != nil {
+		t.Fatalf("marshal fixture plan: %v", err)
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, Type: "plan", Payload: payload,
+	}); err != nil {
+		t.Fatalf("InsertArtifact(plan): %v", err)
+	}
+
+	srv := httptest.NewServer(console.New(s, bus.New(), testBindHost, testConsolePort))
+	defer srv.Close()
+
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	gate := findGroup(t, groups, "Approve the plan?")
+
+	if !strings.Contains(gate, `class="q-context gate-context"`) {
+		t.Fatalf("gate group missing its gate-context region; got:\n%s", gate)
+	}
+	if strings.Contains(gate, "No plan stored for this ticket yet.") {
+		t.Errorf("gate context still shows the no-plan placeholder despite a stored plan; got:\n%s", gate)
+	}
+	for _, want := range []string{
+		"<h2>Overview</h2>", "<h2>Design</h2>", "<h2>Delivery</h2>", "<h2>Review</h2>",
+		"Ship a plan renderer that drops nothing.", // Overview.Objective
+		"<pre class=\"mermaid\">",                  // Design.Shape's mermaid fence
+		planMigrationFile,                          // a Migration
+	} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("gate context missing %q from the stored plan; got:\n%s", want, gate)
+		}
 	}
 }
 

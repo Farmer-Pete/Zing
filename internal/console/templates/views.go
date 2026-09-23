@@ -59,10 +59,12 @@ type ThreadItem struct {
 // the Task 5 Render helper, so this package never imports html/template of
 // its own), its kind (dispatching the control thread.templ renders: option
 // chips for the four option kinds, item rows for the two item kinds), its
-// options or items, a pill label for its lifecycle state, and PRURL, the
-// merge kind's minimal context (design section 12, Task 6 scope: gate's and
-// split's context are later tasks' placeholders; merge's is already on the
-// Ticket row, so it renders for real).
+// options or items, a pill label for its lifecycle state, PRURL, the merge
+// kind's minimal context (design section 12, Task 6 scope: merge's is
+// already on the Ticket row, so it renders for real), and Plan, the gate
+// kind's context (design section 6.9, Task 8): the ticket's stored plan
+// artifact, pre-rendered by internal/console/plan.go, or nil when none is
+// stored yet.
 type ThreadQuestion struct {
 	Key, Title      string
 	Kind            string
@@ -73,7 +75,8 @@ type ThreadQuestion struct {
 	Items           []ThreadItem
 	StateLabel      string
 	MessageCount    int
-	PRURL           string // merge kind only; empty when the ticket has no PR link yet
+	PRURL           string        // merge kind only; empty when the ticket has no PR link yet
+	Plan            *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 }
 
 // ThreadRow is one message the read-only Thread view renders: a state
