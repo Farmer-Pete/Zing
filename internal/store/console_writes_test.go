@@ -48,6 +48,10 @@ func insertQuestionOfKind(t *testing.T, s *Store, ticketID int64, key string, ki
 
 var optionsAB = []response.Option{{Key: "a", Text: "Plain hello"}, {Key: "b", Text: "hello, world"}}
 
+// testReplyWhyThough is a free-reply body repeated across this file's
+// question-reply tests, named once so goconst has nothing to flag.
+const testReplyWhyThough = "why though"
+
 // insertQuestionOption is insertQuestionOfKind for the "question" kind with
 // the standard two-option payload every SaveDraft option test drives.
 func insertQuestionOption(t *testing.T, s *Store, ticketID int64, key string) int64 {
@@ -196,7 +200,7 @@ func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
 
-	qReply, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "why though"})
+	qReply, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
 	if err != nil {
 		t.Fatalf("SaveDraft (question reply): %v", err)
 	}
@@ -204,8 +208,8 @@ func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMessage(question reply): %v", err)
 	}
-	if m.Type != msgTypeReply || m.ParentID == nil || *m.ParentID != qID || m.Body != "why though" {
-		t.Errorf("question reply row = %+v, want type=reply parent_id=%d body=%q", m, qID, "why though")
+	if m.Type != msgTypeReply || m.ParentID == nil || *m.ParentID != qID || m.Body != testReplyWhyThough {
+		t.Errorf("question reply row = %+v, want type=reply parent_id=%d body=%q", m, qID, testReplyWhyThough)
 	}
 	if m.State == nil || *m.State != draftState {
 		t.Errorf("question reply state = %v, want %q", m.State, draftState)
@@ -509,6 +513,167 @@ func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
 	}
 	if sentCount != 1 || emptyCount != 1 {
 		t.Errorf("sentCount=%d emptyCount=%d, want exactly one of each (one draft, sent exactly once)", sentCount, emptyCount)
+	}
+}
+
+// TestSendBatch_ItemCompletenessAccumulatesAcrossSends proves the review-fix
+// contract: an item-kind question decided across two separate SendBatch
+// calls is marked answered, and its wait clears, once every item has a
+// decision from any send, not only the batch just sent.
+func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, string(response.QuestionKindPerimeter))
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindPerimeter, nil, items)
+
+	// Batch 1 decides only item A, and sends.
+	if _, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(a.go): %v", err)
+	}
+	res1, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (batch 1): %v", err)
+	}
+	if res1.Sent != 1 {
+		t.Errorf("batch 1 Sent = %d, want 1", res1.Sent)
+	}
+	if res1.WaitCleared {
+		t.Error("batch 1 WaitCleared = true, want false: only one of two items decided")
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage after batch 1: %v", err)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state after batch 1 = %v, want unchanged %q", q.State, questionStateOpen)
+	}
+
+	// Batch 2, a wholly separate SendBatch call, decides the remaining item B.
+	if _, err = s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionReject},
+	}); err != nil {
+		t.Fatalf("SaveDraft(b.go): %v", err)
+	}
+	res2, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (batch 2): %v", err)
+	}
+	if res2.Sent != 1 {
+		t.Errorf("batch 2 Sent = %d, want 1", res2.Sent)
+	}
+	if !res2.WaitCleared {
+		t.Error("batch 2 WaitCleared = false, want true: every item now has a decision across both sends")
+	}
+
+	q, err = s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage after batch 2: %v", err)
+	}
+	if q.State == nil || *q.State != questionStateAnswered {
+		t.Errorf("question state after batch 2 = %v, want %q (both items decided across two sends)", q.State, questionStateAnswered)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// ---- SaveDraft: reply dedupe on repeated Enter ------------------------------
+
+// TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter proves the
+// review-fix contract: two Enters on the same question-targeted free reply
+// update one draft row in place rather than accumulating a second row that
+// would send twice.
+func TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	first, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft (first Enter): %v", err)
+	}
+	if first.Replaced {
+		t.Error("first Enter: Replaced = true, want false")
+	}
+
+	second, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft (second Enter, same text): %v", err)
+	}
+	if second.MessageID != first.MessageID {
+		t.Errorf("second Enter MessageID = %d, want the same row %d", second.MessageID, first.MessageID)
+	}
+	if second.Replaced {
+		t.Error("second Enter with the same text: Replaced = true, want false")
+	}
+
+	var count int
+	if scanErr := s.db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ?`,
+		ticketID, qID, msgTypeReply,
+	).Scan(&count); scanErr != nil {
+		t.Fatalf("count reply rows: %v", scanErr)
+	}
+	if count != 1 {
+		t.Errorf("reply rows for (ticket, question) = %d, want 1 (repeated Enter must not duplicate)", count)
+	}
+
+	// A third Enter with edited text updates the same row and reports it.
+	third, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "actually, why not"})
+	if err != nil {
+		t.Fatalf("SaveDraft (edited reply): %v", err)
+	}
+	if third.MessageID != first.MessageID || !third.Replaced {
+		t.Errorf("edited reply = %+v, want MessageID=%d Replaced=true", third, first.MessageID)
+	}
+	m, err := s.GetMessage(t.Context(), first.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if m.Body != "actually, why not" {
+		t.Errorf("reply body after edit = %q, want %q", m.Body, "actually, why not")
+	}
+}
+
+// TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter is
+// TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter for an unparented
+// thread reply (QuestionID nil), which dedupes by (ticket, thread) instead
+// of (ticket, question).
+func TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	first, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, Text: "note one"})
+	if err != nil {
+		t.Fatalf("SaveDraft (first Enter): %v", err)
+	}
+
+	second, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, Text: "note one"})
+	if err != nil {
+		t.Fatalf("SaveDraft (second Enter, same text): %v", err)
+	}
+	if second.MessageID != first.MessageID || second.Replaced {
+		t.Errorf("second Enter on a thread reply = %+v, want MessageID=%d Replaced=false", second, first.MessageID)
+	}
+
+	var count int
+	if scanErr := s.db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id IS NULL AND type = ?`,
+		ticketID, msgTypeReply,
+	).Scan(&count); scanErr != nil {
+		t.Fatalf("count thread reply rows: %v", scanErr)
+	}
+	if count != 1 {
+		t.Errorf("thread reply rows for ticket = %d, want 1 (repeated Enter must not duplicate)", count)
 	}
 }
 

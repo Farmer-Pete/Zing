@@ -3,6 +3,7 @@ package notify_test
 import (
 	"encoding/base64"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"zing/internal/notify"
@@ -102,6 +103,51 @@ func TestPublicKey_NeverHalfWritesTheKeypair(t *testing.T) {
 	priv, ok, err := s.GetSetting(t.Context(), "vapid_private")
 	if err != nil || !ok || priv == "" {
 		t.Errorf("settings.vapid_private = (%q, %v, %v), want a non-empty stored value", priv, ok, err)
+	}
+}
+
+// TestPublicKey_ConcurrentCallsReturnSameKeyAndPersistOnce proves the
+// review-fix contract for PublicKey's first-run generation race (design
+// section 6.13): many concurrent first calls on one WebPush must all return
+// the exact same key, never one goroutine's key that a second goroutine's
+// concurrent generate-and-store then overwrites in the store. Run under
+// -race, it also proves generateAndStoreKeypair's writes have no data race.
+func TestPublicKey_ConcurrentCallsReturnSameKeyAndPersistOnce(t *testing.T) {
+	s := newTestStore(t)
+	w := notify.New(s)
+
+	const callers = 20
+	keys := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			keys[i], errs[i] = w.PublicKey(t.Context())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("PublicKey[%d]: %v", i, err)
+		}
+	}
+	for i := 1; i < callers; i++ {
+		if keys[i] != keys[0] {
+			t.Errorf("PublicKey[%d] = %q, want the same key every concurrent caller got (%q): "+
+				"a caller must never be handed a public key whose private half a racing generate then overwrites",
+				i, keys[i], keys[0])
+		}
+	}
+
+	stored, ok, err := s.GetSetting(t.Context(), "vapid_public")
+	if err != nil || !ok {
+		t.Fatalf("GetSetting(vapid_public) = (%q, %v, %v), want a stored key", stored, ok, err)
+	}
+	if stored != keys[0] {
+		t.Errorf("stored vapid_public = %q, want the key every PublicKey call returned (%q)", stored, keys[0])
 	}
 }
 

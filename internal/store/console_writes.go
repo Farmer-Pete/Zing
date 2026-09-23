@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"time"
 
@@ -107,7 +108,14 @@ func draftModeCount(in DraftInput) int {
 // the (ticket, question) draft's items map; a free reply on a question is a
 // reply row with parent_id=question; a free reply to the thread is a reply
 // row with no parent. All drafts are author="you", state="draft".
-func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (DraftResult, error) {
+func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResult, err error) {
+	// Named returns so one deferred call logs every branch's outcome
+	// (CLAUDE.md: "log every major branch with the ids"), without a log
+	// line at each of SaveDraft's many early returns.
+	defer func() {
+		logSaveDraftOutcome(ctx, in, result, err)
+	}()
+
 	switch n := draftModeCount(in); {
 	case n > 1:
 		return DraftResult{}, conflict("ambiguous draft mode")
@@ -127,7 +135,6 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (DraftResult, erro
 	}
 	defer rollback(tx)
 
-	var result DraftResult
 	if in.QuestionID == nil {
 		result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, nil, in.Text)
 	} else {
@@ -160,6 +167,29 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (DraftResult, erro
 		return DraftResult{}, fmt.Errorf("save draft: commit tx: %w", err)
 	}
 	return result, nil
+}
+
+// logSaveDraftOutcome logs SaveDraft's major branches with their ids
+// (CLAUDE.md: "log every major branch with the ids"): a successful save
+// reports the row it wrote or updated, and a named conflict reports its
+// reason. An unexpected (non-conflict) error is left to the caller: the
+// console handler already logs it (internal/console/answer.go), so logging
+// it again here would violate "log or return, never both". question_id logs
+// as 0 for a thread reply, which carries no question.
+func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult, err error) {
+	var questionID int64
+	if in.QuestionID != nil {
+		questionID = *in.QuestionID
+	}
+	if err != nil {
+		if ce, ok := errors.AsType[*ConflictError](err); ok {
+			slog.InfoContext(ctx, "save draft conflict",
+				"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason)
+		}
+		return
+	}
+	slog.InfoContext(ctx, "draft saved",
+		"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "replaced", result.Replaced)
 }
 
 // openQuestionForTicketTx reads questionID and returns its parsed payload,
@@ -379,16 +409,57 @@ func updateDraftPayloadTx(ctx context.Context, tx *sql.Tx, schemas *schemaSet, i
 	return nil
 }
 
-// insertReplyDraftTx inserts a draft "reply" row: parentID nil for a thread
+// findDraftReplyTx returns the ticket's existing draft "reply" row for
+// parentID (nil for a thread reply, a question id for a question-targeted
+// reply), if any: at most one can exist, since insertReplyDraftTx always
+// updates it in place rather than inserting a second one. parentID needs its
+// own IS NULL branch because SQL's parent_id = ? never matches a NULL
+// column.
+func findDraftReplyTx(ctx context.Context, tx *sql.Tx, ticketID int64, parentID *int64) (id int64, body string, found bool, err error) {
+	var row *sql.Row
+	if parentID == nil {
+		row = tx.QueryRowContext(ctx,
+			`SELECT id, body FROM messages WHERE ticket_id = ? AND parent_id IS NULL AND type = ? AND state = ?`,
+			ticketID, msgTypeReply, draftState)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`SELECT id, body FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND state = ?`,
+			ticketID, *parentID, msgTypeReply, draftState)
+	}
+	if err = row.Scan(&id, &body); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", false, nil
+		}
+		return 0, "", false, fmt.Errorf("find draft reply: %w", err)
+	}
+	return id, body, true, nil
+}
+
+// insertReplyDraftTx upserts a draft "reply" row: parentID nil for a thread
 // reply, or the question id for a question-targeted free reply (design
-// section 6.7). A reply carries no payload (messagePayloadTypes, store.go),
-// only Body.
+// section 6.7). It updates one existing draft reply row in place rather than
+// always inserting, so a repeated Enter on the same free-text reply (the
+// composer resubmits the whole draft on every keystroke commit) never
+// accumulates duplicate rows that would all send. A reply carries no payload
+// (messagePayloadTypes, store.go), only Body.
 func (s *Store) insertReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID int64, parentID *int64, text string) (DraftResult, error) {
-	if err := s.insertMessageTx(ctx, tx, Message{
+	existingID, existingBody, found, err := findDraftReplyTx(ctx, tx, ticketID, parentID)
+	if err != nil {
+		return DraftResult{}, err
+	}
+
+	if found {
+		if _, updErr := tx.ExecContext(ctx, `UPDATE messages SET body = ? WHERE id = ?`, text, existingID); updErr != nil {
+			return DraftResult{}, fmt.Errorf("save draft: update reply: %w", updErr)
+		}
+		return DraftResult{MessageID: existingID, Replaced: existingBody != text}, nil
+	}
+
+	if insErr := s.insertMessageTx(ctx, tx, Message{
 		TicketID: ticketID, ParentID: parentID, Type: msgTypeReply, Author: authorYou,
 		State: new(draftState), Body: text,
-	}); err != nil {
-		return DraftResult{}, fmt.Errorf("save draft: insert reply: %w", err)
+	}); insErr != nil {
+		return DraftResult{}, fmt.Errorf("save draft: insert reply: %w", insErr)
 	}
 	id, err := lastInsertIDTx(ctx, tx)
 	if err != nil {
@@ -420,7 +491,14 @@ func kindForWaitReason(reason string) (response.QuestionKind, bool) {
 // IMMEDIATE transaction (store.Open sets _txlock=immediate on the store's
 // one connection), so it takes the write lock before it reads and
 // max(batch_id)+1 is never racy.
-func (s *Store) SendBatch(ctx context.Context, ticketID int64) (BatchResult, error) {
+func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResult, err error) {
+	// Named returns so one deferred call logs every branch's outcome
+	// (CLAUDE.md: "log every major branch with the ids"), without a log
+	// line at each of SendBatch's early returns.
+	defer func() {
+		logSendBatchOutcome(ctx, ticketID, result, err)
+	}()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("send batch: begin tx: %w", err)
@@ -468,6 +546,28 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (BatchResult, err
 		return BatchResult{}, fmt.Errorf("send batch: commit tx: %w", err)
 	}
 	return BatchResult{Sent: len(drafts), BatchID: batchID, WaitCleared: waitCleared}, nil
+}
+
+// logSendBatchOutcome logs SendBatch's major branches with their ids
+// (CLAUDE.md: "log every major branch with the ids"): a successful send
+// reports batch_id, how many drafts it sent, and whether it cleared the
+// ticket's wait; an empty batch and a named conflict each get their own
+// line. An unexpected (non-conflict) error is left to the caller: the
+// console handler already logs it (internal/console/answer.go), so logging
+// it again here would violate "log or return, never both".
+func logSendBatchOutcome(ctx context.Context, ticketID int64, result BatchResult, err error) {
+	if err != nil {
+		if ce, ok := errors.AsType[*ConflictError](err); ok {
+			slog.InfoContext(ctx, "send batch conflict", "ticket_id", ticketID, "reason", ce.Reason)
+		}
+		return
+	}
+	if result.Empty {
+		slog.InfoContext(ctx, "send batch empty", "ticket_id", ticketID)
+		return
+	}
+	slog.InfoContext(ctx, "batch sent",
+		"ticket_id", ticketID, "batch_id", result.BatchID, "sent", result.Sent, "wait_cleared", result.WaitCleared)
 }
 
 // loadDraftsTx returns every draft answer or reply row for ticketID, in id
@@ -537,15 +637,62 @@ func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts [
 	return questions, nil
 }
 
+// sentItemDecisionsTx returns every already-sent item decision for question
+// qid, merged ref->decision, across every "sent" answer row that targets it
+// (parent_id = qid), not just the one this batch just sent: an item-kind
+// question decided across two or more separate SendBatch calls needs every
+// prior send's decisions counted for markAnsweredQuestionsTx to see it as
+// complete.
+func sentItemDecisionsTx(ctx context.Context, tx *sql.Tx, qid int64) (map[string]response.Decision, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT payload FROM messages WHERE parent_id = ? AND type = ? AND state = ?`,
+		qid, msgTypeAnswer, answerStateSent)
+	if err != nil {
+		return nil, fmt.Errorf("send batch: list sent item decisions for question %d: %w", qid, err)
+	}
+	defer rows.Close()
+
+	items := make(map[string]response.Decision)
+	for rows.Next() {
+		var payload sql.NullString
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("send batch: list sent item decisions for question %d: %w", qid, err)
+		}
+		if !payload.Valid {
+			continue
+		}
+		var ap response.AnswerPayload
+		if err := json.Unmarshal([]byte(payload.String), &ap); err != nil {
+			return nil, fmt.Errorf("send batch: unmarshal sent answer for question %d: %w", qid, err)
+		}
+		maps.Copy(items, ap.Items)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("send batch: list sent item decisions for question %d: %w", qid, err)
+	}
+	return items, nil
+}
+
 // markAnsweredQuestionsTx flips a question to "answered" when the batch just
 // sent gives it a sent option answer, a complete sent item answer (every
-// item ref in the question's payload has a decision), or a sent reply
-// (design section 6.7). An incomplete item answer sends its draft like any
-// other but leaves the question open.
+// item ref in the question's payload has a decision, counting decisions
+// already sent in an earlier SendBatch call alongside this batch's own), or
+// a sent reply (design section 6.7). An incomplete item answer sends its
+// draft like any other but leaves the question open.
 func markAnsweredQuestionsTx(ctx context.Context, tx *sql.Tx, drafts []MessageRow, questions map[int64]response.QuestionPayload) error {
 	for qid, payload := range questions {
 		answered := false
 		items := make(map[string]response.Decision)
+		if len(payload.Items) > 0 {
+			// An item-kind question can be decided piecemeal across more
+			// than one SendBatch call, so completeness has to count every
+			// item ref ever sent for it, not only the ones in this batch.
+			sent, err := sentItemDecisionsTx(ctx, tx, qid)
+			if err != nil {
+				return err
+			}
+			maps.Copy(items, sent)
+		}
 		for i := range drafts {
 			d := &drafts[i]
 			if d.ParentID == nil || *d.ParentID != qid {

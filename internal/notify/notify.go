@@ -19,6 +19,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sync"
 
 	"zing/internal/store"
 )
@@ -47,6 +49,15 @@ const (
 // interface (PublicKey, Subscribe); Send is out of scope here (Package 10).
 type WebPush struct {
 	store *store.Store
+
+	// genMu serializes first-run VAPID keypair generation. Without it, two
+	// concurrent first PublicKey calls can both see no stored key, both
+	// generate their own keypair, and race to SetSettings: the loser's
+	// SetSettings call persists last, so the winner's caller is handed a
+	// public key whose private half the loser's write just overwrote. The
+	// mutex makes the check-then-generate atomic: only one goroutine ever
+	// generates, and every other goroutine re-reads the stored key.
+	genMu sync.Mutex
 }
 
 // New builds a WebPush backed by st.
@@ -58,8 +69,25 @@ func New(st *store.Store) *WebPush {
 // (design section 6.13: "the public key is the base64url raw-url encoding
 // of the 65-byte uncompressed point"). It generates and persists a fresh
 // VAPID keypair on first use, when no vapid_public setting exists yet.
+//
+// The first read is lock-free, so the common case (a key already exists)
+// never pays for the mutex. Only a miss takes genMu, and re-checks the
+// setting once inside it: a caller that lost the race to another goroutine's
+// concurrent first call finds the winner's key already stored and returns
+// that, rather than generating (and losing) a keypair of its own.
 func (w *WebPush) PublicKey(ctx context.Context) (string, error) {
 	pub, ok, err := w.store.GetSetting(ctx, settingVAPIDPublic)
+	if err != nil {
+		return "", fmt.Errorf("notify: get %s: %w", settingVAPIDPublic, err)
+	}
+	if ok && pub != "" {
+		return pub, nil
+	}
+
+	w.genMu.Lock()
+	defer w.genMu.Unlock()
+
+	pub, ok, err = w.store.GetSetting(ctx, settingVAPIDPublic)
 	if err != nil {
 		return "", fmt.Errorf("notify: get %s: %w", settingVAPIDPublic, err)
 	}
@@ -97,6 +125,10 @@ func (w *WebPush) generateAndStoreKeypair(ctx context.Context) (string, error) {
 	if err := w.store.SetSettings(ctx, settingVAPIDPublic, pubB64, settingVAPIDPrivate, privB64); err != nil {
 		return "", fmt.Errorf("notify: store vapid keypair: %w", err)
 	}
+	// No key material in the log line (CLAUDE.md: "never log a secret"):
+	// not the private key, and not the public key either, since a bare
+	// info line proving generation happened needs neither.
+	slog.InfoContext(ctx, "vapid keypair generated")
 	return pubB64, nil
 }
 
