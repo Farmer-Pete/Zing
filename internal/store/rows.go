@@ -128,11 +128,11 @@ func scanTicket(rs rowScanner) (Ticket, error) {
 func scanMessage(rs rowScanner) (MessageRow, error) {
 	var row MessageRow
 	var runID, parentID, batchID sql.NullInt64
-	var state, payload, readAt sql.NullString
+	var state, body, payload, readAt sql.NullString
 
 	if err := rs.Scan(
 		&row.ID, &row.TicketID, &runID, &parentID, &row.Type, &row.Author,
-		&state, &row.Body, &payload, &batchID, &readAt,
+		&state, &body, &payload, &batchID, &readAt,
 	); err != nil {
 		return MessageRow{}, err
 	}
@@ -145,6 +145,12 @@ func scanMessage(rs rowScanner) (MessageRow, error) {
 	}
 	if state.Valid {
 		row.State = &state.String
+	}
+	// messages.body is nullable; a NULL row (only reachable through a raw
+	// insert, since InsertMessage always binds a Go string) reads back as ""
+	// rather than failing the scan.
+	if body.Valid {
+		row.Body = body.String
 	}
 	if payload.Valid {
 		row.Payload = json.RawMessage(payload.String)

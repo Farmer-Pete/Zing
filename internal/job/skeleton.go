@@ -281,8 +281,12 @@ func planningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Sess
 func questionMessages(ticketID int64, qs []response.Question) ([]store.Message, error) {
 	msgs := make([]store.Message, 0, len(qs))
 	for _, q := range qs {
+		// q.Key comes off the wire matching response.Question's own pattern
+		// (^[qQ][0-9]+$), but the stored QuestionPayload.Key is the tighter
+		// ^Q[0-9]+$: uppercase it here so a lowercase wire key (q1) still
+		// persists as a schema-valid Q1.
 		payload, err := json.Marshal(response.QuestionPayload{
-			Key:         q.Key,
+			Key:         strings.ToUpper(q.Key),
 			Kind:        response.QuestionKindQuestion,
 			State:       response.QuestionStateOpen,
 			Recommended: q.Recommended,

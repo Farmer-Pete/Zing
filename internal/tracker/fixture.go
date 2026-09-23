@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -54,8 +55,43 @@ func NewFixture(fsys fs.FS, path string) (*Fixture, error) {
 	return &Fixture{
 		project: doc.Project,
 		tickets: tickets,
-		nextRef: len(tickets) + 1,
+		nextRef: maxNumericRef(tickets) + 1,
 	}, nil
+}
+
+// maxNumericRef returns the largest trailing numeric suffix among tickets'
+// Ref fields (for example "fake#7" -> 7), or 0 if none carries one. NewFixture
+// seeds nextRef from this, one past the highest ref already loaded, rather
+// than len(tickets)+1: a loaded ticket set is not guaranteed sequential (a
+// gap, or a ref out of "fake#<n>" order), so counting entries instead of
+// parsing the refs themselves could mint a "fake#<n>" that collides with one
+// already loaded.
+func maxNumericRef(tickets []Ticket) int {
+	highest := 0
+	for _, t := range tickets {
+		if n, ok := numericSuffix(t.Ref); ok && n > highest {
+			highest = n
+		}
+	}
+	return highest
+}
+
+// numericSuffix parses the trailing run of ASCII digits in ref (for example
+// "fake#7" -> 7), reporting ok=false when ref carries no trailing digit at
+// all.
+func numericSuffix(ref string) (n int, ok bool) {
+	i := len(ref)
+	for i > 0 && ref[i-1] >= '0' && ref[i-1] <= '9' {
+		i--
+	}
+	if i == len(ref) {
+		return 0, false
+	}
+	v, err := strconv.Atoi(ref[i:])
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // Intake returns every fixture ticket when project matches the fixture's

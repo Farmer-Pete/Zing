@@ -77,12 +77,21 @@ func TestBroker_CancelStopsFurtherDelivery(t *testing.T) {
 	}
 }
 
-func TestBroker_PublishNeverBlocksOnASlowOrGoneSubscriber(t *testing.T) {
+// TestBroker_PublishNeverBlocksOnAFullLiveSubscriberBuffer proves the
+// non-blocking send claim on a subscriber that is actually live: a fresh
+// subscription's one-slot buffer is filled by a first Publish and never
+// drained, so the second Publish below must hit the select's default case
+// on a full channel, not skip an absent one. It also confirms the buffer
+// coalesces rather than silently dropping: the subscriber still sees
+// exactly one pending wake afterward.
+func TestBroker_PublishNeverBlocksOnAFullLiveSubscriberBuffer(t *testing.T) {
 	t.Parallel()
 
 	b := bus.New()
-	_, cancel := b.Subscribe() // never read from; Publish must not block on it
-	cancel()
+	ch, cancel := b.Subscribe()
+	defer cancel()
+
+	b.Publish() // fills the subscriber's 1-slot buffer; left undrained on purpose
 
 	done := make(chan struct{})
 	go func() {
@@ -90,7 +99,14 @@ func TestBroker_PublishNeverBlocksOnASlowOrGoneSubscriber(t *testing.T) {
 		b.Publish()
 	}()
 
-	waitBounded(t, done, "Publish blocked on an unread or cancelled subscriber")
+	waitBounded(t, done, "Publish blocked on a live subscriber whose buffer was already full")
+
+	waitBounded(t, ch, "expected the live subscriber to have a pending wake")
+	select {
+	case <-ch:
+		t.Fatal("expected exactly one coalesced wake, got a second")
+	default:
+	}
 }
 
 // TestBroker_CancelledSubscriberReaderLeaksNoGoroutine proves the pattern the

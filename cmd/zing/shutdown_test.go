@@ -102,22 +102,44 @@ func TestDrainAndShutdown_TimeoutForcesCancelAndJoins(t *testing.T) {
 	}()
 
 	var storeClosedWhileDispRunning atomic.Bool
-	closeStore := func() error {
+	// closeStore always returns nil: it exists to observe ordering, not to
+	// report a failure, but it must still satisfy drainAndShutdown's
+	// closeStore func() error parameter.
+	closeStore := func() error { //nolint:unparam // matches drainAndShutdown's closeStore func() error parameter
 		if dispRunning.Load() {
 			storeClosedWhileDispRunning.Store(true)
 		}
 		return nil
 	}
 
-	err := drainAndShutdown(
-		context.Background(),
-		20*time.Millisecond,
-		func() error { return nil },
-		dispDone,
-		forceDisp,
-		func(context.Context) error { return nil },
-		closeStore,
-	)
+	// drainAndShutdown's own forced-join wait (the "<-dispDone" right after
+	// forceDisp(), inside its select's time.After branch) is deliberately
+	// unbounded in production: the store must never close while a handler
+	// may still be running (design section 6.10), so there is no deadline to
+	// give it there. That means a regression that drops the forceDisp()
+	// call, or otherwise stops dispDone from ever closing, would hang this
+	// test (and `go test`) forever. Run it in a goroutine and bound the
+	// wait here, in the test only, so that failure mode is a fast, clear
+	// t.Fatal instead of a hang.
+	done := make(chan error, 1)
+	go func() {
+		done <- drainAndShutdown(
+			context.Background(),
+			20*time.Millisecond,
+			func() error { return nil },
+			dispDone,
+			forceDisp,
+			func(context.Context) error { return nil },
+			closeStore,
+		)
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainAndShutdown did not return within 2s of the drain timeout; want forceDisp called and dispDone joined promptly (a regression dropping the forceDisp() call would hang here)")
+	}
 	if err != nil {
 		t.Fatalf("drainAndShutdown: %v", err)
 	}

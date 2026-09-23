@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"zing/fixtures"
 	"zing/internal/tracker"
@@ -126,6 +127,51 @@ func TestFixture_FileTicketAppendsAndGeneratesARef(t *testing.T) {
 	}
 	if got[1].Ref != ref || got[1].Title != "A second ticket" {
 		t.Errorf("Intake did not include the filed ticket: %+v", got[1])
+	}
+}
+
+// nonSequentialTicketsTOML loads two tickets whose refs are not
+// sequential from 1: "fake#1" and "fake#9". Only two entries exist, so
+// seeding nextRef from len(tickets)+1 would mint "fake#3" next, which never
+// collides with anything loaded here -- the point of this fixture is the
+// next test, which proves the generated ref is instead based on the ref
+// values themselves (max 9, so the next must be "fake#10").
+const nonSequentialTicketsTOML = `
+project = "zing"
+
+[[ticket]]
+ref = "fake#1"
+title = "first"
+body = "first body"
+
+[[ticket]]
+ref = "fake#9"
+title = "ninth"
+body = "ninth body"
+`
+
+// TestFixture_FileTicketAvoidsCollidingWithANonSequentialLoadedRef proves
+// FileTicket seeds its generated ref from the highest numeric ref already
+// loaded, not from the loaded ticket count (design section "Tracker fixture"
+// fix 14): loading two tickets whose refs are "fake#1" and "fake#9" must
+// still generate "fake#10" next, never "fake#3" (len+1), which would be a
+// fresh, uncolliding ref only by coincidence here and could collide with a
+// real fixture whose refs carry gaps.
+func TestFixture_FileTicketAvoidsCollidingWithANonSequentialLoadedRef(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{"tickets.toml": {Data: []byte(nonSequentialTicketsTOML)}}
+	f, err := tracker.NewFixture(fsys, "tickets.toml")
+	if err != nil {
+		t.Fatalf("NewFixture: %v", err)
+	}
+
+	ref, err := f.FileTicket(context.Background(), "zing", tracker.NewTicket{Title: "new", Body: "new body"})
+	if err != nil {
+		t.Fatalf("FileTicket: %v", err)
+	}
+	if ref != "fake#10" {
+		t.Errorf("FileTicket ref = %q, want fake#10 (one past the highest loaded ref, fake#9)", ref)
 	}
 }
 

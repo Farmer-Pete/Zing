@@ -31,6 +31,9 @@ const (
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
 	testAuthorZing       = "zing"
+
+	testReasonPickedUp  = "picked up"
+	testPlanningScript1 = "planning/1.xml"
 )
 
 // testProject is the one project every test in this file seeds.
@@ -273,7 +276,7 @@ func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if commit.Next != testStatePlanning || commit.Reason != "picked up" {
+	if commit.Next != testStatePlanning || commit.Reason != testReasonPickedUp {
 		t.Errorf("commit = (Next=%q, Reason=%q), want (planning, picked up)", commit.Next, commit.Reason)
 	}
 	if commit.Waiting != nil {
@@ -403,6 +406,70 @@ func TestPlanningHandler_FirstEntry_PostsQuestionAndWaits(t *testing.T) {
 	}
 	if sess.ExternalID == nil || *sess.ExternalID != *commit.Session.ExternalID {
 		t.Errorf("persisted session.ExternalID = %v, want %s", sess.ExternalID, *commit.Session.ExternalID)
+	}
+}
+
+// lowercaseKeyScript is a job-agnostic one-question QuestionResponse whose
+// question key rides the wire lowercase ("q1"), the shape
+// response.Question.Key's own pattern (^[qQ][0-9]+$) allows but the stored
+// QuestionPayload.Key's tighter pattern (^Q[0-9]+$) does not.
+const lowercaseKeyScript = `<zing job="planning" outcome="question">
+  <question key="q1">
+    <title>Question one</title>
+    <body>Body one.</body>
+    <option key="a">Option A</option>
+    <option key="b">Option B</option>
+    <recommended>a</recommended>
+  </question>
+  <progress>Asked one question before drafting the plan.</progress>
+</zing>`
+
+// TestPlanningHandler_FirstEntry_UppercasesALowercaseWireKey proves the
+// stored QuestionPayload.Key is uppercased from the wire key (design section
+// 6.6's mapping table, fix 6): a lowercase "q1" on the wire persists as the
+// schema-valid "Q1", not the raw lowercase value that would fail
+// QuestionPayload's ^Q[0-9]+$ pattern.
+func TestPlanningHandler_FirstEntry_UppercasesALowercaseWireKey(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := runtime.NewFake(fstest.MapFS{testPlanningScript1: {Data: []byte(lowercaseKeyScript)}})
+
+	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
+	deps := claim(t, s, rt, ticketID)
+
+	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("planning first-entry Run: %v", err)
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %d, want 1", len(commit.Messages))
+	}
+
+	var payload response.QuestionPayload
+	if unmarshalErr := json.Unmarshal(commit.Messages[0].Payload, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal question payload: %v", unmarshalErr)
+	}
+	if payload.Key != "Q1" {
+		t.Errorf("payload.Key = %q, want Q1 (uppercased from the wire's lowercase q1)", payload.Key)
+	}
+
+	// Persisting must succeed: a lowercase Key would fail the messages/question
+	// schema's ^Q[0-9]+$ pattern and CommitHandlerResult would error.
+	apply(t, s, ticket, commit)
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d, want 1", len(open))
+	}
+	var stored response.QuestionPayload
+	if unmarshalErr := json.Unmarshal(open[0].Payload, &stored); unmarshalErr != nil {
+		t.Fatalf("unmarshal persisted question payload: %v", unmarshalErr)
+	}
+	if stored.Key != "Q1" {
+		t.Errorf("persisted payload.Key = %q, want Q1", stored.Key)
 	}
 }
 
@@ -589,8 +656,8 @@ func TestPlanningHandler_Resume_MultiQuestionBatchGatesOnAllAnswered(t *testing.
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := runtime.NewFake(fstest.MapFS{
-		"planning/1.xml": {Data: []byte(multiQuestionScript)},
-		"planning/2.xml": {Data: []byte(multiQuestionReadyScript)},
+		testPlanningScript1: {Data: []byte(multiQuestionScript)},
+		"planning/2.xml":    {Data: []byte(multiQuestionReadyScript)},
 	})
 
 	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
@@ -868,7 +935,7 @@ func TestPlanningHandler_ErrorOutcomeEscalates(t *testing.T) {
 	}
 	apply(t, s, ticket, queuedCommit)
 
-	errRT := runtime.NewFake(fstest.MapFS{"planning/1.xml": {Data: []byte(errorScript)}})
+	errRT := runtime.NewFake(fstest.MapFS{testPlanningScript1: {Data: []byte(errorScript)}})
 	ticket = getTicket(t, s, ticketID)
 	deps = claim(t, s, errRT, ticketID)
 

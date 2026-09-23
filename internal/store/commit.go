@@ -149,6 +149,11 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		if attachRunID != nil {
 			m.RunID = attachRunID
 		}
+		if m.ParentID != nil {
+			if err = verifyParentForTicket(ctx, tx, c.TicketID, *m.ParentID); err != nil {
+				return false, fmt.Errorf("commit handler result: %w", err)
+			}
+		}
 		if err = s.insertMessageTx(ctx, tx, m); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
@@ -263,6 +268,26 @@ func verifyQuestionForTicket(ctx context.Context, tx *sql.Tx, ticketID, question
 	return nil
 }
 
+// verifyParentForTicket errors unless parentID names a message that belongs
+// to ticketID, the check every inserted message's ParentID must pass before
+// this transaction inserts it (section 6.3: every write scoped to
+// c.TicketID) -- otherwise a handler could link a message onto another
+// ticket's thread.
+func verifyParentForTicket(ctx context.Context, tx *sql.Tx, ticketID, parentID int64) error {
+	var gotTicketID int64
+	err := tx.QueryRowContext(ctx, `SELECT ticket_id FROM messages WHERE id = ?`, parentID).Scan(&gotTicketID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("parent message %d not found", parentID)
+		}
+		return fmt.Errorf("get parent message %d: %w", parentID, err)
+	}
+	if gotTicketID != ticketID {
+		return fmt.Errorf("parent message %d belongs to ticket %d, not %d", parentID, gotTicketID, ticketID)
+	}
+	return nil
+}
+
 // upsertSessionTx creates su's session when su.ID is nil, or bumps its
 // resumes counter in place when BumpResumes is set on an existing session,
 // and returns the session's id either way.
@@ -308,13 +333,24 @@ func insertRunTx(ctx context.Context, tx *sql.Tx, sessionID int64, r Run) (int64
 }
 
 // resolveQuestionTx sets one question message's lifecycle state to
-// "resolved".
+// "resolved", but only from "answered": the WHERE clause requires the
+// question's current state be "answered", so a still-open (or already
+// resolved) question can never be resolved out from under itself. Zero rows
+// affected means questionID did not satisfy that, and is reported as an
+// error so the whole commit rolls back rather than silently no-op'ing.
 func resolveQuestionTx(ctx context.Context, tx *sql.Tx, questionID int64) error {
-	_, err := tx.ExecContext(ctx,
-		`UPDATE messages SET state = ? WHERE id = ? AND type = ?`,
-		questionStateResolved, questionID, msgTypeQuestion)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE messages SET state = ? WHERE id = ? AND type = ? AND state = ?`,
+		questionStateResolved, questionID, msgTypeQuestion, questionStateAnswered)
 	if err != nil {
 		return fmt.Errorf("update question state: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update question state: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("question %d is not in answered state", questionID)
 	}
 	return nil
 }

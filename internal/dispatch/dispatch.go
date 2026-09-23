@@ -185,7 +185,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	}
 
 	// 7. Run and commit.
-	return d.runAndCommit(ctx, ticket, timeout, expires, now)
+	return d.runAndCommit(ctx, ticket, timeout, expires)
 }
 
 // Run ticks every cfg.Interval until ctx is done or the drain flag is set.
@@ -279,13 +279,19 @@ func jobNameForState(state string) (string, bool) {
 }
 
 // runAndCommit is step 7: run ticket's handler under a context whose
-// deadline is now+timeout (not the later claim expiry), validate and apply
-// its commit, and resolve one of three outcomes (design section 6.8 step
-// 7): a handler error or an invalid commit releases the claim and leaves
-// the ticket's state for a later retry; a lost lease or a commit error
-// fails the dispatcher closed; a valid, applied commit publishes.
-func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, timeout time.Duration, expires, now time.Time) error {
-	runCtx, cancel := context.WithDeadline(ctx, now.Add(timeout))
+// deadline is (a fresh time.Now(), taken here, right after the claim) +
+// timeout, not the tick-start now (so time already spent on reconcile and
+// intake earlier in this same Tick never eats into the handler's own
+// budget) and not the later claim expiry, validate and apply its commit,
+// and resolve one of three outcomes (design section 6.8 step 7): a handler
+// error or an invalid commit releases the claim and leaves the ticket's
+// state for a later retry; a lost lease or a commit error fails the
+// dispatcher closed; a valid, applied commit publishes. expires is the
+// claim lease Claim was already called with (step 6), computed from the
+// tick-start now, and stays as-is here so it remains consistent with what
+// was actually claimed.
+func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, timeout time.Duration, expires time.Time) error {
+	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
 
 	deps := job.Deps{Store: d.store, Runtime: d.rt, Owner: d.cfg.Owner, Expires: expires}
@@ -318,7 +324,11 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		} else {
 			slog.Error("lease lost", "ticket_id", ticket.ID)
 		}
-		if setErr := d.store.SetStopped(ctx, true); setErr != nil {
+		// A canceled handler context (runCtx above, or ctx itself on the way
+		// out) must not stop this flag write from landing: the runtime may
+		// already have advanced past what a cancellation could undo, so the
+		// stopped flag is the one thing that must still get through.
+		if setErr := d.store.SetStopped(context.WithoutCancel(ctx), true); setErr != nil {
 			return fmt.Errorf("dispatch: set stopped after fail-closed on ticket %d: %w", ticket.ID, setErr)
 		}
 		if err != nil {
@@ -336,15 +346,33 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 // already nil, since a candidate can only be picked while unwaited), so it
 // carries only the ownership fence CommitHandlerResult always checks and
 // always clears (design section 6.8 step 7, 6.3).
+//
+// This runs after a handler error or an invalid commit, either of which can
+// follow a handler that already drove the runtime forward (a real turn ran
+// before the handler failed). So a release error, or the release itself
+// finding the lease already gone, gets the same fail-closed treatment as a
+// failed post-run commit (runAndCommit above): the dispatcher must not
+// assume the release succeeded and keep ticking as if this ticket's claim
+// were cleanly freed, since the runtime may already be ahead of what this
+// process still believes.
 func (d *Dispatcher) releaseClaim(ctx context.Context, ticketID int64, expires time.Time) error {
 	noop := store.HandlerCommit{TicketID: ticketID, Owner: d.cfg.Owner, Expires: expires}
 	applied, err := d.store.CommitHandlerResult(ctx, noop)
+	if err == nil && applied {
+		d.bus.Publish()
+		return nil
+	}
+
 	if err != nil {
-		return fmt.Errorf("dispatch: release claim for ticket %d: %w", ticketID, err)
+		slog.Error("release claim failed", "ticket_id", ticketID, "err", err)
+	} else {
+		slog.Error("release claim: lease already lost", "ticket_id", ticketID)
 	}
-	if !applied {
-		return fmt.Errorf("dispatch: release claim for ticket %d: the lease was already lost", ticketID)
+	if setErr := d.store.SetStopped(context.WithoutCancel(ctx), true); setErr != nil {
+		return fmt.Errorf("dispatch: set stopped after fail-closed releasing claim for ticket %d: %w", ticketID, setErr)
 	}
-	d.bus.Publish()
-	return nil
+	if err != nil {
+		return fmt.Errorf("%w: ticket %d: release claim: %w", ErrFailClosed, ticketID, err)
+	}
+	return fmt.Errorf("%w: ticket %d: release claim: the lease was already lost", ErrFailClosed, ticketID)
 }

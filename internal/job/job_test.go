@@ -57,13 +57,34 @@ func TestValidate_TerminalStateNeedsNoHandler(t *testing.T) {
 	}
 }
 
+// TestValidate_NilHandlerValueFails proves a nil Handler value under a
+// present key is caught the same way a missing key is: the map has an entry
+// for testStatePlanning, but it holds a nil interface value rather than a
+// real handler, which would otherwise panic on the first Run call mid-tick
+// rather than failing at startup.
+func TestValidate_NilHandlerValueFails(t *testing.T) {
+	t.Parallel()
+
+	m := &machine.Machine{
+		States: machine.States{Order: []string{testStateQueued, testStatePlanning, testStateDone}, Terminal: []string{testStateDone}},
+	}
+	reg := map[string]job.Handler{
+		testStateQueued:   job.Registry()[testStateQueued],
+		testStatePlanning: nil, // present key, nil value
+	}
+
+	if err := job.Validate(m, reg); err == nil {
+		t.Error("Validate with a nil handler value: want an error, got nil")
+	}
+}
+
 // --- ValidateCommit ----------------------------------------------------------
 
 func TestValidateCommit_AcceptsALegalTransitionWithAReason(t *testing.T) {
 	t.Parallel()
 
 	ticket := store.Ticket{State: testStateQueued}
-	commit := store.HandlerCommit{Next: testStatePlanning, Reason: "picked up"}
+	commit := store.HandlerCommit{Next: testStatePlanning, Reason: testReasonPickedUp}
 
 	if err := job.ValidateCommit(ticket, commit); err != nil {
 		t.Errorf("ValidateCommit(legal edge, reason set): %v, want nil", err)
@@ -111,6 +132,36 @@ func TestValidateCommit_RejectsATransitionCombinedWithANonErrorWait(t *testing.T
 
 	if err := job.ValidateCommit(ticket, commit); err == nil {
 		t.Error("ValidateCommit(transition + non-error waiting): want an error, got nil")
+	}
+}
+
+// TestValidateCommit_RejectsATicketIDMismatch proves the first check ranks
+// above every other rule: a commit built against a different ticket id than
+// the one it is validated against is rejected outright, even though its
+// shape (Next, Reason) would otherwise be legal.
+func TestValidateCommit_RejectsATicketIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStateQueued}
+	commit := store.HandlerCommit{TicketID: 2, Next: testStatePlanning, Reason: testReasonPickedUp}
+
+	if err := job.ValidateCommit(ticket, commit); err == nil {
+		t.Error("ValidateCommit(commit.TicketID != ticket.ID): want an error, got nil")
+	}
+}
+
+// TestValidateCommit_RejectsAWhollyEmptyCommit proves a commit that carries
+// no Next, Waiting, Messages, Runs, ResolveQuestions, or Session is rejected:
+// it would apply nothing but the claim-release fence, which is
+// CommitHandlerResult's own releaseClaim no-op, never a handler's commit.
+func TestValidateCommit_RejectsAWhollyEmptyCommit(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStateQueued}
+	commit := store.HandlerCommit{TicketID: 1}
+
+	if err := job.ValidateCommit(ticket, commit); err == nil {
+		t.Error("ValidateCommit(wholly empty commit): want an error, got nil")
 	}
 }
 

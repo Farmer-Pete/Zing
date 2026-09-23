@@ -217,6 +217,11 @@ func TestClaim_SecondClaimIsRefused(t *testing.T) {
 	}
 }
 
+// TestExpireClaims_ClearsAtOrPastExpiry proves the reconcile query's "at or
+// past" contract, `claim_expires_at <= ?` (spine.go): a claim expired in the
+// past, one expiring at exactly now (the boundary the <= comparison exists
+// for), and a claim still in the future are all handled correctly in one
+// pass -- the first two cleared, the last one left untouched.
 func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
@@ -230,7 +235,11 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertTicket(expired): %v", err)
 	}
-	freshID, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "2", Title: "fresh", State: ticketStateQueued})
+	boundaryID, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "2", Title: "boundary", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(boundary): %v", err)
+	}
+	freshID, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "3", Title: "fresh", State: ticketStateQueued})
 	if err != nil {
 		t.Fatalf("InsertTicket(fresh): %v", err)
 	}
@@ -238,6 +247,13 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	now := time.Now()
 	if _, err = s.Claim(ctx, expiredID, "host-1", now.Add(-time.Minute)); err != nil {
 		t.Fatalf("Claim(expired): %v", err)
+	}
+	// boundaryID's expiry is exactly now, formatted through the same
+	// second-precision RFC 3339 round trip ExpireClaims's own formatTime(now)
+	// argument goes through below, so the two compare equal in SQL: the "at"
+	// case the <= comparison (not <) exists to catch.
+	if _, err = s.Claim(ctx, boundaryID, "host-1", now); err != nil {
+		t.Fatalf("Claim(boundary): %v", err)
 	}
 	if _, err = s.Claim(ctx, freshID, "host-1", now.Add(time.Hour)); err != nil {
 		t.Fatalf("Claim(fresh): %v", err)
@@ -247,8 +263,14 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != expiredID {
-		t.Errorf("ExpireClaims returned %v, want [%d]", ids, expiredID)
+	wantCleared := map[int64]bool{expiredID: true, boundaryID: true}
+	if len(ids) != len(wantCleared) {
+		t.Fatalf("ExpireClaims returned %v, want exactly %v cleared", ids, wantCleared)
+	}
+	for _, id := range ids {
+		if !wantCleared[id] {
+			t.Errorf("ExpireClaims returned unexpected id %d", id)
+		}
 	}
 
 	got, err := s.GetTicket(ctx, expiredID)
@@ -257,6 +279,14 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	}
 	if got.ClaimOwner != nil || got.ClaimExpiresAt != nil {
 		t.Errorf("expired ticket claim = (%v, %v), want (nil, nil)", got.ClaimOwner, got.ClaimExpiresAt)
+	}
+
+	boundary, err := s.GetTicket(ctx, boundaryID)
+	if err != nil {
+		t.Fatalf("GetTicket(boundary): %v", err)
+	}
+	if boundary.ClaimOwner != nil || boundary.ClaimExpiresAt != nil {
+		t.Errorf("boundary ticket claim (expiry == now) = (%v, %v), want (nil, nil) -- the query is <=", boundary.ClaimOwner, boundary.ClaimExpiresAt)
 	}
 
 	stillClaimed, err := s.GetTicket(ctx, freshID)

@@ -38,6 +38,19 @@ const drainDeadline = 30 * time.Second
 // cancelled their base context.
 const shutdownTimeout = 10 * time.Second
 
+// defaultDispatchInterval and defaultDispatchMaxParallel are the documented
+// defaults for cfg.Dispatch.IntervalSeconds and cfg.Dispatch.MaxParallel
+// (internal/config's applyDefaults uses the same two values). serve clamps
+// to these here, rather than in internal/config, because applyDefaults only
+// fires when a key is absent from zing.toml: an explicit non-positive value
+// (interval_seconds = 0, max_parallel = -1) survives config.Load untouched
+// and would otherwise panic time.Ticker (interval) or stall all processing
+// (max_parallel, since Tick never claims once active >= max_parallel).
+const (
+	defaultDispatchInterval    = 30 * time.Second
+	defaultDispatchMaxParallel = 2
+)
+
 // run wires the default paths and the signal-derived base context, then
 // hands off to serve. It is the "serve" subcommand's entry point.
 func run() error {
@@ -65,9 +78,31 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		return err
 	}
 
+	bindAddr, err := consoleBindAddr(cfg.Console)
+	if err != nil {
+		return err
+	}
+
 	st, err := store.Open(ctx, dbPath)
 	if err != nil {
 		return err
+	}
+
+	// Clear the persisted control flags a prior graceful stop may have left
+	// set. Without this, the "draining" flag survives across a restart: the
+	// HTTP listener below starts normally, but the dispatcher goroutine's
+	// first Tick (and Run, right after it) sees draining still true and
+	// exits immediately, so nothing is ever dispatched even though the
+	// console comes up and serves normally (recovery-by-restart is the
+	// intended path here per the plan's Q-runtime note, so "stopped" is
+	// cleared too).
+	if err = st.SetDraining(ctx, false); err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: clear draining flag: %w", err)
+	}
+	if err = st.SetStopped(ctx, false); err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: clear stopped flag: %w", err)
 	}
 
 	bindings, err := ensureBindings(ctx, st, cfg.Projects)
@@ -105,8 +140,8 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 	defer cancelDisp()
 
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
-		Interval:    time.Duration(cfg.Dispatch.IntervalSeconds) * time.Second,
-		MaxParallel: cfg.Dispatch.MaxParallel,
+		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
+		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
 		Owner:       claimOwner(),
 	}, rt)
 	if err != nil {
@@ -125,35 +160,45 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 		close(dispDone)
 	}()
 
-	addr := net.JoinHostPort(cfg.Console.Bind[0], strconv.Itoa(cfg.Console.Port))
-	srv := newServer(ctx, addr, console.New(st, b))
+	srv := newServer(ctx, bindAddr, console.New(st, b))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("starting", "addr", addr)
+	slog.Info("starting", "addr", bindAddr)
 
+	// dispTriggered records whether the dispatcher's own goroutine is what
+	// ended this select, as opposed to a normal signal (ctx.Done()) or an
+	// HTTP listener failure (errCh). Only in that case does the dispatcher's
+	// captured error become serve's return value below: on the other two
+	// paths dispDone will also close during the drain that shutdown runs
+	// next, but that is the expected, graceful join, not a failure to
+	// report.
 	var serveErr error
+	var dispTriggered bool
 	select {
 	case serveErr = <-errCh:
 	case <-ctx.Done():
+	case <-dispDone:
+		dispTriggered = true
 	}
 
-	return shutdown(ctx, st, srv, d, errCh, serveErr, dispDone, func() error { return dispErr }, cancelDisp)
+	return shutdown(ctx, st, srv, d, errCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
 }
 
 // shutdown runs the drain-then-close sequence (design section 6.10 step
-// 10) through drainAndShutdown, then folds in the two things that sequence
-// does not carry through its channel-of-struct{} and closure shape: the
-// dispatcher's own returned error (logged, not returned: an expected
-// consequence of a forced shutdown, not a serve failure) and the console
-// listener's error from errCh. It returns the first real error among the
-// console listener, Shutdown, and the store close. d is used only to wake
-// Run promptly once draining is set (d.NotifyDrain, called from the
-// setDraining closure below); drainAndShutdown itself stays decoupled from
+// 10) through drainAndShutdown, then folds in the things that sequence does
+// not carry through its channel-of-struct{} and closure shape: the
+// dispatcher's own returned error and the console listener's error from
+// errCh. It returns the first real error among: the dispatcher (only when
+// dispTriggered, i.e. the dispatcher's own goroutine, not a signal or an
+// HTTP failure, is what ended serve's select), the console listener,
+// Shutdown, and the store close. d is used only to wake Run promptly once
+// draining is set (d.NotifyDrain, called from the setDraining closure
+// below); drainAndShutdown itself stays decoupled from
 // *dispatch.Dispatcher; so does shutdown_test.go, which drives it directly.
 func shutdown(
 	ctx context.Context, st *store.Store, srv *http.Server, d *zdispatch.Dispatcher,
-	errCh <-chan error, serveErr error, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
+	errCh <-chan error, serveErr error, dispTriggered bool, dispDone <-chan struct{}, dispErr func() error, cancelDisp context.CancelFunc,
 ) error {
 	err := drainAndShutdown(
 		ctx, drainDeadline,
@@ -180,10 +225,14 @@ func shutdown(
 
 	// dispDone is guaranteed closed by the time drainAndShutdown returns, so
 	// dispErr() is safe to read here.
-	if de := dispErr(); de != nil && !errors.Is(de, context.Canceled) {
+	de := dispErr()
+	if de != nil && !errors.Is(de, context.Canceled) {
 		slog.Error("dispatcher stopped", "err", de)
 	}
 
+	if serveErr == nil {
+		serveErr = dispatchFailure(dispTriggered, de)
+	}
 	if serveErr == nil {
 		serveErr = err
 	}
@@ -193,6 +242,21 @@ func shutdown(
 		}
 	}
 	return serveErr
+}
+
+// dispatchFailure decides whether the dispatcher's own captured error (de)
+// should become serve's return value. It fires only when dispTriggered is
+// true, meaning the dispatcher's goroutine, rather than a signal or an HTTP
+// listener failure, is what ended serve's main select: today a dispatcher
+// error (for example dispatch.ErrFailClosed) stops all intake while HTTP
+// keeps serving, and serve never reports it. A nil error, or
+// context.Canceled (the expected result of the drain sequence's own forced
+// cancel), never counts as a failure.
+func dispatchFailure(dispTriggered bool, de error) error {
+	if !dispTriggered || de == nil || errors.Is(de, context.Canceled) {
+		return nil
+	}
+	return fmt.Errorf("dispatcher: %w", de)
 }
 
 // drainAndShutdown runs the section 6.10 drain-then-close sequence, decoupled
@@ -234,6 +298,52 @@ func drainAndShutdown(
 		err = closeErr
 	}
 	return err
+}
+
+// consoleBindAddr validates cfg.Console.Bind and returns the address to
+// listen on: host from the first entry, joined with cfg.Console.Port. An
+// empty Bind list would otherwise panic net.JoinHostPort(cfg.Console.Bind[0],
+// ...) below, so that case is rejected here instead. This skeleton binds one
+// loopback address; a configured Bind longer than one entry (for example the
+// tailnet address a later package adds) is not an error, but only its first
+// entry is used, so the rest are logged rather than silently ignored.
+func consoleBindAddr(cfg config.Console) (string, error) {
+	if len(cfg.Bind) == 0 {
+		return "", errors.New("zing.toml: console.bind: must have at least one address")
+	}
+	if len(cfg.Bind) > 1 {
+		slog.Warn("console.bind has more than one address; only the first is bound, the rest are deferred to a later package",
+			"bind", cfg.Bind, "using", cfg.Bind[0])
+	}
+	return net.JoinHostPort(cfg.Bind[0], strconv.Itoa(cfg.Port)), nil
+}
+
+// dispatchInterval returns the dispatcher's tick interval for a configured
+// dispatch.interval_seconds, clamping a non-positive value (zero or
+// negative, whether from an explicit zing.toml entry or an unset field) to
+// defaultDispatchInterval. Passed straight through to time.Ticker, a
+// non-positive interval would otherwise panic.
+func dispatchInterval(seconds int) time.Duration {
+	if seconds <= 0 {
+		slog.Warn("dispatch.interval_seconds is not positive, using the default",
+			"interval_seconds", seconds, "default_seconds", int(defaultDispatchInterval.Seconds()))
+		return defaultDispatchInterval
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// dispatchMaxParallel returns the dispatcher's max-parallel guard for a
+// configured dispatch.max_parallel, clamping a non-positive value to
+// defaultDispatchMaxParallel. Tick's max-parallel guard (design section 6.8
+// step 4) is "active >= max_parallel"; a non-positive value would make that
+// guard true before any ticket is ever claimed, stalling all processing.
+func dispatchMaxParallel(n int) int {
+	if n <= 0 {
+		slog.Warn("dispatch.max_parallel is not positive, using the default",
+			"max_parallel", n, "default", defaultDispatchMaxParallel)
+		return defaultDispatchMaxParallel
+	}
+	return n
 }
 
 // ensureBindings ensures a store project for every configured project and

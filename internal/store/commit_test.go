@@ -82,6 +82,20 @@ func insertOpenQuestion(t *testing.T, s *Store, ticketID, runID int64, key strin
 	return id
 }
 
+// markAnswered sets each of ids directly to the "answered" lifecycle state,
+// arranging the fixture ResolveQuestions expects in real use (only an
+// answered question's id ever reaches it) without going through the full
+// AnswerQuestion flow.
+func markAnswered(t *testing.T, s *Store, ids ...int64) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(t.Context(),
+			`UPDATE messages SET state = ? WHERE id = ?`, questionStateAnswered, id); err != nil {
+			t.Fatalf("mark question %d answered: %v", id, err)
+		}
+	}
+}
+
 // zeroOptionQuestionPayload is a QuestionPayload with no options: the
 // free-text case AnswerQuestion must reject.
 func zeroOptionQuestionPayload(key string) []byte {
@@ -95,6 +109,39 @@ func countRows(t *testing.T, s *Store, query string, args ...any) int {
 		t.Fatalf("count rows %q: %v", query, err)
 	}
 	return n
+}
+
+// --- scanMessage: nullable body ---------------------------------------------
+
+// TestGetMessage_NullBodyReadsBackAsEmptyString proves scanMessage (rows.go)
+// scans messages.body through a sql.NullString: the column is nullable
+// (migrations/0001_init.sql), but InsertMessage always binds a Go string
+// (never NULL), so a NULL body is only reachable through a raw insert, the
+// same way this test arranges it. Before the fix, scanning straight into
+// row.Body (a string) failed on a NULL row.
+func TestGetMessage_NullBodyReadsBackAsEmptyString(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (ticket_id, type, author, body) VALUES (?, ?, ?, NULL)`,
+		ticketID, testTypeUpdate, testAuthorZing)
+	if err != nil {
+		t.Fatalf("insert message with NULL body: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("insert message with NULL body: %v", err)
+	}
+
+	got, err := s.GetMessage(ctx, id)
+	if err != nil {
+		t.Fatalf("GetMessage with a NULL body: %v", err)
+	}
+	if got.Body != "" {
+		t.Errorf("Body = %q, want \"\" for a NULL body column", got.Body)
+	}
 }
 
 // --- CommitHandlerResult ----------------------------------------------------
@@ -332,6 +379,11 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	run0ID := insertQuestionRun(t, s, sessID)
 	q1ID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
 	q2ID := insertOpenQuestion(t, s, ticketID, run0ID, "Q2")
+	// ResolveQuestions only ever resolves an answered question in real use
+	// (skeleton.go's planningResume reads QuestionsByRun(..., answered)), and
+	// resolveQuestionTx now enforces that at the store boundary too, so this
+	// fixture answers both before the commit resolves them.
+	markAnswered(t, s, q1ID, q2ID)
 
 	owner, expires := claimForCommit(t, s, ticketID)
 
@@ -495,6 +547,103 @@ func TestCommitHandlerResult_RejectsResolveQuestionFromAnotherTicket(t *testing.
 	}
 	if qGot.State == nil || *qGot.State != questionStateOpen {
 		t.Errorf("question A state = %v, want unchanged open (the commit must not resolve another ticket's question)", qGot.State)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 0 {
+		t.Errorf("ticket B messages after a rejected commit = %d, want 0", n)
+	}
+}
+
+// TestCommitHandlerResult_ResolveQuestionRejectsStillOpenQuestion proves
+// resolveQuestionTx's state guard (section 6.3): a commit that tries to
+// resolve a question still in the "open" state (never answered) errors, and
+// the whole commit -- including its state transition and message -- rolls
+// back rather than partially applying.
+func TestCommitHandlerResult_ResolveQuestionRejectsStillOpenQuestion(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1") // left open: never answered
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		ResolveQuestions: []int64{qID},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult resolving a still-open question: want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult resolving a still-open question: applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.State != testStatePlanning {
+		t.Errorf("ticket state = %q, want unchanged planning (the whole commit rolled back)", got.State)
+	}
+	if got.ClaimOwner == nil {
+		t.Error("ticket claim was cleared despite the rejected commit, want it held")
+	}
+
+	q, getMsgErr := s.GetMessage(ctx, qID)
+	if getMsgErr != nil {
+		t.Fatalf("GetMessage(q): %v", getMsgErr)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state = %v, want unchanged open (never resolved)", q.State)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ?`, ticketID, msgTypeState); n != 0 {
+		t.Errorf("state messages after a rejected commit = %d, want 0 (whole tx rolled back)", n)
+	}
+}
+
+// TestCommitHandlerResult_RejectsMessageParentFromAnotherTicket proves every
+// inserted message's ParentID is scoped to c.TicketID (section 6.3): a
+// commit whose message links onto another ticket's message errors and writes
+// nothing.
+func TestCommitHandlerResult_RejectsMessageParentFromAnotherTicket(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	otherMsgID, insErr := s.InsertMessage(ctx, Message{
+		TicketID: ticketA, Type: testTypeUpdate, Author: testAuthorZing, Body: "on ticket A",
+	})
+	if insErr != nil {
+		t.Fatalf("insert message on ticket A: %v", insErr)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketB)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Messages: []Message{{
+			TicketID: ticketB, ParentID: &otherMsgID, Type: testTypeUpdate, Author: testAuthorZing, Body: "on ticket B",
+		}},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult with a message parented on another ticket: want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult with a message parented on another ticket: applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketB)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.ClaimOwner == nil {
+		t.Error("ticket B claim was cleared despite the rejected commit, want it held")
 	}
 	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 0 {
 		t.Errorf("ticket B messages after a rejected commit = %d, want 0", n)

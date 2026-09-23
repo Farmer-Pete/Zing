@@ -41,6 +41,8 @@ const (
 
 	testWaitingQuestions = "questions"
 	testQuestionOpen     = "open"
+
+	testReasonPlanReady = "plan ready"
 )
 
 var testProject = store.Project{
@@ -492,7 +494,7 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 	advanceTicket(t, s, rt, ticketID, testStateQueued)
 
-	spy := &spyHandler{next: testStateBuilding, reason: "plan ready"}
+	spy := &spyHandler{next: testStateBuilding, reason: testReasonPlanReady}
 	reg := job.Registry()
 	reg[testStatePlanning] = spy
 
@@ -520,6 +522,61 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	claimGraceMax := after.Add(66 * time.Minute)
 	if spy.expires.Before(claimGraceMin) || spy.expires.After(claimGraceMax) {
 		t.Errorf("claim expiry (Deps.Expires) = %v, want within [%v, %v] (~65m: 60m timeout + 5m grace)", spy.expires, claimGraceMin, claimGraceMax)
+	}
+}
+
+// TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt proves the run
+// deadline is computed from a fresh time.Now() taken right before running
+// the handler (after the claim), not the tick-start now (design section
+// 6.8 step 6, fix 9): a slow intake step, which runs earlier in the same
+// Tick, must not eat into the handler's own timeout budget. planning's
+// machine.toml timeout_minutes is 60.
+func TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	projectID := seedProject(t, s)
+	const intakeDelay = 300 * time.Millisecond
+	slow := &slowTracker{Tracker: newFixtureTracker(t), delay: intakeDelay}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name}}
+
+	spy := &spyHandler{next: testStateBuilding, reason: testReasonPlanReady}
+	reg := job.Registry()
+	reg[testStatePlanning] = spy
+
+	d := newDispatcher(t, s, slow, bus.New(), rt, reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	tickStart := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	afterTick := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+
+	// Were the deadline still computed from the tick-start now (the bug),
+	// it would sit at roughly tickStart+60m regardless of the slow intake.
+	// The fix takes a fresh time.Now() after the claim, so the deadline must
+	// land at least intakeDelay later than that, with a safety margin well
+	// under intakeDelay so this assertion cannot pass by coincidence.
+	const margin = 100 * time.Millisecond
+	minDeadline := tickStart.Add(60*time.Minute + intakeDelay - margin)
+	if spy.deadline.Before(minDeadline) {
+		t.Errorf("handler deadline = %v, want at least %v (computed after the %v slow intake, not at tick start)",
+			spy.deadline, minDeadline, intakeDelay)
+	}
+	maxDeadline := afterTick.Add(61 * time.Minute)
+	if spy.deadline.After(maxDeadline) {
+		t.Errorf("handler deadline = %v, want at most %v", spy.deadline, maxDeadline)
 	}
 }
 
@@ -596,6 +653,46 @@ func TestTick_StaleOwnerCommitFailsClosedWithNoRedrive(t *testing.T) {
 	}
 	if got := counting.calls.Load(); got != 1 {
 		t.Errorf("runtime calls after the second tick = %d, want still 1 (no re-drive)", got)
+	}
+}
+
+// TestTick_ReleaseClaimFailsClosedWhenLeaseAlreadyLost proves the release
+// path gets the same fail-closed treatment as the post-run commit path
+// (design section 6.8 step 7, fix 8): a handler that drives the runtime once
+// and then fails after a concurrent reconcile has already stolen its lease
+// leaves releaseClaim's own fenced no-op commit unable to apply (applied =
+// false, the lease already gone), and the dispatcher must stop the process
+// and report ErrFailClosed rather than silently continuing as if the claim
+// had been cleanly released, since the handler may already have advanced
+// the runtime.
+func TestTick_ReleaseClaimFailsClosedWhenLeaseAlreadyLost(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	counting := &countingRuntime{rt: rt}
+	reg := job.Registry()
+	reg[testStatePlanning] = &staleOwnerReleaseHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), counting, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	err := d.Tick(t.Context())
+	if !errors.Is(err, dispatch.ErrFailClosed) {
+		t.Fatalf("Tick: err = %v, want errors.Is(err, dispatch.ErrFailClosed)", err)
+	}
+	if got := counting.calls.Load(); got != 1 {
+		t.Fatalf("runtime calls after the fail-closed tick = %d, want exactly 1", got)
+	}
+
+	_, stopped, flagsErr := s.Flags(t.Context())
+	if flagsErr != nil {
+		t.Fatalf("Flags: %v", flagsErr)
+	}
+	if !stopped {
+		t.Error("stopped flag = false, want true after fail-closed on the release path")
 	}
 }
 
@@ -824,5 +921,38 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateBuilding, Reason: "plan ready"}, nil
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateBuilding, Reason: testReasonPlanReady}, nil
+}
+
+// staleOwnerReleaseHandler runs one real fake-runtime turn (job planning),
+// then simulates a concurrent reconcile stealing this ticket's lease
+// mid-run the same way staleOwnerHandler does, but then returns a plain
+// handler error instead of a commit. That drives the dispatcher's error
+// path (runAndCommit -> releaseClaim), where the fenced no-op release commit
+// now finds the lease already gone, exercising the release-path fail-closed
+// behavior (fix 8) rather than the post-run-commit path staleOwnerHandler
+// (above) exercises.
+type staleOwnerReleaseHandler struct{}
+
+func (staleOwnerReleaseHandler) Run(ctx context.Context, _ store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{}, errors.New("boom: handler blew up after the runtime already ran, lease now stolen")
+}
+
+// slowTracker wraps a Tracker and sleeps for delay before delegating Intake,
+// so a test can simulate a slow intake step without touching the
+// dispatcher's own timing code.
+type slowTracker struct {
+	tracker.Tracker
+	delay time.Duration
+}
+
+func (s *slowTracker) Intake(ctx context.Context, project string, rule tracker.IntakeRule) ([]tracker.Ticket, error) {
+	time.Sleep(s.delay)
+	return s.Tracker.Intake(ctx, project, rule)
 }

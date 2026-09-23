@@ -24,7 +24,8 @@ const contentTypeHTML = "text/html; charset=utf-8"
 func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 	tickets, err := c.store.ListAllTickets(r.Context())
 	if err != nil {
-		http.Error(w, "list tickets: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("console: list tickets", "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
@@ -94,8 +95,8 @@ func (c *console) patchTickets(ctx context.Context, sse *datastar.ServerSentEven
 // leaks.
 func (c *console) handleThread(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	if err != nil {
-		http.Error(w, "id must be an integer", http.StatusBadRequest)
+	if err != nil || id <= 0 {
+		http.Error(w, "id must be a positive integer", http.StatusBadRequest)
 		return
 	}
 
@@ -180,6 +181,12 @@ var optionPattern = regexp.MustCompile(`^[a-z]$`)
 // slog instead (design section 6.9: never err.Error() in the response).
 const genericServerErrorBody = "internal error"
 
+// maxAnswerBodyBytes bounds POST /answer's request body: the $answer signal
+// is a handful of small fields, so a few KB is comfortable headroom, and
+// wrapping r.Body in http.MaxBytesReader before ReadSignals keeps an
+// oversized body from being buffered in full before validation ever runs.
+const maxAnswerBodyBytes = 8 << 10 // 8 KiB
+
 // handleAnswer validates $answer, records it through store.AnswerQuestion,
 // and reports the outcome: 400 on a malformed signal (a non-positive ticket
 // or question id, or an option that is not a single lowercase letter), 204
@@ -188,6 +195,8 @@ const genericServerErrorBody = "internal error"
 // since nothing changed), and 500 with a generic body on any other store
 // error, logged server-side with the detail (design section 6.9, 6.3).
 func (c *console) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAnswerBodyBytes)
+
 	var sig answerSignals
 	if err := datastar.ReadSignals(r, &sig); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

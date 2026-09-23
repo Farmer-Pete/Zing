@@ -229,6 +229,9 @@ func TestIndexRendersTicketListAndScript(t *testing.T) {
 	if !strings.Contains(got, `<script type="module" src="/static/datastar.js">`) {
 		t.Errorf("GET / body missing the datastar script tag; got:\n%s", got)
 	}
+	if !strings.Contains(got, `<meta name="viewport" content="width=device-width, initial-scale=1">`) {
+		t.Errorf("GET / body missing the responsive viewport meta tag; got:\n%s", got)
+	}
 }
 
 func TestUpdatesStreamsInitialFrameAndOnPublish(t *testing.T) {
@@ -664,6 +667,94 @@ func TestAnswerReturns500WithGenericBodyOnStoreError(t *testing.T) {
 	if strings.Contains(got, "sql") || strings.Contains(got, strconv.Itoa(missingQuestionID)) ||
 		strings.Contains(got, "answer question") {
 		t.Errorf("POST /answer body leaked store error detail: %q", got)
+	}
+}
+
+// TestIndexReturns500WithGenericBodyOnStoreError proves a real store error
+// on GET / never leaks its detail to the client: closing the store out from
+// under a live server makes ListAllTickets return a genuine error, and
+// handleIndex must turn that into 500 with the fixed generic body, logging
+// the detail server-side instead (design section "Console" fix 10).
+func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GET / after closing the store: status = %d, want 500", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	got := strings.TrimSpace(string(body))
+	if got != "internal error" {
+		t.Errorf(`GET / body = %q, want exactly "internal error"`, got)
+	}
+}
+
+// TestThreadRejectsInvalidIDWith400 proves handleThread validates the id
+// query parameter -- non-integer and non-positive alike -- before it ever
+// opens the SSE stream (design section "Console" fix 11).
+func TestThreadRejectsInvalidIDWith400(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	cases := []struct{ name, id string }{
+		{"non-integer", "abc"},
+		{"zero", "0"},
+		{"negative", "-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			//nolint:noctx // a bare GET on a test server needs no deadline
+			resp, err := http.Get(srv.URL + "/thread?id=" + tc.id)
+			if err != nil {
+				t.Fatalf("GET /thread?id=%s: %v", tc.id, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("GET /thread?id=%s status = %d, want 400", tc.id, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestAnswerRejectsOversizedBodyWith400 proves POST /answer wraps r.Body in
+// http.MaxBytesReader before ReadSignals (design section "Console" fix 12):
+// a body padded well past the limit with an otherwise-ignored field is
+// rejected with 400 before it can reach the store, rather than decoding in
+// full and failing later (which would surface as 500 for these
+// nonexistent ids, not 400).
+func TestAnswerRejectsOversizedBodyWith400(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New()))
+	defer srv.Close()
+
+	filler := strings.Repeat("x", 16<<10) // far past the console's body size limit
+	body := fmt.Sprintf(`{"answer":{"ticket":1,"question":999999,"option":"a"},"filler":%q}`, filler)
+
+	//nolint:noctx // a bare POST on a test server needs no deadline
+	resp, err := http.Post(srv.URL+"/answer", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /answer: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /answer with an oversized body: status = %d, want 400 (rejected before it could reach the store)", resp.StatusCode)
 	}
 }
 
