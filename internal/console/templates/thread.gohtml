@@ -1,0 +1,16 @@
+{{define "threadFragment"}}<main id="thread">
+{{if .Ticket}}<h2>{{.Ticket.Title}}</h2>
+{{range .Messages}}{{if .Question}}<div id="q-{{.ID}}" class="question">
+<h3>{{.Question.Title}}</h3>
+<p>{{.Question.Body}}</p>
+{{$qid := .ID}}{{range .Question.Options}}<button data-on:click="$answer = {ticket: {{$.Ticket.ID}}, question: {{$qid}}, option: '{{.Key}}'}">{{.Text}}</button>
+{{end}}<button data-on:click="@post('/answer')">Send</button>
+</div>
+{{else}}<div class="message message-{{.Type}}">
+<div class="meta"><span class="type">{{.Type}}</span> <span class="author">{{.Author}}</span></div>
+<div class="body">{{.Body}}</div>
+</div>
+{{end}}{{else}}<p class="empty">No messages yet.</p>
+{{end}}{{else}}<p class="empty">Ticket not found.</p>
+{{end}}</main>
+{{end}}

@@ -9,9 +9,23 @@ import (
 	"zing/internal/schemagen"
 )
 
+// TestRunSelftest_ReturnsZeroOnEmptyMachine proves the whole selftest suite
+// passes end to end, schema and template checks through the design section
+// 11 dispatcher-to-done e2e suite (selftestE2E) included: runSelftest
+// prints "selftest: OK" and exits 0.
 func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
 	if got := runSelftest(); got != 0 {
 		t.Errorf("runSelftest() = %d, want 0", got)
+	}
+}
+
+// TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered isolates the
+// section 11 end-to-end suite from the rest of selftest, so a failure here
+// names the e2e path specifically rather than surfacing only as
+// runSelftest's generic non-zero exit.
+func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
+	if err := selftestE2E(t.Context()); err != nil {
+		t.Errorf("selftestE2E() = %v, want nil", err)
 	}
 }
 

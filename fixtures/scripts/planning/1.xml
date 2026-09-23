@@ -1,0 +1,10 @@
+<zing job="planning" outcome="question">
+  <question key="Q1">
+    <title>How should the greeting read?</title>
+    <body>Pick the greeting style for GET /hello.</body>
+    <option key="a">Plain hello</option>
+    <option key="b">hello, world</option>
+    <recommended>b</recommended>
+  </question>
+  <progress>Asked one question before drafting the plan.</progress>
+</zing>
