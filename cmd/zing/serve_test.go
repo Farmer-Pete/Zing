@@ -115,7 +115,7 @@ func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	ticketID, questionID := waitForOpenQuestion(t, dbPath, serveDone)
 	answerQuestion(t, baseURL, ticketID, questionID, "b")
@@ -545,7 +545,7 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForTicketPastQueued(t, dbPath, serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -575,7 +575,7 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -598,7 +598,7 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 		Port: freeLoopbackPort(t), IntervalSeconds: 1, MaxParallel: 1, Bind: nil,
 	})
 
-	err := serve(t.Context(), cfgPath, dbPath)
+	err := serve(t.Context(), cfgPath, dbPath, false)
 	if err == nil {
 		t.Fatal("serve returned nil, want an error for an empty console.bind")
 	}
@@ -632,7 +632,7 @@ func TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry(t *tes
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)

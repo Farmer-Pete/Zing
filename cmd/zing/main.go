@@ -29,7 +29,7 @@ func dispatch(args []string) int {
 	case "validate":
 		return runValidate(args[2:])
 	case "serve":
-		if err := run(); err != nil {
+		if err := run(args[2:]); err != nil {
 			slog.Error("server stopped", "err", err)
 			return 1
 		}

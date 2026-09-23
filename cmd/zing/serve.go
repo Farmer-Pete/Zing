@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -55,9 +56,30 @@ const (
 	defaultDispatchMaxParallel = 2
 )
 
+// parseServeFlags parses the "serve" subcommand's own flags (args is
+// everything after "serve", os.Args[2:] shaped, matching runValidate's own
+// args[2:] convention). --seed-demo (design section 6.15, section 12 row
+// 12) is off by default: the normal serve path never seeds, and only a
+// caller that passes the flag explicitly gets SeedDemo run once at startup,
+// for hands-on verification.
+func parseServeFlags(args []string) (seedDemo bool, err error) {
+	flagSet := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flagSet.BoolVar(&seedDemo, "seed-demo", false, "seed one demo project and ticket (design section 6.15) once at startup; never on by default")
+	if err := flagSet.Parse(args); err != nil {
+		return false, fmt.Errorf("parse serve flags: %w", err)
+	}
+	return seedDemo, nil
+}
+
 // run wires the default paths and the signal-derived base context, then
-// hands off to serve. It is the "serve" subcommand's entry point.
-func run() error {
+// hands off to serve. It is the "serve" subcommand's entry point; args is
+// os.Args[2:], the arguments after "serve".
+func run(args []string) error {
+	seedDemo, err := parseServeFlags(args)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -70,13 +92,19 @@ func run() error {
 		return err
 	}
 
-	return serve(ctx, cfgPath, dbPath)
+	return serve(ctx, cfgPath, dbPath, seedDemo)
 }
 
 // serve starts the store, the dispatcher, and the console, and runs until
 // ctx is cancelled (or the console listener fails), draining the dispatcher
-// before it closes the store (design section 6.10).
-func serve(ctx context.Context, cfgPath, dbPath string) error {
+// before it closes the store (design section 6.10). seedDemo, true only
+// when the "serve" subcommand was given --seed-demo, calls
+// console.SeedDemo once, right after the store opens and its control flags
+// are cleared, so the demo project and ticket (design section 6.15) are
+// visible before the console's first request; false leaves the store
+// exactly as a normal serve always has, since SeedDemo must never run
+// unasked.
+func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -120,6 +148,13 @@ func serve(ctx context.Context, cfgPath, dbPath string) error {
 	if err = st.SetStopped(ctx, false); err != nil {
 		_ = st.Close()
 		return fmt.Errorf("serve: clear stopped flag: %w", err)
+	}
+
+	if seedDemo {
+		if err = console.SeedDemo(ctx, st); err != nil {
+			_ = st.Close()
+			return fmt.Errorf("serve: seed demo: %w", err)
+		}
 	}
 
 	bindings, err := ensureBindings(ctx, st, cfg.Projects)

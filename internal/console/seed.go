@@ -33,6 +33,11 @@ var seedQuestionKinds = []response.QuestionKind{
 // kinds" (design section 6.15).
 const msgStateOpen = "open"
 
+// helloHandlerPath is the one fixture path both SeedQuestionFixtures'
+// perimeter question and SeedDemo's plan artifact name, named once so
+// goconst's repeated-literal guard has one definition to point at.
+const helloHandlerPath = "internal/hello/handler.go"
+
 // SeedQuestionFixtures inserts one open question of each of the six kinds
 // (design section 8) on ticketID, each with just enough payload to render
 // and compose: an option kind (question, gate, split, merge) gets two
@@ -116,6 +121,249 @@ func seedQuestionText(kind response.QuestionKind) (title, body string) {
 	}
 }
 
+// demoProjectName, demoProjectRepo, demoProjectPath, demoTrackerRef, and
+// demoTicketTitle name the one fixed demo project and ticket SeedDemo seeds
+// (design section 6.15): fixed literals, not generated, so a second call
+// finds the same rows (EnsureProject on the name, then a lookup by tracker
+// ref) instead of creating a duplicate. demoProjectPath is never read by
+// anything SeedDemo does; the fake runtime and fixture tracker this repo
+// runs elsewhere never touch the demo project, so the path names no real
+// directory.
+const (
+	demoProjectName = "demo"
+	demoProjectRepo = "https://example.invalid/demo"
+	demoProjectPath = "/tmp/zing-demo-project"
+	demoTrackerRef  = "demo-1"
+	demoTicketTitle = "Add a hello endpoint"
+)
+
+// scenarioArtifactType and findingArtifactType are the artifacts.type
+// literals a scenario-writing and a review-writing commit use
+// (internal/store/schemas/artifacts/scenario.json, finding.json), matching
+// views.go's own planArtifactType for "plan".
+const (
+	scenarioArtifactType = "scenario"
+	findingArtifactType  = "finding"
+)
+
+// SeedDemo seeds one demo project and one demo ticket carrying a stored
+// plan artifact (a small valid response.Plan with a mermaid block in its
+// Shape), a scenario artifact set, a finding set, and one open question of
+// each of the six kinds (design section 6.15), every row through the
+// store's validated inserts (InsertArtifact, InsertMessage, by way of
+// SeedQuestionFixtures), so a seeded row is a row a real producer could
+// have written. It is idempotent: a second call finds the same project and
+// ticket and skips any artifact or question already present, inserting
+// nothing new. SeedDemo never runs in a normal serve; it runs only behind
+// `zing serve --seed-demo`, from cmd/zing's selftest, and from this
+// package's own tests.
+func SeedDemo(ctx context.Context, s *store.Store) error {
+	projectID, err := s.EnsureProject(ctx, store.Project{
+		Name: demoProjectName, RepoURL: demoProjectRepo, LocalPath: demoProjectPath, Tracker: "github",
+	})
+	if err != nil {
+		return fmt.Errorf("seed demo: ensure project: %w", err)
+	}
+
+	ticketID, err := ensureDemoTicket(ctx, s, projectID)
+	if err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+
+	if err := seedDemoPlan(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	if err := seedDemoScenarios(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	if err := seedDemoFindings(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	if err := SeedQuestionFixtures(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	return nil
+}
+
+// ensureDemoTicket returns the demo ticket's id under projectID, inserting
+// it (queued, no payload) the first time and reusing the same row, found by
+// its fixed tracker ref, on every later call.
+func ensureDemoTicket(ctx context.Context, s *store.Store, projectID int64) (int64, error) {
+	existing, ok, err := s.TicketByRef(ctx, projectID, demoTrackerRef)
+	if err != nil {
+		return 0, fmt.Errorf("ticket by ref: %w", err)
+	}
+	if ok {
+		return existing.ID, nil
+	}
+
+	id, err := s.InsertTicket(ctx, store.Ticket{
+		ProjectID:  projectID,
+		TrackerRef: demoTrackerRef,
+		Title:      demoTicketTitle,
+		Body:       "Add a small hello endpoint so the demo console has something concrete to plan, scan, and review.",
+		State:      "queued",
+	})
+	if err != nil {
+		return 0, fmt.Errorf("insert ticket: %w", err)
+	}
+	return id, nil
+}
+
+// seedDemoPlan inserts ticketID's demo plan artifact once, skipping when one
+// is already stored (GetArtifact returns ok == true), so a second SeedDemo
+// call never writes a second version.
+func seedDemoPlan(ctx context.Context, s *store.Store, ticketID int64) error {
+	_, ok, err := s.GetArtifact(ctx, ticketID, planArtifactType)
+	if err != nil {
+		return fmt.Errorf("get plan artifact: %w", err)
+	}
+	if ok {
+		return nil
+	}
+
+	payload, err := json.Marshal(demoPlan())
+	if err != nil {
+		return fmt.Errorf("marshal plan: %w", err)
+	}
+	if _, err := s.InsertArtifact(ctx, store.Artifact{
+		TicketID: ticketID, Type: planArtifactType, Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("insert plan artifact: %w", err)
+	}
+	return nil
+}
+
+// seedDemoScenarios inserts ticketID's demo scenario set, one artifact row
+// per response.Scenario at consecutive versions, once, skipping the whole
+// set when a "scenario" artifact is already stored.
+func seedDemoScenarios(ctx context.Context, s *store.Store, ticketID int64) error {
+	_, ok, err := s.GetArtifact(ctx, ticketID, scenarioArtifactType)
+	if err != nil {
+		return fmt.Errorf("get scenario artifact: %w", err)
+	}
+	if ok {
+		return nil
+	}
+
+	for i, sc := range demoScenarios() {
+		payload, err := json.Marshal(sc)
+		if err != nil {
+			return fmt.Errorf("marshal scenario %s: %w", sc.ID, err)
+		}
+		if _, err := s.InsertArtifact(ctx, store.Artifact{
+			TicketID: ticketID, Type: scenarioArtifactType, Version: i + 1, Payload: payload,
+		}); err != nil {
+			return fmt.Errorf("insert scenario %s: %w", sc.ID, err)
+		}
+	}
+	return nil
+}
+
+// seedDemoFindings inserts ticketID's demo finding set, one artifact row per
+// response.Finding at consecutive versions, once, skipping the whole set
+// when a "finding" artifact is already stored.
+func seedDemoFindings(ctx context.Context, s *store.Store, ticketID int64) error {
+	_, ok, err := s.GetArtifact(ctx, ticketID, findingArtifactType)
+	if err != nil {
+		return fmt.Errorf("get finding artifact: %w", err)
+	}
+	if ok {
+		return nil
+	}
+
+	for i, f := range demoFindings() {
+		payload, err := json.Marshal(f)
+		if err != nil {
+			return fmt.Errorf("marshal finding %d: %w", i+1, err)
+		}
+		if _, err := s.InsertArtifact(ctx, store.Artifact{
+			TicketID: ticketID, Type: findingArtifactType, Version: i + 1, Payload: payload,
+		}); err != nil {
+			return fmt.Errorf("insert finding %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// demoPlan returns a small but fully valid response.Plan (design section
+// 6.15): every field the artifacts/plan.json schema requires is present,
+// and Design.Shape carries a mermaid fence, so the plan renderer (plan.go)
+// has a real diagram to show.
+func demoPlan() response.Plan {
+	return response.Plan{
+		Overview: response.Overview{
+			Objective: "Add a small hello endpoint so the demo has something concrete to plan and review.",
+			Context:   "A new HTTP handler in the demo project's `internal/hello` package.",
+			Problem:   response.Problem{Text: "The demo project has no endpoint for the console's plan renderer to point at."},
+			Goals:     []string{"Serve GET /hello with a friendly greeting"},
+			NonGoals:  []string{"Authentication, or any endpoint beyond /hello"},
+		},
+		Design: response.Design{
+			Demo: response.Demo{Cmd: "curl localhost:8080/hello", Text: "the server answers with a greeting"},
+			Shape: "The handler sits behind the existing mux.\n\n" +
+				"```mermaid\ngraph TD\n  Client -->|GET /hello| Handler\n  Handler --> Response\n```",
+			Changes: []response.Change{
+				{
+					Path: helloHandlerPath, Symbol: "Handler", Kind: response.ChangeKindNew,
+					Callers: "cmd/zing/main.go", Callees: "net/http",
+					Before: "", After: "func Handler(w http.ResponseWriter, r *http.Request)",
+				},
+			},
+			Types:      []response.TypeDef{},
+			Migrations: response.Migrations{Items: []response.Migration{}},
+		},
+		Delivery: response.Delivery{
+			Files: []response.FileChange{
+				{Path: helloHandlerPath, Action: response.FileActionCreate, Reason: "the new GET /hello handler"},
+			},
+			Deletions: response.Deletions{Items: []response.Fence{}},
+			Tests: []response.TestCase{
+				{Name: "TestHandler_Returns200", Seam: "internal/hello.Handler", Kind: response.TestKindIntegration, Mocks: "", Asserts: "GET /hello returns 200 with a greeting body"},
+			},
+			Tasks: []response.Task{
+				{N: 1, Test: "TestHandler_Returns200", Demo: true, Text: "Add the GET /hello handler."},
+			},
+		},
+		Review: response.Review{
+			TrustRoot:    "internal/hello, a new package with no prior trust root",
+			Alternatives: []string{"Serve the greeting from a static file instead of a handler"},
+			Risks:        []string{"None: this is a demo fixture, not shipped code"},
+		},
+	}
+}
+
+// demoScenarios returns the demo ticket's scenario set (design section
+// 6.15): one behavior scenario and one negative scenario, each a fully
+// valid response.Scenario.
+func demoScenarios() []response.Scenario {
+	return []response.Scenario{
+		{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Check: "go test ./internal/hello/... -run TestHandler_Returns200",
+			Given: "the server is running", When: "a client sends GET /hello", Then: "the response is 200 with a greeting body",
+		},
+		{
+			ID: "s2", Kind: response.ScenarioKindNegative,
+			Given: "the server is running", When: "a client sends POST /hello", Then: "the response is 405 Method Not Allowed",
+		},
+	}
+}
+
+// demoFindings returns the demo ticket's finding set (design section 6.15):
+// two review findings, each a fully valid response.Finding.
+func demoFindings() []response.Finding {
+	return []response.Finding{
+		{
+			Lens: response.LensQuality, Severity: response.SeverityMinor, Location: "plan/design/shape",
+			Text: "The shape section does not name the response content type.", Fix: "Add one sentence naming text/plain.",
+		},
+		{
+			Lens: response.LensTests, Severity: response.SeverityMajor, Location: "plan/delivery/tests/test[1]",
+			Text: "The only test covers the happy path.", Fix: "Add a scenario for a disallowed method.",
+		},
+	}
+}
+
 // seedQuestionPayload builds and marshals the QuestionPayload fixture for
 // kind (design section 6.15): an option kind gets two options and a
 // recommended option key; an item kind gets two or three items, each with a
@@ -156,7 +404,7 @@ func seedQuestionPayload(key string, kind response.QuestionKind) (json.RawMessag
 	case response.QuestionKindPerimeter:
 		payload.Recommended = "Accept every file in the perimeter"
 		payload.Items = []response.Item{
-			{Ref: "internal/hello/handler.go", Text: "new HTTP handler for GET /hello"},
+			{Ref: helloHandlerPath, Text: "new HTTP handler for GET /hello"},
 			{Ref: "internal/hello/handler_test.go", Text: "test for the new handler"},
 			{Ref: "cmd/zing/main.go", Text: "wires the new route"},
 		}
