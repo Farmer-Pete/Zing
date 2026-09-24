@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Project is the git and GitHub identity of one repository the orchestrator
@@ -35,21 +36,62 @@ type Runner interface {
 }
 
 // execRunner is the real Runner, running commands with os/exec. extraEnv
-// holds additional environment variables appended to the inherited process
-// environment (os.Environ()) for every command this Runner runs -- needed
-// later so a caller can add GIT_LITERAL_PATHSPECS=1 for the pathspec-
-// consuming git calls in commit.go and perimeter.go. The zero value runs
-// with the inherited environment unchanged.
+// holds additional environment variables appended to the scrubbed process
+// environment (see command and scrubGitLocationEnv) for every command this
+// Runner runs -- a caller adds GIT_LITERAL_PATHSPECS=1 through it for the
+// pathspec-consuming git calls in commit.go and perimeter.go. The zero value
+// runs with the scrubbed process environment and no additions.
 type execRunner struct {
 	extraEnv []string
 }
 
+// gitLocationEnv names the environment variables that redirect where git
+// finds its repository, index, and object store. Zing always runs git
+// against an explicit working directory (cmd.Dir), so these are scrubbed
+// from every git child's environment: if the process inherits them -- most
+// commonly when Zing runs from inside a git hook, which exports GIT_DIR and
+// its siblings -- they would override cmd.Dir and send every git command at
+// the wrong repository. GIT_LITERAL_PATHSPECS (added via extraEnv) is not in
+// this list and is preserved.
+var gitLocationEnv = []string{
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_COMMON_DIR",
+	"GIT_PREFIX",
+	"GIT_NAMESPACE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_CEILING_DIRECTORIES",
+}
+
+// scrubGitLocationEnv returns env with every gitLocationEnv assignment
+// removed, so an inherited GIT_DIR (or sibling) cannot override cmd.Dir.
+func scrubGitLocationEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		drop := false
+		for _, key := range gitLocationEnv {
+			if strings.HasPrefix(kv, key+"=") {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// command builds the *exec.Cmd for one git (or other) invocation. It always
+// sets cmd.Env to the scrubbed process environment plus extraEnv, so no git
+// child ever inherits a repository-redirecting GIT_* variable; cmd.Dir is
+// the single source of truth for which repository the command acts on.
 func (r execRunner) command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	if len(r.extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), r.extraEnv...)
-	}
+	cmd.Env = append(scrubGitLocationEnv(os.Environ()), r.extraEnv...)
 	return cmd
 }
 

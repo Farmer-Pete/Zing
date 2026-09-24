@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,11 @@ func runGit(ctx context.Context, t *testing.T, dir string, args ...string) strin
 	t.Helper()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	// Scrub inherited GIT_DIR and siblings so a test git command can never be
+	// redirected at the real repository -- the same guarantee execRunner
+	// gives production. This matters when the suite runs from inside a git
+	// hook (for example lefthook's pre-push test-race), which exports GIT_DIR.
+	cmd.Env = scrubGitLocationEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
@@ -646,5 +652,70 @@ func TestWorktreePresentAcrossASymlinkedLocalPath(t *testing.T) {
 	branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
 	if strings.TrimSpace(branches) != "" {
 		t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+	}
+}
+
+// TestExecRunnerIgnoresInheritedGitDir proves the fix for the review's
+// worktree-pollution incident: a git command must act on cmd.Dir, not on an
+// inherited GIT_DIR. A git hook (lefthook's pre-push) exports GIT_DIR, and
+// without scrubbing, every test and orchestrator git command was redirected
+// at the real repository -- committing to it and running sparse-checkout on
+// it. With scrubbing, an inherited GIT_DIR is ignored.
+func TestExecRunnerIgnoresInheritedGitDir(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+
+	// Point GIT_DIR at an unrelated, bogus location for the whole process,
+	// exactly as a git hook would export it.
+	bogus := t.TempDir()
+	t.Setenv("GIT_DIR", bogus)
+	t.Setenv("GIT_WORK_TREE", bogus)
+
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve want git dir: %v", err)
+	}
+	resolve := func(label, raw string) {
+		got, evalErr := filepath.EvalSymlinks(strings.TrimSpace(raw))
+		if evalErr != nil {
+			t.Fatalf("resolve %s git dir %q: %v", label, raw, evalErr)
+		}
+		if got != wantDir {
+			t.Errorf("%s resolved git dir = %q, want %q (inherited GIT_DIR leaked through)", label, got, wantDir)
+		}
+	}
+
+	resolve("runGit", runGit(ctx, t, repo, "rev-parse", "--absolute-git-dir"))
+
+	// The production execRunner must give the same guarantee.
+	out, err := execRunner{}.Output(ctx, repo, "git", "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		t.Fatalf("execRunner git rev-parse: %v", err)
+	}
+	resolve("execRunner", out)
+}
+
+// TestScrubGitLocationEnv is a focused unit test of the env scrubber.
+func TestScrubGitLocationEnv(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"GIT_DIR=/somewhere/.git",
+		"HOME=/home/x",
+		"GIT_WORK_TREE=/somewhere",
+		"GIT_INDEX_FILE=/somewhere/.git/index",
+		"GIT_LITERAL_PATHSPECS=1",
+		"LANG=C",
+	}
+	got := scrubGitLocationEnv(in)
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GIT_DIR=") || strings.HasPrefix(kv, "GIT_WORK_TREE=") || strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
+			t.Errorf("scrubGitLocationEnv kept a location var: %q", kv)
+		}
+	}
+	// Non-location vars, including GIT_LITERAL_PATHSPECS, must survive.
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/home/x", "GIT_LITERAL_PATHSPECS=1", "LANG=C"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("scrubGitLocationEnv dropped %q", want)
+		}
 	}
 }

@@ -142,6 +142,9 @@ func runGitStdout(ctx context.Context, t *testing.T, dir string, args ...string)
 	t.Helper()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	// Scrub inherited GIT_DIR and siblings (see runGit) so a test git command
+	// under a git hook cannot be redirected at the real repository.
+	cmd.Env = scrubGitLocationEnv(os.Environ())
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
