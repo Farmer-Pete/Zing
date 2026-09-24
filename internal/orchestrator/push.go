@@ -125,21 +125,24 @@ func (pr PullRequest) Body() (string, error) {
 	return b.String(), nil
 }
 
-// OpenDraftPR pushes wt's branch, then creates a draft pull request from
-// wt.Branch into the default branch through go-github, and returns the PR
-// URL and number (PKG5-PLAN.md section 8.4). It is idempotent under retry:
-// if CreateDraftPR fails, it asks GitHub for an existing open PR whose head
-// is wt.Branch (FindPRByHead) and returns that one when present, so a lost
-// response does not open a duplicate; otherwise it returns the create
-// error. It sets nothing on the store; the caller records branch and
-// pr_url.
+// OpenDraftPR renders and validates pr's body, pushes wt's branch, then
+// creates a draft pull request from wt.Branch into the default branch
+// through go-github, and returns the PR URL and number (PKG5-PLAN.md
+// section 8.4). Body is rendered before Push runs, so an invalid PullRequest
+// (an empty Title, in particular) errors before the remote branch is ever
+// updated, rather than after. It is idempotent under retry: if CreateDraftPR
+// fails, it asks GitHub for an existing open PR whose head is wt.Branch and
+// whose base is the default branch (FindPRByHead) and returns that one when
+// present, so a lost response does not open a duplicate; otherwise it
+// returns the create error. It sets nothing on the store; the caller
+// records branch and pr_url.
 func (o *Orchestrator) OpenDraftPR(ctx context.Context, wt Worktree, pr PullRequest) (url string, number int, err error) {
-	if err = o.Push(ctx, wt); err != nil {
+	body, err := pr.Body()
+	if err != nil {
 		return "", 0, fmt.Errorf("orchestrator: open draft pr: %w", err)
 	}
 
-	body, err := pr.Body()
-	if err != nil {
+	if err = o.Push(ctx, wt); err != nil {
 		return "", 0, fmt.Errorf("orchestrator: open draft pr: %w", err)
 	}
 
@@ -151,7 +154,7 @@ func (o *Orchestrator) OpenDraftPR(ctx context.Context, wt Worktree, pr PullRequ
 
 	o.log.Warn("create draft pr failed, checking for an existing pr with this head", "branch", wt.branch, "err", createErr)
 
-	existingURL, existingNumber, ok, findErr := o.gh.FindPRByHead(ctx, o.proj.Owner, o.proj.Repo, wt.branch)
+	existingURL, existingNumber, ok, findErr := o.gh.FindPRByHead(ctx, o.proj.Owner, o.proj.Repo, wt.branch, o.proj.DefaultBranch)
 	if findErr != nil {
 		return "", 0, fmt.Errorf("orchestrator: open draft pr: create draft pr: %w (and find existing pr also failed: %w)", createErr, findErr)
 	}

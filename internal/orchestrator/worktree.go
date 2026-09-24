@@ -14,8 +14,13 @@ import (
 
 // Worktree is a prepared ticket worktree. Its fields are unexported, so only
 // PrepareWorktree (same package) can build one; a caller cannot forge a
-// Worktree pointing at the main checkout or the default branch. Dir and
-// Branch expose the values.
+// Worktree pointing at the main checkout. PrepareWorktree also refuses to
+// build one pointing at the default branch: ordinarily branch's "zing/"
+// prefix already keeps it structurally distinct from a repository's default
+// branch, but that alone would not catch the pathological case of a project
+// whose default branch itself happens to be named "zing/...", so
+// PrepareWorktree checks for it explicitly. Dir and Branch expose the
+// values.
 type Worktree struct {
 	dir    string // <local_path>/.zing/wt/<ticket_id>
 	branch string // zing/<ticket_id>-<slug>, or zing/<ticket_id> when slug is empty
@@ -41,8 +46,12 @@ var (
 // "git check-ref-format refs/heads/<name>" -- git's own ref-name rules (no
 // ".." sequence, no trailing ".lock", no bare "." component, and so on) --
 // so a candidate that slips past the pattern is still caught. So the branch
-// can never be a bare ref, a refspec, an invalid ref, or the default
-// branch.
+// can never be a bare ref, a refspec, or an invalid ref. Its "zing/" prefix
+// also keeps it structurally distinct from a repository's default branch in
+// the ordinary case; PrepareWorktree additionally rejects the pathological
+// case where the default branch itself matches the zing/ pattern, since
+// check-ref-format has no notion of "the default branch" to compare
+// against.
 //
 // branchName takes ctx (a small, deliberate deviation from PKG5-PLAN.md
 // section 8.2's signature, which omits it) because it runs a real git
@@ -100,7 +109,7 @@ func checkRefFormat(ctx context.Context, name string) error {
 // have a checked-out HEAD to read, so it validates only the first two
 // conditions (see RemoveWorktree).
 func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(wt.branch); err != nil {
+	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
 		return err
 	}
 
@@ -116,16 +125,24 @@ func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
 }
 
 // validateZingBranch is the branch-shape half of revalidate: the branch
-// must match the zing/ form and must differ from the default branch. It
-// takes no ctx or Runner, since it never touches git; RemoveWorktree uses it
+// must match the zing/ form, must differ from the default branch, and must
+// be a git-legal ref name under "git check-ref-format" -- the same second,
+// independent layer branchName checks a freshly built candidate against, so
+// a zing/-shaped branch that was hand-crafted rather than produced by
+// branchName (and so never ran through check-ref-format) is still rejected
+// on the destructive paths that use validateZingBranch (revalidate,
+// RemoveWorktree). It takes ctx to run that check; RemoveWorktree uses it
 // directly, without the checked-out-HEAD check revalidate adds, since a
 // half-removed worktree may have no HEAD to read.
-func (o *Orchestrator) validateZingBranch(branch string) error {
+func (o *Orchestrator) validateZingBranch(ctx context.Context, branch string) error {
 	if !zingBranchPattern.MatchString(branch) {
 		return fmt.Errorf("orchestrator: branch %q is not a zing/ ticket branch", branch)
 	}
 	if branch == o.proj.DefaultBranch {
 		return fmt.Errorf("orchestrator: branch %q must not be the default branch", branch)
+	}
+	if err := checkRefFormat(ctx, branch); err != nil {
+		return fmt.Errorf("orchestrator: branch %q: %w", branch, err)
 	}
 	return nil
 }
@@ -180,10 +197,19 @@ func (o *Orchestrator) ensureWorktreeExclude() (err error) {
 // failure after "git worktree add" it force-removes the worktree and
 // deletes the branch, then returns the original error (a cleanup error is
 // logged, not returned).
+//
+// After computing branch, it errors if branch equals o.proj.DefaultBranch:
+// the "zing/" prefix ordinarily keeps a ticket branch distinct from a
+// repository's default branch, but a project whose default branch itself
+// happens to be named "zing/..." would otherwise slip past that assumption
+// and hand the caller a Worktree pointing at the default branch.
 func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug string, cone []string) (Worktree, error) {
 	branch, err := branchName(ctx, ticketID, slug)
 	if err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
+	}
+	if branch == o.proj.DefaultBranch {
+		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: branch %q must not be the default branch", branch)
 	}
 
 	dir := filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
@@ -240,17 +266,23 @@ func (o *Orchestrator) cleanupWorktree(ctx context.Context, wt Worktree) {
 }
 
 // RemoveWorktree removes the worktree and deletes its branch. It first
-// validates the branch (zing/ form, not the default branch); an invalid or
-// default branch is an error and nothing is removed. Then, independently:
-// if "git worktree list --porcelain" shows wt.Dir, it removes it with
-// "git worktree remove --force <dir>" (an already-absent worktree is fine);
-// if "git branch --list <branch>" shows the branch, it deletes it with
-// "git branch -D <branch>" (an already-absent branch is fine). So the
-// "worktree absent, branch present" state is safe and deterministic: the
-// validated zing/ branch is still deleted, and the default branch is never
-// touched.
+// validates the branch (zing/ form, not the default branch, a git-legal ref
+// per check-ref-format); an invalid or default branch is an error and
+// nothing is removed. Then, independently: if "git worktree list
+// --porcelain" shows wt.Dir, it first reads the branch actually checked out
+// there with "git -C wt.dir symbolic-ref --short HEAD" and refuses to
+// proceed if it differs from wt.branch, so a worktree directory repurposed
+// out from under Zing (checked out to some other branch since it was
+// prepared) is never force-removed; only then does it remove it with
+// "git worktree remove --force <dir>" (an already-absent worktree is fine
+// and skips the HEAD check entirely, since a half-removed worktree may have
+// no HEAD to read); if "git branch --list <branch>" shows the branch, it
+// deletes it with "git branch -D <branch>" (an already-absent branch is
+// fine). So the "worktree absent, branch present" state is safe and
+// deterministic: the validated zing/ branch is still deleted, and the
+// default branch is never touched.
 func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(wt.branch); err != nil {
+	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 
@@ -261,6 +293,16 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 	if present {
+		checkedOut, headErr := o.run.Output(ctx, wt.dir, "git", "symbolic-ref", "--short", "HEAD")
+		if headErr != nil {
+			return fmt.Errorf("orchestrator: remove worktree: read checked-out branch in %s: %w", wt.dir, headErr)
+		}
+		checkedOut = strings.TrimSpace(checkedOut)
+		if checkedOut != wt.branch {
+			return fmt.Errorf("orchestrator: remove worktree: %s has %q checked out, expected %q; refusing to force-remove a repurposed worktree",
+				wt.dir, checkedOut, wt.branch)
+		}
+
 		if out, removeErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); removeErr != nil {
 			return fmt.Errorf("orchestrator: remove worktree: git worktree remove: %w: %s", removeErr, strings.TrimSpace(out))
 		}
@@ -281,13 +323,30 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 	return nil
 }
 
+// worktreePresent reports whether dir appears in "git worktree list
+// --porcelain". Git reports each worktree's path with symlinks resolved, so
+// dir is resolved with filepath.EvalSymlinks before comparing; otherwise a
+// dir reached through a symlinked path component (o.proj.LocalPath itself,
+// say) would never match git's resolved form, and RemoveWorktree would
+// wrongly conclude the worktree is absent and leak it. When dir no longer
+// exists at all, EvalSymlinks errors with a path-not-found error, which is
+// exactly the "not present" case, not a real failure, so it is treated as
+// present=false rather than propagated.
 func (o *Orchestrator) worktreePresent(ctx context.Context, dir string) (bool, error) {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("resolve worktree dir %s: %w", dir, err)
+	}
+
 	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("git worktree list: %w", err)
 	}
 	for line := range strings.SplitSeq(out, "\n") {
-		if path, ok := strings.CutPrefix(line, "worktree "); ok && path == dir {
+		if path, ok := strings.CutPrefix(line, "worktree "); ok && path == resolved {
 			return true, nil
 		}
 	}

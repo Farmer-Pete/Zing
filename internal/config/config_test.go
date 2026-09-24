@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -84,7 +83,12 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		Projects: []Project{
 			{
 				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
-				DefaultBranch: "main", // defaults when absent
+				// DefaultBranch stays "" when zing.toml omits it (PR review
+				// finding Q): store.EnsureProject, not config.Load, is what
+				// defaults an absent value to "main", and only on INSERT,
+				// so a defaulted "main" here could never overwrite a real
+				// default branch recorded by an earlier "zing project add".
+				DefaultBranch: "",
 				Self:          false,
 				Intake:        Intake{AssignedTo: testUser}, // defaults to the top-level user
 				Commands:      Commands{Test: "go test ./...", Lint: "golangci-lint run"},
@@ -572,6 +576,28 @@ func TestSave_WritesFileAt0600(t *testing.T) {
 	}
 }
 
+// leftoverSaveTempFiles lists the "zing.toml.*.tmp" entries in dir, the
+// pattern Save's os.CreateTemp call uses, so a test can prove none is left
+// behind after a failed or successful Save.
+func leftoverSaveTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	var leftover []string
+	for _, e := range entries {
+		matched, matchErr := filepath.Match("zing.toml.*.tmp", e.Name())
+		if matchErr != nil {
+			t.Fatalf("Match: %v", matchErr)
+		}
+		if matched {
+			leftover = append(leftover, e.Name())
+		}
+	}
+	return leftover
+}
+
 // TestSave_ErrorLeavesTempRemovedAndOriginalUntouched proves the edge case
 // in PKG5-PLAN.md section 13 ("config.Save cannot write"): a rename failure
 // (forced here by making the destination an existing directory) removes the
@@ -585,7 +611,8 @@ func TestSave_ErrorLeavesTempRemovedAndOriginalUntouched(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	path := filepath.Join(t.TempDir(), "zing.toml")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zing.toml")
 	if mkdirErr := os.Mkdir(path, 0o700); mkdirErr != nil {
 		t.Fatalf("Mkdir: %v", mkdirErr)
 	}
@@ -594,8 +621,8 @@ func TestSave_ErrorLeavesTempRemovedAndOriginalUntouched(t *testing.T) {
 		t.Fatal("Save() = nil, want an error when the rename target is an existing directory")
 	}
 
-	if _, statErr := os.Stat(path + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("temp file after a failed Save: stat err = %v, want os.ErrNotExist", statErr)
+	if leftover := leftoverSaveTempFiles(t, dir); len(leftover) != 0 {
+		t.Errorf("temp files left behind after a failed Save: %v", leftover)
 	}
 
 	info, err := os.Stat(path)
@@ -604,6 +631,44 @@ func TestSave_ErrorLeavesTempRemovedAndOriginalUntouched(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Error("path was overwritten by a failed Save, want the original left untouched")
+	}
+}
+
+// TestSave_PreexistingDotTmpFileDoesNotBreakSave proves PR review finding I:
+// Save's old fixed "<path>.tmp" name opened with O_EXCL meant a single
+// leftover temp file -- from an earlier crashed or interrupted Save --
+// would permanently block every Save after it. Save now writes to a fresh,
+// uniquely named file from os.CreateTemp, so a stale "<path>.tmp" sitting
+// alongside it is just another file in the directory, not an obstacle.
+func TestSave_PreexistingDotTmpFileDoesNotBreakSave(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zing.toml")
+	stalePath := path + ".tmp"
+	if writeErr := os.WriteFile(stalePath, []byte("stale, from a crashed Save"), 0o600); writeErr != nil {
+		t.Fatalf("write stale %s: %v", stalePath, writeErr)
+	}
+
+	if saveErr := Save(path, cfg); saveErr != nil {
+		t.Fatalf("Save: unexpected error with a pre-existing %s: %v", stalePath, saveErr)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(Save(cfg)): %v", err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("round-tripped config = %+v, want %+v", got, cfg)
+	}
+
+	if _, statErr := os.Stat(stalePath); statErr != nil {
+		t.Errorf("expected the unrelated stale %s to be left alone, stat err = %v", stalePath, statErr)
 	}
 }
 

@@ -153,6 +153,38 @@ func TestMatchPattern(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Pure: statusFromXY
+// -----------------------------------------------------------------------
+
+// TestStatusFromXY covers the two PR review fixes to statusFromXY (finding
+// M): "T" (typechange, such as a file swapped for a symlink) must map to
+// Modified, and a code shorter than two characters must be a parse error
+// rather than a panic from indexing xy[0].
+func TestStatusFromXY(t *testing.T) {
+	t.Run("T (typechange) maps to Modified", func(t *testing.T) {
+		got, err := statusFromXY(" T")
+		if err != nil {
+			t.Fatalf("statusFromXY(\" T\"): unexpected error: %v", err)
+		}
+		if got != Modified {
+			t.Errorf("statusFromXY(\" T\") = %v, want Modified", got)
+		}
+	})
+
+	t.Run("empty input is a parse error, not a panic", func(t *testing.T) {
+		if _, err := statusFromXY(""); err == nil {
+			t.Fatal("statusFromXY(\"\"): expected an error, got nil")
+		}
+	})
+
+	t.Run("a single-character code is a parse error, not a panic", func(t *testing.T) {
+		if _, err := statusFromXY("A"); err == nil {
+			t.Fatal("statusFromXY(\"A\"): expected an error, got nil")
+		}
+	})
+}
+
+// -----------------------------------------------------------------------
 // Pure: PerimeterNotice
 // -----------------------------------------------------------------------
 
@@ -417,6 +449,33 @@ func TestRevertPaths(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), readmePath) {
 			t.Errorf("error %q does not name the leftover path", err.Error())
+		}
+	})
+
+	// PR review finding F: RevertPaths is content-mutating and destructive
+	// (it calls os.Remove) but used to trust Change.Path unsanitized. A
+	// path that escapes the worktree via "../" must be rejected before any
+	// file is touched.
+	t.Run("errors on a path that escapes the worktree", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 205)
+
+		err := o.RevertPaths(ctx, wt, []Change{{Path: "../escape", Code: Untracked}})
+		if err == nil {
+			t.Fatal("RevertPaths: expected an error for a path escaping the worktree, got nil")
+		}
+	})
+
+	// PR review finding F: RevertPaths used to never revalidate wt, so it
+	// could act on a worktree whose checked-out branch no longer matches
+	// wt.branch.
+	t.Run("errors for a worktree whose checked-out branch drifted", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 206)
+
+		runGit(ctx, t, wt.Dir(), "checkout", "-b", "zing/206-drifted")
+
+		err := o.RevertPaths(ctx, wt, []Change{{Path: readmePath, Code: Modified}})
+		if err == nil {
+			t.Fatal("RevertPaths: expected an error for a worktree whose checked-out branch drifted, got nil")
 		}
 	})
 }

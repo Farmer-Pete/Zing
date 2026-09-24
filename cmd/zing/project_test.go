@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"zing/internal/config"
@@ -53,7 +54,7 @@ func (fakeGitHub) CreateDraftPR(_ context.Context, _, _, _, _, _, _ string) (url
 	return "", 0, errors.New("fakeGitHub: CreateDraftPR not scripted for project add")
 }
 
-func (fakeGitHub) FindPRByHead(_ context.Context, _, _, _ string) (url string, number int, ok bool, err error) {
+func (fakeGitHub) FindPRByHead(_ context.Context, _, _, _, _ string) (url string, number int, ok bool, err error) {
 	return "", 0, false, errors.New("fakeGitHub: FindPRByHead not scripted for project add")
 }
 
@@ -232,5 +233,52 @@ func TestProjectAdd_RejectsMalformedRepo(t *testing.T) {
 	err := projectAdd(t.Context(), cfgPath, gh, projectAddArgs("zing", "not-a-valid-repo", t.TempDir()))
 	if err == nil {
 		t.Fatal("projectAdd() = nil, want an error for a --repo with no owner/repo slash")
+	}
+}
+
+// TestProjectAdd_RejectsTrailingPositionalArgs proves PR review finding O:
+// parseProjectAddFlags used to silently ignore a trailing positional
+// argument after the flags, rather than rejecting it.
+func TestProjectAdd_RejectsTrailingPositionalArgs(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := writeProjectlessConfig(t)
+	gh := fakeGitHub{defaultBranchErr: errors.New("must not be called for an invalid flag set")}
+
+	args := append(projectAddArgs("zing", "Farmer-Pete/Zing", t.TempDir()), "unexpected-extra-arg")
+	err := projectAdd(t.Context(), cfgPath, gh, args)
+	if err == nil {
+		t.Fatal("projectAdd() = nil, want an error for a trailing positional argument")
+	}
+	if !strings.Contains(err.Error(), "unexpected-extra-arg") {
+		t.Errorf("projectAdd() error = %q, want it to name the unexpected argument", err.Error())
+	}
+}
+
+// TestProjectAdd_RejectsEmptyDiscoveredDefaultBranch proves PR review
+// finding O: projectAdd must not trust an empty default branch from
+// RepoDefaultBranch into the saved project.
+func TestProjectAdd_RejectsEmptyDiscoveredDefaultBranch(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := writeProjectlessConfig(t)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config before: %v", err)
+	}
+
+	gh := fakeGitHub{defaultBranch: ""}
+
+	err = projectAdd(t.Context(), cfgPath, gh, projectAddArgs("zing", "Farmer-Pete/Zing", t.TempDir()))
+	if err == nil {
+		t.Fatal("projectAdd() = nil, want an error for an empty discovered default branch")
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config after: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Error("zing.toml changed after a rejected empty-default-branch projectAdd, want it untouched")
 	}
 }

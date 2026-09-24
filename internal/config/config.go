@@ -80,10 +80,14 @@ type Project struct {
 	Path    string `toml:"path"`
 	Tracker string `toml:"tracker"`
 	// DefaultBranch is the branch the orchestrator worktrees off of and
-	// targets a draft PR at. Optional; defaults to "main" in applyDefaults.
+	// targets a draft PR at. Optional; left "" when zing.toml omits it (not
+	// defaulted to "main" here, so a real default branch recorded earlier
+	// is never overwritten by a defaulted one -- see applyDefaults).
 	// ensureBindings (cmd/zing/serve.go) passes it into store.EnsureProject,
-	// which reconciles a changed value into the projects table on every
-	// start (store/spine.go).
+	// which defaults ""->"main" on INSERT, skips its reconcile of
+	// DefaultBranch entirely when the value is "", and otherwise reconciles
+	// a changed value into the projects table on every start
+	// (store/spine.go).
 	DefaultBranch string   `toml:"default_branch"`
 	Self          bool     `toml:"self"`
 	Intake        Intake   `toml:"intake"`
@@ -203,15 +207,22 @@ func repairFileMode(path string) error {
 }
 
 // Save re-encodes cfg to path atomically and at mode 0600, since the file
-// holds github_token (PKG5-PLAN.md section 9). It writes to a sibling temp
-// file opened O_CREATE|O_EXCL|O_WRONLY at 0600 -- so a pre-existing
-// permissive file or symlink at the temp name cannot defeat the mode --
-// creating the parent directory at 0700 if absent, then renames over path.
-// On any error the temp file is removed and path is left untouched, since
-// the rename never runs until every earlier step has succeeded. Save drops
-// comments and hand-formatting in the existing file (decision Q70).
+// holds github_token (PKG5-PLAN.md section 9). It writes to a fresh sibling
+// temp file made with os.CreateTemp(dir, "zing.toml.*.tmp") -- a unique name
+// per call, rather than the fixed "<path>.tmp" a fixed name plus O_EXCL used
+// to imply, so a stale leftover temp file from an earlier interrupted or
+// crashed Save (which O_EXCL would then refuse to reuse or overwrite,
+// permanently blocking every future Save) can never block this one --
+// chmods it to 0600 (os.CreateTemp itself creates at 0600 already, minus
+// umask, so this makes the mode explicit rather than umask-dependent),
+// writes, closes, and renames it over path, creating the parent directory at
+// 0700 if absent. On any error the temp file is removed and path is left
+// untouched, since the rename never runs until every earlier step has
+// succeeded. Save drops comments and hand-formatting in the existing file
+// (decision Q70).
 func Save(path string, cfg *Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("zing.toml: save: %w", err)
 	}
 
@@ -220,9 +231,15 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("zing.toml: save: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.CreateTemp(dir, "zing.toml.*.tmp")
 	if err != nil {
+		return fmt.Errorf("zing.toml: save: %w", err)
+	}
+	tmp := f.Name()
+
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("zing.toml: save: %w", err)
 	}
 	if _, err := f.Write(data); err != nil {
@@ -444,8 +461,13 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 		if cfg.Projects[i].Intake.AssignedTo == "" {
 			cfg.Projects[i].Intake.AssignedTo = cfg.User
 		}
-		if cfg.Projects[i].DefaultBranch == "" {
-			cfg.Projects[i].DefaultBranch = "main"
-		}
+		// DefaultBranch is deliberately left "" when zing.toml omits it,
+		// rather than defaulted to "main" here: store.EnsureProject already
+		// defaults ""->"main" on INSERT and, on an existing project, skips
+		// its reconcile of DefaultBranch entirely when the incoming value is
+		// "". A default of "main" applied here would instead reach
+		// EnsureProject as an explicit value on every start, and overwrite a
+		// real, non-"main" default branch recorded from an earlier "zing
+		// project add" with the wrong one.
 	}
 }

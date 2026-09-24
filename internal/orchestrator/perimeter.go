@@ -115,9 +115,16 @@ func (o *Orchestrator) ChangedPaths(ctx context.Context, wt Worktree) ([]Change,
 // statusFromXY classifies a git porcelain-v1 XY status code. "??" is
 // Untracked. A conflict code (conflictCodes) is an error. Otherwise: an
 // index status of "A" (checked first, since it can co-occur with a worktree
-// "D" or "M") is Added; a "D" anywhere is Deleted; an "M" anywhere is
-// Modified.
+// "D" or "M") is Added; a "D" anywhere is Deleted; an "M" or "T"
+// (typechange, such as a file swapped for a symlink) anywhere is Modified.
+// A code shorter than two characters is a parse error rather than a panic:
+// the caller has already sliced the record on a fixed offset, so this
+// should never actually happen, but indexing xy[0] on a code with no
+// characters would otherwise panic.
 func statusFromXY(xy string) (Status, error) {
+	if len(xy) < 2 {
+		return 0, fmt.Errorf("status code too short: %q", xy)
+	}
 	switch {
 	case xy == "??":
 		return Untracked, nil
@@ -127,7 +134,7 @@ func statusFromXY(xy string) (Status, error) {
 		return Added, nil
 	case strings.Contains(xy, "D"):
 		return Deleted, nil
-	case strings.Contains(xy, "M"):
+	case strings.ContainsAny(xy, "MT"):
 		return Modified, nil
 	default:
 		return 0, fmt.Errorf("unrecognized status %q", xy)
@@ -195,8 +202,14 @@ func matchPattern(pattern, p string) bool {
 }
 
 // RevertPaths undoes exactly the given changes, by status, so a rejected
-// extra leaves no trace and no accepted file is touched. It groups the paths
-// by how they undo: Modified and Deleted paths are restored with
+// extra leaves no trace and no accepted file is touched. It first revalidates
+// wt (worktree.go): a wrong or stale worktree never has a path removed or
+// restored from under it. It then rejects any change whose Path is empty,
+// absolute, contains a NUL byte, or -- once filepath.Clean'd and joined onto
+// wt.dir -- resolves outside wt.dir, since RevertPaths is content-mutating
+// and destructive (it calls os.Remove) and Path is not otherwise trusted
+// input. Only once every path clears that check does it group the paths by
+// how they undo: Modified and Deleted paths are restored with
 // "git restore --staged --worktree"; Added (staged-new) paths are unstaged
 // with "git restore --staged" and then removed from disk; Untracked paths
 // are removed from disk directly, with no git call. Each restore reads its
@@ -223,6 +236,16 @@ func matchPattern(pattern, p string) bool {
 // finds a cleaner shared spot for it, this is the function to reconcile it
 // with.
 func (o *Orchestrator) RevertPaths(ctx context.Context, wt Worktree, changes []Change) error {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return fmt.Errorf("orchestrator: revert paths: %w", err)
+	}
+
+	for _, c := range changes {
+		if err := validateRevertPath(wt.dir, c.Path); err != nil {
+			return fmt.Errorf("orchestrator: revert paths: %w", err)
+		}
+	}
+
 	restoreBoth := make([]string, 0, len(changes))
 	restoreStaged := make([]string, 0, len(changes))
 	remove := make([]string, 0, len(changes))
@@ -267,6 +290,35 @@ func (o *Orchestrator) RevertPaths(ctx context.Context, wt Worktree, changes []C
 	}
 
 	o.log.Info("reverted extra paths", "branch", wt.branch, "count", len(changes))
+	return nil
+}
+
+// validateRevertPath rejects a Change.Path RevertPaths should never act on:
+// empty, containing a NUL byte, absolute, or one that -- once
+// filepath.Clean'd and joined onto wtDir -- resolves outside wtDir. Change
+// comes from ChangedPaths in the ordinary flow, but RevertPaths is
+// content-mutating and destructive (it calls os.Remove), so Path is
+// validated here rather than trusted.
+func validateRevertPath(wtDir, p string) error {
+	if p == "" {
+		return errors.New("path must not be empty")
+	}
+	if strings.ContainsRune(p, 0) {
+		return fmt.Errorf("path must not contain a NUL byte: %q", p)
+	}
+	if filepath.IsAbs(p) {
+		return fmt.Errorf("path must not be absolute: %q", p)
+	}
+
+	clean := filepath.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes the worktree: %q", p)
+	}
+
+	full := filepath.Join(wtDir, clean)
+	if full != wtDir && !strings.HasPrefix(full, wtDir+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes the worktree: %q", p)
+	}
 	return nil
 }
 

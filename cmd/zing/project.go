@@ -76,7 +76,9 @@ type projectAddFlags struct {
 // parseProjectAddFlags parses and validates the "add" subcommand's flags, in
 // the order PKG5-PLAN.md section 10 step 2 lists: name, repo, path
 // (absolute), test, lint required; tracker defaults to "github" and must be
-// "github".
+// "github". It also rejects any trailing positional argument fs.Parse leaves
+// unconsumed (a stray word after the flags, or a flag typo'd without its
+// leading "-"), naming it in the error, rather than silently ignoring it.
 func parseProjectAddFlags(args []string) (projectAddFlags, error) {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -89,6 +91,9 @@ func parseProjectAddFlags(args []string) (projectAddFlags, error) {
 	fs.StringVar(&f.tracker, "tracker", "github", "issue tracker (github only)")
 	if err := fs.Parse(args); err != nil {
 		return projectAddFlags{}, fmt.Errorf("%s: %w", projectAddUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return projectAddFlags{}, fmt.Errorf("zing project add: unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 
 	switch {
@@ -127,7 +132,11 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 //  2. Parse and validate the flags.
 //  3. A project whose name already exists is a fatal error, with no write.
 //  4. Split --repo into owner and repo on the single "/".
-//  5. Discover the default branch through gh.RepoDefaultBranch.
+//  5. Discover the default branch through gh.RepoDefaultBranch; an empty
+//     result is an error, since projectAdd must not trust an empty
+//     DefaultBranch into the saved project (store.EnsureProject only
+//     defaults an empty DefaultBranch to "main" for a project it is
+//     inserting for the first time, not one already on record).
 //  6. gh.RequiredChecks on that branch; a result missing "ci" fails with
 //     errMissingRequiredCICheck and writes nothing.
 //  7. Append the project, with the discovered default branch, and
@@ -155,6 +164,9 @@ func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, arg
 	defaultBranch, err := gh.RepoDefaultBranch(ctx, owner, repo)
 	if err != nil {
 		return fmt.Errorf("zing project add: repo default branch: %w", err)
+	}
+	if defaultBranch == "" {
+		return errors.New("zing project add: repo default branch: GitHub returned an empty default branch")
 	}
 
 	checks, err := gh.RequiredChecks(ctx, owner, repo, defaultBranch)

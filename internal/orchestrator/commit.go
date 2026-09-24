@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"zing/internal/response"
 )
@@ -27,16 +28,31 @@ type CommitMessage struct {
 }
 
 // Render returns the full commit message, or an error if Title or any
-// FuncLines entry is empty or spans more than one line (PKG5-PLAN.md section
-// 8.3, worked example 12.1). The layout is: subject, blank line, the func
-// lines, a blank line and the fence lines when present, a blank line and
-// CoAuthorTrailer.
+// FuncLines entry is empty or spans more than one line, or if any Fences
+// entry's Path, Symbol, or ExistedBecause is empty or spans more than one
+// line (PKG5-PLAN.md section 8.3, worked example 12.1). Fences comes from
+// Package 8's model output, so it is validated by the same single-line rule
+// as Title and FuncLines rather than trusted: an empty or multiline field
+// there would otherwise inject extra, model-controlled lines into the commit
+// message. The layout is: subject, blank line, the func lines, a blank line
+// and the fence lines when present, a blank line and CoAuthorTrailer.
 func (m CommitMessage) Render() (string, error) {
 	if err := validateSingleLine("title", m.Title); err != nil {
 		return "", fmt.Errorf("orchestrator: render commit message: %w", err)
 	}
 	for i, fl := range m.FuncLines {
 		if err := validateSingleLine(fmt.Sprintf("func line %d", i), fl); err != nil {
+			return "", fmt.Errorf("orchestrator: render commit message: %w", err)
+		}
+	}
+	for i, f := range m.Fences {
+		if err := validateSingleLine(fmt.Sprintf("fence %d path", i), f.Path); err != nil {
+			return "", fmt.Errorf("orchestrator: render commit message: %w", err)
+		}
+		if err := validateSingleLine(fmt.Sprintf("fence %d symbol", i), f.Symbol); err != nil {
+			return "", fmt.Errorf("orchestrator: render commit message: %w", err)
+		}
+		if err := validateSingleLine(fmt.Sprintf("fence %d existed because", i), f.ExistedBecause); err != nil {
 			return "", fmt.Errorf("orchestrator: render commit message: %w", err)
 		}
 	}
@@ -75,17 +91,22 @@ func validateSingleLine(field, value string) error {
 	return nil
 }
 
-// CommitTask writes a single signed commit of exactly the approved paths
-// (PKG5-PLAN.md section 8.3). approved is staged with
-// "git add --pathspec-from-file=<file> --pathspec-file-nul" under
-// GIT_LITERAL_PATHSPECS=1, the same wiring perimeter.go's RevertPaths uses,
-// so a path is never read as pathspec magic or a wildcard and "git add -A"
-// is never run. Steps: revalidate wt; record HEAD; stage approved; render
-// and commit with "git commit -S -F <file>"; verify with signedStatus. A git
-// error at commit, an unsigned result, or an error running the verification
-// itself all reset the branch to the recorded HEAD with
-// "git reset --soft <head>" and return a plain "commit signing failed: ..."
-// error, so no unsigned commit is ever left at HEAD.
+// CommitTask writes a single signed commit of exactly the approved paths,
+// and nothing else already sitting in the index (PKG5-PLAN.md section 8.3).
+// approved is written once to a NUL-delimited pathspec file, and that same
+// file is passed to both "git add --pathspec-from-file=<file>
+// --pathspec-file-nul" and "git commit -S -F <msg>
+// --pathspec-from-file=<file> --pathspec-file-nul", both run under
+// GIT_LITERAL_PATHSPECS=1 (the same wiring perimeter.go's RevertPaths uses),
+// so a path is never read as pathspec magic or a wildcard, "git add -A" is
+// never run, and the commit itself is scoped to approved rather than
+// whatever else a caller or a prior step left staged in the index. Steps:
+// revalidate wt; record HEAD; stage approved; render and commit, both
+// pathspec-scoped; verify with signedStatus. A git error at commit, an
+// unsigned result, or an error running the verification itself all reset
+// the branch to the recorded HEAD with "git reset --soft <head>" and return
+// a plain "commit signing failed: ..." error, so no unsigned commit is ever
+// left at HEAD.
 func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []string, m CommitMessage) (sha string, err error) {
 	if err = o.revalidate(ctx, wt); err != nil {
 		return "", fmt.Errorf("orchestrator: commit task: %w", err)
@@ -97,9 +118,16 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 	}
 	priorHead = strings.TrimSpace(priorHead)
 
+	pathspecFile, err := writePathspecFile(approved)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit task: %w", err)
+	}
+	defer func() { _ = os.Remove(pathspecFile) }()
+
 	litRun := execRunner{extraEnv: literalPathspecEnv}
-	if err = runPathspecCommand(ctx, litRun, wt.dir, approved, "add"); err != nil {
-		return "", fmt.Errorf("orchestrator: commit task: stage approved paths: %w", err)
+	addArgs := pathspecArgs([]string{"add"}, pathspecFile)
+	if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
+		return "", fmt.Errorf("orchestrator: commit task: stage approved paths: %w: %s", addErr, strings.TrimSpace(out))
 	}
 
 	message, err := m.Render()
@@ -115,7 +143,8 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 
 	o.log.Info("committing task", "branch", wt.branch, "title", m.Title, "approved_count", len(approved))
 
-	commitOut, commitErr := o.run.Run(ctx, wt.dir, "git", "commit", "-S", "-F", msgFile)
+	commitArgs := pathspecArgs([]string{"commit", "-S", "-F", msgFile}, pathspecFile)
+	commitOut, commitErr := litRun.Run(ctx, wt.dir, "git", commitArgs...)
 	if commitErr != nil {
 		return "", o.resetAfterUnsignedCommit(ctx, wt, priorHead,
 			fmt.Sprintf("git commit -S: %v: %s", commitErr, strings.TrimSpace(commitOut)))
@@ -145,16 +174,35 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 	return newSHA, nil
 }
 
+// resetUnsignedCommitTimeout bounds the detached reset resetAfterUnsignedCommit
+// runs, so a cleanup that can no longer inherit the caller's context still
+// completes in bounded time rather than hanging forever.
+const resetUnsignedCommitTimeout = 30 * time.Second
+
 // resetAfterUnsignedCommit resets wt.Dir back to priorHead with
 // "git reset --soft" and returns a plain "commit signing failed: ..." error
-// naming reason. A failure of the reset itself is logged, not returned,
-// since the caller must still learn that signing failed.
+// naming reason. The reset runs under a detached context
+// (context.WithoutCancel(ctx), bounded by resetUnsignedCommitTimeout) rather
+// than ctx itself: ctx may already be cancelled or past its deadline by the
+// time signing fails, and an unsigned commit left at HEAD because the
+// cleanup couldn't run is worse than a reset that outlives the caller's own
+// context. A failure of the reset itself is logged, not returned, since the
+// caller must still learn that signing failed.
 func (o *Orchestrator) resetAfterUnsignedCommit(ctx context.Context, wt Worktree, priorHead, reason string) error {
-	if out, resetErr := o.run.Run(ctx, wt.dir, "git", "reset", "--soft", priorHead); resetErr != nil {
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
+	defer cancel()
+	if out, resetErr := o.run.Run(resetCtx, wt.dir, "git", "reset", "--soft", priorHead); resetErr != nil {
 		o.log.Error("commit signing failed and the reset also failed", "branch", wt.branch,
 			"err", resetErr, "output", strings.TrimSpace(out))
 	}
 	return errors.New("commit signing failed: " + reason)
+}
+
+// pathspecArgs appends "--pathspec-from-file=<file> --pathspec-file-nul" to
+// args, the two flags every pathspec-scoped git call in this file and
+// perimeter.go needs to read its paths from file rather than argv.
+func pathspecArgs(args []string, file string) []string {
+	return append(args, "--pathspec-from-file="+file, "--pathspec-file-nul")
 }
 
 // writeCommitMessageFile writes message to a fresh temp file and returns its
@@ -184,14 +232,21 @@ func writeCommitMessageFile(message string) (string, error) {
 // robustly across hosts that have not configured
 // gpg.ssh.allowedSignersFile (PKG5-PLAN.md section 8.3). It reads
 // "git show --no-patch --format=%G? <rev>", trimmed:
-//   - "G" or "U": the signature verified locally; signed=true, verified=true.
-//   - "N": git found no verifiable signature -- which is also what it
-//     reports for a validly SSH-signed commit when allowedSignersFile is not
-//     configured. Fall back to "git cat-file -p <rev>" and look for a
-//     "gpgsig " header line: present means the commit is signed but this
-//     host cannot verify it (signed=true, verified=false); absent means the
-//     commit is genuinely unsigned (signed=false, verified=false).
-//   - "B", "E", "X", "Y", "R": a real signing problem; signed=false.
+//   - "G": a good, locally verified signature; signed=true, verified=true.
+//   - "U": a good signature from a key of unknown validity -- the signature
+//     itself checks out, but this host cannot vouch for the key, so it is
+//     signed=true but not verified=true (over-trusting "U" as fully
+//     verified would accept a signature from an untrusted key).
+//   - "N", "E", "X", "Y": git found no verifiable signature ("N"), could not
+//     check one at all ("E"), or found one past expiry ("X") or signed by a
+//     since-expired key ("Y") -- every one of which is also what a validly
+//     SSH-signed commit reports when allowedSignersFile is not configured.
+//     Fall back to "git cat-file -p <rev>" and look for a "gpgsig " header:
+//     present means the commit is signed but this host cannot verify it
+//     (signed=true, verified=false); absent means the commit is genuinely
+//     unsigned (signed=false, verified=false).
+//   - "B" or "R": a real signing problem (a bad signature, or a good
+//     signature from a revoked key); signed=false, verified=false.
 func (o *Orchestrator) signedStatus(ctx context.Context, dir, rev string) (signed, verified bool, err error) {
 	out, err := o.run.Output(ctx, dir, "git", "show", "--no-patch", "--format=%G?", rev)
 	if err != nil {
@@ -199,11 +254,13 @@ func (o *Orchestrator) signedStatus(ctx context.Context, dir, rev string) (signe
 	}
 
 	switch code := strings.TrimSpace(out); code {
-	case "G", "U":
+	case "G":
 		return true, true, nil
-	case "N":
+	case "U":
+		return true, false, nil
+	case "N", "E", "X", "Y":
 		return o.signedStatusFallback(ctx, dir, rev)
-	case "B", "E", "X", "Y", "R":
+	case "B", "R":
 		return false, false, nil
 	default:
 		return false, false, fmt.Errorf("orchestrator: signed status: unrecognized %%G? code %q", code)
@@ -211,16 +268,24 @@ func (o *Orchestrator) signedStatus(ctx context.Context, dir, rev string) (signe
 }
 
 // signedStatusFallback is the presence check signedStatus falls back to when
-// %G? reports "N": it looks for a "gpgsig " header in the raw commit object
-// rather than trusting local verifiability, since a missing
-// gpg.ssh.allowedSignersFile makes %G? report "N" even for a validly signed
-// commit.
+// %G? cannot report a locally verifiable result: it looks for a "gpgsig "
+// header in the raw commit object rather than trusting local verifiability,
+// since a missing gpg.ssh.allowedSignersFile makes %G? report a code such as
+// "N" even for a validly signed commit. It scans only the header block of
+// "git cat-file -p <rev>" -- the lines up to and not including the first
+// blank line that separates the commit's headers from its message -- and
+// stops there, so a commit message whose title or body happens to start
+// with "gpgsig " (an attacker- or model-controlled string) is never
+// misread as a signature header.
 func (o *Orchestrator) signedStatusFallback(ctx context.Context, dir, rev string) (signed, verified bool, err error) {
 	out, err := o.run.Output(ctx, dir, "git", "cat-file", "-p", rev)
 	if err != nil {
 		return false, false, fmt.Errorf("orchestrator: signed status: git cat-file: %w", err)
 	}
 	for line := range strings.SplitSeq(out, "\n") {
+		if line == "" {
+			break
+		}
 		if strings.HasPrefix(line, "gpgsig ") {
 			return true, false, nil
 		}

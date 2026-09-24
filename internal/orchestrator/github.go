@@ -23,8 +23,9 @@ type GitHub interface {
 	RequiredChecks(ctx context.Context, owner, repo, branch string) ([]string, error)
 	// CreateDraftPR opens a draft pull request and returns its URL and number.
 	CreateDraftPR(ctx context.Context, owner, repo, head, base, title, body string) (url string, number int, err error)
-	// FindPRByHead returns the open PR whose head branch is head, or ok=false.
-	FindPRByHead(ctx context.Context, owner, repo, head string) (url string, number int, ok bool, err error)
+	// FindPRByHead returns the open PR whose head branch is head and whose
+	// base branch is base, or ok=false.
+	FindPRByHead(ctx context.Context, owner, repo, head, base string) (url string, number int, ok bool, err error)
 }
 
 // ghHTTPTimeout bounds every call the real client makes, so a call never
@@ -116,11 +117,15 @@ func (g ghClient) CreateDraftPR(ctx context.Context, owner, repo, head, base, ti
 	return pr.GetHTMLURL(), pr.GetNumber(), nil
 }
 
-// FindPRByHead calls PullRequests.List with a Head filter of "owner:head"
-// and State "open", returning the first match.
-func (g ghClient) FindPRByHead(ctx context.Context, owner, repo, head string) (url string, number int, ok bool, err error) {
+// FindPRByHead calls PullRequests.List with a Head filter of "owner:head", a
+// Base filter of base, and State "open", returning the first match. The Base
+// filter matters: without it, OpenDraftPR's fallback could return an open PR
+// from wt.Branch into some other base entirely, not the default branch it
+// meant to open one against.
+func (g ghClient) FindPRByHead(ctx context.Context, owner, repo, head, base string) (url string, number int, ok bool, err error) {
 	prs, _, err := g.c.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
 		Head:  owner + ":" + head,
+		Base:  base,
 		State: "open",
 	})
 	if err != nil {

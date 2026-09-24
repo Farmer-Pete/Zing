@@ -74,8 +74,8 @@ func TestGHClientRepoDefaultBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoDefaultBranch: unexpected error: %v", err)
 	}
-	if branch != "main" {
-		t.Errorf("RepoDefaultBranch = %q, want %q", branch, "main")
+	if branch != mainBranch {
+		t.Errorf("RepoDefaultBranch = %q, want %q", branch, mainBranch)
 	}
 	if want := "Bearer " + testGHToken; gotAuth != want {
 		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
@@ -101,7 +101,7 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 
 	g := newTestGHClient(t, mux)
 
-	url, number, err := g.CreateDraftPR(t.Context(), "acme", "widgets", "zing/1-slug", "main", "A title", "A body")
+	url, number, err := g.CreateDraftPR(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch, "A title", "A body")
 	if err != nil {
 		t.Fatalf("CreateDraftPR: unexpected error: %v", err)
 	}
@@ -123,8 +123,8 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 	if gotBody["head"] != "zing/1-slug" {
 		t.Errorf("request body head = %v, want %q", gotBody["head"], "zing/1-slug")
 	}
-	if gotBody["base"] != "main" {
-		t.Errorf("request body base = %v, want %q", gotBody["base"], "main")
+	if gotBody["base"] != mainBranch {
+		t.Errorf("request body base = %v, want %q", gotBody["base"], mainBranch)
 	}
 }
 
@@ -143,7 +143,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 
 		g := newTestGHClient(t, mux)
 
-		checks, err := g.RequiredChecks(t.Context(), "acme", "widgets", "main")
+		checks, err := g.RequiredChecks(t.Context(), "acme", "widgets", mainBranch)
 		if err != nil {
 			t.Fatalf("RequiredChecks: unexpected error: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 
 		g := newTestGHClient(t, mux)
 
-		checks, err := g.RequiredChecks(t.Context(), "acme", "widgets", "main")
+		checks, err := g.RequiredChecks(t.Context(), "acme", "widgets", mainBranch)
 		if err != nil {
 			t.Fatalf("RequiredChecks: unexpected error: %v", err)
 		}
@@ -186,7 +186,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 
 		g := newTestGHClient(t, mux)
 
-		_, err := g.RequiredChecks(t.Context(), "acme", "widgets", "main")
+		_, err := g.RequiredChecks(t.Context(), "acme", "widgets", mainBranch)
 		if err == nil {
 			t.Fatal("RequiredChecks: expected an error for a non-branch-protection 404, got nil")
 		}
@@ -195,18 +195,19 @@ func TestGHClientRequiredChecks(t *testing.T) {
 
 func TestGHClientFindPRByHead(t *testing.T) {
 	t.Run("returns the match", func(t *testing.T) {
-		var gotHead, gotState string
+		var gotHead, gotBase, gotState string
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, r *http.Request) {
 			gotHead = r.URL.Query().Get("head")
+			gotBase = r.URL.Query().Get("base")
 			gotState = r.URL.Query().Get("state")
 			fmt.Fprint(w, `[{"html_url": "https://github.com/acme/widgets/pull/7", "number": 7}]`)
 		})
 
 		g := newTestGHClient(t, mux)
 
-		url, number, ok, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug")
+		url, number, ok, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch)
 		if err != nil {
 			t.Fatalf("FindPRByHead: unexpected error: %v", err)
 		}
@@ -222,6 +223,9 @@ func TestGHClientFindPRByHead(t *testing.T) {
 		if gotHead != "acme:zing/1-slug" {
 			t.Errorf("head query = %q, want %q", gotHead, "acme:zing/1-slug")
 		}
+		if gotBase != mainBranch {
+			t.Errorf("base query = %q, want %q", gotBase, mainBranch)
+		}
 		if gotState != "open" {
 			t.Errorf("state query = %q, want %q", gotState, "open")
 		}
@@ -235,12 +239,57 @@ func TestGHClientFindPRByHead(t *testing.T) {
 
 		g := newTestGHClient(t, mux)
 
-		_, _, ok, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug")
+		_, _, ok, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch)
 		if err != nil {
 			t.Fatalf("FindPRByHead: unexpected error: %v", err)
 		}
 		if ok {
 			t.Error("FindPRByHead: ok = true, want false")
+		}
+	})
+
+	// PR review finding L: OpenDraftPR's fallback used to ignore base
+	// entirely, so it could return an open PR into some other base branch.
+	// This mimics GitHub's own Head+Base filtering (the real endpoint drops
+	// a PR whose base does not match) to prove FindPRByHead, given a base
+	// that does not match the PR on the server, comes back ok=false.
+	t.Run("a PR whose base does not match the requested base is not returned", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("base") != mainBranch {
+				fmt.Fprint(w, `[]`)
+				return
+			}
+			fmt.Fprint(w, `[{"html_url": "https://github.com/acme/widgets/pull/7", "number": 7}]`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		_, _, ok, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", "release")
+		if err != nil {
+			t.Fatalf("FindPRByHead: unexpected error: %v", err)
+		}
+		if ok {
+			t.Error("FindPRByHead: ok = true, want false for a base that does not match the open PR's base")
+		}
+	})
+
+	t.Run("passes base as its own query parameter, not just head", func(t *testing.T) {
+		var gotBase string
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, r *http.Request) {
+			gotBase = r.URL.Query().Get("base")
+			fmt.Fprint(w, `[]`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		if _, _, _, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", "release"); err != nil {
+			t.Fatalf("FindPRByHead: unexpected error: %v", err)
+		}
+		if gotBase != "release" {
+			t.Errorf("base query = %q, want %q", gotBase, "release")
 		}
 	})
 }

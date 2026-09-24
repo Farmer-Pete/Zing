@@ -35,7 +35,7 @@ func (fakeGitHub) CreateDraftPR(context.Context, string, string, string, string,
 	return "", 0, errors.New("fakeGitHub: not implemented")
 }
 
-func (fakeGitHub) FindPRByHead(context.Context, string, string, string) (url string, number int, ok bool, err error) {
+func (fakeGitHub) FindPRByHead(context.Context, string, string, string, string) (url string, number int, ok bool, err error) {
 	return "", 0, false, errors.New("fakeGitHub: not implemented")
 }
 
@@ -468,6 +468,25 @@ func TestPrepareWorktree(t *testing.T) {
 			t.Errorf("expected branch zing/13-boom to be deleted after cleanup, branch --list said: %q", branches)
 		}
 	})
+
+	// PR review finding P: the "zing/" prefix ordinarily keeps a ticket
+	// branch structurally distinct from a repository's default branch, but
+	// a project whose default branch itself happens to be named like a
+	// zing/ ticket branch would otherwise slip past that assumption.
+	// PrepareWorktree must reject this before touching git or the
+	// filesystem, which noCallRunner and an unused LocalPath both prove.
+	t.Run("rejects a computed branch that equals the default branch", func(t *testing.T) {
+		proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: "zing/1"}
+		log := slog.New(slog.DiscardHandler)
+		o, err := New(proj, fakeGitHub{}, noCallRunner{t: t}, log)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		if _, err := o.PrepareWorktree(t.Context(), 1, "", nil); err == nil {
+			t.Fatal("PrepareWorktree: expected an error when the computed branch equals the default branch, got nil")
+		}
+	})
 }
 
 func TestRemoveWorktree(t *testing.T) {
@@ -539,4 +558,93 @@ func TestRemoveWorktree(t *testing.T) {
 			t.Fatal("RemoveWorktree: expected an error for a non-zing branch, got nil")
 		}
 	})
+
+	// PR review finding H: validateZingBranch used to check only the
+	// zing/ pattern and the default branch, so a hand-crafted branch that
+	// matches the pattern but is not a git-legal ref (never having run
+	// through branchName's own check-ref-format layer) could still reach
+	// RemoveWorktree's destructive paths. "lock" is a legal slug character,
+	// so this branch matches zingBranchPattern, but git rejects a ref
+	// ending in ".lock". checkRefFormat runs outside the Runner, so
+	// noCallRunner still proves the rejection happens before any git
+	// command goes through o.run.
+	t.Run("rejects a zing/-shaped branch that check-ref-format rejects", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
+		ctx := t.Context()
+
+		bad := Worktree{dir: filepath.Join(repo, ".zing", "wt", "99"), branch: "zing/7-wip.lock"}
+		if err := o.RemoveWorktree(ctx, bad); err == nil {
+			t.Fatal("RemoveWorktree: expected an error for a git-invalid zing/ branch, got nil")
+		}
+	})
+
+	// PR review finding G: RemoveWorktree used to force-remove a present
+	// worktree without checking what branch was actually checked out there.
+	// A worktree directory whose HEAD was switched to some other branch
+	// since Zing prepared it (repurposed out from under Zing) must be
+	// refused, not force-removed.
+	t.Run("refuses to remove a worktree whose HEAD was switched to another branch", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 23, "repurposed", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		runGit(ctx, t, wt.Dir(), "checkout", "-b", "some-other-branch")
+
+		if err := o.RemoveWorktree(ctx, wt); err == nil {
+			t.Fatal("RemoveWorktree: expected an error for a worktree checked out to another branch, got nil")
+		}
+
+		if _, statErr := os.Stat(wt.Dir()); statErr != nil {
+			t.Errorf("expected the repurposed worktree to be left in place, stat err = %v", statErr)
+		}
+		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+		if strings.TrimSpace(branches) == "" {
+			t.Errorf("expected branch %q to still exist, branch --list said: %q", wt.Branch(), branches)
+		}
+	})
+}
+
+// PR review finding B: worktreePresent compared "git worktree list
+// --porcelain" paths (which git reports with symlinks resolved) against
+// dir as passed in, unresolved. When o.proj.LocalPath is itself reached
+// through a symlinked path component, PrepareWorktree's Worktree.dir is
+// built from that unresolved path (a plain filepath.Join), so it would
+// never match git's resolved form and RemoveWorktree would wrongly
+// conclude the worktree was already gone, leaking it. This test
+// deliberately builds the Orchestrator's LocalPath from a symlink rather
+// than pre-resolving it, unlike every other test in this file.
+func TestWorktreePresentAcrossASymlinkedLocalPath(t *testing.T) {
+	repo := newTestRepo(t)
+
+	parent := t.TempDir()
+	link := filepath.Join(parent, "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	ctx := t.Context()
+	o := newTestOrchestrator(t, link, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 50, "symlinked", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	if err := o.RemoveWorktree(ctx, wt); err != nil {
+		t.Fatalf("RemoveWorktree: unexpected error for a worktree reached through a symlinked local path: %v", err)
+	}
+
+	if _, statErr := os.Stat(wt.Dir()); statErr == nil {
+		t.Errorf("expected %s to be removed, but it still exists (the leak worktreePresent's symlink fix prevents)", wt.Dir())
+	}
+	branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+	if strings.TrimSpace(branches) != "" {
+		t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+	}
 }

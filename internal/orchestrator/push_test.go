@@ -168,11 +168,12 @@ type scriptedPushGitHub struct {
 	gotTitle     string
 	gotBody      string
 
-	findURL    string
-	findNumber int
-	findOK     bool
-	findErr    error
-	findCalls  int
+	findURL     string
+	findNumber  int
+	findOK      bool
+	findErr     error
+	findCalls   int
+	gotFindBase string
 }
 
 func (g *scriptedPushGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
@@ -192,8 +193,9 @@ func (g *scriptedPushGitHub) CreateDraftPR(_ context.Context, _, _, head, base, 
 	return g.createURL, g.createNumber, nil
 }
 
-func (g *scriptedPushGitHub) FindPRByHead(context.Context, string, string, string) (url string, number int, ok bool, err error) {
+func (g *scriptedPushGitHub) FindPRByHead(_ context.Context, _, _, _, base string) (url string, number int, ok bool, err error) {
 	g.findCalls++
+	g.gotFindBase = base
 	if g.findErr != nil {
 		return "", 0, false, g.findErr
 	}
@@ -307,6 +309,51 @@ func TestOpenDraftPR(t *testing.T) {
 		}
 		if gh.findCalls != 1 {
 			t.Errorf("FindPRByHead called %d times, want 1", gh.findCalls)
+		}
+		if gh.gotFindBase != mainBranch {
+			t.Errorf("FindPRByHead base = %q, want %q (the default branch, PR review finding L)", gh.gotFindBase, mainBranch)
+		}
+	})
+
+	// PR review finding K: OpenDraftPR used to call Push before rendering
+	// and validating pr.Body(), so an empty Title errored only after the
+	// remote branch had already been updated. This repo deliberately has no
+	// "origin" remote configured: if OpenDraftPR still reached Push before
+	// the title check, this test would see a "no such remote" push error
+	// instead of the title error it asserts on, and neither GitHub double
+	// method would be safe to assume uncalled.
+	//
+	// This builds the Orchestrator directly through New rather than reusing
+	// newTestOrchestratorWithGitHub above (mirroring orchestrator_test.go's
+	// newE2EOrchestrator, and its own comment on why): that helper's Runner
+	// parameter is called only with execRunner{} from every existing site,
+	// and a fourth one here that agrees would trip golangci-lint's unparam
+	// finding on it.
+	t.Run("an empty title errors before any push", func(t *testing.T) {
+		newSigningFixture(t, true)
+		repo := newSigningTestRepo(t)
+		ctx := t.Context()
+
+		proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: mainBranch}
+		gh := &scriptedPushGitHub{}
+		o, err := New(proj, gh, execRunner{}, slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		wt := prepareSignedCommit(ctx, t, o, 33)
+
+		_, _, err = o.OpenDraftPR(ctx, wt, PullRequest{})
+		if err == nil {
+			t.Fatal("OpenDraftPR: expected an error for an empty title, got nil")
+		}
+		if !strings.Contains(err.Error(), "title") {
+			t.Errorf("OpenDraftPR error = %q, want it to mention %q", err.Error(), "title")
+		}
+		if gh.createCalls != 0 {
+			t.Errorf("CreateDraftPR called %d times, want 0 (must not reach GitHub for an invalid title)", gh.createCalls)
+		}
+		if gh.findCalls != 0 {
+			t.Errorf("FindPRByHead called %d times, want 0 (must not reach GitHub for an invalid title)", gh.findCalls)
 		}
 	})
 

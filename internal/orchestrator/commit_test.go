@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,8 @@ const (
 	testCommitTitle      = "Add approved.txt"
 	testFuncLine         = "main adds a file, called by nothing, calls nothing"
 	testSingleFuncLine   = "a func line"
+	testGenericTitle     = "a title"
+	testTwoLineValue     = "line one\nline two"
 )
 
 // -----------------------------------------------------------------------
@@ -84,23 +88,42 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("multiline title is an error", func(t *testing.T) {
-		m := CommitMessage{Title: "line one\nline two", FuncLines: []string{testSingleFuncLine}}
+		m := CommitMessage{Title: testTwoLineValue, FuncLines: []string{testSingleFuncLine}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for a multiline title, got nil")
 		}
 	})
 
 	t.Run("empty func line is an error", func(t *testing.T) {
-		m := CommitMessage{Title: "a title", FuncLines: []string{testSingleFuncLine, ""}}
+		m := CommitMessage{Title: testGenericTitle, FuncLines: []string{testSingleFuncLine, ""}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for an empty func line, got nil")
 		}
 	})
 
 	t.Run("multiline func line is an error", func(t *testing.T) {
-		m := CommitMessage{Title: "a title", FuncLines: []string{"line one\nline two"}}
+		m := CommitMessage{Title: testGenericTitle, FuncLines: []string{testTwoLineValue}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for a multiline func line, got nil")
+		}
+	})
+
+	// PR review finding N: Render validated Title and FuncLines but trusted
+	// Fences, so a multiline (or empty) Fence field could inject extra
+	// commit lines. Fences comes from Package 8's model output, so it must
+	// be validated the same way.
+	t.Run("a fence with a multiline ExistedBecause is an error", func(t *testing.T) {
+		m := CommitMessage{
+			Title:     testGenericTitle,
+			FuncLines: []string{testSingleFuncLine},
+			Fences: []response.Fence{{
+				Path:           "a.go",
+				Symbol:         "foo",
+				ExistedBecause: testTwoLineValue,
+			}},
+		}
+		if _, err := m.Render(); err == nil {
+			t.Fatal("Render: expected an error for a fence with a multiline ExistedBecause, got nil")
 		}
 	})
 }
@@ -307,6 +330,44 @@ func TestCommitTask(t *testing.T) {
 		}
 	})
 
+	// PR review finding C: CommitTask used to stage only approved with
+	// "git add", but then run "git commit -S -F <file>" with no pathspec,
+	// which commits the WHOLE index -- so anything a caller (or a prior
+	// step) had already staged before CommitTask ran would be swept into
+	// the commit too. This proves an unrelated file staged before CommitTask
+	// runs is left out of the commit and stays staged afterward.
+	t.Run("with allowed signers: an unrelated already-staged file is not included in the commit", func(t *testing.T) {
+		newSigningFixture(t, true)
+		repo := newSigningTestRepo(t)
+		ctx := t.Context()
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 4, "", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "approved content\n")
+		writeTestFile(t, filepath.Join(wt.Dir(), unrelatedTestFile), "unrelated content\n")
+		runGit(ctx, t, wt.Dir(), "add", unrelatedTestFile)
+
+		msg := CommitMessage{Title: testCommitTitle, FuncLines: []string{testFuncLine}}
+
+		if _, err := o.CommitTask(ctx, wt, []string{approvedTestFile}, msg); err != nil {
+			t.Fatalf("CommitTask: unexpected error: %v", err)
+		}
+
+		committed := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"))
+		if committed != approvedTestFile {
+			t.Errorf("committed paths = %q, want only %q (not the already-staged %q)", committed, approvedTestFile, unrelatedTestFile)
+		}
+
+		staged := runGit(ctx, t, wt.Dir(), "diff", "--cached", "--name-only")
+		if !strings.Contains(staged, unrelatedTestFile) {
+			t.Errorf("expected %s to remain staged after CommitTask, staged = %q", unrelatedTestFile, staged)
+		}
+	})
+
 	t.Run("without allowed signers: commits and signs, unverifiable locally", func(t *testing.T) {
 		newSigningFixture(t, false)
 		repo := newSigningTestRepo(t)
@@ -387,4 +448,200 @@ func TestCommitTask(t *testing.T) {
 			t.Error("expected no new commit to remain in the log after the reset")
 		}
 	})
+}
+
+// -----------------------------------------------------------------------
+// signedStatus: a scripted Runner drives every %G? code
+// -----------------------------------------------------------------------
+
+// commitHeaderWithGpgsig and commitHeaderWithoutGpgsig are "git cat-file -p"
+// bodies for signedStatusFallback's table cases: one with a "gpgsig " header
+// line before the blank line separating headers from the message, one
+// without.
+const (
+	commitHeaderWithGpgsig = "tree deadbeef\n" +
+		"author A <a@example.com> 0 +0000\n" +
+		"committer A <a@example.com> 0 +0000\n" +
+		"gpgsig -----BEGIN SSH SIGNATURE-----\n" +
+		" U1NIU0lHAAAA\n" +
+		" -----END SSH SIGNATURE-----\n" +
+		"\n" +
+		"a commit message\n"
+	commitHeaderWithoutGpgsig = "tree deadbeef\n" +
+		"author A <a@example.com> 0 +0000\n" +
+		"committer A <a@example.com> 0 +0000\n" +
+		"\n" +
+		"a commit message\n"
+)
+
+// scriptedSignedStatusRunner is a fake Runner for signedStatus's table test:
+// it returns a fixed "git show --no-patch --format=%G?" code and, for the
+// fallback path, a fixed "git cat-file -p" body, so every %G? code
+// signedStatus's switch (PR review finding D) can be driven directly rather
+// than reproducing each one with a real signing key and host configuration.
+type scriptedSignedStatusRunner struct {
+	gCode   string
+	catFile string
+}
+
+func (scriptedSignedStatusRunner) Run(context.Context, string, string, ...string) (string, error) {
+	return "", errors.New("scriptedSignedStatusRunner: Run not implemented")
+}
+
+func (r scriptedSignedStatusRunner) Output(_ context.Context, _, _ string, args ...string) (string, error) {
+	switch {
+	case len(args) > 0 && args[0] == "show":
+		return r.gCode, nil
+	case len(args) > 0 && args[0] == "cat-file":
+		return r.catFile, nil
+	default:
+		return "", fmt.Errorf("scriptedSignedStatusRunner: unexpected Output call: %s", strings.Join(args, " "))
+	}
+}
+
+// TestSignedStatus drives every %G? code signedStatus's switch handles (PR
+// review finding D): "G" is fully verified; "U" is signed but must not be
+// over-trusted as verified; "N", "E", "X", and "Y" fall back to the gpgsig
+// presence check; "B" and "R" are real signing problems; anything else is an
+// error.
+func TestSignedStatus(t *testing.T) {
+	cases := []struct {
+		name         string
+		gCode        string
+		catFile      string
+		wantSigned   bool
+		wantVerified bool
+		wantErr      bool
+	}{
+		{name: "G is fully verified", gCode: "G", wantSigned: true, wantVerified: true},
+		{name: "U is signed but not verified, not over-trusted", gCode: "U", wantSigned: true, wantVerified: false},
+		{name: "N with a gpgsig header falls back to signed, unverified", gCode: "N", catFile: commitHeaderWithGpgsig, wantSigned: true},
+		{name: "N without a gpgsig header falls back to genuinely unsigned", gCode: "N", catFile: commitHeaderWithoutGpgsig},
+		{name: "E with a gpgsig header falls back to signed, unverified", gCode: "E", catFile: commitHeaderWithGpgsig, wantSigned: true},
+		{name: "E without a gpgsig header falls back to genuinely unsigned", gCode: "E", catFile: commitHeaderWithoutGpgsig},
+		{name: "X with a gpgsig header falls back to signed, unverified", gCode: "X", catFile: commitHeaderWithGpgsig, wantSigned: true},
+		{name: "X without a gpgsig header falls back to genuinely unsigned", gCode: "X", catFile: commitHeaderWithoutGpgsig},
+		{name: "Y with a gpgsig header falls back to signed, unverified", gCode: "Y", catFile: commitHeaderWithGpgsig, wantSigned: true},
+		{name: "Y without a gpgsig header falls back to genuinely unsigned", gCode: "Y", catFile: commitHeaderWithoutGpgsig},
+		{name: "B is a real signing problem", gCode: "B"},
+		{name: "R is a real signing problem", gCode: "R"},
+		{name: "an unrecognized code is an error", gCode: "Q", wantErr: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run := scriptedSignedStatusRunner{gCode: c.gCode, catFile: c.catFile}
+			o := newTestOrchestrator(t, absLocalPath, run)
+
+			signed, verified, err := o.signedStatus(t.Context(), absLocalPath, "HEAD")
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("signedStatus: expected an error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("signedStatus: unexpected error: %v", err)
+			}
+			if signed != c.wantSigned || verified != c.wantVerified {
+				t.Errorf("signedStatus = (signed=%v, verified=%v), want (%v, %v)", signed, verified, c.wantSigned, c.wantVerified)
+			}
+		})
+	}
+}
+
+// TestSignedStatusFallback_HeaderScanStopsAtBlankLine proves PR review
+// finding A: signedStatusFallback used to scan every line of
+// "git cat-file -p", including the commit message body, for a line starting
+// "gpgsig ". An unsigned commit whose title happens to start with
+// "gpgsig " was then falsely reported signed. The fix scans only the header
+// block, stopping at the first blank line, so this genuinely unsigned
+// commit is correctly reported unsigned.
+func TestSignedStatusFallback_HeaderScanStopsAtBlankLine(t *testing.T) {
+	newUnsignedFixture(t)
+	repo := newSigningTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	runGit(ctx, t, repo, "commit", "--allow-empty", "-q", "-m", "gpgsig fake")
+
+	raw := runGit(ctx, t, repo, "cat-file", "-p", "HEAD")
+	parts := strings.SplitN(raw, "\n\n", 2)
+	if len(parts) != 2 || !strings.HasPrefix(parts[1], "gpgsig fake") {
+		t.Fatalf("test setup: expected the commit message body to start with \"gpgsig fake\", raw object:\n%s", raw)
+	}
+
+	signed, verified, err := o.signedStatusFallback(ctx, repo, "HEAD")
+	if err != nil {
+		t.Fatalf("signedStatusFallback: unexpected error: %v", err)
+	}
+	if signed {
+		t.Error("signedStatusFallback: signed = true, want false for a genuinely unsigned commit whose message body starts with \"gpgsig \"")
+	}
+	if verified {
+		t.Error("signedStatusFallback: verified = true, want false")
+	}
+}
+
+// -----------------------------------------------------------------------
+// resetAfterUnsignedCommit: the reset survives a cancelled ctx
+// -----------------------------------------------------------------------
+
+// cancelAfterCommitRunner wraps a real Runner and cancels cancel right after
+// any "git commit" call returns, so the caller's ctx is already done by the
+// time CommitTask goes on to verify the signature and, on failure, calls
+// resetAfterUnsignedCommit -- exercising PR review finding E's fix, that the
+// reset runs under a context detached from ctx rather than ctx itself.
+type cancelAfterCommitRunner struct {
+	inner  Runner
+	cancel context.CancelFunc
+}
+
+func (r cancelAfterCommitRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	out, err := r.inner.Run(ctx, dir, name, args...)
+	if name == "git" && len(args) > 0 && args[0] == "commit" {
+		r.cancel()
+	}
+	return out, err
+}
+
+func (r cancelAfterCommitRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return r.inner.Output(ctx, dir, name, args...)
+}
+
+// TestResetAfterUnsignedCommit_SurvivesCancelledContext proves PR review
+// finding E: resetAfterUnsignedCommit used to run "git reset --soft" on the
+// same ctx as the commit it is cleaning up after, so a ctx cancelled (or
+// past its deadline) between the commit and the reset would leave an
+// unsigned commit sitting at HEAD, since the reset could never run. The
+// commit here is forced unsigned (stripDashSRunner) so CommitTask reaches
+// its failure path deterministically, and ctx is cancelled the instant the
+// "git commit" call returns, before CommitTask's own signature check and
+// reset run -- yet HEAD still ends up reset, since the reset now runs on a
+// context.WithoutCancel(ctx) detached from ctx's cancellation.
+func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
+	newUnsignedFixture(t)
+	repo := newSigningTestRepo(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	run := cancelAfterCommitRunner{inner: stripDashSRunner{inner: execRunner{}}, cancel: cancel}
+	o := newTestOrchestrator(t, repo, run)
+
+	wt, err := o.PrepareWorktree(ctx, 5, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	priorHead := strings.TrimSpace(runGit(t.Context(), t, wt.Dir(), "rev-parse", "HEAD"))
+
+	writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "should never land\n")
+	msg := CommitMessage{Title: "Should never land", FuncLines: []string{testFuncLine}}
+
+	if _, err := o.CommitTask(ctx, wt, []string{approvedTestFile}, msg); err == nil {
+		t.Fatal("CommitTask: expected an error for a genuinely unsigned commit, got nil")
+	}
+
+	afterHead := strings.TrimSpace(runGit(t.Context(), t, wt.Dir(), "rev-parse", "HEAD"))
+	if afterHead != priorHead {
+		t.Errorf("HEAD = %q after a failed signed commit under a cancelled ctx, want it reset back to %q", afterHead, priorHead)
+	}
 }
