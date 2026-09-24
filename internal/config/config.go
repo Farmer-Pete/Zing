@@ -275,6 +275,16 @@ func AppendProject(path string, p Project) error {
 	}
 	out.Write(block)
 
+	// Validate the combined file decodes before it replaces zing.toml, which
+	// holds github_token: a shape emptyProjectsArrayPattern does not match (a
+	// non-empty inline projects array, say) would otherwise duplicate the
+	// projects key and make every later Load fail, stopping zing serve. On a
+	// decode failure, leave path untouched.
+	var check Config
+	if _, decErr := toml.Decode(out.String(), &check); decErr != nil {
+		return fmt.Errorf("zing.toml: append project: combined config is invalid, left unchanged: %w", decErr)
+	}
+
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "zing.toml.*.tmp")
 	if err != nil {
@@ -288,6 +298,13 @@ func AppendProject(path string, p Project) error {
 		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 	if _, err := f.Write(out.Bytes()); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("zing.toml: append project: %w", err)
+	}
+	// Flush to disk before the rename so a crash cannot leave a truncated
+	// zing.toml that loses user, github_token, and every project.
+	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 		return fmt.Errorf("zing.toml: append project: %w", err)

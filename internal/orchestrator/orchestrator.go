@@ -84,14 +84,24 @@ func scrubGitLocationEnv(env []string) []string {
 	return out
 }
 
+// localeEnv forces git's messages into the C locale so any output this
+// package matches on (for example the "is not a working tree" text
+// RemoveWorktree tolerates) is not translated by an inherited LANG or
+// LC_MESSAGES. It is appended after the inherited environment, so it wins.
+var localeEnv = []string{"LC_ALL=C", "LANG=C"}
+
 // command builds the *exec.Cmd for one git (or other) invocation. It always
-// sets cmd.Env to the scrubbed process environment plus extraEnv, so no git
-// child ever inherits a repository-redirecting GIT_* variable; cmd.Dir is
-// the single source of truth for which repository the command acts on.
+// sets cmd.Env to the scrubbed process environment, the C locale, and
+// extraEnv, so no git child ever inherits a repository-redirecting GIT_*
+// variable and its messages never depend on the host locale; cmd.Dir is the
+// single source of truth for which repository the command acts on.
 func (r execRunner) command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	cmd.Env = append(scrubGitLocationEnv(os.Environ()), r.extraEnv...)
+	env := scrubGitLocationEnv(os.Environ())
+	env = append(env, localeEnv...)
+	env = append(env, r.extraEnv...)
+	cmd.Env = env
 	return cmd
 }
 

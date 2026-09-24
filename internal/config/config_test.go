@@ -875,3 +875,36 @@ func TestLoad_PathIsADirectoryIsRejectedWithoutChmod(t *testing.T) {
 		t.Errorf("directory mode = %o after Load, want unchanged 0755 (repairFileMode must not chmod a non-regular file)", perm)
 	}
 }
+
+// TestAppendProject_InvalidCombinedConfigLeavesFileUnchanged proves the PR
+// review fix: a pre-existing shape emptyProjectsArrayPattern does not strip
+// (here a non-empty inline projects array) would duplicate the projects key.
+// AppendProject must decode the combined bytes first and, on failure, return
+// an error and leave the token-bearing file byte-for-byte unchanged.
+func TestAppendProject_InvalidCombinedConfigLeavesFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zing.toml")
+	original := `user = "peter"
+github_token = "tok"
+projects = [{ name = "a", repo = "git@github.com:x/a.git", path = "/p/a", tracker = "github", commands = { test = "t", lint = "l" } }]
+`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	p := Project{
+		Name: "b", Repo: "git@github.com:x/b.git", Path: "/p/b", Tracker: testTracker,
+		Commands: Commands{Test: testCommandTest, Lint: testCommandLint},
+	}
+	if err := AppendProject(path, p); err == nil {
+		t.Fatal("AppendProject: expected an error for a combined config that duplicates the projects key, got nil")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(after) != original {
+		t.Errorf("AppendProject changed the file on a validation failure:\n%s", after)
+	}
+}
