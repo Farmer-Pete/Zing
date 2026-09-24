@@ -545,12 +545,14 @@ func dispatchMaxParallel(n int) int {
 // 6.10 step 3).
 func ensureBindings(ctx context.Context, st *store.Store, projects []config.Project) ([]zdispatch.Binding, error) {
 	bindings := make([]zdispatch.Binding, 0, len(projects))
-	for _, p := range projects {
+	for i := range projects {
+		p := &projects[i]
 		id, err := st.EnsureProject(ctx, store.Project{
-			Name:      p.Name,
-			RepoURL:   p.Repo,
-			LocalPath: p.Path,
-			Tracker:   p.Tracker,
+			Name:          p.Name,
+			RepoURL:       p.Repo,
+			LocalPath:     p.Path,
+			Tracker:       p.Tracker,
+			DefaultBranch: p.DefaultBranch,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("ensure project %s: %w", p.Name, err)

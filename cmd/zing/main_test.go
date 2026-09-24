@@ -158,6 +158,19 @@ func TestDispatch_ValidateWithNoExtraArgs(t *testing.T) {
 	}
 }
 
+// TestDispatch_Project proves dispatch routes "project" to runProject with
+// the arguments after the subcommand name, mirroring TestDispatch_Validate.
+// project_test.go already covers runProject/projectAdd's own behavior in
+// depth, so "zing project" with no further arguments is enough here to
+// exercise dispatch's own routing: runProject's usage-error path returns 2.
+func TestDispatch_Project(t *testing.T) {
+	t.Parallel()
+
+	if got := dispatch([]string{argv0, "project"}); got != 2 {
+		t.Errorf("dispatch(project, no args) = %d, want 2 (usage error)", got)
+	}
+}
+
 func TestDispatch_UnknownCommand(t *testing.T) {
 	r, w, pipeErr := os.Pipe()
 	if pipeErr != nil {

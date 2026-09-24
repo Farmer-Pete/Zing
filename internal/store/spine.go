@@ -10,12 +10,26 @@ import (
 )
 
 // EnsureProject returns the id of the project named p.Name, inserting it
-// first if no project by that name exists yet.
+// first if no project by that name exists yet. For an existing project
+// whose stored default_branch differs from a non-empty p.DefaultBranch, it
+// reconciles the column to p.DefaultBranch first, so a default branch
+// edited in zing.toml is picked up on the next start rather than silently
+// ignored (PKG5-PLAN.md section 9).
 func (s *Store) EnsureProject(ctx context.Context, p Project) (int64, error) {
-	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ?`, p.Name).Scan(&id)
+	var (
+		id           int64
+		storedBranch string
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT id, default_branch FROM projects WHERE name = ?`, p.Name).Scan(&id, &storedBranch)
 	switch {
 	case err == nil:
+		if p.DefaultBranch != "" && p.DefaultBranch != storedBranch {
+			if _, updateErr := s.db.ExecContext(ctx, `UPDATE projects SET default_branch = ? WHERE id = ?`, p.DefaultBranch, id); updateErr != nil {
+				return 0, fmt.Errorf("ensure project %s: reconcile default_branch: %w", p.Name, updateErr)
+			}
+			slog.Info("project default_branch reconciled", "project_id", id, "name", p.Name,
+				"from", storedBranch, "to", p.DefaultBranch)
+		}
 		slog.Info("project ensured", "project_id", id, "name", p.Name, "branch", "existing")
 		return id, nil
 	case !errors.Is(err, sql.ErrNoRows):
