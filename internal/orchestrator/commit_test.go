@@ -149,86 +149,66 @@ func runGitStdout(ctx context.Context, t *testing.T, dir string, args ...string)
 	return string(out)
 }
 
-// gitConfigGlobal runs "git config --global key value" directly (not
-// through a Runner, like worktree_test.go's checkRefFormat-style direct
-// exec.CommandContext calls), threading ctx like every other git-invoking
-// call in this package.
-func gitConfigGlobal(ctx context.Context, t *testing.T, key, value string) {
-	t.Helper()
-	out, err := exec.CommandContext(ctx, "git", "config", "--global", key, value).CombinedOutput()
-	if err != nil {
-		t.Fatalf("git config --global %s %s: %v\n%s", key, value, err, out)
-	}
+// signingFixture holds the ed25519 SSH signing key material a repo needs to
+// sign commits: a key path and, when the test wants local verification, an
+// allowed-signers file for that key. It carries no environment variable and
+// no git config of its own; newSigningTestRepo is what applies it, and only
+// to one repo's local config.
+type signingFixture struct {
+	keyPath            string
+	allowedSignersFile string // empty when withAllowedSigners was false
 }
 
-// newSigningFixture isolates a fresh global git identity -- a temp HOME plus
-// GIT_CONFIG_GLOBAL, so these tests never read or write the developer's own
-// git identity or signing key (PKG5-PLAN.md section 11) -- and configures an
-// ed25519 SSH signing key: user.name, user.email, commit.gpgsign=true,
-// gpg.format=ssh, user.signingKey. When withAllowedSigners is true it also
-// writes gpg.ssh.allowedSignersFile for that key, so "%G?" can report "G"
-// instead of the "N" the build host reports without it.
-func newSigningFixture(t *testing.T, withAllowedSigners bool) {
+// newSigningFixture generates a fresh ed25519 SSH signing key in its own
+// temp directory and, when withAllowedSigners is true, an allowed-signers
+// file naming signingIdentityEmail for that key. Unlike the fixture this
+// replaces, it never touches HOME, GIT_CONFIG_GLOBAL, or "git config
+// --global": ssh-keygen writes to an explicit -f path and git reads
+// user.signingKey as an absolute path, so no global git identity is ever
+// set. The returned signingFixture is inert until newSigningTestRepo
+// applies it to one repo's local config, so a stray git command anywhere
+// else -- including in the real repository this test binary happens to run
+// inside -- can never pick up a test signing identity.
+func newSigningFixture(t *testing.T, withAllowedSigners bool) signingFixture {
 	t.Helper()
-	ctx := t.Context()
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "gitconfig-global"))
-
-	keyPath := filepath.Join(home, "id_ed25519")
-	out, err := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-test", "-f", keyPath).CombinedOutput()
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	out, err := exec.CommandContext(t.Context(), "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-test", "-f", keyPath).CombinedOutput()
 	if err != nil {
 		t.Fatalf("ssh-keygen: %v\n%s", err, out)
 	}
 
-	gitConfigGlobal(ctx, t, "user.name", "Zing Signing Test")
-	gitConfigGlobal(ctx, t, "user.email", signingIdentityEmail)
-	gitConfigGlobal(ctx, t, "commit.gpgsign", "true")
-	gitConfigGlobal(ctx, t, "gpg.format", "ssh")
-	gitConfigGlobal(ctx, t, "user.signingKey", keyPath)
-
-	if withAllowedSigners {
-		pubBytes, readErr := os.ReadFile(keyPath + ".pub")
-		if readErr != nil {
-			t.Fatalf("read public key: %v", readErr)
-		}
-		fields := strings.Fields(string(pubBytes))
-		if len(fields) < 2 {
-			t.Fatalf("unexpected public key format: %q", pubBytes)
-		}
-		pubLine := fields[0] + " " + fields[1]
-
-		signersFile := filepath.Join(home, "allowed_signers")
-		writeTestFile(t, signersFile, signingIdentityEmail+" "+pubLine+"\n")
-		gitConfigGlobal(ctx, t, "gpg.ssh.allowedSignersFile", signersFile)
+	fixture := signingFixture{keyPath: keyPath}
+	if !withAllowedSigners {
+		return fixture
 	}
+
+	pubBytes, readErr := os.ReadFile(keyPath + ".pub")
+	if readErr != nil {
+		t.Fatalf("read public key: %v", readErr)
+	}
+	fields := strings.Fields(string(pubBytes))
+	if len(fields) < 2 {
+		t.Fatalf("unexpected public key format: %q", pubBytes)
+	}
+	pubLine := fields[0] + " " + fields[1]
+
+	fixture.allowedSignersFile = filepath.Join(dir, "allowed_signers")
+	writeTestFile(t, fixture.allowedSignersFile, signingIdentityEmail+" "+pubLine+"\n")
+
+	return fixture
 }
 
-// newUnsignedFixture isolates a global git identity with signing explicitly
-// disabled and no signing key configured at all, for the
-// genuinely-unsigned-commit case: paired with stripDashSRunner, "git commit"
-// then produces a plain, unsigned commit.
-func newUnsignedFixture(t *testing.T) {
-	t.Helper()
-	ctx := t.Context()
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "gitconfig-global"))
-
-	gitConfigGlobal(ctx, t, "user.name", "Zing Unsigned Test")
-	gitConfigGlobal(ctx, t, "user.email", signingIdentityEmail)
-	gitConfigGlobal(ctx, t, "commit.gpgsign", "false")
-}
-
-// newSigningTestRepo inits a real git repo with one commit on "main", for
-// the CommitTask signing tests. Unlike worktree_test.go's newTestRepo, it
-// sets no local user identity or commit.gpgsign: these tests need the
-// global signing fixture's identity and config to reach every commit,
-// including ones made in a worktree of this repo (a worktree shares its
-// main checkout's top-level config).
-func newSigningTestRepo(t *testing.T) string {
+// newSigningTestRepo inits a real git repo with one commit on "main" and
+// configures fixture's signing key entirely through LOCAL git config:
+// user.name, user.email, commit.gpgsign, gpg.format, user.signingKey, and
+// -- when fixture carries one -- gpg.ssh.allowedSignersFile. A git worktree
+// shares its parent repo's local config (these are all repo-level
+// settings), so every worktree PrepareWorktree creates under this repo
+// signs and verifies exactly the same way, with no global git state
+// involved anywhere.
+func newSigningTestRepo(t *testing.T, fixture signingFixture) string {
 	t.Helper()
 	ctx := t.Context()
 
@@ -239,6 +219,50 @@ func newSigningTestRepo(t *testing.T) string {
 	}
 
 	runGit(ctx, t, resolved, "init", "-q", "-b", mainBranch)
+	runGit(ctx, t, resolved, "config", "user.name", "Zing Signing Test")
+	runGit(ctx, t, resolved, "config", "user.email", signingIdentityEmail)
+	runGit(ctx, t, resolved, "config", "commit.gpgsign", "true")
+	runGit(ctx, t, resolved, "config", "gpg.format", "ssh")
+	runGit(ctx, t, resolved, "config", "user.signingKey", fixture.keyPath)
+	if fixture.allowedSignersFile != "" {
+		runGit(ctx, t, resolved, "config", "gpg.ssh.allowedSignersFile", fixture.allowedSignersFile)
+	}
+
+	writeTestFile(t, filepath.Join(resolved, "README.md"), "# test repo\n")
+	runGit(ctx, t, resolved, "add", "README.md")
+	runGit(ctx, t, resolved, "commit", "-q", "-m", "initial commit")
+
+	return resolved
+}
+
+// newUnsignedTestRepo inits a real git repo with signing explicitly
+// disabled and, critically, user.signingKey pointing at a path that does
+// not exist, entirely through LOCAL git config, for the
+// genuinely-unsigned-commit case. commit.gpgsign=false alone is not
+// enough: CommitTask's own git commit call always passes "-S", which
+// forces an attempt to sign regardless of commit.gpgsign, so this repo
+// also points gpg.format and user.signingKey at a key git cannot load --
+// "git commit -S" then fails outright, deterministically, on any host,
+// including one whose real global git config (unrelated to this repo)
+// already has a working signing key configured. Like newSigningTestRepo,
+// this never touches global git config.
+func newUnsignedTestRepo(t *testing.T) string {
+	t.Helper()
+	ctx := t.Context()
+
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+
+	runGit(ctx, t, resolved, "init", "-q", "-b", mainBranch)
+	runGit(ctx, t, resolved, "config", "user.name", "Zing Unsigned Test")
+	runGit(ctx, t, resolved, "config", "user.email", signingIdentityEmail)
+	runGit(ctx, t, resolved, "config", "commit.gpgsign", "false")
+	runGit(ctx, t, resolved, "config", "gpg.format", "ssh")
+	runGit(ctx, t, resolved, "config", "user.signingKey", filepath.Join(resolved, "no-such-signing-key"))
+
 	writeTestFile(t, filepath.Join(resolved, "README.md"), "# test repo\n")
 	runGit(ctx, t, resolved, "add", "README.md")
 	runGit(ctx, t, resolved, "commit", "-q", "-m", "initial commit")
@@ -278,8 +302,8 @@ func stripDashS(name string, args []string) []string {
 
 func TestCommitTask(t *testing.T) {
 	t.Run("with allowed signers: commits, verifies, stages only approved", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -337,8 +361,8 @@ func TestCommitTask(t *testing.T) {
 	// the commit too. This proves an unrelated file staged before CommitTask
 	// runs is left out of the commit and stays staged afterward.
 	t.Run("with allowed signers: an unrelated already-staged file is not included in the commit", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -369,8 +393,8 @@ func TestCommitTask(t *testing.T) {
 	})
 
 	t.Run("without allowed signers: commits and signs, unverifiable locally", func(t *testing.T) {
-		newSigningFixture(t, false)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, false)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -414,8 +438,7 @@ func TestCommitTask(t *testing.T) {
 	})
 
 	t.Run("a genuinely unsigned commit resets HEAD and errors", func(t *testing.T) {
-		newUnsignedFixture(t)
-		repo := newSigningTestRepo(t)
+		repo := newUnsignedTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, stripDashSRunner{inner: execRunner{}})
 
@@ -558,8 +581,7 @@ func TestSignedStatus(t *testing.T) {
 // block, stopping at the first blank line, so this genuinely unsigned
 // commit is correctly reported unsigned.
 func TestSignedStatusFallback_HeaderScanStopsAtBlankLine(t *testing.T) {
-	newUnsignedFixture(t)
-	repo := newSigningTestRepo(t)
+	repo := newUnsignedTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -620,8 +642,7 @@ func (r cancelAfterCommitRunner) Output(ctx context.Context, dir, name string, a
 // reset run -- yet HEAD still ends up reset, since the reset now runs on a
 // context.WithoutCancel(ctx) detached from ctx's cancellation.
 func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
-	newUnsignedFixture(t)
-	repo := newSigningTestRepo(t)
+	repo := newUnsignedTestRepo(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	run := cancelAfterCommitRunner{inner: stripDashSRunner{inner: execRunner{}}, cancel: cancel}
 	o := newTestOrchestrator(t, repo, run)

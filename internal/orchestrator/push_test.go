@@ -100,8 +100,8 @@ func addOrigin(ctx context.Context, t *testing.T, repoDir, remoteDir string) {
 
 func TestPush(t *testing.T) {
 	t.Run("a signed branch pushes and the bare remote receives it", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		remote := newBareRemote(ctx, t)
 		addOrigin(ctx, t, repo, remote)
@@ -239,8 +239,8 @@ func prepareSignedCommit(ctx context.Context, t *testing.T, o *Orchestrator, tic
 
 func TestOpenDraftPR(t *testing.T) {
 	t.Run("returns the created url and number", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		remote := newBareRemote(ctx, t)
 		addOrigin(ctx, t, repo, remote)
@@ -279,8 +279,8 @@ func TestOpenDraftPR(t *testing.T) {
 	})
 
 	t.Run("falls back to FindPRByHead when CreateDraftPR errors", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		remote := newBareRemote(ctx, t)
 		addOrigin(ctx, t, repo, remote)
@@ -330,8 +330,8 @@ func TestOpenDraftPR(t *testing.T) {
 	// and a fourth one here that agrees would trip golangci-lint's unparam
 	// finding on it.
 	t.Run("an empty title errors before any push", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 
 		proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: mainBranch}
@@ -358,8 +358,8 @@ func TestOpenDraftPR(t *testing.T) {
 	})
 
 	t.Run("returns the create error when FindPRByHead also fails to find one", func(t *testing.T) {
-		newSigningFixture(t, true)
-		repo := newSigningTestRepo(t)
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
 		remote := newBareRemote(ctx, t)
 		addOrigin(ctx, t, repo, remote)

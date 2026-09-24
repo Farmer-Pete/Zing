@@ -46,9 +46,9 @@ var prBodyHeadings = []string{
 // and a "docs" directory (to leave outside it) to repo and commits them, on
 // top of newSigningTestRepo's single README.md commit, mirroring the shape
 // worktree_test.go's newTestRepo builds for TestPrepareWorktree's own cone
-// subtest. Unlike newTestRepo, it does not touch repo-local git identity or
-// signing config, so the signing fixture already applied to HOME still
-// governs this commit.
+// subtest. It does not touch repo-local git identity or signing config, so
+// the local config newSigningTestRepo already set on repo still governs
+// this commit.
 func addConeDirsCommit(ctx context.Context, t *testing.T, repo string) {
 	t.Helper()
 	writeTestFile(t, filepath.Join(repo, coneDir, "main.go"), "package main\n")
@@ -120,8 +120,8 @@ func TestEndToEnd(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				newSigningFixture(t, tc.withAllowedSigners)
-				repo := newSigningTestRepo(t)
+				fixture := newSigningFixture(t, tc.withAllowedSigners)
+				repo := newSigningTestRepo(t, fixture)
 				ctx := t.Context()
 				addConeDirsCommit(ctx, t, repo)
 
@@ -337,8 +337,7 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("a genuinely unsigned commit resets HEAD and leaves no extra commit", func(t *testing.T) {
-		newUnsignedFixture(t)
-		repo := newSigningTestRepo(t)
+		repo := newUnsignedTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, stripDashSRunner{inner: execRunner{}})
 
