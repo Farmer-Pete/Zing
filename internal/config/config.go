@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -211,6 +212,16 @@ func repairFileMode(path string) error {
 	return nil
 }
 
+// emptyProjectsArrayPattern matches a pre-existing explicit "projects = []"
+// key assignment -- the bootstrap-with-zero-projects shape LoadForAdd
+// permits -- in every realistic spelling: "projects = []", "projects=[]",
+// extra internal spacing, and the multiline empty form "projects = [\n]".
+// It anchors "projects" to right after a line's leading whitespace, so it
+// can never match a "[[projects]]" table header (which starts with "[[",
+// not "projects"), a key that merely contains "projects" as a substring
+// (such as "other_projects"), or a value that happens to contain the word.
+var emptyProjectsArrayPattern = regexp.MustCompile(`(?m)^[ \t]*projects[ \t]*=[ \t]*\[[ \t\r\n]*\][ \t]*\r?\n?`)
+
 // AppendProject appends a single [[projects]] block for p to the zing.toml
 // already at path, atomically and at mode 0600, since the file holds
 // github_token (PKG5-PLAN.md section 9). It never re-marshals or rewrites
@@ -233,11 +244,21 @@ func repairFileMode(path string) error {
 // closed, and renamed over path. On any error the temp file is removed and
 // path is left untouched, since the rename never runs until every earlier
 // step has succeeded.
+//
+// Before appending, it strips a pre-existing explicit empty "projects = []"
+// key assignment, if the file has one (PR review fix): that is exactly the
+// bootstrap-with-zero-projects shape LoadForAdd permits, and appending
+// "[[projects]]" onto a file that already defines "projects" as an inline
+// empty array redefines the same key twice, which the next Load then
+// rejects outright ("Key 'projects' was already created and cannot be used
+// as an array"). Removing that inline assignment first makes the appended
+// block the first element instead.
 func AppendProject(path string, p Project) error {
 	existing, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
+	existing = emptyProjectsArrayPattern.ReplaceAll(existing, nil)
 
 	wrapper := struct {
 		Projects []Project `toml:"projects"`

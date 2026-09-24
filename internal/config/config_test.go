@@ -31,6 +31,11 @@ const (
 	testCommandLint = "golangci-lint run"
 )
 
+// testZingProjectName is the project name minimalValidTOML (and every TOML
+// fixture built from it) uses, pulled out as a constant so goconst does not
+// flag the repeats.
+const testZingProjectName = "zing"
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -91,7 +96,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 		Projects: []Project{
 			{
-				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
+				Name: testZingProjectName, Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				// DefaultBranch stays "" when zing.toml omits it (PR review
 				// finding Q): store.EnsureProject, not config.Load, is what
 				// defaults an absent value to "main", and only on INSERT,
@@ -192,7 +197,7 @@ lint = "golangci-lint run"
 		},
 		Projects: []Project{
 			{
-				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
+				Name: testZingProjectName, Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				DefaultBranch: "develop",
 				Self:          true,
 				Intake:        Intake{AssignedTo: "someone-else"},
@@ -693,6 +698,79 @@ func TestAppendProject_MissingFileIsAnErrorAndCreatesNothing(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); statErr == nil {
 		t.Error("AppendProject created a file at path, want none for a missing zing.toml")
+	}
+}
+
+// TestAppendProject_RemovesPreexistingEmptyProjectsArray proves the PR
+// review fix: a zing.toml bootstrapped through LoadForAdd's zero-projects
+// path can carry an explicit "projects = []" key. Appending "[[projects]]"
+// onto that unchanged would redefine "projects" twice, which the next Load
+// then rejects. AppendProject must strip that inline empty array first, in
+// every realistic spelling, so the appended project becomes the first (and
+// only) element and the file still Loads.
+func TestAppendProject_RemovesPreexistingEmptyProjectsArray(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"single line, spaced", "user = \"x\"\ngithub_token = \"y\"\nprojects = []\n"},
+		{"single line, no spaces", "user = \"x\"\ngithub_token = \"y\"\nprojects=[]\n"},
+		{"single line, extra internal spaces", "user = \"x\"\ngithub_token = \"y\"\nprojects  =   [   ]\n"},
+		{"multiline empty array", "user = \"x\"\ngithub_token = \"y\"\nprojects = [\n]\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeTOML(t, c.body)
+
+			if err := AppendProject(path, testAppendedProject); err != nil {
+				t.Fatalf("AppendProject: %v", err)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load after AppendProject: %v", err)
+			}
+			if len(cfg.Projects) != 1 {
+				t.Fatalf("Projects = %+v, want exactly one", cfg.Projects)
+			}
+			if cfg.Projects[0].Name != testAppendedProject.Name {
+				t.Errorf("Projects[0].Name = %q, want %q", cfg.Projects[0].Name, testAppendedProject.Name)
+			}
+		})
+	}
+}
+
+// TestAppendProject_LeavesAnExistingProjectsTableAlone is the regression
+// case alongside the empty-array fix above: a file whose "projects" key is
+// already an array of tables (at least one real [[projects]] entry, not an
+// inline empty array) must be left completely alone by
+// emptyProjectsArrayPattern, and a second project must still append cleanly
+// onto it.
+func TestAppendProject_LeavesAnExistingProjectsTableAlone(t *testing.T) {
+	t.Parallel()
+
+	path := writeTOML(t, minimalValidTOML)
+
+	if err := AppendProject(path, testAppendedProject); err != nil {
+		t.Fatalf("AppendProject: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after AppendProject: %v", err)
+	}
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("Projects = %+v, want two", cfg.Projects)
+	}
+	if cfg.Projects[0].Name != testZingProjectName {
+		t.Errorf("Projects[0].Name = %q, want %q (the original entry, untouched)", cfg.Projects[0].Name, testZingProjectName)
+	}
+	if cfg.Projects[1].Name != testAppendedProject.Name {
+		t.Errorf("Projects[1].Name = %q, want %q", cfg.Projects[1].Name, testAppendedProject.Name)
 	}
 }
 
