@@ -343,38 +343,39 @@ func (o *Orchestrator) cleanupWorktree(ctx context.Context, wt Worktree) {
 // RemoveWorktree removes the worktree and deletes its branch. It first
 // validates the branch (zing/ form, not the default branch, a git-legal ref
 // per check-ref-format); an invalid or default branch is an error and
-// nothing is removed. It then runs "git worktree prune" (PR review fix): if
-// wt.dir was deleted outside git (an "rm -rf", not "git worktree remove"),
-// git's own worktree administration under .git/worktrees/ still registers
-// it as present, which both makes "git worktree list --porcelain" report a
-// path that no longer exists on disk and makes "git branch -D <branch>"
-// refuse with "already checked out" even though nothing is actually there;
-// pruning first clears any such stale registration whose working directory
-// is gone, so a worktree removed by hand still gets its branch deleted
-// here, not leaked. Then, independently: if "git worktree list --porcelain"
-// still shows wt.Dir after the prune (a live, present worktree, not a stale
-// registration), it first reads the branch actually checked out there with
-// "git -C wt.dir symbolic-ref --short HEAD" and refuses to proceed if it
-// differs from wt.branch, so a worktree directory repurposed out from under
-// Zing (checked out to some other branch since it was prepared) is never
-// force-removed; only then does it remove it with "git worktree remove
-// --force <dir>" (an already-absent worktree is fine and skips the HEAD
-// check entirely, since a half-removed worktree may have no HEAD to read);
-// if "git branch --list <branch>" shows the branch, it deletes it with
-// "git branch -D <branch>" (an already-absent branch is fine). So the
+// nothing is removed. If "git worktree list --porcelain" shows wt.Dir as a
+// live, present worktree (not a stale registration), it first reads the
+// branch actually checked out there with "git -C wt.dir symbolic-ref --short
+// HEAD" and refuses to proceed if it differs from wt.branch, so a worktree
+// directory repurposed out from under Zing (checked out to some other branch
+// since it was prepared) is never force-removed.
+//
+// It then always runs "git worktree remove --force <wt.dir>" (PR review fix:
+// this used to be a global "git worktree prune" run first, which would
+// silently discard any other stale worktree registration in the whole
+// repository -- for example one on temporarily-unavailable network or
+// removable storage -- not just the one being removed here). Scoped to
+// wt.dir alone, "git worktree remove --force" clears wt.dir's own
+// registration whether its directory still exists on disk, was deleted
+// outside git (an "rm -rf", not "git worktree remove"; git's own worktree
+// administration under .git/worktrees/ still registers such a directory as
+// present), or was already removed entirely; in that last case git reports
+// "fatal: '<dir>' is not a working tree" and nothing else is left to do, so
+// that specific error is treated as success rather than propagated. Any
+// other error from the removal is returned.
+//
+// Finally, if "git branch --list <branch>" shows the branch, it deletes it
+// with "git branch -D <branch>" (an already-absent branch is fine). So the
 // "worktree absent, branch present" state is safe and deterministic: the
-// validated zing/ branch is still deleted, and the default branch is never
-// touched.
+// validated zing/ branch is still deleted, no unrelated worktree
+// registration elsewhere in the repository is ever touched, and the default
+// branch is never touched.
 func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 
 	o.log.Info("removing worktree", "branch", wt.branch, "dir", wt.dir)
-
-	if out, pruneErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "prune"); pruneErr != nil {
-		return fmt.Errorf("orchestrator: remove worktree: git worktree prune: %w: %s", pruneErr, strings.TrimSpace(out))
-	}
 
 	present, err := o.worktreePresent(ctx, wt.dir)
 	if err != nil {
@@ -390,10 +391,10 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 			return fmt.Errorf("orchestrator: remove worktree: %s has %q checked out, expected %q; refusing to force-remove a repurposed worktree",
 				wt.dir, checkedOut, wt.branch)
 		}
+	}
 
-		if out, removeErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); removeErr != nil {
-			return fmt.Errorf("orchestrator: remove worktree: git worktree remove: %w: %s", removeErr, strings.TrimSpace(out))
-		}
+	if out, removeErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); removeErr != nil && !isNotAWorkingTreeErrorOutput(out) {
+		return fmt.Errorf("orchestrator: remove worktree: git worktree remove: %w: %s", removeErr, strings.TrimSpace(out))
 	}
 
 	branchPresent, err := o.branchExists(ctx, wt.branch)
@@ -409,6 +410,16 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 	o.log.Info("worktree removed", "branch", wt.branch, "dir", wt.dir)
 
 	return nil
+}
+
+// isNotAWorkingTreeErrorOutput reports whether out is git's error for a path
+// it has no worktree registration for at all -- the exact message
+// "git worktree remove" gives as "fatal: '<dir>' is not a working tree" when
+// wt.dir was already fully removed (disk and registration both gone). That
+// case means RemoveWorktree's job here is already done, not that the removal
+// failed, so it is treated as success-equivalent rather than propagated.
+func isNotAWorkingTreeErrorOutput(out string) bool {
+	return strings.Contains(strings.ToLower(out), "not a working tree")
 }
 
 // worktreePresent reports whether dir appears in "git worktree list

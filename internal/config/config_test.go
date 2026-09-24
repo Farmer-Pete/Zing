@@ -22,6 +22,15 @@ const wantWildcardBindError = "zing.toml: console.bind: wildcard address not all
 // or malformed alike (config.go, design section 6.14).
 const wantAllowedHostsPortError = "zing.toml: console.allowed_hosts[0]: must not include a port"
 
+// testTracker, testCommandTest, and testCommandLint are the tracker and
+// commands values every valid Project fixture below uses, pulled out as
+// constants so goconst does not flag the repeats.
+const (
+	testTracker     = "github"
+	testCommandTest = "go test ./..."
+	testCommandLint = "golangci-lint run"
+)
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -82,7 +91,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 		Projects: []Project{
 			{
-				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
+				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				// DefaultBranch stays "" when zing.toml omits it (PR review
 				// finding Q): store.EnsureProject, not config.Load, is what
 				// defaults an absent value to "main", and only on INSERT,
@@ -91,7 +100,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 				DefaultBranch: "",
 				Self:          false,
 				Intake:        Intake{AssignedTo: testUser}, // defaults to the top-level user
-				Commands:      Commands{Test: "go test ./...", Lint: "golangci-lint run"},
+				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
 	}
@@ -183,11 +192,11 @@ lint = "golangci-lint run"
 		},
 		Projects: []Project{
 			{
-				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: "github",
+				Name: "zing", Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				DefaultBranch: "develop",
 				Self:          true,
 				Intake:        Intake{AssignedTo: "someone-else"},
-				Commands:      Commands{Test: "go test ./...", Lint: "golangci-lint run"},
+				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
 	}
@@ -524,47 +533,53 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
-// TestSave_RoundTripsThroughLoad proves Save's write half and Load's read
-// half agree: a config loaded, saved to a fresh path (whose parent directory
-// does not exist yet, exercising Save's MkdirAll), then loaded again comes
-// back identical, including PushToken's "omitempty" tag (config.go) not
-// resurfacing as an explicit empty string that checkValues would then
-// reject.
-func TestSave_RoundTripsThroughLoad(t *testing.T) {
+// testAppendedProject is a valid, fully-specified Project every AppendProject
+// test below appends, so a fixture missing a field is unambiguously testing
+// that absence.
+var testAppendedProject = Project{
+	Name: "appended", Repo: "git@github.com:x/appended.git", Path: "/home/peter/appended",
+	Tracker: testTracker, DefaultBranch: "main",
+	Commands: Commands{Test: testCommandTest, Lint: testCommandLint},
+}
+
+// TestAppendProject_AppendsAndLoadsBack proves AppendProject's write half and
+// Load's read half agree: a project appended to an existing, project-less
+// config comes back out of the next Load with every field intact.
+func TestAppendProject_AppendsAndLoadsBack(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(writeTOML(t, minimalValidTOML))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	path := writeTOML(t, "user = \"peter\"\ngithub_token = \""+testGitHubToken+"\"\n")
+
+	if err := AppendProject(path, testAppendedProject); err != nil {
+		t.Fatalf("AppendProject: %v", err)
 	}
 
-	dst := filepath.Join(t.TempDir(), "nested", "zing.toml")
-	if saveErr := Save(dst, cfg); saveErr != nil {
-		t.Fatalf("Save: %v", saveErr)
-	}
-
-	got, err := Load(dst)
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load(Save(cfg)): %v", err)
+		t.Fatalf("Load after AppendProject: %v", err)
 	}
-	if !reflect.DeepEqual(got, cfg) {
-		t.Errorf("round-tripped config = %+v, want %+v", got, cfg)
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("Projects = %+v, want exactly one", cfg.Projects)
+	}
+	// Intake.AssignedTo defaults to the top-level user on Load, since
+	// testAppendedProject leaves it unset; every other field must come back
+	// exactly as appended.
+	want := testAppendedProject
+	want.Intake.AssignedTo = testUser
+	if got := cfg.Projects[0]; got != want {
+		t.Errorf("appended project = %+v, want %+v", got, want)
 	}
 }
 
-// TestSave_WritesFileAt0600 proves Save's file lands at 0600, since it
-// carries github_token (PKG5-PLAN.md section 9).
-func TestSave_WritesFileAt0600(t *testing.T) {
+// TestAppendProject_WritesFileAt0600 proves AppendProject's file lands at
+// 0600, since it carries github_token (PKG5-PLAN.md section 9).
+func TestAppendProject_WritesFileAt0600(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(writeTOML(t, minimalValidTOML))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	path := writeTOML(t, minimalValidTOML)
 
-	path := filepath.Join(t.TempDir(), "zing.toml")
-	if saveErr := Save(path, cfg); saveErr != nil {
-		t.Fatalf("Save: %v", saveErr)
+	if err := AppendProject(path, testAppendedProject); err != nil {
+		t.Fatalf("AppendProject: %v", err)
 	}
 
 	info, err := os.Stat(path)
@@ -572,103 +587,112 @@ func TestSave_WritesFileAt0600(t *testing.T) {
 		t.Fatalf("Stat: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("saved file mode = %o, want 0600", perm)
+		t.Errorf("file mode after AppendProject = %o, want 0600", perm)
 	}
 }
 
-// leftoverSaveTempFiles lists the "zing.toml.*.tmp" entries in dir, the
-// pattern Save's os.CreateTemp call uses, so a test can prove none is left
-// behind after a failed or successful Save.
-func leftoverSaveTempFiles(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir(%s): %v", dir, err)
-	}
-	var leftover []string
-	for _, e := range entries {
-		matched, matchErr := filepath.Match("zing.toml.*.tmp", e.Name())
-		if matchErr != nil {
-			t.Fatalf("Match: %v", matchErr)
-		}
-		if matched {
-			leftover = append(leftover, e.Name())
-		}
-	}
-	return leftover
-}
-
-// TestSave_ErrorLeavesTempRemovedAndOriginalUntouched proves the edge case
-// in PKG5-PLAN.md section 13 ("config.Save cannot write"): a rename failure
-// (forced here by making the destination an existing directory) removes the
-// sibling temp file and leaves whatever was already at path untouched,
-// since the rename that would have replaced it never completed.
-func TestSave_ErrorLeavesTempRemovedAndOriginalUntouched(t *testing.T) {
+// TestAppendProject_PreservesExplicitZeroAndEmptyValues proves the fix this
+// exists for: an earlier "zing project add" re-marshaled and rewrote the
+// whole Config, so an explicitly-set budget.usage_hold_percent = 0 or
+// merge.manual_paths = [] came back out of that Config indistinguishable
+// from a field zing.toml had never mentioned, and the rewrite silently
+// dropped it. AppendProject never touches existing bytes, so both survive a
+// project add unchanged.
+func TestAppendProject_PreservesExplicitZeroAndEmptyValues(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	const body = `
+user = "peter"
+github_token = "` + testGitHubToken + `"
+
+[budget]
+usage_hold_percent = 0
+
+[merge]
+manual_paths = []
+
+[[projects]]
+name = "existing"
+repo = "git@github.com:x/existing.git"
+path = "/home/peter/existing"
+tracker = "github"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`
+	path := writeTOML(t, body)
+
+	if err := AppendProject(path, testAppendedProject); err != nil {
+		t.Fatalf("AppendProject: %v", err)
+	}
+
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("Load after AppendProject: %v", err)
 	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "zing.toml")
-	if mkdirErr := os.Mkdir(path, 0o700); mkdirErr != nil {
-		t.Fatalf("Mkdir: %v", mkdirErr)
+	if cfg.Budget.UsageHoldPercent != 0 {
+		t.Errorf("Budget.UsageHoldPercent = %d, want the explicit 0 to survive", cfg.Budget.UsageHoldPercent)
 	}
-
-	if saveErr := Save(path, cfg); saveErr == nil {
-		t.Fatal("Save() = nil, want an error when the rename target is an existing directory")
+	if len(cfg.Merge.ManualPaths) != 0 {
+		t.Errorf("Merge.ManualPaths = %v, want the explicit empty slice to survive", cfg.Merge.ManualPaths)
 	}
-
-	if leftover := leftoverSaveTempFiles(t, dir); len(leftover) != 0 {
-		t.Errorf("temp files left behind after a failed Save: %v", leftover)
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("Projects = %+v, want two", cfg.Projects)
 	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat(path) after a failed Save: %v", err)
+	if cfg.Projects[0].Name != "existing" {
+		t.Errorf("Projects[0].Name = %q, want %q", cfg.Projects[0].Name, "existing")
 	}
-	if !info.IsDir() {
-		t.Error("path was overwritten by a failed Save, want the original left untouched")
+	if cfg.Projects[1].Name != testAppendedProject.Name {
+		t.Errorf("Projects[1].Name = %q, want %q", cfg.Projects[1].Name, testAppendedProject.Name)
 	}
 }
 
-// TestSave_PreexistingDotTmpFileDoesNotBreakSave proves PR review finding I:
-// Save's old fixed "<path>.tmp" name opened with O_EXCL meant a single
-// leftover temp file -- from an earlier crashed or interrupted Save --
-// would permanently block every Save after it. Save now writes to a fresh,
-// uniquely named file from os.CreateTemp, so a stale "<path>.tmp" sitting
-// alongside it is just another file in the directory, not an obstacle.
-func TestSave_PreexistingDotTmpFileDoesNotBreakSave(t *testing.T) {
+// TestAppendProject_SecondProjectDoesNotDisturbFirst proves AppendProject
+// changes nothing about a project already on record when a second one is
+// appended after it.
+func TestAppendProject_SecondProjectDoesNotDisturbFirst(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	path := writeTOML(t, minimalValidTOML)
+
+	before, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("Load before AppendProject: %v", err)
 	}
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "zing.toml")
-	stalePath := path + ".tmp"
-	if writeErr := os.WriteFile(stalePath, []byte("stale, from a crashed Save"), 0o600); writeErr != nil {
-		t.Fatalf("write stale %s: %v", stalePath, writeErr)
+	if appendErr := AppendProject(path, testAppendedProject); appendErr != nil {
+		t.Fatalf("AppendProject: %v", appendErr)
 	}
 
-	if saveErr := Save(path, cfg); saveErr != nil {
-		t.Fatalf("Save: unexpected error with a pre-existing %s: %v", stalePath, saveErr)
-	}
-
-	got, err := Load(path)
+	after, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load(Save(cfg)): %v", err)
+		t.Fatalf("Load after AppendProject: %v", err)
 	}
-	if !reflect.DeepEqual(got, cfg) {
-		t.Errorf("round-tripped config = %+v, want %+v", got, cfg)
+	if len(after.Projects) != 2 {
+		t.Fatalf("Projects = %+v, want two", after.Projects)
 	}
+	if after.Projects[0] != before.Projects[0] {
+		t.Errorf("first project changed after appending a second: got %+v, want %+v", after.Projects[0], before.Projects[0])
+	}
+	if after.Projects[1].Name != testAppendedProject.Name {
+		t.Errorf("Projects[1].Name = %q, want %q", after.Projects[1].Name, testAppendedProject.Name)
+	}
+}
 
-	if _, statErr := os.Stat(stalePath); statErr != nil {
-		t.Errorf("expected the unrelated stale %s to be left alone, stat err = %v", stalePath, statErr)
+// TestAppendProject_MissingFileIsAnErrorAndCreatesNothing proves AppendProject
+// only ever appends to a file that already exists; a missing path is an
+// error, not a fresh file created out of just the one project.
+func TestAppendProject_MissingFileIsAnErrorAndCreatesNothing(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "zing.toml")
+
+	if err := AppendProject(path, testAppendedProject); err == nil {
+		t.Fatal("AppendProject() = nil, want an error for a missing zing.toml")
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("AppendProject created a file at path, want none for a missing zing.toml")
 	}
 }
 
@@ -744,51 +768,6 @@ func TestLoad_RejectsZeroProjects(t *testing.T) {
 	const want = "zing.toml: missing required key projects"
 	if err.Error() != want {
 		t.Errorf("Load() = %q, want %q", err.Error(), want)
-	}
-}
-
-// TestLoadRawForAdd_SkipsDefaults proves the PR review fix: LoadRawForAdd
-// runs the same checks as LoadForAdd but never calls applyDefaults, so a
-// field zing.toml leaves unset comes back at its TOML zero value rather than
-// the value Load and LoadForAdd would fill in.
-func TestLoadRawForAdd_SkipsDefaults(t *testing.T) {
-	t.Parallel()
-
-	body := "user = \"peter\"\ngithub_token = \"" + testGitHubToken + "\"\n"
-	cfg, err := LoadRawForAdd(writeTOML(t, body))
-	if err != nil {
-		t.Fatalf("LoadRawForAdd: %v", err)
-	}
-	if cfg.Console.Port != 0 {
-		t.Errorf("Console.Port = %d, want 0 (no default applied)", cfg.Console.Port)
-	}
-	if len(cfg.Console.Bind) != 0 {
-		t.Errorf("Console.Bind = %v, want empty (no default applied)", cfg.Console.Bind)
-	}
-	if cfg.Models.Sonnet != "" {
-		t.Errorf("Models.Sonnet = %q, want empty (no default applied)", cfg.Models.Sonnet)
-	}
-	if cfg.Merge.Method != "" {
-		t.Errorf("Merge.Method = %q, want empty (no default applied)", cfg.Merge.Method)
-	}
-	if len(cfg.Projects) != 0 {
-		t.Errorf("Projects = %v, want empty", cfg.Projects)
-	}
-}
-
-// TestLoadRawForAdd_StillRunsTheSameChecksAsLoadForAdd proves LoadRawForAdd
-// diverges from LoadForAdd only in whether defaults are applied, not in
-// which errors it reports.
-func TestLoadRawForAdd_StillRunsTheSameChecksAsLoadForAdd(t *testing.T) {
-	t.Parallel()
-
-	_, err := LoadRawForAdd(writeTOML(t, `user = "peter"`))
-	if err == nil {
-		t.Fatal("LoadRawForAdd() = nil, want an error for missing github_token")
-	}
-	const want = "zing.toml: missing required key github_token"
-	if err.Error() != want {
-		t.Errorf("LoadRawForAdd() = %q, want %q", err.Error(), want)
 	}
 }
 

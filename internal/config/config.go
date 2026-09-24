@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,28 +32,12 @@ type Config struct {
 	Projects    []Project `toml:"projects"`
 }
 
-// Every field below that applyDefaults fills in carries "omitempty" (a
-// string or slice) or "omitzero" (an int) -- PR review fix: LoadRawForAdd
-// (used by "zing project add") skips applyDefaults, so its Config carries
-// these fields at their bare Go zero value when zing.toml leaves them unset.
-// Without the tag, Save would marshal that zero value back as an explicit
-// TOML entry (BurntSushi/toml writes every field unless told to omit it),
-// which is worse than the defaults-inlining bug this exists to fix: an
-// explicit console.port = 0 or review.floor = "" fails checkValues on the
-// very next Load, rather than merely pinning a default. The tag makes Save
-// leave the key out entirely when the value is still the zero one, so the
-// next Load's applyDefaults fills it in exactly as if zing.toml had never
-// mentioned it -- indistinguishable, for these fields, from having omitted
-// it in the first place.
 type Console struct {
-	Bind []string `toml:"bind,omitempty"`
-	Port int      `toml:"port,omitzero"`
+	Bind []string `toml:"bind"`
+	Port int      `toml:"port"`
 	// PushToken is left as the toml zero value (empty) by Load and
-	// LoadForAdd when zing.toml omits it (see Load's doc comment), so it
-	// carries "omitempty": Save must not write an explicit empty string
-	// back, which checkValues would then reject as shorter than
-	// minPushTokenLen on the next Load.
-	PushToken string `toml:"push_token,omitempty"`
+	// LoadForAdd when zing.toml omits it (see Load's doc comment).
+	PushToken string `toml:"push_token"`
 	// AllowedHosts extends the mutation middleware's Host allowlist (design
 	// section 6.14) with hostnames the middleware cannot derive on its own,
 	// such as a tailnet DNS name: bare hostnames, no port. Empty by default.
@@ -60,31 +45,31 @@ type Console struct {
 }
 
 type Models struct {
-	Sonnet string `toml:"sonnet,omitempty"`
-	Opus   string `toml:"opus,omitempty"`
-	Fable  string `toml:"fable,omitempty"`
-	Codex  string `toml:"codex,omitempty"`
+	Sonnet string `toml:"sonnet"`
+	Opus   string `toml:"opus"`
+	Fable  string `toml:"fable"`
+	Codex  string `toml:"codex"`
 }
 
 type Dispatch struct {
-	IntervalSeconds int `toml:"interval_seconds,omitzero"`
-	MaxParallel     int `toml:"max_parallel,omitzero"`
+	IntervalSeconds int `toml:"interval_seconds"`
+	MaxParallel     int `toml:"max_parallel"`
 }
 
 type Budget struct {
-	AgentMinutesPerTicket int `toml:"agent_minutes_per_ticket,omitzero"`
-	UsageHoldPercent      int `toml:"usage_hold_percent,omitzero"`
+	AgentMinutesPerTicket int `toml:"agent_minutes_per_ticket"`
+	UsageHoldPercent      int `toml:"usage_hold_percent"`
 }
 
 type Review struct {
-	Floor string `toml:"floor,omitempty"`
+	Floor string `toml:"floor"`
 }
 
 type Merge struct {
 	Auto            bool     `toml:"auto"`
-	Method          string   `toml:"method,omitempty"`
-	ManualPaths     []string `toml:"manual_paths,omitempty"`
-	DependencyFiles []string `toml:"dependency_files,omitempty"`
+	Method          string   `toml:"method"`
+	ManualPaths     []string `toml:"manual_paths"`
+	DependencyFiles []string `toml:"dependency_files"`
 }
 
 type Project struct {
@@ -155,7 +140,7 @@ const minPushTokenLen = 16
 // settings.push_token for stability across restarts -- a distinction a value
 // regenerated fresh on every Load call could not preserve.
 func Load(path string) (*Config, error) {
-	return load(path, false, true)
+	return load(path, false)
 }
 
 // LoadForAdd loads config for "zing project add" only (PKG5-PLAN.md section
@@ -163,27 +148,12 @@ func Load(path string) (*Config, error) {
 // permits zero projects, so the first project can be added to a fresh
 // config. It still requires user and github_token.
 func LoadForAdd(path string) (*Config, error) {
-	return load(path, true, true)
+	return load(path, true)
 }
 
-// LoadRawForAdd loads config for "zing project add" the same way LoadForAdd
-// does -- decode, unknown-key check, required-key check with zero projects
-// allowed, and value checks -- but skips applyDefaults (PR review fix). This
-// is the load projectAdd (cmd/zing/project.go) appends the new project onto
-// and saves: appending onto LoadForAdd's result instead would inline every
-// applied default (console.bind, dispatch.interval_seconds, and so on) into
-// zing.toml as an explicit value, pinning it there and hiding it from future
-// default changes. LoadRawForAdd's result carries only what zing.toml
-// actually says, plus the appended project.
-func LoadRawForAdd(path string) (*Config, error) {
-	return load(path, true, false)
-}
-
-// load is the shared decode/unknown-key/value-check body of Load,
-// LoadForAdd, and LoadRawForAdd. allowEmptyProjects is Load's and
-// LoadForAdd's one difference; fillDefaults skips applyDefaults for
-// LoadRawForAdd, whose caller must not write applied defaults back to disk.
-func load(path string, allowEmptyProjects, fillDefaults bool) (*Config, error) {
+// load is the shared decode/unknown-key/value-check body of Load and
+// LoadForAdd. allowEmptyProjects is their one difference.
+func load(path string, allowEmptyProjects bool) (*Config, error) {
 	if err := repairFileMode(path); err != nil {
 		return nil, err
 	}
@@ -204,9 +174,7 @@ func load(path string, allowEmptyProjects, fillDefaults bool) (*Config, error) {
 		return nil, err
 	}
 
-	if fillDefaults {
-		applyDefaults(md, &cfg)
-	}
+	applyDefaults(md, &cfg)
 
 	return &cfg, nil
 }
@@ -243,55 +211,74 @@ func repairFileMode(path string) error {
 	return nil
 }
 
-// Save re-encodes cfg to path atomically and at mode 0600, since the file
-// holds github_token (PKG5-PLAN.md section 9). It writes to a fresh sibling
+// AppendProject appends a single [[projects]] block for p to the zing.toml
+// already at path, atomically and at mode 0600, since the file holds
+// github_token (PKG5-PLAN.md section 9). It never re-marshals or rewrites
+// anything already in the file (PR review fix): an earlier version of "zing
+// project add" re-marshaled and rewrote the whole Config, which meant any
+// field the caller had set to its Go zero value on purpose -- an explicit
+// merge.manual_paths = [] or budget.usage_hold_percent = 0 -- came back out
+// of that Config struct indistinguishable from a field zing.toml had simply
+// never mentioned, and so was silently dropped by the rewrite. Rendering
+// only the new project and appending it leaves every existing key and value
+// byte-for-byte untouched, so no explicit empty or zero value already on
+// disk is ever at risk.
+//
+// The new block is produced by marshaling a small wrapper struct holding
+// only p, so BurntSushi/toml's own TOML-string escaping applies to it
+// exactly as it would to the full Config. It is written to a fresh sibling
 // temp file made with os.CreateTemp(dir, "zing.toml.*.tmp") -- a unique name
-// per call, rather than the fixed "<path>.tmp" a fixed name plus O_EXCL used
-// to imply, so a stale leftover temp file from an earlier interrupted or
-// crashed Save (which O_EXCL would then refuse to reuse or overwrite,
-// permanently blocking every future Save) can never block this one --
-// chmods it to 0600 (os.CreateTemp itself creates at 0600 already, minus
-// umask, so this makes the mode explicit rather than umask-dependent),
-// writes, closes, and renames it over path, creating the parent directory at
-// 0700 if absent. On any error the temp file is removed and path is left
-// untouched, since the rename never runs until every earlier step has
-// succeeded. Save drops comments and hand-formatting in the existing file
-// (decision Q70).
-func Save(path string, cfg *Config) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("zing.toml: save: %w", err)
-	}
-
-	data, err := toml.Marshal(cfg)
+// per call, so a stale leftover temp file from an earlier interrupted or
+// crashed append can never block this one -- chmod'd to 0600, written,
+// closed, and renamed over path. On any error the temp file is removed and
+// path is left untouched, since the rename never runs until every earlier
+// step has succeeded.
+func AppendProject(path string, p Project) error {
+	existing, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 
+	wrapper := struct {
+		Projects []Project `toml:"projects"`
+	}{[]Project{p}}
+	block, err := toml.Marshal(wrapper)
+	if err != nil {
+		return fmt.Errorf("zing.toml: append project: %w", err)
+	}
+
+	var out bytes.Buffer
+	out.Write(existing)
+	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
+		out.WriteByte('\n')
+	}
+	out.Write(block)
+
+	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "zing.toml.*.tmp")
 	if err != nil {
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 	tmp := f.Name()
 
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := f.Write(out.Bytes()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("zing.toml: save: %w", err)
+		return fmt.Errorf("zing.toml: append project: %w", err)
 	}
 	return nil
 }

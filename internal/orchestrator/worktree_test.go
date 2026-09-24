@@ -547,7 +547,7 @@ func TestPrepareWorktree(t *testing.T) {
 		repo := newTestRepo(t)
 		ctx := t.Context()
 
-		linkedDir := filepath.Join(filepath.Dir(repo), "linked-worktree")
+		linkedDir := filepath.Join(t.TempDir(), "linked-worktree")
 		runGit(ctx, t, repo, "worktree", "add", "-b", "linked-branch", linkedDir, mainBranch)
 
 		info, statErr := os.Lstat(filepath.Join(linkedDir, ".git"))
@@ -675,9 +675,10 @@ func TestRemoveWorktree(t *testing.T) {
 	// "rm -rf", not "git worktree remove") leaves it registered in git's own
 	// worktree administration under .git/worktrees/, which used to make
 	// "git branch -D" refuse with "already checked out" even though nothing
-	// is actually there. RemoveWorktree now runs "git worktree prune" first,
-	// which clears that stale registration, so the branch still gets
-	// deleted.
+	// is actually there. RemoveWorktree now always runs
+	// "git worktree remove --force <wt.dir>" scoped to this one worktree,
+	// which clears that stale registration on its own, so the branch still
+	// gets deleted.
 	t.Run("a worktree deleted outside git still gets its branch deleted", func(t *testing.T) {
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
@@ -699,6 +700,61 @@ func TestRemoveWorktree(t *testing.T) {
 		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
 		if strings.TrimSpace(branches) != "" {
 			t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+		}
+	})
+
+	// PR review finding: RemoveWorktree used to run "git worktree prune" over
+	// the whole repository before removing wt.dir, which would silently
+	// discard any other stale worktree registration in the repo -- for
+	// example one on temporarily-unavailable network or removable storage --
+	// not just the one being removed. RemoveWorktree now scopes its cleanup
+	// to wt.dir alone, so removing one ticket's worktree must never disturb
+	// an unrelated ticket's registration.
+	t.Run("does not prune an unrelated registered worktree", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wtA, err := o.PrepareWorktree(ctx, 60, "a", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree(60): %v", err)
+		}
+		wtB, err := o.PrepareWorktree(ctx, 61, "b", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree(61): %v", err)
+		}
+
+		// Simulate wtB's worktree directory becoming unavailable (as if on
+		// removable or network storage that dropped out) without git ever
+		// being told: its registration under .git/worktrees/ survives, but
+		// nothing is left on disk at wtB.Dir().
+		if err := os.RemoveAll(wtB.Dir()); err != nil {
+			t.Fatalf("RemoveAll(%s): %v", wtB.Dir(), err)
+		}
+
+		if err := o.RemoveWorktree(ctx, wtA); err != nil {
+			t.Fatalf("RemoveWorktree(wtA): %v", err)
+		}
+
+		if _, statErr := os.Stat(wtA.Dir()); statErr == nil {
+			t.Errorf("expected %s to be removed", wtA.Dir())
+		}
+		branchesA := runGit(ctx, t, repo, "branch", "--list", wtA.Branch())
+		if strings.TrimSpace(branchesA) != "" {
+			t.Errorf("expected branch %q to be deleted, branch --list said: %q", wtA.Branch(), branchesA)
+		}
+
+		// wtB's stale registration must survive: a global prune would have
+		// silently discarded it. "git worktree list --porcelain" still
+		// reports it, and its branch still exists, exactly as if it were on
+		// storage waiting to come back.
+		list := runGit(ctx, t, repo, "worktree", "list", "--porcelain")
+		if !strings.Contains(list, wtB.Dir()) {
+			t.Errorf("expected wtB's registration to survive removing wtA's worktree, worktree list:\n%s", list)
+		}
+		branchesB := runGit(ctx, t, repo, "branch", "--list", wtB.Branch())
+		if strings.TrimSpace(branchesB) == "" {
+			t.Errorf("expected branch %q to still exist (its worktree registration must not be pruned), branch --list said: %q", wtB.Branch(), branchesB)
 		}
 	})
 

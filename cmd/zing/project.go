@@ -127,12 +127,13 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 
 // projectAdd is the testable core of "zing project add", run in this exact
 // order so the first error is deterministic (PKG5-PLAN.md section 10):
-//  1. LoadRawForAdd from cfgPath: a missing github_token or user fails here;
-//     zero existing projects is allowed. This is the raw load, with
-//     applyDefaults skipped (PR review fix): appending the new project onto
-//     LoadForAdd's result instead would inline every applied default into
-//     zing.toml as an explicit value on every "project add", pinning
-//     defaults that should stay implicit and free to change later.
+//  1. LoadForAdd from cfgPath, to confirm the file is loadable and carries
+//     user and github_token; zero existing projects is allowed. This load is
+//     read-only here (PR review fix): the new project is later written with
+//     config.AppendProject, a textual append that never re-marshals this
+//     Config (or anything else already in the file) back to disk, so
+//     applying defaults onto it for this check has no chance of pinning them
+//     into zing.toml as explicit values.
 //  2. Parse and validate the flags.
 //  3. A project whose name already exists is a fatal error, with no write.
 //  4. Split --repo into owner and repo on the single "/".
@@ -143,10 +144,11 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 //     inserting for the first time, not one already on record).
 //  6. gh.RequiredChecks on that branch; a result missing "ci" fails with
 //     errMissingRequiredCICheck and writes nothing.
-//  7. Append the project, with the discovered default branch, and
-//     config.Save.
+//  7. config.AppendProject writes the new project, with the discovered
+//     default branch, as a single appended [[projects]] block, leaving every
+//     existing key and value in zing.toml untouched.
 func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, args []string) error {
-	cfg, err := config.LoadRawForAdd(cfgPath)
+	cfg, err := config.LoadForAdd(cfgPath)
 	if err != nil {
 		return err
 	}
@@ -181,7 +183,7 @@ func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, arg
 		return errMissingRequiredCICheck
 	}
 
-	cfg.Projects = append(cfg.Projects, config.Project{
+	newProject := config.Project{
 		Name:          f.name,
 		Repo:          f.repo,
 		Path:          f.path,
@@ -191,9 +193,9 @@ func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, arg
 			Test: f.test,
 			Lint: f.lint,
 		},
-	})
+	}
 
-	if err := config.Save(cfgPath, cfg); err != nil {
+	if err := config.AppendProject(cfgPath, newProject); err != nil {
 		return fmt.Errorf("zing project add: %w", err)
 	}
 	return nil

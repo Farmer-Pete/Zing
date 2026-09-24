@@ -150,12 +150,12 @@ func TestProjectAdd_WritesProjectWithDiscoveredDefaultBranch(t *testing.T) {
 }
 
 // TestProjectAdd_DoesNotInlineDefaults proves the PR review fix: projectAdd
-// must append the new project onto a raw load (config.LoadRawForAdd), not
-// onto LoadForAdd's result, so applied defaults (console.port,
-// dispatch.max_parallel, and so on) are never written back to zing.toml as
-// explicit values that pin them there. A raw re-load after projectAdd must
-// still see every default field at its TOML zero value, proving nothing
-// beyond the appended project was written.
+// now writes the new project with config.AppendProject, a textual append
+// that never re-marshals the rest of the Config back to disk, so applied
+// defaults (console.port, dispatch.max_parallel, and so on) can never be
+// written back to zing.toml as explicit values that pin them there. The raw
+// file bytes after projectAdd must carry no default section it did not
+// already have, proving nothing beyond the appended project was written.
 func TestProjectAdd_DoesNotInlineDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -170,32 +170,22 @@ func TestProjectAdd_DoesNotInlineDefaults(t *testing.T) {
 		t.Fatalf("projectAdd: %v", err)
 	}
 
-	raw, err := config.LoadRawForAdd(cfgPath)
-	if err != nil {
-		t.Fatalf("LoadRawForAdd after projectAdd: %v", err)
-	}
-	if raw.Console.Port != 0 {
-		t.Errorf("raw Console.Port = %d, want 0 (default not inlined)", raw.Console.Port)
-	}
-	if len(raw.Console.Bind) != 0 {
-		t.Errorf("raw Console.Bind = %v, want empty (default not inlined)", raw.Console.Bind)
-	}
-	if raw.Dispatch.MaxParallel != 0 {
-		t.Errorf("raw Dispatch.MaxParallel = %d, want 0 (default not inlined)", raw.Dispatch.MaxParallel)
-	}
-	if raw.Review.Floor != "" {
-		t.Errorf("raw Review.Floor = %q, want empty (default not inlined)", raw.Review.Floor)
-	}
-	if len(raw.Projects) != 1 || raw.Projects[0].Name != "zing" {
-		t.Fatalf("raw Projects = %+v, want exactly one project named zing", raw.Projects)
-	}
-
 	body, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", cfgPath, err)
 	}
-	if strings.Contains(string(body), "max_parallel") {
-		t.Errorf("zing.toml contains an inlined default key, body:\n%s", body)
+	for _, section := range []string{"max_parallel", "[console]", "[dispatch]", "[budget]", "[review]", "[merge]", "[models]"} {
+		if strings.Contains(string(body), section) {
+			t.Errorf("zing.toml contains an inlined default section or key %q, body:\n%s", section, body)
+		}
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load after projectAdd: %v", err)
+	}
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "zing" {
+		t.Fatalf("Projects = %+v, want exactly one project named zing", cfg.Projects)
 	}
 }
 
