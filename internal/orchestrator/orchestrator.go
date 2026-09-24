@@ -137,9 +137,18 @@ type Orchestrator struct {
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute
 // LocalPath) and returns the orchestrator. An invalid Project is an error.
+// gh and run are also required (PR review fix): either nil would otherwise
+// build an Orchestrator that panics the first time it calls a GitHub or git
+// method, rather than failing here at construction.
 func New(proj Project, gh GitHub, run Runner, log *slog.Logger) (*Orchestrator, error) {
 	if err := validateProject(proj); err != nil {
 		return nil, err
+	}
+	if gh == nil {
+		return nil, errors.New("orchestrator: github client must not be nil")
+	}
+	if run == nil {
+		return nil, errors.New("orchestrator: runner must not be nil")
 	}
 	if log == nil {
 		log = slog.Default()

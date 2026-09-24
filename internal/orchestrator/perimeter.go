@@ -298,7 +298,9 @@ func (o *Orchestrator) RevertPaths(ctx context.Context, wt Worktree, changes []C
 // filepath.Clean'd and joined onto wtDir -- resolves outside wtDir. Change
 // comes from ChangedPaths in the ordinary flow, but RevertPaths is
 // content-mutating and destructive (it calls os.Remove), so Path is
-// validated here rather than trusted.
+// validated here rather than trusted. That lexical check alone only catches
+// a textual "../" escape; validateRevertPathRealPath adds a second, physical
+// layer on top of it (PR review fix).
 func validateRevertPath(wtDir, p string) error {
 	if p == "" {
 		return errors.New("path must not be empty")
@@ -318,6 +320,46 @@ func validateRevertPath(wtDir, p string) error {
 	full := filepath.Join(wtDir, clean)
 	if full != wtDir && !strings.HasPrefix(full, wtDir+string(filepath.Separator)) {
 		return fmt.Errorf("path escapes the worktree: %q", p)
+	}
+
+	return validateRevertPathRealPath(wtDir, full, p)
+}
+
+// validateRevertPathRealPath is validateRevertPath's physical layer (PR
+// review fix): the lexical check in validateRevertPath only catches a
+// textual "../" escape, but a symlinked path component earlier in full can
+// still resolve outside wtDir even when the textual path itself never
+// leaves it -- for example a symlinked subdirectory inside the worktree that
+// points elsewhere on disk, with an ordinary filename appended after it. It
+// resolves full's parent directory with filepath.EvalSymlinks and confirms
+// the result stays within wtDir's own real path (also resolved, so a
+// symlinked wtDir itself is not mistaken for an escape), and rejects full
+// outright when it is a directory: RevertPaths only ever restores or
+// removes a single file, and a directory pathspec passed to "git restore"
+// or os.Remove would act on a whole subtree instead of the one path the
+// caller asked for.
+func validateRevertPathRealPath(wtDir, full, p string) error {
+	if info, statErr := os.Lstat(full); statErr == nil && info.IsDir() {
+		return fmt.Errorf("path is a directory, not a file: %q", p)
+	}
+
+	realWtDir, err := filepath.EvalSymlinks(wtDir)
+	if err != nil {
+		return fmt.Errorf("resolve worktree root %s: %w", wtDir, err)
+	}
+
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(full))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Nothing on disk to escape through: RevertPaths' own
+			// os.Remove/git restore calls will fail cleanly on their own
+			// for a path whose parent does not exist.
+			return nil
+		}
+		return fmt.Errorf("resolve %s: %w", filepath.Dir(full), err)
+	}
+	if realParent != realWtDir && !strings.HasPrefix(realParent, realWtDir+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes the worktree through a symlink: %q", p)
 	}
 	return nil
 }

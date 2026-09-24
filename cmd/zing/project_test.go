@@ -20,6 +20,11 @@ import (
 // of using the discovered branch would fail these tests.
 const discoveredBranch = "release"
 
+// fakeRequiredCheckLint is a required-check name reused across several
+// fakeGitHub.checksByBranch fixtures below, pulled out as a constant so
+// goconst does not flag the repeats.
+const fakeRequiredCheckLint = "lint"
+
 // fakeGitHub is a minimal, scripted stand-in for orchestrator.GitHub, local
 // to this file: internal/orchestrator's own scripted fake
 // (fakegithub_test.go) lives in a file this package must not touch, since
@@ -120,7 +125,7 @@ func TestProjectAdd_WritesProjectWithDiscoveredDefaultBranch(t *testing.T) {
 	cfgPath := writeProjectlessConfig(t)
 	gh := fakeGitHub{
 		defaultBranch:  discoveredBranch,
-		checksByBranch: map[string][]string{discoveredBranch: {"lint", "ci"}},
+		checksByBranch: map[string][]string{discoveredBranch: {fakeRequiredCheckLint, "ci"}},
 	}
 	dir := t.TempDir()
 
@@ -144,6 +149,56 @@ func TestProjectAdd_WritesProjectWithDiscoveredDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestProjectAdd_DoesNotInlineDefaults proves the PR review fix: projectAdd
+// must append the new project onto a raw load (config.LoadRawForAdd), not
+// onto LoadForAdd's result, so applied defaults (console.port,
+// dispatch.max_parallel, and so on) are never written back to zing.toml as
+// explicit values that pin them there. A raw re-load after projectAdd must
+// still see every default field at its TOML zero value, proving nothing
+// beyond the appended project was written.
+func TestProjectAdd_DoesNotInlineDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := writeProjectlessConfig(t)
+	gh := fakeGitHub{
+		defaultBranch:  discoveredBranch,
+		checksByBranch: map[string][]string{discoveredBranch: {fakeRequiredCheckLint, "ci"}},
+	}
+
+	err := projectAdd(t.Context(), cfgPath, gh, projectAddArgs("zing", "Farmer-Pete/Zing", t.TempDir()))
+	if err != nil {
+		t.Fatalf("projectAdd: %v", err)
+	}
+
+	raw, err := config.LoadRawForAdd(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadRawForAdd after projectAdd: %v", err)
+	}
+	if raw.Console.Port != 0 {
+		t.Errorf("raw Console.Port = %d, want 0 (default not inlined)", raw.Console.Port)
+	}
+	if len(raw.Console.Bind) != 0 {
+		t.Errorf("raw Console.Bind = %v, want empty (default not inlined)", raw.Console.Bind)
+	}
+	if raw.Dispatch.MaxParallel != 0 {
+		t.Errorf("raw Dispatch.MaxParallel = %d, want 0 (default not inlined)", raw.Dispatch.MaxParallel)
+	}
+	if raw.Review.Floor != "" {
+		t.Errorf("raw Review.Floor = %q, want empty (default not inlined)", raw.Review.Floor)
+	}
+	if len(raw.Projects) != 1 || raw.Projects[0].Name != "zing" {
+		t.Fatalf("raw Projects = %+v, want exactly one project named zing", raw.Projects)
+	}
+
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", cfgPath, err)
+	}
+	if strings.Contains(string(body), "max_parallel") {
+		t.Errorf("zing.toml contains an inlined default key, body:\n%s", body)
+	}
+}
+
 // TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing proves step 6's
 // exact-string contract and its no-write guarantee.
 func TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing(t *testing.T) {
@@ -157,7 +212,7 @@ func TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing(t *testing.T) {
 
 	gh := fakeGitHub{
 		defaultBranch:  "main",
-		checksByBranch: map[string][]string{"main": {"lint", "build"}}, // no "ci"
+		checksByBranch: map[string][]string{"main": {fakeRequiredCheckLint, "build"}}, // no "ci"
 	}
 
 	err = projectAdd(t.Context(), cfgPath, gh, projectAddArgs("zing", "Farmer-Pete/Zing", t.TempDir()))

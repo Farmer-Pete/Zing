@@ -189,6 +189,21 @@ func TestNew(t *testing.T) {
 			}
 		})
 	}
+
+	// PR review finding: New used to return an orchestrator even when gh or
+	// run was nil, which would panic the first time a method reached one of
+	// them, rather than failing here at construction.
+	t.Run("nil GitHub is rejected", func(t *testing.T) {
+		if _, err := New(valid, nil, execRunner{}, log); err == nil {
+			t.Fatal("New: expected an error for a nil GitHub, got nil")
+		}
+	})
+
+	t.Run("nil Runner is rejected", func(t *testing.T) {
+		if _, err := New(valid, fakeGitHub{}, nil, log); err == nil {
+			t.Fatal("New: expected an error for a nil Runner, got nil")
+		}
+	})
 }
 
 func TestBranchName(t *testing.T) {
@@ -384,7 +399,7 @@ func TestPrepareWorktree(t *testing.T) {
 		}
 		found := false
 		for line := range strings.SplitSeq(string(contents), "\n") {
-			if strings.TrimSpace(line) == ".zing/" {
+			if strings.TrimSpace(line) == worktreeExcludeLine {
 				found = true
 			}
 		}
@@ -412,7 +427,7 @@ func TestPrepareWorktree(t *testing.T) {
 		}
 		count := 0
 		for line := range strings.SplitSeq(string(contents), "\n") {
-			if strings.TrimSpace(line) == ".zing/" {
+			if strings.TrimSpace(line) == worktreeExcludeLine {
 				count++
 			}
 		}
@@ -491,6 +506,77 @@ func TestPrepareWorktree(t *testing.T) {
 
 		if _, err := o.PrepareWorktree(t.Context(), 1, "", nil); err == nil {
 			t.Fatal("PrepareWorktree: expected an error when the computed branch equals the default branch, got nil")
+		}
+	})
+
+	// PR review finding: PrepareWorktree used to pass cone entries straight
+	// through as argv to "git sparse-checkout set", so an entry beginning
+	// with "-" would be parsed by git as an option rather than a path,
+	// either erroring outright or being misinterpreted. Feeding cone through
+	// stdin (runSparseCheckoutSet) means git never sees these as argv at
+	// all, so a dash-prefixed path is included as a literal path like any
+	// other.
+	t.Run("a cone entry beginning with a dash is a literal path, not an option", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+
+		const dashDir = "-weird"
+		writeTestFile(t, filepath.Join(repo, dashDir, "file.txt"), "dashed\n")
+		runGit(ctx, t, repo, "add", "--", dashDir+"/file.txt")
+		runGit(ctx, t, repo, "commit", "-q", "-m", "add a dash-prefixed directory")
+
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 15, "dash", []string{dashDir})
+		if err != nil {
+			t.Fatalf("PrepareWorktree: unexpected error for a dash-prefixed cone entry: %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(wt.Dir(), dashDir, "file.txt")); err != nil {
+			t.Errorf("expected %s/file.txt inside the cone: %v", dashDir, err)
+		}
+	})
+
+	// PR review finding: ensureWorktreeExclude used to hardcode
+	// "<LocalPath>/.git/info/exclude", which cannot work when LocalPath is
+	// itself a git worktree (".git" there is a file pointing at the real,
+	// shared gitdir, not a directory). Resolving through
+	// "git rev-parse --git-path info/exclude" finds the repository's real,
+	// shared info/exclude regardless of where LocalPath sits.
+	t.Run("resolves info/exclude correctly when LocalPath is itself a linked worktree", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+
+		linkedDir := filepath.Join(filepath.Dir(repo), "linked-worktree")
+		runGit(ctx, t, repo, "worktree", "add", "-b", "linked-branch", linkedDir, mainBranch)
+
+		info, statErr := os.Lstat(filepath.Join(linkedDir, ".git"))
+		if statErr != nil {
+			t.Fatalf("test setup: stat %s/.git: %v", linkedDir, statErr)
+		}
+		if info.IsDir() {
+			t.Fatalf("test setup: expected %s/.git to be a file (a linked worktree), got a directory", linkedDir)
+		}
+
+		o := newTestOrchestrator(t, linkedDir, execRunner{})
+
+		if _, err := o.PrepareWorktree(ctx, 30, "nested", nil); err != nil {
+			t.Fatalf("PrepareWorktree from inside a linked worktree: %v", err)
+		}
+
+		excludePath := filepath.Join(repo, ".git", "info", "exclude")
+		contents, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatalf("read the main checkout's shared %s: %v", excludePath, err)
+		}
+		found := false
+		for line := range strings.SplitSeq(string(contents), "\n") {
+			if strings.TrimSpace(line) == worktreeExcludeLine {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected the main checkout's shared info/exclude (info/exclude is shared across worktrees) to contain \".zing/\", got:\n%s", contents)
 		}
 	})
 }
@@ -585,6 +671,37 @@ func TestRemoveWorktree(t *testing.T) {
 		}
 	})
 
+	// PR review finding: a worktree directory deleted outside git (an
+	// "rm -rf", not "git worktree remove") leaves it registered in git's own
+	// worktree administration under .git/worktrees/, which used to make
+	// "git branch -D" refuse with "already checked out" even though nothing
+	// is actually there. RemoveWorktree now runs "git worktree prune" first,
+	// which clears that stale registration, so the branch still gets
+	// deleted.
+	t.Run("a worktree deleted outside git still gets its branch deleted", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.PrepareWorktree(ctx, 24, "rm-rf", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		if err := os.RemoveAll(wt.Dir()); err != nil {
+			t.Fatalf("RemoveAll(%s): %v", wt.Dir(), err)
+		}
+
+		if err := o.RemoveWorktree(ctx, wt); err != nil {
+			t.Fatalf("RemoveWorktree: unexpected error for a worktree deleted outside git: %v", err)
+		}
+
+		branches := runGit(ctx, t, repo, "branch", "--list", wt.Branch())
+		if strings.TrimSpace(branches) != "" {
+			t.Errorf("expected branch %q to be deleted, branch --list said: %q", wt.Branch(), branches)
+		}
+	})
+
 	// PR review finding G: RemoveWorktree used to force-remove a present
 	// worktree without checking what branch was actually checked out there.
 	// A worktree directory whose HEAD was switched to some other branch
@@ -614,6 +731,68 @@ func TestRemoveWorktree(t *testing.T) {
 			t.Errorf("expected branch %q to still exist, branch --list said: %q", wt.Branch(), branches)
 		}
 	})
+}
+
+// cancelingFailingRunner wraps a real Runner, forces an error for any
+// command args reports true for, and cancels cancel at the moment it does
+// so -- so a caller reacting to that failure (PrepareWorktree calling
+// cleanupWorktree) runs against an already-cancelled ctx. It exercises the
+// fix that cleanupWorktree's own commands run on a context.WithoutCancel(ctx)
+// detached from ctx's cancellation, mirroring commit_test.go's
+// cancelAfterCommitRunner for resetAfterUnsignedCommit.
+type cancelingFailingRunner struct {
+	inner  Runner
+	fail   func(args []string) bool
+	cancel context.CancelFunc
+}
+
+func (r cancelingFailingRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if r.fail(args) {
+		r.cancel()
+		return "forced failure", errors.New("forced failure")
+	}
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+func (r cancelingFailingRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return r.inner.Output(ctx, dir, name, args...)
+}
+
+// TestPrepareWorktree_CleanupSurvivesCancelledContext proves the PR review
+// fix to cleanupWorktree: it used to run "git worktree remove" and
+// "git branch -D" on the same ctx PrepareWorktree was called with, so a ctx
+// cancelled by the very failure that triggered cleanup (or one past its
+// deadline) would leave the worktree directory and branch leaked, since
+// cleanup could never run. ctx here is cancelled the instant the forced
+// "checkout" failure happens, before cleanupWorktree runs -- yet the
+// directory and branch still end up removed, since cleanupWorktree now runs
+// on a context.WithoutCancel(ctx) detached from ctx's cancellation.
+func TestPrepareWorktree_CleanupSurvivesCancelledContext(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	failing := cancelingFailingRunner{
+		inner: execRunner{},
+		fail: func(args []string) bool {
+			return len(args) > 0 && args[0] == "checkout"
+		},
+		cancel: cancel,
+	}
+	o := newTestOrchestrator(t, repo, failing)
+
+	_, err := o.PrepareWorktree(ctx, 40, "cancel", nil)
+	if err == nil {
+		t.Fatal("PrepareWorktree: expected an error, got nil")
+	}
+
+	dir := filepath.Join(repo, ".zing", "wt", "40")
+	if _, statErr := os.Stat(dir); statErr == nil {
+		t.Errorf("expected %s to be removed by cleanup even under a cancelled ctx", dir)
+	}
+
+	branches := runGit(t.Context(), t, repo, "branch", "--list", "zing/40-cancel")
+	if strings.TrimSpace(branches) != "" {
+		t.Errorf("expected branch zing/40-cancel to be deleted by cleanup even under a cancelled ctx, branch --list said: %q", branches)
+	}
 }
 
 // PR review finding B: worktreePresent compared "git worktree list

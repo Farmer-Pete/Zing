@@ -129,6 +129,38 @@ func TestCommitMessageRender(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Pure: validateApprovedPaths, through CommitTask
+// -----------------------------------------------------------------------
+
+// TestCommitTask_RejectsInvalidApprovedPaths proves the PR review fix: an
+// empty approved slice, an empty path entry, or a path with a NUL byte is
+// rejected before CommitTask stages anything -- noCallRunner proves no git
+// command runs at all, so a fake, never-prepared Worktree is enough.
+func TestCommitTask_RejectsInvalidApprovedPaths(t *testing.T) {
+	cases := []struct {
+		name     string
+		approved []string
+	}{
+		{"nil slice", nil},
+		{"empty slice", []string{}},
+		{"empty path entry", []string{""}},
+		{"a valid entry alongside an empty one", []string{approvedTestFile, ""}},
+		{"path containing a NUL byte", []string{"a\x00b"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
+			wt := Worktree{dir: absLocalPath, branch: branch7MySlug}
+			msg := CommitMessage{Title: testGenericTitle, FuncLines: []string{testSingleFuncLine}}
+
+			if _, err := o.CommitTask(t.Context(), wt, c.approved, msg); err == nil {
+				t.Fatalf("CommitTask(%q): expected an error, got nil", c.approved)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
 // Real git: CommitTask and signedStatus
 // -----------------------------------------------------------------------
 

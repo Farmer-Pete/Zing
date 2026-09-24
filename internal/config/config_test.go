@@ -746,3 +746,75 @@ func TestLoad_RejectsZeroProjects(t *testing.T) {
 		t.Errorf("Load() = %q, want %q", err.Error(), want)
 	}
 }
+
+// TestLoadRawForAdd_SkipsDefaults proves the PR review fix: LoadRawForAdd
+// runs the same checks as LoadForAdd but never calls applyDefaults, so a
+// field zing.toml leaves unset comes back at its TOML zero value rather than
+// the value Load and LoadForAdd would fill in.
+func TestLoadRawForAdd_SkipsDefaults(t *testing.T) {
+	t.Parallel()
+
+	body := "user = \"peter\"\ngithub_token = \"" + testGitHubToken + "\"\n"
+	cfg, err := LoadRawForAdd(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("LoadRawForAdd: %v", err)
+	}
+	if cfg.Console.Port != 0 {
+		t.Errorf("Console.Port = %d, want 0 (no default applied)", cfg.Console.Port)
+	}
+	if len(cfg.Console.Bind) != 0 {
+		t.Errorf("Console.Bind = %v, want empty (no default applied)", cfg.Console.Bind)
+	}
+	if cfg.Models.Sonnet != "" {
+		t.Errorf("Models.Sonnet = %q, want empty (no default applied)", cfg.Models.Sonnet)
+	}
+	if cfg.Merge.Method != "" {
+		t.Errorf("Merge.Method = %q, want empty (no default applied)", cfg.Merge.Method)
+	}
+	if len(cfg.Projects) != 0 {
+		t.Errorf("Projects = %v, want empty", cfg.Projects)
+	}
+}
+
+// TestLoadRawForAdd_StillRunsTheSameChecksAsLoadForAdd proves LoadRawForAdd
+// diverges from LoadForAdd only in whether defaults are applied, not in
+// which errors it reports.
+func TestLoadRawForAdd_StillRunsTheSameChecksAsLoadForAdd(t *testing.T) {
+	t.Parallel()
+
+	_, err := LoadRawForAdd(writeTOML(t, `user = "peter"`))
+	if err == nil {
+		t.Fatal("LoadRawForAdd() = nil, want an error for missing github_token")
+	}
+	const want = "zing.toml: missing required key github_token"
+	if err.Error() != want {
+		t.Errorf("LoadRawForAdd() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestLoad_PathIsADirectoryIsRejectedWithoutChmod proves the PR review fix
+// to repairFileMode: a config path that is a directory (or any non-regular
+// file) is reported as an error rather than chmod'd. Before the fix, a
+// group- or other-readable directory (0755 here, whose group/other bits
+// overlap permissiveMode) would have been chmod'd to 0600, stripping the
+// execute bit a directory needs to be traversable at all.
+func TestLoad_PathIsADirectoryIsRejectedWithoutChmod(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "zing.toml")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() = nil, want an error when the config path is a directory")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("directory mode = %o after Load, want unchanged 0755 (repairFileMode must not chmod a non-regular file)", perm)
+	}
+}

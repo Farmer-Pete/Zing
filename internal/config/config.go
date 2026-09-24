@@ -31,9 +31,22 @@ type Config struct {
 	Projects    []Project `toml:"projects"`
 }
 
+// Every field below that applyDefaults fills in carries "omitempty" (a
+// string or slice) or "omitzero" (an int) -- PR review fix: LoadRawForAdd
+// (used by "zing project add") skips applyDefaults, so its Config carries
+// these fields at their bare Go zero value when zing.toml leaves them unset.
+// Without the tag, Save would marshal that zero value back as an explicit
+// TOML entry (BurntSushi/toml writes every field unless told to omit it),
+// which is worse than the defaults-inlining bug this exists to fix: an
+// explicit console.port = 0 or review.floor = "" fails checkValues on the
+// very next Load, rather than merely pinning a default. The tag makes Save
+// leave the key out entirely when the value is still the zero one, so the
+// next Load's applyDefaults fills it in exactly as if zing.toml had never
+// mentioned it -- indistinguishable, for these fields, from having omitted
+// it in the first place.
 type Console struct {
-	Bind []string `toml:"bind"`
-	Port int      `toml:"port"`
+	Bind []string `toml:"bind,omitempty"`
+	Port int      `toml:"port,omitzero"`
 	// PushToken is left as the toml zero value (empty) by Load and
 	// LoadForAdd when zing.toml omits it (see Load's doc comment), so it
 	// carries "omitempty": Save must not write an explicit empty string
@@ -47,31 +60,31 @@ type Console struct {
 }
 
 type Models struct {
-	Sonnet string `toml:"sonnet"`
-	Opus   string `toml:"opus"`
-	Fable  string `toml:"fable"`
-	Codex  string `toml:"codex"`
+	Sonnet string `toml:"sonnet,omitempty"`
+	Opus   string `toml:"opus,omitempty"`
+	Fable  string `toml:"fable,omitempty"`
+	Codex  string `toml:"codex,omitempty"`
 }
 
 type Dispatch struct {
-	IntervalSeconds int `toml:"interval_seconds"`
-	MaxParallel     int `toml:"max_parallel"`
+	IntervalSeconds int `toml:"interval_seconds,omitzero"`
+	MaxParallel     int `toml:"max_parallel,omitzero"`
 }
 
 type Budget struct {
-	AgentMinutesPerTicket int `toml:"agent_minutes_per_ticket"`
-	UsageHoldPercent      int `toml:"usage_hold_percent"`
+	AgentMinutesPerTicket int `toml:"agent_minutes_per_ticket,omitzero"`
+	UsageHoldPercent      int `toml:"usage_hold_percent,omitzero"`
 }
 
 type Review struct {
-	Floor string `toml:"floor"`
+	Floor string `toml:"floor,omitempty"`
 }
 
 type Merge struct {
 	Auto            bool     `toml:"auto"`
-	Method          string   `toml:"method"`
-	ManualPaths     []string `toml:"manual_paths"`
-	DependencyFiles []string `toml:"dependency_files"`
+	Method          string   `toml:"method,omitempty"`
+	ManualPaths     []string `toml:"manual_paths,omitempty"`
+	DependencyFiles []string `toml:"dependency_files,omitempty"`
 }
 
 type Project struct {
@@ -142,7 +155,7 @@ const minPushTokenLen = 16
 // settings.push_token for stability across restarts -- a distinction a value
 // regenerated fresh on every Load call could not preserve.
 func Load(path string) (*Config, error) {
-	return load(path, false)
+	return load(path, false, true)
 }
 
 // LoadForAdd loads config for "zing project add" only (PKG5-PLAN.md section
@@ -150,13 +163,27 @@ func Load(path string) (*Config, error) {
 // permits zero projects, so the first project can be added to a fresh
 // config. It still requires user and github_token.
 func LoadForAdd(path string) (*Config, error) {
-	return load(path, true)
+	return load(path, true, true)
 }
 
-// load is the shared decode/unknown-key/value-check body of Load and
-// LoadForAdd, so the two never diverge except in whether an empty
-// cfg.Projects is accepted.
-func load(path string, allowEmptyProjects bool) (*Config, error) {
+// LoadRawForAdd loads config for "zing project add" the same way LoadForAdd
+// does -- decode, unknown-key check, required-key check with zero projects
+// allowed, and value checks -- but skips applyDefaults (PR review fix). This
+// is the load projectAdd (cmd/zing/project.go) appends the new project onto
+// and saves: appending onto LoadForAdd's result instead would inline every
+// applied default (console.bind, dispatch.interval_seconds, and so on) into
+// zing.toml as an explicit value, pinning it there and hiding it from future
+// default changes. LoadRawForAdd's result carries only what zing.toml
+// actually says, plus the appended project.
+func LoadRawForAdd(path string) (*Config, error) {
+	return load(path, true, false)
+}
+
+// load is the shared decode/unknown-key/value-check body of Load,
+// LoadForAdd, and LoadRawForAdd. allowEmptyProjects is Load's and
+// LoadForAdd's one difference; fillDefaults skips applyDefaults for
+// LoadRawForAdd, whose caller must not write applied defaults back to disk.
+func load(path string, allowEmptyProjects, fillDefaults bool) (*Config, error) {
 	if err := repairFileMode(path); err != nil {
 		return nil, err
 	}
@@ -177,7 +204,9 @@ func load(path string, allowEmptyProjects bool) (*Config, error) {
 		return nil, err
 	}
 
-	applyDefaults(md, &cfg)
+	if fillDefaults {
+		applyDefaults(md, &cfg)
+	}
 
 	return &cfg, nil
 }
@@ -190,11 +219,19 @@ const permissiveMode = 0o077
 // repairFileMode chmods path to 0600 when it is readable by group or other,
 // logging a warning once. It runs first, before the decode, so a token is
 // never left group- or other-readable past the start of a Load or
-// LoadForAdd call, even one that goes on to fail a later check.
+// LoadForAdd call, even one that goes on to fail a later check. It chmods
+// only a regular file (PR review fix): path pointing at a directory or some
+// other non-regular file (a symlink to one, a device, ...) is left alone and
+// reported as an error, rather than chmod'd to a mode that could make a
+// directory unusable (0600 strips the execute bit a directory needs to be
+// traversable).
 func repairFileMode(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("zing.toml: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("zing.toml: %s: not a regular file", path)
 	}
 	if info.Mode().Perm()&permissiveMode == 0 {
 		return nil

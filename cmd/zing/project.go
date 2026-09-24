@@ -127,8 +127,12 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 
 // projectAdd is the testable core of "zing project add", run in this exact
 // order so the first error is deterministic (PKG5-PLAN.md section 10):
-//  1. LoadForAdd from cfgPath: a missing github_token or user fails here;
-//     zero existing projects is allowed.
+//  1. LoadRawForAdd from cfgPath: a missing github_token or user fails here;
+//     zero existing projects is allowed. This is the raw load, with
+//     applyDefaults skipped (PR review fix): appending the new project onto
+//     LoadForAdd's result instead would inline every applied default into
+//     zing.toml as an explicit value on every "project add", pinning
+//     defaults that should stay implicit and free to change later.
 //  2. Parse and validate the flags.
 //  3. A project whose name already exists is a fatal error, with no write.
 //  4. Split --repo into owner and repo on the single "/".
@@ -142,7 +146,7 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 //  7. Append the project, with the discovered default branch, and
 //     config.Save.
 func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, args []string) error {
-	cfg, err := config.LoadForAdd(cfgPath)
+	cfg, err := config.LoadRawForAdd(cfgPath)
 	if err != nil {
 		return err
 	}

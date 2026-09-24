@@ -78,6 +78,29 @@ func (m CommitMessage) Render() (string, error) {
 	return b.String(), nil
 }
 
+// validateApprovedPaths rejects an approved slice CommitTask must never
+// stage (PR review fix): empty, since an empty pathspec file makes
+// "git add --pathspec-from-file=..." a no-op, which would leave CommitTask
+// reporting success while committing nothing at all; or carrying an empty
+// entry or one with a NUL byte, since NUL is the pathspec file's own
+// record separator (writePathspecFile) and an empty or NUL-bearing path
+// would corrupt the file or every entry after it. It runs before any
+// staging, so a rejected call never touches git or the working tree.
+func validateApprovedPaths(approved []string) error {
+	if len(approved) == 0 {
+		return errors.New("approved paths must not be empty")
+	}
+	for i, p := range approved {
+		if p == "" {
+			return fmt.Errorf("approved path %d must not be empty", i)
+		}
+		if strings.ContainsRune(p, 0) {
+			return fmt.Errorf("approved path %d must not contain a NUL byte: %q", i, p)
+		}
+	}
+	return nil
+}
+
 // validateSingleLine rejects an empty value or one containing a line break,
 // naming field in the error so Render's caller sees which part of the
 // message was invalid.
@@ -108,6 +131,10 @@ func validateSingleLine(field, value string) error {
 // a plain "commit signing failed: ..." error, so no unsigned commit is ever
 // left at HEAD.
 func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []string, m CommitMessage) (sha string, err error) {
+	if err = validateApprovedPaths(approved); err != nil {
+		return "", fmt.Errorf("orchestrator: commit task: %w", err)
+	}
+
 	if err = o.revalidate(ctx, wt); err != nil {
 		return "", fmt.Errorf("orchestrator: commit task: %w", err)
 	}

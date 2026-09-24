@@ -478,4 +478,49 @@ func TestRevertPaths(t *testing.T) {
 			t.Fatal("RevertPaths: expected an error for a worktree whose checked-out branch drifted, got nil")
 		}
 	})
+
+	// PR review finding: validateRevertPath used to check containment only
+	// lexically ("../" in the textual path), so a symlinked path component
+	// inside the worktree pointing elsewhere on disk could still resolve
+	// outside it even though the textual Path never contains "..". This
+	// builds exactly that: a symlink inside the worktree pointing at an
+	// unrelated temp directory outside it, with an ordinary filename
+	// appended after the symlink component in Path.
+	t.Run("errors on a symlink-escape attempt", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 207)
+
+		outside := t.TempDir()
+		writeTestFile(t, filepath.Join(outside, "secret.txt"), "outside the worktree\n")
+
+		linkName := "escape-link"
+		if err := os.Symlink(outside, filepath.Join(wt.Dir(), linkName)); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		err := o.RevertPaths(ctx, wt, []Change{{Path: linkName + "/secret.txt", Code: Untracked}})
+		if err == nil {
+			t.Fatal("RevertPaths: expected an error for a path escaping the worktree through a symlink, got nil")
+		}
+
+		if _, statErr := os.Stat(filepath.Join(outside, "secret.txt")); statErr != nil {
+			t.Errorf("expected the file outside the worktree to survive untouched: %v", statErr)
+		}
+	})
+
+	// PR review finding: a directory pathspec passed to "git restore" or
+	// os.Remove behaves unexpectedly (a whole subtree, not the single path
+	// the caller asked for). validateRevertPath now rejects Path when it
+	// names a directory.
+	t.Run("errors when the path is a directory", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 208)
+
+		err := o.RevertPaths(ctx, wt, []Change{{Path: "app", Code: Untracked}})
+		if err == nil {
+			t.Fatal("RevertPaths: expected an error for a path that is a directory, got nil")
+		}
+
+		if _, statErr := os.Stat(filepath.Join(wt.Dir(), "app", "main.go")); statErr != nil {
+			t.Errorf("expected app/main.go to survive untouched: %v", statErr)
+		}
+	})
 }

@@ -93,8 +93,15 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 	mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotAuth = r.Header.Get("Authorization")
+		// The httptest server invokes this handler on its own goroutine, so
+		// a failure here must be recorded with t.Errorf (goroutine-safe for
+		// marking the test failed), not t.Fatalf (PR review fix: t.Fatalf
+		// calls runtime.Goexit, which off the main goroutine only kills that
+		// goroutine, not the test, and is unsafe to call concurrently with
+		// the main goroutine's own use of t).
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			return
 		}
 		fmt.Fprint(w, `{"html_url": "https://github.com/acme/widgets/pull/42", "number": 42}`)
 	})

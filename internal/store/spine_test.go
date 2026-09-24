@@ -119,9 +119,10 @@ func TestEnsureProject_ReconcilesChangedDefaultBranch(t *testing.T) {
 
 // TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite proves EnsureProject
 // only reconciles when p.DefaultBranch is non-empty, so a caller that omits
-// it (config.Project.DefaultBranch is optional at the TOML layer, but
-// applyDefaults always fills it to "main" before ensureBindings ever calls
-// EnsureProject) never wipes an existing stored value.
+// it (config.Project.DefaultBranch is optional at the TOML layer, and
+// applyDefaults deliberately leaves it "" rather than filling it to "main"
+// -- see config.go's applyDefaults -- so ensureBindings can call
+// EnsureProject with an empty value) never wipes an existing stored value.
 func TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
