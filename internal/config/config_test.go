@@ -25,7 +25,7 @@ const wantAllowedHostsPortError = "zing.toml: console.allowed_hosts[0]: must not
 // wantBudgetMinutesError is the exact error checkValues returns for any
 // budget.agent_minutes_per_ticket value outside [1, 525600] (config.go,
 // design section 4.4).
-const wantBudgetMinutesError = "zing.toml: budget.agent_minutes_per_ticket must be between 1 and 525600 minutes"
+const wantBudgetMinutesError = "zing.toml: budget.agent_minutes_per_ticket: must be between 1 and 525600 minutes"
 
 // testTracker, testCommandTest, and testCommandLint are the tracker and
 // commands values every valid Project fixture below uses, pulled out as

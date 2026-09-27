@@ -5,7 +5,14 @@
 # an env var the test sets and passes through RunRequest.Env, so it
 # survives Claude's own environment filter -- then behaves per
 # $FAKE_CLAUDE_MODE, so one script drives every process-lifecycle test.
-set -u
+#
+# set -euo pipefail so a failed setup step (a missing FAKE_CLAUDE_RESULT_FILE,
+# a mkdir or a recording write that fails) surfaces as a nonzero exit instead
+# of a silent exit 0 that leaves Go's Run reporting a misleading empty-output
+# error. The big_stdout/big_stderr branches keep their explicit exit 0: Go
+# fully drains both pipes (capWriter never short-reads), so their head|tr
+# pipelines complete cleanly and never trip pipefail.
+set -euo pipefail
 
 dir="${FAKE_CLAUDE_DIR:?FAKE_CLAUDE_DIR not set}"
 mkdir -p "$dir"

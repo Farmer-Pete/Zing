@@ -51,6 +51,11 @@ func checkNoBareErrorfReturn(t *testing.T, filename string) {
 		}
 
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			// A return inside a nested func literal returns from that
+			// literal, not from Run; do not descend into closures.
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
 			ret, ok := n.(*ast.ReturnStmt)
 			if !ok {
 				return true

@@ -73,7 +73,12 @@ func Seconds(d time.Duration) int {
 	if d <= 0 {
 		return 1
 	}
-	secs := int((d + time.Second - 1) / time.Second)
-	secs = max(secs, 1)
-	return secs
+	// Compute the quotient and remainder separately, rather than adding
+	// (time.Second - 1) up front, so a duration within one second of
+	// time.Duration's maximum cannot overflow and wrap to a bogus value.
+	secs := int(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return max(secs, 1)
 }

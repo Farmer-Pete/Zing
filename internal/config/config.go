@@ -379,9 +379,10 @@ func checkRequiredKeys(cfg Config, allowEmptyProjects bool) error {
 }
 
 // checkValues runs the fixed-order value checks. A field with a default
-// (floor, method, port, usage_hold_percent) is only checked when the key was
-// explicitly present, so an absent key defers to applyDefaults and an
-// explicit out-of-range value (including an explicit zero) is rejected here.
+// (floor, method, port, usage_hold_percent, agent_minutes_per_ticket) is
+// only checked when the key was explicitly present, so an absent key defers
+// to applyDefaults and an explicit out-of-range value (including an explicit
+// zero) is rejected here.
 func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("review", "floor") && !slices.Contains(validReviewFloors, cfg.Review.Floor) {
 		return fmt.Errorf("zing.toml: review.floor: must be one of %s", strings.Join(validReviewFloors, ", "))
@@ -409,7 +410,7 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	}
 	if md.IsDefined("budget", "agent_minutes_per_ticket") &&
 		(cfg.Budget.AgentMinutesPerTicket < minBudgetMinutes || cfg.Budget.AgentMinutesPerTicket > maxBudgetMinutes) {
-		return errors.New("zing.toml: budget.agent_minutes_per_ticket must be between 1 and 525600 minutes")
+		return fmt.Errorf("zing.toml: budget.agent_minutes_per_ticket: must be between %d and %d minutes", minBudgetMinutes, maxBudgetMinutes)
 	}
 	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
 		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)

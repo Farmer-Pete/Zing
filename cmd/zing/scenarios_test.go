@@ -172,9 +172,7 @@ func scenarioPayload(t *testing.T, id, kind, checkCmd, given, when, then string)
 }
 
 // insertPlan inserts a schema-valid "plan" artifact for ticketID at
-// version, produced by runID (nil for a legacy plan with no producing run),
-// and returns its artifact id (unused by every caller but kept for
-// clarity).
+// version, produced by runID (nil for a legacy plan with no producing run).
 func insertPlan(t *testing.T, st *store.Store, ticketID int64, runID *int64, version int) {
 	t.Helper()
 	if _, err := st.InsertArtifact(t.Context(), store.Artifact{
@@ -303,6 +301,39 @@ func TestScenarios_NoRunContext(t *testing.T) {
 				t.Errorf("stdout = %q, want empty", out.String())
 			}
 		})
+	}
+}
+
+// TestScenarios_RunContextInfraErrorExitsOne proves an operational
+// RunContext failure (here, a closed store) is reported as exit 1, not the
+// exit-2 "no run context" path a missing or unknown token takes (design
+// section 8 step 2): only sql.ErrNoRows is a user-input problem.
+func TestScenarios_RunContextInfraErrorExitsOne(t *testing.T) {
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if closeErr := st.Close(); closeErr != nil {
+		t.Fatalf("store.Close: %v", closeErr)
+	}
+
+	var out, errOut bytes.Buffer
+	getenv := func(k string) string {
+		if k == scenariosTokenEnv {
+			return "1"
+		}
+		return ""
+	}
+	code := scenarios(t.Context(), st, getenv, &out, &errOut)
+
+	if code != 1 {
+		t.Errorf("code = %d, want 1 (operational error, not a bad token)", code)
+	}
+	if got := errOut.String(); got == scenariosNoRunContext+"\n" {
+		t.Errorf("stderr = %q, want an operational error, not the no-run-context text", got)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want empty", out.String())
 	}
 }
 

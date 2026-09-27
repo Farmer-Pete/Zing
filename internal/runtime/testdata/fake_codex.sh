@@ -25,6 +25,7 @@ is_resume=false
 outfile=""
 prev=""
 have_sandbox_config=false
+have_sandbox_flag=false
 
 for a in "$@"; do
   case "$a" in
@@ -37,6 +38,9 @@ for a in "$@"; do
   fi
   if [ "$prev" = "-c" ] && [ "$a" = 'sandbox_mode="read-only"' ]; then
     have_sandbox_config=true
+  fi
+  if [ "$prev" = "-s" ] && [ "$a" = "read-only" ]; then
+    have_sandbox_flag=true
   fi
   prev="$a"
 done
@@ -51,6 +55,10 @@ if ! $has_ignore_rules; then
 fi
 if $is_resume && ! $have_sandbox_config; then
   echo 'fake_codex: -c sandbox_mode="read-only" missing from resume argv' >&2
+  exit 9
+fi
+if ! $is_resume && ! $have_sandbox_flag; then
+  echo "fake_codex: -s read-only missing from first-turn argv" >&2
   exit 9
 fi
 if [ -z "$outfile" ]; then

@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -49,8 +51,8 @@ func runScenarios() int {
 // the judge run named by ZING_RUN_TOKEN (design section 8):
 //  1. ZING_RUN_TOKEN missing or not a positive decimal integer -> no run
 //     context, exit 2.
-//  2. store.RunContext fails to resolve it to a run (unknown run) -> no run
-//     context, exit 2.
+//  2. store.RunContext reports no such run (sql.ErrNoRows) -> no run
+//     context, exit 2; any other RunContext error is operational -> exit 1.
 //  3. that run's job is not "judge" -> only a judge run may read scenarios,
 //     exit 2.
 //  4. the ticket has no current plan cohort, or its producing run is
@@ -65,9 +67,16 @@ func scenarios(ctx context.Context, st *store.Store, getenv func(string) string,
 	}
 
 	job, ticketID, err := st.RunContext(ctx, runID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		// The token names no run: a user-input problem, exit 2.
 		fmt.Fprintln(stderr, scenariosNoRunContext)
 		return 2
+	}
+	if err != nil {
+		// An outage, a closed store, or a canceled context is operational,
+		// not a bad token: exit 1, not the exit-2 no-run-context path.
+		fmt.Fprintf(stderr, "zing scenarios: %v\n", err)
+		return 1
 	}
 	if job != "judge" {
 		fmt.Fprintln(stderr, scenariosNotJudge)

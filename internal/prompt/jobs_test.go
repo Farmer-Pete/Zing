@@ -31,8 +31,9 @@ func fenced(text string) string { return testFence(text) }
 // fence (header, guidance, the text, footer).
 func assertFenced(t *testing.T, got, label, text string) {
 	t.Helper()
-	if !strings.Contains(got, fenced(text)) {
-		t.Errorf("%s: text %q is not fenced in:\n%s", label, text, got)
+	want := label + ":\n" + fenced(text)
+	if !strings.Contains(got, want) {
+		t.Errorf("%s: text %q is not fenced under its label in:\n%s", label, text, got)
 	}
 }
 

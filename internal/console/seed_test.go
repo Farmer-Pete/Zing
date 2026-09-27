@@ -233,11 +233,10 @@ func TestSeedDemo_NormalServeDoesNotSeed(t *testing.T) {
 }
 
 // TestSeedDemo_GateRendersScenariosAndFindings proves Task 11's demo wiring
-// end to end (design section 7, 13 task 11): SeedDemo's seeded run puts the
-// demo plan and scenario cohort on the real cohort path (not the legacy
-// AllScenarios fallback), and its planreview artifact renders through the
-// same review.floor every other ticket's gate uses, over the live GET
-// /stream a browser itself reads.
+// end to end (design section 7, 13 task 11): the gate the console renders for
+// the seeded ticket carries the demo scenario table, and its planreview
+// artifact renders through the same review.floor every other ticket's gate
+// uses, over the live GET /stream a browser itself reads.
 func TestSeedDemo_GateRendersScenariosAndFindings(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
@@ -263,16 +262,15 @@ func TestSeedDemo_GateRendersScenariosAndFindings(t *testing.T) {
 	groups := splitQuestionGroups(t, main)
 	gate := findGroup(t, groups, "Approve the plan?")
 
-	// demoScenarios (seed.go, unexported) writes exactly these two Given
-	// texts; this file (package console_test) asserts the rendered output,
-	// not the private fixture function.
+	// demoScenarios (seed.go, unexported) writes two scenarios that share
+	// the same Given text; this file (package console_test) asserts the
+	// rendered output, not the private fixture function.
 	if !strings.Contains(gate, `class="scenarios"`) {
 		t.Errorf("gate group missing its scenarios table; got:\n%s", gate)
 	}
-	for _, given := range []string{"the server is running"} {
-		if !strings.Contains(gate, given) {
-			t.Errorf("gate group missing scenario text %q; got:\n%s", given, gate)
-		}
+	const sharedGiven = "the server is running"
+	if !strings.Contains(gate, sharedGiven) {
+		t.Errorf("gate group missing scenario text %q; got:\n%s", sharedGiven, gate)
 	}
 
 	// demoFindings (seed.go, unexported) writes one minor finding (at or

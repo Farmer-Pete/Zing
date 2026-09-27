@@ -12,11 +12,13 @@ import (
 
 // --- productionRuntimes (task 14, D2) ---------------------------------------
 
-// TestProductionRuntimes_ResolvesExactlyClaudeAndCodex proves productionRuntimes
-// wires production with only the two real runtimes, claude and codex, and
-// never the fake name (design D2: "Production wires the two real runtimes,
-// claude and codex"; PKG7-PLAN.md task 14).
-func TestProductionRuntimes_ResolvesExactlyClaudeAndCodex(t *testing.T) {
+// TestProductionRuntimes_ResolvesClaudeAndCodexNotFake proves productionRuntimes
+// resolves the two real runtimes, claude and codex, and never maps the fake
+// name (design D2: "Production wires the two real runtimes, claude and
+// codex"; PKG7-PLAN.md task 14). runtime.Set exposes no size, so this cannot
+// prove the set holds ONLY these two; it asserts the two resolve and fake
+// does not.
+func TestProductionRuntimes_ResolvesClaudeAndCodexNotFake(t *testing.T) {
 	t.Parallel()
 
 	rts, err := productionRuntimes()

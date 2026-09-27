@@ -291,6 +291,9 @@ func answerOpenQuestionViaConsole(t *testing.T, st *store.Store, srv *httptest.S
 		t.Fatalf("question %d has no options", open[0].ID)
 	}
 	chosen := payload.Options[0].Key // "a" on both Q1 and the gate (design section 6.7, 6.6)
+	if chosen != "a" {
+		t.Fatalf("question %d first option key = %q, want \"a\" (the approving option on Q1 and the gate)", open[0].ID, chosen)
+	}
 
 	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, open[0].ID, chosen)
 	draftReq := mutationRequest(t, srv, "/draft", draftBody)

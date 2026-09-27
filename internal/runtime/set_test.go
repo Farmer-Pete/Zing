@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -86,8 +87,8 @@ func TestSet_For_UnknownNameErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal(`For(codex): want an error, got nil`)
 	}
-	if got := err.Error(); got == "" {
-		t.Error("For(unknown): error text is empty, want it to name the runtime")
+	if got := err.Error(); !strings.Contains(got, testRuntimeCodex) {
+		t.Errorf("For(unknown): error text %q does not name the unknown runtime %q", got, testRuntimeCodex)
 	}
 }
 

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -14,8 +15,9 @@ func TestSeconds(t *testing.T) {
 		want int
 	}{
 		{"zero", 0, 1},
-		{"under a second", 1200 * time.Millisecond, 2},
+		{"rounds up past a second", 1200 * time.Millisecond, 2},
 		{"exactly two seconds", 2 * time.Second, 2},
+		{"near the maximum duration does not overflow", math.MaxInt64, 9223372037},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

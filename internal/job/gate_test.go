@@ -15,6 +15,7 @@ package job_test
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -262,33 +263,10 @@ func TestPlanningHandler_Gate_Approve_Branch3_ScenarioCountOutOfRangeEscalates(t
 			if err != nil {
 				t.Fatalf("gate approve Run: %v", err)
 			}
-			want := "cohort has " + itoa(tc.n) + " scenarios, want 2 to 30"
+			want := "cohort has " + strconv.Itoa(tc.n) + " scenarios, want 2 to 30"
 			assertSealFailedEscalation(t, commit, qID, want)
 		})
 	}
-}
-
-// itoa avoids importing strconv solely for one small test helper.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // TestPlanningHandler_Gate_Approve_Branch6_PartiallySealedEscalates proves
@@ -320,8 +298,8 @@ func TestPlanningHandler_Gate_Approve_Branch0_TwoMismatchMarkersEscalates(t *tes
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	_, runID := seedCohort(t, s, ticketID, validPlan("Twice mismatched."), validScenarios(2, "mismatch"))
 
-	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+itoa(int(runID)))
-	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+itoa(int(runID)))
+	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+strconv.FormatInt(runID, 10))
+	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+strconv.FormatInt(runID, 10))
 
 	qID := seedGateQuestion(t, s, ticketID, &runID)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
@@ -494,7 +472,7 @@ func seedCohortWithSeals(t *testing.T, s *store.Store, ticketID int64, plan resp
 		artifacts = append(artifacts, a)
 	}
 
-	extID := "seed-sealed-sess-" + itoa(int(rsv.SessionID))
+	extID := "seed-sealed-sess-" + strconv.FormatInt(rsv.SessionID, 10)
 	outcome, exitCode, agentSeconds := "ready", 0, 1
 	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,

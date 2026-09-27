@@ -33,7 +33,7 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 	for _, c := range children {
 		renderChild(&buf, c, 1, override)
 	}
-	buf.WriteString("</zing>\n")
+	buf.WriteString("</" + zingElementName + ">\n")
 
 	return buf.String(), nil
 }

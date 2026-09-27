@@ -25,7 +25,9 @@ import (
 // the fixture tracker (design D2), which production must never build, and
 // selftestResumeE2E already proves the identical ring against its own Fake
 // and Fixture, independent of serve(). The tests below only need serve() to
-// come up and shut down cleanly, so they never touch the pipeline itself.
+// come up and shut down cleanly; the one exception,
+// TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup, drives only the
+// dispatcher's code-only queued-to-planning transition.
 
 // freeLoopbackPort asks the kernel for an unused loopback port by opening
 // and immediately closing a listener on port 0, then reusing the port
