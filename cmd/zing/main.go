@@ -43,6 +43,8 @@ func dispatch(args []string) int {
 		return runValidate(subArgs(args))
 	case "project":
 		return runProject(subArgs(args))
+	case "scenarios":
+		return runScenarios()
 	case "serve":
 		if err := run(subArgs(args)); err != nil {
 			slog.Error("server stopped", "err", err)
