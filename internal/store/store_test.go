@@ -23,6 +23,8 @@ const (
 	testAuthorYou      = "you"
 	testRefAGo         = "a.go"
 	testRefBGo         = "b.go"
+	testRuntimeFake    = "fake"
+	testExternalID1    = "ext-1"
 )
 
 var wantTables = []string{

@@ -143,6 +143,55 @@ func (s *Store) OpenSession(ctx context.Context, ticketID int64, job string) (Se
 	return sess, true, nil
 }
 
+// SessionState classifies LatestSession's newest session for (ticketID, job)
+// against maxResumes (design D17, section 4.5).
+type SessionState int
+
+const (
+	SessionNone      SessionState = iota // no session exists yet
+	SessionIdless                        // newest session has external_id NULL
+	SessionOpen                          // external_id set and resumes < maxResumes
+	SessionExhausted                     // external_id set and resumes >= maxResumes
+)
+
+// LatestSession returns the newest session for (ticketID, job), by id, and
+// classifies it against maxResumes (design D17): SessionNone when none
+// exists; SessionIdless when its external_id is still NULL (a first turn
+// that never got far enough for the runtime to echo one back, so step 3
+// treats it the same as none); SessionOpen when it has an external_id and
+// fewer than maxResumes resumes; SessionExhausted when it has an external_id
+// and resumes is at or past maxResumes. A ticket with several sessions for
+// the same job (one per fresh entry, section 5.1) is judged by its highest
+// id, never by which older one happens to still be open.
+func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, maxResumes int) (Session, SessionState, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, ticket_id, job, runtime, external_id, resumes
+		 FROM sessions WHERE ticket_id = ? AND job = ? ORDER BY id DESC LIMIT 1`,
+		ticketID, job)
+
+	var sess Session
+	var externalID sql.NullString
+	err := row.Scan(&sess.ID, &sess.TicketID, &sess.Job, &sess.Runtime, &externalID, &sess.Resumes)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Session{}, SessionNone, nil
+		}
+		return Session{}, SessionNone, fmt.Errorf("latest session for ticket %d job %s: %w", ticketID, job, err)
+	}
+	if externalID.Valid {
+		sess.ExternalID = &externalID.String
+	}
+
+	switch {
+	case sess.ExternalID == nil:
+		return sess, SessionIdless, nil
+	case sess.Resumes >= maxResumes:
+		return sess, SessionExhausted, nil
+	default:
+		return sess, SessionOpen, nil
+	}
+}
+
 // QuestionsByState returns every "question" message on ticketID whose
 // messages.state equals state (the canonical question lifecycle value,
 // section 8), ordered by id.

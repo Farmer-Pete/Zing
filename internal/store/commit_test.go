@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -153,12 +154,12 @@ func TestCommitHandlerResult_FirstEntryPlanningAppliesAtomically(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 	owner, expires := claimForCommit(t, s, ticketID)
 
-	externalID := "ext-1"
+	externalID := testExternalID1
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Waiting: new(testWaitingQuestions),
-		Session: &SessionUpsert{Job: testStatePlanning, Runtime: "fake", ExternalID: &externalID},
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &externalID},
 		Runs:    []Run{{Turn: 0, Outcome: new(testTypeQuestion)}},
 		Messages: []Message{{
 			TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
@@ -338,10 +339,10 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsNonSingleRun(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 	owner, expires := claimForCommit(t, s, ticketID)
 
-	externalID := "ext-1"
+	externalID := testExternalID1
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Session: &SessionUpsert{Job: testStatePlanning, Runtime: "fake", ExternalID: &externalID},
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &externalID},
 		Runs:    nil, // zero runs, AttachRunToMsgs still set
 		Messages: []Message{{
 			TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
@@ -451,6 +452,85 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	}
 	if from != testStatePlanning || to != testStateBuilding || reason != testReasonPlanReady {
 		t.Errorf("state message = (%s, %s, %s), want (%s, %s, %s)", from, to, reason, testStatePlanning, testStateBuilding, testReasonPlanReady)
+	}
+}
+
+// TestCommitHandlerResult_SessionUpsertFillsNullExternalID proves the
+// SessionUpsert extension (design section 4.5): a resume commit whose
+// ExternalID is non-nil fills a session's still-null external_id -- the
+// D13 case where Reserve created the session before the runtime call ran,
+// and this terminalizing commit is the first to learn the runtime's session
+// id -- and BumpResumes still increments alongside it.
+func TestCommitHandlerResult_SessionUpsertFillsNullExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessID := insertSession(t, s, ticketID, testStatePlanning) // external_id NULL
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	externalID := testExternalID1
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID, ExternalID: &externalID, BumpResumes: true},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var gotExternal sql.NullString
+	var gotResumes int
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT external_id, resumes FROM sessions WHERE id = ?`, sessID).
+		Scan(&gotExternal, &gotResumes); scanErr != nil {
+		t.Fatalf("read session: %v", scanErr)
+	}
+	if !gotExternal.Valid || gotExternal.String != externalID {
+		t.Errorf("session.external_id = %v, want %s", gotExternal, externalID)
+	}
+	if gotResumes != 1 {
+		t.Errorf("session.resumes = %d, want 1 (BumpResumes)", gotResumes)
+	}
+}
+
+// TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID proves
+// the UPDATE ... WHERE external_id IS NULL guard: a commit's ExternalID
+// never overwrites a session that already has one, so a later terminalizing
+// commit on the same session (a second resume, say) cannot clobber the id
+// the runtime returned on the first turn.
+func TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET external_id = ? WHERE id = ?`, "ext-old", sessID); err != nil {
+		t.Fatalf("seed external_id: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	newExternal := "ext-new"
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID, ExternalID: &newExternal},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var got string
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT external_id FROM sessions WHERE id = ?`, sessID).Scan(&got); scanErr != nil {
+		t.Fatalf("read session: %v", scanErr)
+	}
+	if got != "ext-old" {
+		t.Errorf("session.external_id = %q, want unchanged ext-old", got)
 	}
 }
 

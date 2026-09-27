@@ -288,14 +288,26 @@ func verifyParentForTicket(ctx context.Context, tx *sql.Tx, ticketID, parentID i
 	return nil
 }
 
-// upsertSessionTx creates su's session when su.ID is nil, or bumps its
-// resumes counter in place when BumpResumes is set on an existing session,
-// and returns the session's id either way.
+// upsertSessionTx creates su's session when su.ID is nil, or updates it in
+// place when su.ID names an existing one, and returns the session's id
+// either way. An update bumps the resumes counter when BumpResumes is set,
+// and, when ExternalID is non-nil, fills external_id -- but only while it is
+// still NULL, so a second terminalizing commit on the same session (the
+// D13 case where Reserve created the session before the runtime call ran,
+// and every later commit on it also carries RunResult.SessionID) can never
+// clobber the id the first commit recorded.
 func upsertSessionTx(ctx context.Context, tx *sql.Tx, ticketID int64, su SessionUpsert) (int64, error) {
 	if su.ID != nil {
 		if su.BumpResumes {
 			if _, err := tx.ExecContext(ctx, `UPDATE sessions SET resumes = resumes + 1 WHERE id = ?`, *su.ID); err != nil {
 				return 0, fmt.Errorf("bump session resumes: %w", err)
+			}
+		}
+		if su.ExternalID != nil {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE sessions SET external_id = ? WHERE id = ? AND external_id IS NULL`,
+				*su.ExternalID, *su.ID); err != nil {
+				return 0, fmt.Errorf("set session external_id: %w", err)
 			}
 		}
 		return *su.ID, nil
