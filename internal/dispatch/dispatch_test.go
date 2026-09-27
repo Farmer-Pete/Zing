@@ -52,6 +52,22 @@ var testProject = store.Project{
 	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
 }
 
+// testModels and testBudget are the job.Deps.Models and job.Deps.Budget
+// every handler that calls runJob (classify, planning, since this task)
+// needs to resolve a model alias and pass the agent-time budget check:
+// the same alias table and an ample budget cmd/zing/selftest.go's own
+// e2eModels/e2eBudget wire the real dispatcher with. fakeRuntime never
+// reads Model, so the exact ids do not matter beyond matching machine.toml's
+// alias names.
+var testModels = map[string]string{
+	"sonnet": "claude-sonnet-5",
+	"opus":   "claude-opus-4-8",
+	"fable":  "claude-fable-5-1",
+	"codex":  "gpt-5.5",
+}
+
+const testBudget = 240 * time.Minute
+
 // --- shared fixtures -------------------------------------------------------
 
 // newDispatchTestStore opens a fresh Store on a temp-file database, closed
@@ -114,11 +130,21 @@ func testRuntimeSet(t *testing.T, rt runtime.Runtime) runtime.Set {
 }
 
 // testDeps builds the job.Deps a handler test drives directly (bypassing
-// the dispatcher), with rt resolvable under every machine.toml runtime name
-// and the real, checked-in machine.toml as Deps.Machine.
+// the dispatcher), with rt resolvable under every machine.toml runtime name,
+// the real, checked-in machine.toml as Deps.Machine, testModels/testBudget
+// so classify and planning can resolve a model and pass the budget check,
+// and Reserve wired to a real store.Reserve closure over (owner, expires),
+// exactly as dispatch.Dispatcher.runAndCommit wires it for a real Tick
+// (design D13).
 func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, expires time.Time) job.Deps {
 	t.Helper()
-	return job.Deps{Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t), Owner: owner, Expires: expires}
+	return job.Deps{
+		Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t),
+		Models: testModels, Budget: testBudget, Owner: owner, Expires: expires,
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		},
+	}
 }
 
 // seedProject inserts testProject and returns its id.
@@ -165,19 +191,42 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 		if ticket.State != state {
 			t.Fatalf("advanceTicket(%s): ticket state = %q, want %q", state, ticket.State, state)
 		}
-		runHandlerOnce(t, s, rt, ticketID, state)
-		// Planning is two-phase (section 6.6): the first entry posts a
-		// question and waits, and the resume advances only after the batch
-		// is answered. Answer it and re-run planning so this helper leaves
-		// the ticket in building, as its callers expect.
 		if state == testStatePlanning {
-			after := getTicket(t, s, ticketID)
-			if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
-				answerOpenQuestion(t, s, ticketID)
-				runHandlerOnce(t, s, rt, ticketID, state)
-			}
+			advancePlanning(t, s, rt, ticketID)
+			continue
+		}
+		runHandlerOnce(t, s, rt, ticketID, state)
+	}
+}
+
+// advancePlanningMaxCalls bounds advancePlanning's own handler-call loop:
+// classify (kind unset, stays planning), the first turn (posts questions,
+// waits), and the resume (transitions to building) is three calls; the
+// headroom catches a stuck handler instead of hanging the test.
+const advancePlanningMaxCalls = 6
+
+// advancePlanning drives the real planning handler through as many calls as
+// it now takes to reach building (design section 5.1): classify runs first
+// on a kindless ticket and sets kind but carries no transition, so this
+// loops the handler until either the ticket leaves planning or it waits on
+// "questions", in which case it answers the batch and keeps looping.
+func advancePlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	for range advancePlanningMaxCalls {
+		runHandlerOnce(t, s, rt, ticketID, testStatePlanning)
+		after := getTicket(t, s, ticketID)
+		if after.State != testStatePlanning {
+			return
+		}
+		if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
+			answerOpenQuestion(t, s, ticketID)
+			continue
+		}
+		if after.WaitingOn != nil {
+			t.Fatalf("advancePlanning: ticket waiting_on = %q, want questions or nil", *after.WaitingOn)
 		}
 	}
+	t.Fatalf("advancePlanning: still in planning after %d handler calls", advancePlanningMaxCalls)
 }
 
 // runHandlerOnce claims the ticket, runs its state's handler once, and applies
@@ -236,13 +285,23 @@ func answerOpenQuestion(t *testing.T, s *store.Store, ticketID int64) {
 
 // newDispatcher builds a Dispatcher over the real skeleton registry, unless
 // reg is non-nil, in which case reg is used instead (a test's chance to
-// substitute a spy handler for one state).
+// substitute a spy handler for one state). cfg.Models and cfg.Budget default
+// to testModels/testBudget when the caller leaves them unset, so a bare
+// dispatch.Config{MaxParallel: N, Owner: testOwner} literal still lets
+// classify and planning resolve a model and pass the budget check once a
+// real Tick reaches them.
 func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Broker, rt runtime.Runtime,
 	reg map[string]job.Handler, bindings []dispatch.Binding, cfg dispatch.Config,
 ) *dispatch.Dispatcher {
 	t.Helper()
 	if reg == nil {
 		reg = job.Registry()
+	}
+	if cfg.Models == nil {
+		cfg.Models = testModels
+	}
+	if cfg.Budget == 0 {
+		cfg.Budget = testBudget
 	}
 	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
@@ -844,14 +903,17 @@ func TestTick_ReleaseClaimSurvivesCancelledTickContext(t *testing.T) {
 
 // --- the minimal error path (design section 6.7) --------------------------
 
-// errorScriptXML is a minimal, valid RunError document for the planning job:
-// a universal error outcome with a code from the closed ErrorCode set. It is
-// wired into an inline fstest.MapFS fake runtime, never added to the real
-// fixtures/scripts tree, because the plan says the skeleton's real scripts
-// never error (design section 6.7, section 12 task 8).
-const errorScriptXML = `<zing job="planning" outcome="error">
+// errorScriptXML is a minimal, valid RunError document for the classify
+// job: a universal error outcome with a code from the closed ErrorCode set.
+// It is wired into an inline fstest.MapFS fake runtime, never added to the
+// real fixtures/scripts tree, because the plan says the skeleton's real
+// scripts never error (design section 6.7, section 12 task 8). classify,
+// not planning, is the job this test's freshly-queued ticket actually runs
+// first (design section 5.1 step 2: a nil Kind classifies before planning
+// ever opens a session).
+const errorScriptXML = `<zing job="classify" outcome="error">
   <error code="cannot_run">
-    <what>The planning job's environment cannot run.</what>
+    <what>The classify job's environment cannot run.</what>
     <why>The sandbox has no network access to reach the model.</why>
     <tried>Retried once; same failure.</tried>
   </error>
@@ -859,12 +921,12 @@ const errorScriptXML = `<zing job="planning" outcome="error">
 `
 
 // TestTick_ErrorOutcomeEscalates drives a ticket already claimed into
-// planning against a fake runtime whose one scripted turn returns the
-// universal error outcome, and proves the dispatcher applies the section
-// 6.7 error-branch commit end to end: the ticket stays in its state,
-// waiting on "error", with one escalation message authored "zing" whose
-// EscalationPayload.Code is the script's RunError.Code (one of the four
-// ErrorCode values) and whose Options are the fixed local
+// planning against a fake runtime whose one scripted classify turn returns
+// the universal error outcome, and proves the dispatcher applies the
+// section 6.7 error-branch commit end to end: the ticket stays in its
+// state, waiting on "error", with one escalation message authored "zing"
+// whose EscalationPayload.Code is the script's RunError.Code (one of the
+// four ErrorCode values) and whose Options are the fixed local
 // retry/planning/abandon set.
 func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	t.Parallel()
@@ -874,7 +936,7 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 	advanceTicket(t, s, rt, ticketID, testStateQueued) // queued -> planning, no session opened yet
 
-	errFS := fstest.MapFS{"planning/1.xml": &fstest.MapFile{Data: []byte(errorScriptXML)}}
+	errFS := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(errorScriptXML)}}
 	errRT := runtime.NewFake(errFS)
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), errRT, nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
@@ -886,8 +948,12 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	if final.State != testStatePlanning {
 		t.Errorf("final ticket state = %q, want unchanged planning (no Next on the error branch)", final.State)
 	}
-	if final.WaitingOn == nil || *final.WaitingOn != "error" {
-		t.Errorf("final ticket waiting_on = %v, want error", final.WaitingOn)
+	// Section 6.7's Write rule sets waiting_on to "questions" for every
+	// escalation, cap or run-caused alike (the linked question offers
+	// retry/planning/abandon): this superseded the old skeleton's "error"
+	// flag once planning.go (task 6) became the real escalation writer.
+	if final.WaitingOn == nil || *final.WaitingOn != testWaitingQuestions {
+		t.Errorf("final ticket waiting_on = %v, want questions", final.WaitingOn)
 	}
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (cleared by the commit)", *final.ClaimOwner)

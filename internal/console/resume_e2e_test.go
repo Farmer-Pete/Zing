@@ -49,6 +49,21 @@ const (
 // cmd/zing/selftest.go's e2eWantStates asserts.
 var resumeE2EWantStates = []string{"planning", "building", "reviewing", "judging", "shipping", "done"}
 
+// resumeE2EModels and resumeE2EBudget mirror cmd/zing/selftest.go's own
+// e2eModels/e2eBudget: the job.Deps.Models alias table and Budget classify
+// and planning need to resolve a model and pass the agent-time budget check
+// (design section 4.4, 4.6), now that planning.go (task 6) routes both
+// through runJob. The fake runtime never reads Model, so the exact ids do
+// not matter beyond matching machine.toml's own alias names.
+var resumeE2EModels = map[string]string{
+	"sonnet": "claude-sonnet-5",
+	"opus":   "claude-opus-4-8",
+	"fable":  "claude-fable-5-1",
+	"codex":  "gpt-5.5",
+}
+
+const resumeE2EBudget = 240 * time.Minute
+
 // TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak is the
 // verify-by. See the file doc comment above.
 func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) {
@@ -93,7 +108,10 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
 		[]zdispatch.Binding{{StoreProjectID: projectID, TrackerProject: testAuthorZing}},
-		zdispatch.Config{Interval: time.Millisecond, MaxParallel: 2, Owner: resumeE2EOwner}, rts)
+		zdispatch.Config{
+			Interval: time.Millisecond, MaxParallel: 2, Owner: resumeE2EOwner,
+			Models: resumeE2EModels, Budget: resumeE2EBudget,
+		}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
 	}

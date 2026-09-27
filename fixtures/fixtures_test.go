@@ -26,10 +26,12 @@ func repoRootFS(t *testing.T) fs.FS {
 // jobForScript derives the running job a script's ValidateContext should
 // carry from its path under fixtures/scripts, matching how the dispatcher
 // actually runs each fake job (design section 6.10, 7.3): a script under
-// planning/ is job.Planning; a script under build/ is job.Build. This
-// mirrors checkHeader's own "document says X, run is Y" check, so a script
-// whose <zing job="..."> disagrees with its own directory fails loudly
-// here instead of validating under the wrong job.
+// planning/ is job.Planning; a script under build/ is job.Build; a script
+// under classify/ is job.Classify (task 6: a fresh, kindless ticket
+// classifies before planning ever opens a session). This mirrors
+// checkHeader's own "document says X, run is Y" check, so a script whose
+// <zing job="..."> disagrees with its own directory fails loudly here
+// instead of validating under the wrong job.
 func jobForScript(t *testing.T, name string) response.Job {
 	t.Helper()
 	switch {
@@ -37,8 +39,10 @@ func jobForScript(t *testing.T, name string) response.Job {
 		return response.JobPlanning
 	case strings.HasPrefix(name, "build/"):
 		return response.JobBuild
+	case strings.HasPrefix(name, "classify/"):
+		return response.JobClassify
 	default:
-		t.Fatalf("script %s is under neither planning/ nor build/; add a case to jobForScript", name)
+		t.Fatalf("script %s is under none of planning/, build/, or classify/; add a case to jobForScript", name)
 		return ""
 	}
 }

@@ -1,0 +1,3 @@
+<zing job="classify" outcome="feature">
+  <reason>The ticket asks for a new GET /hello endpoint; nothing today is broken or misbehaving, so this is new behavior, not a bug.</reason>
+</zing>
