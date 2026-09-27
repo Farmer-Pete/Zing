@@ -1,0 +1,1 @@
+<zing job="planreview" outcome="ok"><finding lens="security" severity="minor" location="plan/delivery/tasks/task[2]"><text>The task does not name which trust root the fenced input crosses.</text><fix>Name the trust root explicitly in the task text.</fix></finding></zing>

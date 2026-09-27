@@ -6,18 +6,6 @@ import (
 	"testing"
 )
 
-const notImplemented = "not implemented in package 2"
-
-func TestCodex_RunNotImplemented(t *testing.T) {
-	t.Parallel()
-
-	var c Codex
-	_, err := c.Run(context.Background(), RunRequest{})
-	if err == nil || err.Error() != notImplemented {
-		t.Fatalf("Run() error = %v, want %q", err, notImplemented)
-	}
-}
-
 // TestClaude_Version runs the real claude binary's --version output when
 // it is on PATH, and skips otherwise: this is a smoke test for the local
 // environment, not a correctness check on package 2's own code.

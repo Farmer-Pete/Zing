@@ -127,12 +127,15 @@ func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
 // calling process happens to have is not the child's business.
 var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR"}
 
-// claudeEnv builds the filtered environment (design section 4.1): the
-// allowlisted parent variables, then req.Env, then the two variables
-// every run needs, then a drop pass that removes anything shaped like a
-// secret except ZING_RUN_TOKEN by its exact name -- so a GITHUB_TOKEN or
-// an AWS_SECRET_ACCESS_KEY riding in on req.Env can never reach the child.
-func claudeEnv(req RunRequest) []string {
+// agentEnv builds the filtered environment (design section 4.1), shared by
+// both Claude and Codex: the allowlisted parent variables, then req.Env,
+// then the two variables every run needs, then a drop pass that removes
+// anything shaped like a secret except ZING_RUN_TOKEN by its exact name --
+// so a GITHUB_TOKEN or an AWS_SECRET_ACCESS_KEY riding in on req.Env can
+// never reach the child. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a
+// codex run: it is an environment variable, not a flag, and codex ignores
+// names it does not read.
+func agentEnv(req RunRequest) []string {
 	merged := make([]string, 0, len(allowedParentEnv)+len(req.Env)+2)
 	for _, name := range allowedParentEnv {
 		if v, ok := os.LookupEnv(name); ok {
@@ -153,7 +156,7 @@ func claudeEnv(req RunRequest) []string {
 }
 
 // envNameBlocked reports whether name is shaped like a secret (design
-// section 4.1): *_TOKEN, *_KEY, *_SECRET, or AWS_*. claudeEnv checks this
+// section 4.1): *_TOKEN, *_KEY, *_SECRET, or AWS_*. agentEnv checks this
 // against every merged variable except ZING_RUN_TOKEN by exact name.
 func envNameBlocked(name string) bool {
 	switch {
@@ -237,9 +240,55 @@ type claudeResult struct {
 	Result string `json:"result"`
 }
 
+// configureProcessGroup puts cmd in its own process group and arranges for
+// ctx's cancellation to SIGKILL the whole group, not just cmd.Process
+// (design section 4.1, shared by Claude and Codex): either CLI may itself
+// fork children (a shell, a tool it runs), and killing only the direct
+// child can leave a grandchild holding the child's stdout pipe open, which
+// would make Wait block on a process neither runtime meant to keep alive.
+// WaitDelay is the backstop: if some descendant still won't let go, Wait
+// stops waiting on I/O after it rather than hanging forever.
+func configureProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+}
+
+// classifyProcessOutcome applies the shared priority order both runtimes use
+// once a process has exited (design section 4.1): ctx.Err() explains the
+// exit before anything else, because after a kill a process's own exit
+// status no longer distinguishes a job deadline from a parent shutdown;
+// then whether stdout ran past the 4 MiB cap; then a plain non-zero or
+// signalled exit. nil means the process exited cleanly and within bounds,
+// and the caller should now look at whatever it produced. When it returns
+// ErrTimeout or ErrCanceled, the caller resets its own exit code to -1, the
+// value design section 4.1 states for both.
+func classifyProcessOutcome(ctx context.Context, overflowed bool, waitErr error, exitCode int) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		switch {
+		case errors.Is(ctxErr, context.DeadlineExceeded):
+			return ErrTimeout
+		case errors.Is(ctxErr, context.Canceled):
+			return ErrCanceled
+		}
+	}
+	if overflowed {
+		return ErrOutputTooLarge
+	}
+	if waitErr != nil {
+		return &ExecError{ExitCode: exitCode}
+	}
+	return nil
+}
+
 // Run runs one turn of req.Job through the claude CLI (design section
 // 4.1): argv per claudeArgv, the prompt on stdin (never in argv) with
-// stdin closed once it is written, the environment per claudeEnv, stdout
+// stdin closed once it is written, the environment per agentEnv, stdout
 // capped and drained through capWriter, and stderr streamed through a
 // counting writer and a sha256 hash with nothing retained. See errors.go
 // for the typed failures this can return.
@@ -282,25 +331,9 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID string, start time.Time) (RunResult, error) {
 	cmd := exec.CommandContext(ctx, c.resolveBin(), argv...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, never from raw external input
 	cmd.Dir = req.WorkDir
-	cmd.Env = claudeEnv(req)
+	cmd.Env = agentEnv(req)
 	cmd.Stdin = strings.NewReader(req.Prompt)
-
-	// claude may itself fork children (a shell, a tool it runs); putting it
-	// in its own process group and killing the whole group on cancel is
-	// what actually frees the stdout pipe when the deadline or a shutdown
-	// fires -- killing only the direct child can leave a grandchild holding
-	// the write end open, and Wait would then block on that grandchild's
-	// own exit instead of ours. WaitDelay is the backstop: if some
-	// descendant still won't let go, Wait stops waiting on I/O after it
-	// rather than hanging forever.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 5 * time.Second
+	configureProcessGroup(cmd)
 
 	stdout := &capWriter{limit: maxOutputBytes}
 	cmd.Stdout = stdout
@@ -323,22 +356,11 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
 	}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		res.ExitCode = -1
-		switch {
-		case errors.Is(ctxErr, context.DeadlineExceeded):
-			return res, ErrTimeout
-		case errors.Is(ctxErr, context.Canceled):
-			return res, ErrCanceled
+	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
+		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {
+			res.ExitCode = -1
 		}
-	}
-
-	if stdout.overflowed() {
-		return res, ErrOutputTooLarge
-	}
-
-	if waitErr != nil {
-		return res, &ExecError{ExitCode: res.ExitCode}
+		return res, outcomeErr
 	}
 
 	var cr claudeResult
