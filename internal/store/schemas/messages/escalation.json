@@ -11,7 +11,12 @@
         "plan_gap",
         "cannot_run",
         "environment",
-        "other"
+        "other",
+        "split_unsupported",
+        "nothing_to_do_with_true_claims",
+        "runtime_exec_failed",
+        "response_invalid",
+        "seal_failed"
       ]
     },
     "what": {
@@ -35,6 +40,25 @@
         ]
       },
       "type": "array"
+    },
+    "session_id": {
+      "type": "integer"
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "classify",
+        "planning_first",
+        "planning_resume",
+        "planreview",
+        "gate_approve",
+        "seal",
+        "cap_resumes",
+        "cap_loops",
+        "cap_budget",
+        "split",
+        "nothing_to_do_claims"
+      ]
     }
   },
   "additionalProperties": false,
@@ -44,6 +68,7 @@
     "what",
     "why",
     "tried",
-    "options"
+    "options",
+    "origin"
   ]
 }

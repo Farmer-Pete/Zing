@@ -2,10 +2,15 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"zing/internal/response"
 )
 
 // testOwner and testOwnerOther are the claim owners repeated across this
@@ -20,6 +25,7 @@ const (
 
 	testWaitingQuestions = "questions"
 	testStateBuilding    = "building"
+	testStateDone        = "done"
 	testReasonPlanReady  = "plan ready"
 	testOutcomeBug       = "bug"
 	testTypePlan         = "plan"
@@ -1818,5 +1824,474 @@ func TestCommitHandlerResult_ResolveAllResolvesOpenAndAnsweredQuestionsOnly(t *t
 	}
 	if other.State != nil {
 		t.Errorf("non-question message state = %v, want unchanged nil", other.State)
+	}
+}
+
+// --- CommitHandlerResult: Seal (design D16, section 4.5) --------------------
+
+// insertRun inserts a bare runs row (outcome, exit_code, and agent_seconds
+// all NULL) directly under sessionID, the run id a Seal fixture's plan and
+// scenario artifacts attach to.
+func insertRun(t *testing.T, s *Store, sessionID int64) int64 {
+	t.Helper()
+	res, err := s.db.ExecContext(t.Context(), `INSERT INTO runs (session_id, turn) VALUES (?, 0)`, sessionID)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	return id
+}
+
+// seedSealableCohort inserts one "plan" artifact at planVersion owned by
+// runID, plus n "scenario" artifacts also owned by runID: the cohort a Seal
+// test's SealRequest targets.
+func seedSealableCohort(t *testing.T, s *Store, ticketID, runID int64, planVersion, n int) {
+	t.Helper()
+	ctx := t.Context()
+	if _, err := s.InsertArtifact(ctx, Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testTypePlan, Version: planVersion, Payload: planPayload(),
+	}); err != nil {
+		t.Fatalf("seed plan artifact: %v", err)
+	}
+	for i := range n {
+		if _, err := s.InsertArtifact(ctx, Artifact{
+			TicketID: ticketID, RunID: &runID, Type: testTypeScenario, Payload: scenarioPayload(fmt.Sprintf("s%d", i+1)),
+		}); err != nil {
+			t.Fatalf("seed scenario artifact %d: %v", i, err)
+		}
+	}
+}
+
+// assertSealMismatch asserts err is a *SealMismatchError with the given
+// stage, expected, and affected, and that it also satisfies
+// errors.Is(err, ErrSealMismatch) (design D16), so both the sentinel and the
+// typed-error styles of check work against the same failure.
+func assertSealMismatch(t *testing.T, err error, stage string, expected, affected int) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("err = nil, want a *SealMismatchError")
+	}
+	if !errors.Is(err, ErrSealMismatch) {
+		t.Errorf("errors.Is(err, ErrSealMismatch) = false, want true (err: %v)", err)
+	}
+	var mismatch *SealMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("errors.As(err, *SealMismatchError) = false, want true (err: %v)", err)
+	}
+	if mismatch.Stage != stage {
+		t.Errorf("Stage = %q, want %q", mismatch.Stage, stage)
+	}
+	if mismatch.Expected != expected {
+		t.Errorf("Expected = %d, want %d", mismatch.Expected, expected)
+	}
+	if mismatch.Affected != affected {
+		t.Errorf("Affected = %d, want %d", mismatch.Affected, affected)
+	}
+}
+
+// TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched
+// proves the happy path (design D16): sealing one run's cohort stamps every
+// one of its scenario rows with sealed_at and never touches another run's
+// cohort on the same ticket.
+func TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runA := insertRun(t, s, sess)
+	runB := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runA, 1, 3)
+	seedSealableCohort(t, s, ticketID, runB, 2, 4)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal: &SealRequest{RunID: runB, PlanVersion: 2, ExpectedCount: 4, At: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	sealedB := countRows(t, s,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? AND sealed_at IS NOT NULL`,
+		ticketID, testTypeScenario, runB)
+	if sealedB != 4 {
+		t.Errorf("sealed rows for the target cohort = %d, want 4", sealedB)
+	}
+	sealedA := countRows(t, s,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? AND sealed_at IS NOT NULL`,
+		ticketID, testTypeScenario, runA)
+	if sealedA != 0 {
+		t.Errorf("sealed rows for the other cohort = %d, want 0 (untouched)", sealedA)
+	}
+}
+
+// TestCommitHandlerResult_SealPlanVersionMismatch proves a SealRequest whose
+// PlanVersion does not match the ticket's max-version plan artifact fails at
+// stage "plan" (design D16, section 4.5 check 1).
+func TestCommitHandlerResult_SealPlanVersionMismatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Seal: &SealRequest{RunID: runID, PlanVersion: 2, ExpectedCount: 3, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "plan", 3, 0)
+}
+
+// TestCommitHandlerResult_SealCohortCountOutOfRange proves a scenario cohort
+// of 1 or 31 rows fails at stage "count" (design D16, section 4.5 check 2:
+// the count must lie in [2,30]).
+func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+	}{
+		{"one scenario is below the floor", 1},
+		{"thirty-one scenarios is above the ceiling", 31},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			setTicketState(t, s, ticketID, testStatePlanning)
+			sess := insertSession(t, s, ticketID, testStatePlanning)
+			runID := insertRun(t, s, sess)
+			seedSealableCohort(t, s, ticketID, runID, 1, tt.n)
+
+			owner, expires := claimForCommit(t, s, ticketID)
+			_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: tt.n, At: time.Now()},
+			})
+			assertSealMismatch(t, err, "count", tt.n, 0)
+		})
+	}
+}
+
+// TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate proves a
+// cohort with one row already sealed fails at stage "update" with Affected
+// == ExpectedCount-1 (design D16, section 4.5 check 3): the UPDATE only
+// touches rows still sealed_at IS NULL, so it affects one row fewer than
+// ExpectedCount.
+func TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+
+	var oneID int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? LIMIT 1`,
+		ticketID, testTypeScenario, runID).Scan(&oneID); err != nil {
+		t.Fatalf("find one scenario artifact: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE artifacts SET sealed_at = ? WHERE id = ?`, formatTime(time.Now()), oneID); err != nil {
+		t.Fatalf("pre-seal one scenario artifact: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "update", 3, 2)
+}
+
+// TestCommitHandlerResult_SealMismatchRollsBackWholeCommit proves a seal
+// mismatch rolls the whole commit back: the ticket's state is unchanged, its
+// claim is still held (the fenced ticket UPDATE that would release it never
+// ran), and an otherwise-valid message in the same commit was never inserted
+// (design D16).
+func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 1) // one scenario: out of range
+
+	before, err := s.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket before: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Messages: []Message{{TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress}},
+		Seal:     &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "count", 1, 0)
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	after, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket after: %v", getErr)
+	}
+	if after.State != before.State {
+		t.Errorf("ticket state = %q, want unchanged %q", after.State, before.State)
+	}
+	if after.ClaimOwner == nil || *after.ClaimOwner != owner {
+		t.Error("the claim was released by a rolled-back commit, want it still held")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("messages after a rolled-back seal mismatch = %d, want 0", n)
+	}
+}
+
+// --- CommitHandlerResult: Escalation (design D10, section 6.7) -------------
+
+// escalationTestPayload is a minimal, schema-valid EscalationPayload with
+// the given code and origin.
+func escalationTestPayload(code response.EscalationCode, origin response.EscalationOrigin) response.EscalationPayload {
+	return response.EscalationPayload{
+		Code: string(code), What: "what happened", Why: "why it happened", Tried: "what was tried",
+		Options: []string{"retry", "planning", "abandon"}, Origin: string(origin),
+	}
+}
+
+// wantEscalationOptions is the fixed retry/back-to-planning/abandon choice
+// every escalation's linked question offers (design section 6.7).
+var wantEscalationOptions = []response.Option{
+	{Key: "a", Text: "Retry"},
+	{Key: "b", Text: "Back to planning"},
+	{Key: "c", Text: "Abandon"},
+}
+
+// TestCommitHandlerResult_EscalationCapHasNilRunID proves a cap escalation
+// (no run caused it) inserts an escalation message and its linked question
+// both with RunID nil, the question parented to the escalation's own id,
+// recommended "b", offering the fixed three options, and both bodies exactly
+// as design section 6.7 specifies.
+func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	body := "wall_clock: over budget"
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: nil, Body: body,
+			Payload: escalationTestPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (escalation + question)", len(msgs))
+	}
+	esc, q := msgs[0], msgs[1]
+	if esc.Type != msgTypeEscalation {
+		t.Fatalf("msgs[0].Type = %q, want %q", esc.Type, msgTypeEscalation)
+	}
+	if q.Type != msgTypeQuestion {
+		t.Fatalf("msgs[1].Type = %q, want %q", q.Type, msgTypeQuestion)
+	}
+	if esc.RunID != nil {
+		t.Errorf("escalation.RunID = %v, want nil", esc.RunID)
+	}
+	if q.RunID != nil {
+		t.Errorf("question.RunID = %v, want nil", q.RunID)
+	}
+	if q.ParentID == nil || *q.ParentID != esc.ID {
+		t.Errorf("question.ParentID = %v, want %d (the escalation's own id)", q.ParentID, esc.ID)
+	}
+	if esc.Body != body {
+		t.Errorf("escalation.Body = %q, want %q", esc.Body, body)
+	}
+	wantQBody := body + "\n\nHow should Zing proceed?"
+	if q.Body != wantQBody {
+		t.Errorf("question.Body = %q, want %q", q.Body, wantQBody)
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if qp.Key != "Q1" {
+		t.Errorf("question.Key = %q, want Q1", qp.Key)
+	}
+	if qp.Recommended != "b" {
+		t.Errorf("question.Recommended = %q, want b", qp.Recommended)
+	}
+	if !reflect.DeepEqual(qp.Options, wantEscalationOptions) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptions)
+	}
+
+	var ep response.EscalationPayload
+	if err := json.Unmarshal(esc.Payload, &ep); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if ep.Origin != string(response.EscalationOriginCapBudget) {
+		t.Errorf("escalation.Origin = %q, want %q", ep.Origin, response.EscalationOriginCapBudget)
+	}
+	if ep.Code != string(response.EscalationCodeWallClock) {
+		t.Errorf("escalation.Code = %q, want %q", ep.Code, response.EscalationCodeWallClock)
+	}
+}
+
+// TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt proves an
+// owned escalation (a run caused it) ties both the escalation message and
+// its linked question to that same run id.
+func TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: &runID, Body: "response_invalid: invalid output twice",
+			Payload: escalationTestPayload(response.EscalationCodeResponseInvalid, response.EscalationOriginPlanningResume),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (escalation + question)", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.RunID == nil || *m.RunID != runID {
+			t.Errorf("message %d (%s) RunID = %v, want %d", m.ID, m.Type, m.RunID, runID)
+		}
+	}
+}
+
+// TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys proves
+// two escalations committed one after another on the same ticket allocate
+// Q1 then Q2 (design section 6.7): the allocation counts every "question"
+// message the ticket already carries, escalation or otherwise.
+func TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	for i := range 2 {
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:    "other: repeated escalation",
+				Payload: escalationTestPayload(response.EscalationCodeOther, response.EscalationOriginSeal),
+			},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult %d: %v", i, err)
+		}
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var keys []string
+	for _, m := range msgs {
+		if m.Type != msgTypeQuestion {
+			continue
+		}
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &qp); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		keys = append(keys, qp.Key)
+	}
+	if !reflect.DeepEqual(keys, []string{"Q1", "Q2"}) {
+		t.Errorf("question keys in commit order = %v, want [Q1 Q2]", keys)
+	}
+}
+
+// TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites
+// proves TrackerEffect is carried, never applied, by CommitHandlerResult
+// (design D12): a commit with and without an identical TrackerEffect writes
+// the same rows either way.
+func TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	ownerA, expiresA := claimForCommit(t, s, ticketA)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketA, Owner: ownerA, Expires: expiresA,
+		Next: testStateDone, Reason: "nothing to do",
+	}); err != nil {
+		t.Fatalf("commit without TrackerEffect: %v", err)
+	}
+
+	ownerB, expiresB := claimForCommit(t, s, ticketB)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: ownerB, Expires: expiresB,
+		Next: testStateDone, Reason: "nothing to do",
+		TrackerEffect: &TrackerEffect{Ref: "owner/repo#9", Notes: "nothing left to do"},
+	}); err != nil {
+		t.Fatalf("commit with TrackerEffect: %v", err)
+	}
+
+	ta, err := s.GetTicket(ctx, ticketA)
+	if err != nil {
+		t.Fatalf("GetTicket(A): %v", err)
+	}
+	tb, err := s.GetTicket(ctx, ticketB)
+	if err != nil {
+		t.Fatalf("GetTicket(B): %v", err)
+	}
+	if ta.State != tb.State {
+		t.Errorf("state with TrackerEffect = %q, without = %q, want equal", tb.State, ta.State)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketA); n != 1 {
+		t.Errorf("messages for ticket without TrackerEffect = %d, want 1 (the state message only)", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 1 {
+		t.Errorf("messages for ticket with TrackerEffect = %d, want 1 (TrackerEffect writes nothing)", n)
 	}
 }

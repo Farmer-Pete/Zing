@@ -17,13 +17,15 @@ import (
 // or writes, named once so commit.go carries identifiers rather than
 // repeated literals.
 const (
-	msgTypeQuestion = "question"
-	msgTypeAnswer   = "answer"
-	msgTypeState    = "state"
-	msgTypeResolved = "resolved"
+	msgTypeQuestion   = "question"
+	msgTypeAnswer     = "answer"
+	msgTypeState      = "state"
+	msgTypeResolved   = "resolved"
+	msgTypeEscalation = "escalation"
 
 	authorSystem = "system"
 	authorYou    = "you"
+	authorZing   = "zing"
 
 	answerStateSent = "sent"
 
@@ -79,7 +81,76 @@ type HandlerCommit struct {
 	// ResolveAll resolves every ticket question still "open" or "answered",
 	// the abandon case where no individual id list applies.
 	ResolveAll bool
+	// Seal applies the section 4.5 cohort seal, after Artifacts: the
+	// ticket's max-version plan artifact must match RunID and PlanVersion,
+	// its scenario cohort (artifacts of type "scenario" carrying that
+	// RunID) must count exactly ExpectedCount rows in [2,30], and sealing
+	// every one of them at At must affect exactly ExpectedCount rows. Any
+	// other outcome is a *SealMismatchError naming the failing stage, and
+	// rolls the whole commit back (design D16).
+	Seal *SealRequest
+	// Escalation records one structured escalation and its linked question
+	// in a single shape (design D10, section 6.7): a nil RunID is a cap
+	// escalation that no run caused; a non-nil RunID ties both inserted
+	// messages to the run that did.
+	Escalation *EscalationCommit
+	// TrackerEffect is carried, never applied, by this transaction: the
+	// dispatcher runs it against the ticket's tracker only after a
+	// successful commit (design D12).
+	TrackerEffect *TrackerEffect
 }
+
+// SealRequest names the cohort a Seal step must prove and seal: the run that
+// produced it, the plan version it was planned against, the exact scenario
+// count it must carry, and the instant to stamp every sealed row with
+// (design D16, section 4.5).
+type SealRequest struct {
+	RunID         int64
+	PlanVersion   int
+	ExpectedCount int // 2..30
+	At            time.Time
+}
+
+// EscalationCommit is one structured escalation plus its linked question
+// (design D10, section 6.7). Body is "<code>: <what>", stored on both the
+// escalation message and, with the standing question appended, the question
+// message. Payload is the escalation's own validated shape; RunID is nil for
+// a cap escalation no run caused.
+type EscalationCommit struct {
+	RunID   *int64
+	Body    string
+	Payload response.EscalationPayload
+}
+
+// TrackerEffect is a tracker comment a handler wants posted after its commit
+// lands (design D12): Ref names the tracker issue, Notes is the comment
+// text. CommitHandlerResult carries this value through unread; only the
+// dispatcher, after a successful commit, resolves Ref and posts Notes.
+type TrackerEffect struct {
+	Ref, Notes string
+}
+
+// ErrSealMismatch is the sentinel every *SealMismatchError unwraps to, so a
+// caller that only needs to know "was this a seal mismatch" can use
+// errors.Is without also importing the typed shape (design D16).
+var ErrSealMismatch = errors.New("store: seal invariant mismatch")
+
+// SealMismatchError is Seal's typed failure (design D16): Stage names which
+// of the three checks failed ("plan", "count", or "update"), Expected is the
+// SealRequest's ExpectedCount, and Affected is the row count the "update"
+// stage actually saw (zero for "plan" and "count", which fail before any
+// row is touched).
+type SealMismatchError struct {
+	Stage    string
+	Expected int
+	Affected int
+}
+
+func (e *SealMismatchError) Error() string {
+	return fmt.Sprintf("store: seal mismatch at stage %q: expected %d, affected %d", e.Stage, e.Expected, e.Affected)
+}
+
+func (e *SealMismatchError) Unwrap() error { return ErrSealMismatch }
 
 // SessionUpsert creates or updates the session a HandlerCommit's runs belong
 // to. ID nil creates a new session; a non-nil ID updates the existing one.
@@ -96,12 +167,15 @@ type SessionUpsert struct {
 // claim_expires_at=?. Zero rows affected means the lease was lost; it rolls
 // back and returns applied=false, err=nil.
 //
-// Order inside the transaction (section 6.3): verify the fence; upsert the
-// session and learn its id; insert the runs and learn their ids; insert the
-// messages, attaching the single run's id when AttachRunToMsgs is set;
-// resolve each ResolveQuestions id and insert its resolved message; write the
-// state message; then apply Next, Waiting, and the claim clear in the one
-// fenced ticket UPDATE that also serves as the final fence check.
+// Order inside the transaction (section 6.3, 4.5): verify the fence; upsert
+// the session and learn its id; insert or update the runs and learn their
+// ids; set kind; insert the artifacts; seal the cohort when Seal is set;
+// record the escalation and its linked question when Escalation is set;
+// resolve every question when ResolveAll is set; insert the messages,
+// attaching the single run's id when AttachRunToMsgs is set; resolve each
+// ResolveQuestions id and insert its resolved message; write the state
+// message; then apply Next, Waiting, and the claim clear in the one fenced
+// ticket UPDATE that also serves as the final fence check.
 func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool, error) {
 	if c.AttachRunToMsgs && len(c.Runs) != 1 {
 		return false, errors.New("commit handler result: attach needs exactly one run")
@@ -194,6 +268,18 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			}
 		}
 		if _, err = s.insertArtifactTx(ctx, tx, a); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.Seal != nil {
+		if err = sealCohortTx(ctx, tx, c.TicketID, *c.Seal); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.Escalation != nil {
+		if err = s.escalateTx(ctx, tx, c.TicketID, *c.Escalation); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -548,6 +634,119 @@ func (s *Store) insertArtifactTx(ctx context.Context, tx *sql.Tx, a Artifact) (i
 		return 0, fmt.Errorf("insert artifact: %w", err)
 	}
 	return id, nil
+}
+
+// sealCohortTx applies req inside tx (design D16, section 4.5): (1) the
+// ticket's max-version plan artifact must have req.RunID's version and run
+// id, else a "plan" mismatch; (2) the scenario cohort that run id carries
+// must count exactly req.ExpectedCount rows in [2,30], else a "count"
+// mismatch; (3) sealing every still-unsealed row of that cohort at req.At
+// must affect exactly req.ExpectedCount rows, else an "update" mismatch
+// naming how many it actually affected. req.At is formatted the same way
+// insertArtifactTx formats sealed_at: UTC RFC3339.
+func sealCohortTx(ctx context.Context, tx *sql.Tx, ticketID int64, req SealRequest) error {
+	var planVersion int
+	var planRunID sql.NullInt64
+	err := tx.QueryRowContext(ctx,
+		`SELECT version, run_id FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		ticketID).Scan(&planVersion, &planRunID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return &SealMismatchError{Stage: "plan", Expected: req.ExpectedCount}
+	case err != nil:
+		return fmt.Errorf("seal: read max-version plan artifact: %w", err)
+	}
+	if planVersion != req.PlanVersion || !planRunID.Valid || planRunID.Int64 != req.RunID {
+		return &SealMismatchError{Stage: "plan", Expected: req.ExpectedCount}
+	}
+
+	var count int
+	if err = tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ?`,
+		ticketID, req.RunID).Scan(&count); err != nil {
+		return fmt.Errorf("seal: count scenario cohort: %w", err)
+	}
+	if count != req.ExpectedCount || count < 2 || count > 30 {
+		return &SealMismatchError{Stage: "count", Expected: req.ExpectedCount}
+	}
+
+	sealedAt := req.At.UTC().Format(time.RFC3339)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE artifacts SET sealed_at = ? WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? AND sealed_at IS NULL`,
+		sealedAt, ticketID, req.RunID)
+	if err != nil {
+		return fmt.Errorf("seal: update sealed_at: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("seal: update sealed_at: %w", err)
+	}
+	if int(affected) != req.ExpectedCount {
+		return &SealMismatchError{Stage: "update", Expected: req.ExpectedCount, Affected: int(affected)}
+	}
+	return nil
+}
+
+// nextQuestionKeyTx returns one past the count of every "question" message
+// ticketID carries, of any lifecycle state (design section 6.7): the
+// allocation an escalation's linked question, a gate question, and a
+// planning question all share, so no two ever collide on the same Q<n>.
+func nextQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ?`, ticketID, msgTypeQuestion,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("next question key: %w", err)
+	}
+	return n + 1, nil
+}
+
+// escalateTx inserts ec's escalation message, then its linked question
+// (design D10, section 6.7): the question is parented to the escalation's
+// own id, carries the same run id, is recommended "b", and offers the fixed
+// retry/back-to-planning/abandon choice. Both payloads are validated by
+// insertMessageTx against their committed schemas.
+func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ec EscalationCommit) error {
+	payload, err := json.Marshal(ec.Payload)
+	if err != nil {
+		return fmt.Errorf("escalation: marshal payload: %w", err)
+	}
+	if err = s.insertMessageTx(ctx, tx, Message{
+		TicketID: ticketID, RunID: ec.RunID, Type: msgTypeEscalation, Author: authorZing, Body: ec.Body, Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("escalation: insert escalation message: %w", err)
+	}
+	escID, err := lastInsertIDTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("escalation: %w", err)
+	}
+
+	n, err := nextQuestionKeyTx(ctx, tx, ticketID)
+	if err != nil {
+		return fmt.Errorf("escalation: %w", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key:         fmt.Sprintf("Q%d", n),
+		Kind:        response.QuestionKindQuestion,
+		State:       response.QuestionStateOpen,
+		Recommended: "b",
+		Options: []response.Option{
+			{Key: "a", Text: "Retry"},
+			{Key: "b", Text: "Back to planning"},
+			{Key: "c", Text: "Abandon"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("escalation: marshal question payload: %w", err)
+	}
+	if err = s.insertMessageTx(ctx, tx, Message{
+		TicketID: ticketID, RunID: ec.RunID, ParentID: &escID, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: ec.Body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	}); err != nil {
+		return fmt.Errorf("escalation: insert question message: %w", err)
+	}
+	return nil
 }
 
 // isUniqueConstraintErr reports whether err came from a SQLite UNIQUE

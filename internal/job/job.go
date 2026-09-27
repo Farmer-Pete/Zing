@@ -124,18 +124,19 @@ var legalWaiting = map[string]bool{
 // commit shape rules (design section 6.5): c.TicketID must name the ticket
 // it was built against, the commit must do something (it is never wholly
 // empty: at least one of Next, Waiting, Messages, Runs, ResolveQuestions,
-// Session, SetKind, Artifacts, or ResolveAll must be set), when Next is set
-// it names a legal successor of t.State and carries a non-empty Reason, and
-// it does not also set a non-error Waiting; any set Waiting is one of the
-// eight closed-set flags.
+// Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or
+// TrackerEffect must be set), when Next is set it names a legal successor of
+// t.State and carries a non-empty Reason, and it does not also set a
+// non-error Waiting; any set Waiting is one of the eight closed-set flags.
 func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 	if c.TicketID != t.ID {
 		return fmt.Errorf("job: commit is for ticket %d, not ticket %d", c.TicketID, t.ID)
 	}
 	if c.Next == "" && c.Waiting == nil && len(c.Messages) == 0 && len(c.Runs) == 0 &&
 		len(c.ResolveQuestions) == 0 && c.Session == nil &&
-		c.SetKind == nil && len(c.Artifacts) == 0 && !c.ResolveAll {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, Artifacts, or ResolveAll", t.ID)
+		c.SetKind == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
+		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil {
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

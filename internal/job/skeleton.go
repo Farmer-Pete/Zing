@@ -48,6 +48,26 @@ func baseCommit(t store.Ticket, d Deps) store.HandlerCommit {
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}
 }
 
+// skeletonOrigin maps r's job to design section 6.7's closed EscalationOrigin
+// set, for this file's placeholder escalateCommit, which every skeleton
+// handler still shares. classify and planreview map directly; planning maps
+// to planning_first for both entry and resume, because this helper cannot
+// tell them apart from the job alone, and every job task 4 gives no
+// dedicated origin (building, and everything after it) also falls back to
+// planning_first -- harmless today, since no test exercises this file's
+// escalation path for those jobs. Task 6 replaces this file's planning
+// entries with real handlers that set their own correct Origin directly.
+func skeletonOrigin(job response.Job) response.EscalationOrigin {
+	switch job {
+	case response.JobClassify:
+		return response.EscalationOriginClassify
+	case response.JobPlanreview:
+		return response.EscalationOriginPlanreview
+	default:
+		return response.EscalationOriginPlanningFirst
+	}
+}
+
 // escalateCommit builds the section 6.7 error-branch commit: an escalation
 // message carrying RunError's fields and the fixed local options, and
 // Waiting set to "error". It carries no Next: the ticket stays in its
@@ -64,6 +84,7 @@ func escalateCommit(t store.Ticket, d Deps, r response.Response) (store.HandlerC
 		Why:     errResp.Error.Why,
 		Tried:   errResp.Error.Tried,
 		Options: escalationOptions,
+		Origin:  string(skeletonOrigin(r.Header().Job)),
 	})
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: marshal escalation payload: %w", err)

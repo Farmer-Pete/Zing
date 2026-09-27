@@ -244,6 +244,72 @@ func (ErrorCode) Values() []string {
 	}
 }
 
+// EscalationCode is the closed set an escalation payload's code may carry
+// (design section 6.7): the eight already stored, plus split_unsupported,
+// nothing_to_do_with_true_claims, runtime_exec_failed, response_invalid, and
+// seal_failed. EscalationPayload.Code itself stays a plain string (matching
+// its jsonschema enum tag); these constants let Go code name a code instead
+// of writing the literal.
+type EscalationCode string
+
+const (
+	EscalationCodeResumesExhausted          EscalationCode = "resumes_exhausted"
+	EscalationCodeLoopsExhausted            EscalationCode = "loops_exhausted"
+	EscalationCodeWallClock                 EscalationCode = "wall_clock"
+	EscalationCodeUsageHold                 EscalationCode = "usage_hold"
+	EscalationCodePlanGap                   EscalationCode = "plan_gap"
+	EscalationCodeCannotRun                 EscalationCode = "cannot_run"
+	EscalationCodeEnvironment               EscalationCode = "environment"
+	EscalationCodeOther                     EscalationCode = "other"
+	EscalationCodeSplitUnsupported          EscalationCode = "split_unsupported"
+	EscalationCodeNothingToDoWithTrueClaims EscalationCode = "nothing_to_do_with_true_claims"
+	EscalationCodeRuntimeExecFailed         EscalationCode = "runtime_exec_failed"
+	EscalationCodeResponseInvalid           EscalationCode = "response_invalid"
+	EscalationCodeSealFailed                EscalationCode = "seal_failed"
+)
+
+// Values returns every valid EscalationCode.
+func (EscalationCode) Values() []string {
+	return []string{
+		string(EscalationCodeResumesExhausted), string(EscalationCodeLoopsExhausted), string(EscalationCodeWallClock),
+		string(EscalationCodeUsageHold), string(EscalationCodePlanGap), string(EscalationCodeCannotRun),
+		string(EscalationCodeEnvironment), string(EscalationCodeOther), string(EscalationCodeSplitUnsupported),
+		string(EscalationCodeNothingToDoWithTrueClaims), string(EscalationCodeRuntimeExecFailed),
+		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed),
+	}
+}
+
+// EscalationOrigin is the step that produced an escalation (design section
+// 6.7): which job or cap check ran, driving how "resume or fresh" and choice
+// resolution behave. EscalationPayload.Origin stays a plain string (matching
+// its jsonschema enum tag); these constants let Go code name an origin
+// instead of writing the literal.
+type EscalationOrigin string
+
+const (
+	EscalationOriginClassify          EscalationOrigin = "classify"
+	EscalationOriginPlanningFirst     EscalationOrigin = "planning_first"
+	EscalationOriginPlanningResume    EscalationOrigin = "planning_resume"
+	EscalationOriginPlanreview        EscalationOrigin = "planreview"
+	EscalationOriginGateApprove       EscalationOrigin = "gate_approve"
+	EscalationOriginSeal              EscalationOrigin = "seal"
+	EscalationOriginCapResumes        EscalationOrigin = "cap_resumes"
+	EscalationOriginCapLoops          EscalationOrigin = "cap_loops"
+	EscalationOriginCapBudget         EscalationOrigin = "cap_budget"
+	EscalationOriginSplit             EscalationOrigin = "split"
+	EscalationOriginNothingToDoClaims EscalationOrigin = "nothing_to_do_claims"
+)
+
+// Values returns every valid EscalationOrigin.
+func (EscalationOrigin) Values() []string {
+	return []string{
+		string(EscalationOriginClassify), string(EscalationOriginPlanningFirst), string(EscalationOriginPlanningResume),
+		string(EscalationOriginPlanreview), string(EscalationOriginGateApprove), string(EscalationOriginSeal),
+		string(EscalationOriginCapResumes), string(EscalationOriginCapLoops), string(EscalationOriginCapBudget),
+		string(EscalationOriginSplit), string(EscalationOriginNothingToDoClaims),
+	}
+}
+
 // QuestionKind categorizes a stored question.
 type QuestionKind string
 

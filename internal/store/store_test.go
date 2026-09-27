@@ -19,6 +19,7 @@ const (
 	testTypePlanreview = "planreview"
 	testTypeClaims     = "claims"
 	testTypeScenario   = "scenario"
+	testTypeEscalation = "escalation"
 	testAuthorZing     = "zing"
 	testAuthorYou      = "you"
 	testRefAGo         = "a.go"
