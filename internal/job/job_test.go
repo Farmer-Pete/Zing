@@ -165,6 +165,27 @@ func TestValidateCommit_RejectsAWhollyEmptyCommit(t *testing.T) {
 	}
 }
 
+// TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField proves the
+// emptiness check (design section 4.5) grew to cover SetKind, Artifacts, and
+// ResolveAll: a commit that sets only one of them is not the wholly empty
+// case ValidateCommit rejects.
+func TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	kind := "bug"
+
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetKind: &kind}); err != nil {
+		t.Errorf("ValidateCommit(SetKind only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Artifacts: []store.Artifact{{Type: "scenario"}}}); err != nil {
+		t.Errorf("ValidateCommit(Artifacts only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, ResolveAll: true}); err != nil {
+		t.Errorf("ValidateCommit(ResolveAll only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 

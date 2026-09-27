@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"zing/internal/response"
@@ -52,11 +53,32 @@ type HandlerCommit struct {
 	Waiting *string // nil clears waiting_on
 
 	Session *SessionUpsert // nil, or create-or-update the run's session
-	Runs    []Run          // run rows to insert (SessionID filled from Session after upsert)
+	// Runs is applied entry by entry: ID == 0 inserts a new row under
+	// Session's session id (SessionID filled from Session after upsert);
+	// ID > 0 updates that existing, ticket-owned run's outcome, exit_code,
+	// and agent_seconds in place (design D13's Reserve placeholder,
+	// terminalized here) and never touches its model column, which Reserve
+	// already set.
+	Runs []Run
 
-	Messages         []Message // messages to insert (question, escalation, ...)
-	AttachRunToMsgs  bool      // when true, every inserted message takes the id of the single inserted run
-	ResolveQuestions []int64   // set each question's state to "resolved" and insert one "resolved" message per id
+	Messages []Message
+	// AttachRunToMsgs requires exactly one Runs entry; every message whose
+	// RunID is nil takes that run's id (inserted or updated), a message
+	// whose RunID points at 0 is rejected, and any other non-nil RunID is
+	// left as the handler set it.
+	AttachRunToMsgs bool
+	// SetKind sets tickets.kind to "bug" or "feature" when it is currently
+	// NULL or already that same value; any other current value is a
+	// conflict.
+	SetKind *string
+	// Artifacts is inserted after Runs and SetKind: TicketID is forced to
+	// this commit's ticket, a non-nil RunID must belong to it, and
+	// Version == 0 becomes one past that (ticket, type)'s current maximum.
+	Artifacts        []Artifact
+	ResolveQuestions []int64 // set each question's state to "resolved" and insert one "resolved" message per id
+	// ResolveAll resolves every ticket question still "open" or "answered",
+	// the abandon case where no individual id list applies.
+	ResolveAll bool
 }
 
 // SessionUpsert creates or updates the session a HandlerCommit's runs belong
@@ -82,7 +104,7 @@ type SessionUpsert struct {
 // fenced ticket UPDATE that also serves as the final fence check.
 func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool, error) {
 	if c.AttachRunToMsgs && len(c.Runs) != 1 {
-		return false, fmt.Errorf("commit handler result: AttachRunToMsgs requires exactly one run, got %d", len(c.Runs))
+		return false, errors.New("commit handler result: attach needs exactly one run")
 	}
 	if c.Next != "" && c.Reason == "" {
 		return false, fmt.Errorf("commit handler result: reason is required when transitioning to %s", c.Next)
@@ -126,6 +148,13 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 
 	runIDs := make([]int64, 0, len(c.Runs))
 	for _, r := range c.Runs {
+		if r.ID > 0 {
+			if err = updateRunTx(ctx, tx, r, c.TicketID); err != nil {
+				return false, fmt.Errorf("commit handler result: %w", err)
+			}
+			runIDs = append(runIDs, r.ID)
+			continue
+		}
 		if !haveSession {
 			return false, errRunNeedsSession
 		}
@@ -141,13 +170,57 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 	if c.AttachRunToMsgs {
 		attachRunID = &runIDs[0]
 	}
+
+	if c.SetKind != nil {
+		if err = setKindTx(ctx, tx, c.TicketID, *c.SetKind); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	for _, a := range c.Artifacts {
+		// Force every inserted artifact's ticket_id to c.TicketID, the same
+		// rule commit.go already applies to Messages: a handler proposes
+		// artifacts but never writes, so this commit boundary is what an
+		// artifact can never be scoped away from.
+		a.TicketID = c.TicketID
+		if a.RunID != nil {
+			var owned bool
+			owned, err = runOwnedByTicketTx(ctx, tx, c.TicketID, *a.RunID)
+			if err != nil {
+				return false, fmt.Errorf("commit handler result: check artifact run %d: %w", *a.RunID, err)
+			}
+			if !owned {
+				return false, fmt.Errorf("commit handler result: artifact run %d not owned by ticket %d", *a.RunID, c.TicketID)
+			}
+		}
+		if _, err = s.insertArtifactTx(ctx, tx, a); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.ResolveAll {
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE messages SET state = ? WHERE ticket_id = ? AND type = ? AND state IN (?, ?)`,
+			questionStateResolved, c.TicketID, msgTypeQuestion, questionStateOpen, questionStateAnswered,
+		); err != nil {
+			return false, fmt.Errorf("commit handler result: resolve all questions: %w", err)
+		}
+	}
+
 	for _, m := range c.Messages {
 		// Force every inserted message's ticket_id to c.TicketID: a handler
 		// proposes messages but never writes, so this commit boundary, not
 		// the handler, is what a message can never be scoped away from.
 		m.TicketID = c.TicketID
 		if attachRunID != nil {
-			m.RunID = attachRunID
+			switch {
+			case m.RunID == nil:
+				m.RunID = attachRunID
+			case *m.RunID == 0:
+				return false, errors.New("commit handler result: message run id 0")
+			default:
+				// A message with an explicit non-zero RunID keeps it.
+			}
 		}
 		if m.ParentID != nil {
 			if err = verifyParentForTicket(ctx, tx, c.TicketID, *m.ParentID); err != nil {
@@ -342,6 +415,146 @@ func insertRunTx(ctx context.Context, tx *sql.Tx, sessionID int64, r Run) (int64
 		return 0, fmt.Errorf("insert run: %w", err)
 	}
 	return id, nil
+}
+
+// updateRunTx terminalizes an existing, ticket-owned run (design D13's
+// Reserve placeholder): outcome, exit_code, and agent_seconds only. model is
+// never written here -- Reserve already set it, and nothing after Reserve
+// may change it. The WHERE clause is the same ticket-ownership subquery
+// insertArtifactTx's RunID check reuses: session_id IN (SELECT id FROM
+// sessions WHERE ticket_id = ?). Zero rows affected means r.ID does not name
+// a run on one of ticketID's sessions.
+func updateRunTx(ctx context.Context, tx *sql.Tx, r Run, ticketID int64) error {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE runs SET outcome = ?, exit_code = ?, agent_seconds = ?
+		 WHERE id = ? AND session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)`,
+		r.Outcome, r.ExitCode, r.AgentSeconds, r.ID, ticketID,
+	)
+	if err != nil {
+		return fmt.Errorf("update run %d: %w", r.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update run %d: %w", r.ID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("run %d not owned by ticket %d", r.ID, ticketID)
+	}
+	return nil
+}
+
+// runOwnedByTicketTx reports whether runID names a run on one of ticketID's
+// sessions, the check every non-nil Artifact.RunID must pass before this
+// transaction inserts it (section 6.3-style scoping, design section 4.5).
+func runOwnedByTicketTx(ctx context.Context, tx *sql.Tx, ticketID, runID int64) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM runs WHERE id = ? AND session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)`,
+		runID, ticketID).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("check run %d owned by ticket %d: %w", runID, ticketID, err)
+	}
+	return true, nil
+}
+
+// setKindTx sets tickets.kind to kind ("bug" or "feature") when it is
+// currently NULL or already kind (design section 4.5's "null-to-value and
+// same-to-same succeed"). The UPDATE's WHERE clause matches both cases, but
+// modernc.org/sqlite may report zero rows affected for a same-to-same write
+// that changes no bytes, so a zero-row result re-reads the live kind and
+// only reports a conflict when it actually differs from kind.
+func setKindTx(ctx context.Context, tx *sql.Tx, ticketID int64, kind string) error {
+	if kind != "bug" && kind != "feature" {
+		return fmt.Errorf("kind must be bug or feature, got %q", kind)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tickets SET kind = ? WHERE id = ? AND (kind IS NULL OR kind = ?)`,
+		kind, ticketID, kind,
+	)
+	if err != nil {
+		return fmt.Errorf("set kind: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set kind: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	var have sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM tickets WHERE id = ?`, ticketID).Scan(&have); err != nil {
+		return fmt.Errorf("read kind for conflict: %w", err)
+	}
+	if have.Valid && have.String == kind {
+		return nil // same-to-same: the driver reported zero rows for a no-op write
+	}
+	haveStr := "null"
+	if have.Valid {
+		haveStr = have.String
+	}
+	return fmt.Errorf("kind conflict: have %s, want %s", haveStr, kind)
+}
+
+// insertArtifactTx is InsertArtifact (store.go), tx-scoped: it validates
+// a.Payload against the same schema validator and inserts against tx instead
+// of s.db, so a commit's artifacts share one transaction with the rest of
+// the write, the way insertMessageTx mirrors InsertMessage. Version == 0
+// becomes one past (a.TicketID, a.Type)'s current maximum, computed inside
+// tx, so two zero-Version artifacts of the same type inserted by the same
+// commit each see the prior insert; Version > 0 is stored exactly, and a
+// whole-document type's unique-index collision (artifacts_whole_doc_uk)
+// surfaces as "artifact <type> version <v> exists" rather than a raw
+// constraint error.
+func (s *Store) insertArtifactTx(ctx context.Context, tx *sql.Tx, a Artifact) (int64, error) {
+	if a.Version < 0 {
+		return 0, fmt.Errorf("insert artifact: version %d must not be negative", a.Version)
+	}
+	if err := s.schemas.validate("artifacts", a.Type, a.Payload); err != nil {
+		return 0, err
+	}
+
+	version := a.Version
+	if version == 0 {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(version), 0) + 1 FROM artifacts WHERE ticket_id = ? AND type = ?`,
+			a.TicketID, a.Type).Scan(&version); err != nil {
+			return 0, fmt.Errorf("next artifact version: %w", err)
+		}
+	}
+
+	var sealedAt *string
+	if a.SealedAt != nil {
+		formatted := a.SealedAt.UTC().Format(time.RFC3339)
+		sealedAt = &formatted
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO artifacts (ticket_id, run_id, type, version, payload, sealed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		a.TicketID, a.RunID, a.Type, version, string(a.Payload), sealedAt,
+	)
+	if err != nil {
+		if isUniqueConstraintErr(err) {
+			return 0, fmt.Errorf("artifact %s version %d exists", a.Type, version)
+		}
+		return 0, fmt.Errorf("insert artifact: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("insert artifact: %w", err)
+	}
+	return id, nil
+}
+
+// isUniqueConstraintErr reports whether err came from a SQLite UNIQUE
+// constraint violation, detected by message text since modernc.org/sqlite's
+// error type carries no exported constraint name to switch on.
+func isUniqueConstraintErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // resolveQuestionTx sets one question message's lifecycle state to
