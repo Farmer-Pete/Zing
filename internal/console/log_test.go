@@ -306,6 +306,49 @@ func TestWarnings_ReturnsAFreshCopy(t *testing.T) {
 	}
 }
 
+// TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing proves each returned
+// LogEntry's TicketID does not alias the ring's own pointee (design section
+// 6a: "a fresh copy ... may retain or mutate freely", which a shared int64
+// pointee would violate even though the returned slice and struct are
+// otherwise fresh): mutating a snapshot's *TicketID must not be visible in a
+// later snapshot.
+func TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	slog.New(h).Warn("first warning", "ticket_id", int64(1))
+
+	got := h.Warnings(10)
+	if len(got) != 1 || got[0].TicketID == nil {
+		t.Fatalf("Warnings(10) = %v, want one entry with a non-nil TicketID", got)
+	}
+	*got[0].TicketID = 999
+
+	again := h.Warnings(10)
+	if len(again) != 1 || again[0].TicketID == nil || *again[0].TicketID != 1 {
+		t.Errorf("Warnings(10) after mutating a prior result's *TicketID = %v, want TicketID still 1 (the ring's own pointee must be untouched)", again)
+	}
+}
+
+// TestTail_ReturnsOwnIDPointersNotAliasingTheRing is
+// TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing for Tail (byRunID):
+// the same aliasing bug affects both snapshot methods, since both, before
+// the fix, appended the ring's own LogEntry value, id pointers included.
+func TestTail_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	h, _, lv := newTestHandler(t)
+	lv.Set(slog.LevelDebug)
+	slog.New(h).Debug("a run-scoped line", "run_id", int64(5), "ticket_id", int64(1))
+
+	got := h.Tail(5)
+	if len(got) != 1 || got[0].TicketID == nil {
+		t.Fatalf("Tail(5) = %v, want one entry with a non-nil TicketID", got)
+	}
+	*got[0].TicketID = 999
+
+	again := h.Tail(5)
+	if len(again) != 1 || again[0].TicketID == nil || *again[0].TicketID != 1 {
+		t.Errorf("Tail(5) after mutating a prior result's *TicketID = %v, want TicketID still 1 (the ring's own pointee must be untouched)", again)
+	}
+}
+
 // TestOnWarn_FiresOnWarnAndAboveNotBelow proves onWarn (design section 6a):
 // it fires exactly once per WARN-or-above record and never for INFO or
 // DEBUG.

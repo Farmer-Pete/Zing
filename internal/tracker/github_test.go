@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,25 @@ import (
 
 	"github.com/google/go-github/v92/github"
 )
+
+// assertErrorsAsGitHubErrorResponse fails the test unless errors.As finds a
+// *github.ErrorResponse in err's chain: go-github wraps every HTTP failure
+// in that type, and every tracker method wraps it again with fmt.Errorf's
+// %w, so a caller that needs the underlying HTTP detail (status code,
+// message) must be able to unwrap to it. Asserting on the error string
+// alone would still pass if a future change swapped %w for %v and broke
+// that chain silently.
+func assertErrorsAsGitHubErrorResponse(t *testing.T, err error) {
+	t.Helper()
+	ghErr, ok := errors.AsType[*github.ErrorResponse](err)
+	if !ok {
+		t.Errorf("errors.AsType[*github.ErrorResponse](%v) found no match, want one", err)
+		return
+	}
+	if ghErr.Response == nil {
+		t.Error("errors.AsType found a *github.ErrorResponse, but its Response is nil")
+	}
+}
 
 // testGHToken is the token every newTestTracker build authenticates with, so
 // a test can assert the Authorization header it produces.
@@ -250,6 +270,7 @@ func TestGitHubTrackerIntake(t *testing.T) {
 		if !strings.Contains(err.Error(), "tracker: intake:") {
 			t.Errorf("Intake error = %q, want it to carry the %q prefix", err.Error(), "tracker: intake:")
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("a second-page 500 errors and leaks no partial slice", func(t *testing.T) {
@@ -271,6 +292,7 @@ func TestGitHubTrackerIntake(t *testing.T) {
 		if tickets != nil {
 			t.Errorf("Intake: tickets = %+v, want nil on a second-page failure (no partial leak)", tickets)
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
@@ -329,6 +351,7 @@ func TestGitHubTrackerFetch(t *testing.T) {
 		if !strings.Contains(err.Error(), "tracker: fetch:") {
 			t.Errorf("Fetch error = %q, want it to carry the %q prefix", err.Error(), "tracker: fetch:")
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
@@ -400,6 +423,7 @@ func TestGitHubTrackerComment(t *testing.T) {
 		if !strings.Contains(err.Error(), "tracker: comment:") {
 			t.Errorf("Comment error = %q, want it to carry the %q prefix", err.Error(), "tracker: comment:")
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
@@ -484,6 +508,7 @@ func TestGitHubTrackerFileTicket(t *testing.T) {
 		if !strings.Contains(err.Error(), "tracker: file ticket:") {
 			t.Errorf("FileTicket error = %q, want it to carry the %q prefix", err.Error(), "tracker: file ticket:")
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
@@ -542,6 +567,7 @@ func TestGitHubTrackerCollaborators(t *testing.T) {
 		if !strings.Contains(err.Error(), "tracker: collaborators:") {
 			t.Errorf("Collaborators error = %q, want it to carry the %q prefix", err.Error(), "tracker: collaborators:")
 		}
+		assertErrorsAsGitHubErrorResponse(t, err)
 	})
 
 	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {

@@ -323,23 +323,25 @@ func (r *logRing) add(e LogEntry) {
 
 // byRunID returns a fresh copy of every entry whose RunID equals runID,
 // oldest first: never the guarded slice itself (golang skill: "Never let a
-// map or slice guarded by a mutex escape the critical section").
+// map or slice guarded by a mutex escape the critical section"), and each
+// entry's own copy via cloneEntry, so the id pointers do not alias the
+// ring's own pointees either.
 func (r *logRing) byRunID(runID int64) []LogEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]LogEntry, 0, len(r.entries))
 	for _, e := range r.entries {
 		if e.RunID != nil && *e.RunID == runID {
-			out = append(out, e)
+			out = append(out, cloneEntry(e))
 		}
 	}
 	return out
 }
 
 // warnings returns the slog.LevelWarn-and-above entries, newest first,
-// capped at limit, as a fresh copy (design section 6a). A non-positive
-// limit returns an empty, non-nil slice rather than panicking make with a
-// negative capacity.
+// capped at limit, as a fresh copy with each entry cloned via cloneEntry
+// (design section 6a). A non-positive limit returns an empty, non-nil slice
+// rather than panicking make with a negative capacity.
 func (r *logRing) warnings(limit int) []LogEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -349,10 +351,33 @@ func (r *logRing) warnings(limit int) []LogEntry {
 	out := make([]LogEntry, 0, limit)
 	for i := len(r.entries) - 1; i >= 0 && len(out) < limit; i-- {
 		if r.entries[i].Level >= slog.LevelWarn {
-			out = append(out, r.entries[i])
+			out = append(out, cloneEntry(r.entries[i]))
 		}
 	}
 	return out
+}
+
+// cloneEntry returns a copy of e whose TicketID, RunID, and TaskN pointers
+// are freshly allocated, holding the same values, rather than the ring's own
+// pointees (design section 6a, 6.11: Tail and Warnings promise a "fresh
+// copy" the caller "may retain or mutate freely", which the *int64 fields
+// alone did not honor -- copying the LogEntry struct still left every
+// returned copy pointing at the same three ints the ring's own stored entry
+// holds). A nil field stays nil.
+func cloneEntry(e LogEntry) LogEntry {
+	e.TicketID = cloneInt64(e.TicketID)
+	e.RunID = cloneInt64(e.RunID)
+	e.TaskN = cloneInt64(e.TaskN)
+	return e
+}
+
+// cloneInt64 returns a new *int64 holding *p's value, or nil when p is nil.
+func cloneInt64(p *int64) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // debugSet is the mutex-guarded per-ticket debug override (design section

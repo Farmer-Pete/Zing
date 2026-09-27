@@ -1037,13 +1037,30 @@ func TestTick_IntakePostsPickupCommentForEachNewTicket(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("after first Tick: %d pickup comments, want 2", len(got))
 	}
+	if attempts := rec.attemptCount(); attempts != 2 {
+		t.Errorf("after first Tick: %d Comment attempts, want 2", attempts)
+	}
 	want := tracker.PickupComment(testBindingUser)
+	wantRefs := map[string]bool{"fake#1": true, "fake#2": true}
+	gotRefs := make(map[string]bool, len(got))
 	for _, c := range got {
+		gotRefs[c.ref] = true
 		if c.body != want {
 			t.Errorf("pickup comment body = %q, want %q", c.body, want)
 		}
 		if c.project != testProject.Name {
 			t.Errorf("pickup comment project = %q, want %q", c.project, testProject.Name)
+		}
+	}
+	// Each of the two new tickets' refs must have received its own comment,
+	// not both landing on the same ref (which the earlier count-only
+	// assertion could not have caught).
+	if len(gotRefs) != len(wantRefs) {
+		t.Errorf("pickup comments covered refs %v, want exactly %v (one comment per distinct new ref)", gotRefs, wantRefs)
+	}
+	for ref := range wantRefs {
+		if !gotRefs[ref] {
+			t.Errorf("pickup comments never covered ref %q, want one for every new ticket", ref)
 		}
 	}
 
@@ -1052,6 +1069,9 @@ func TestTick_IntakePostsPickupCommentForEachNewTicket(t *testing.T) {
 	}
 	if got = rec.recorded(); len(got) != 2 {
 		t.Errorf("after second Tick (dedup): %d pickup comments, want still 2 (no new posts)", len(got))
+	}
+	if attempts := rec.attemptCount(); attempts != 2 {
+		t.Errorf("after second Tick (dedup): %d Comment attempts, want still 2 (no new attempts)", attempts)
 	}
 }
 
@@ -1090,12 +1110,18 @@ func TestTick_IntakePickupCommentFailureIsBestEffort(t *testing.T) {
 	if got[0].ref != "fake#2" {
 		t.Errorf("recorded comment ref = %q, want fake#2 (the later ticket's comment, since the first failed)", got[0].ref)
 	}
+	if attempts := rec.attemptCount(); attempts != 2 {
+		t.Errorf("Comment attempts = %d, want 2 (one failed attempt for fake#1, one successful for fake#2)", attempts)
+	}
 
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("second Tick: %v", err)
 	}
 	if got = rec.recorded(); len(got) != 1 {
 		t.Errorf("recorded pickup comments after second Tick = %d, want still 1 (no retry, no double-post)", len(got))
+	}
+	if attempts := rec.attemptCount(); attempts != 2 {
+		t.Errorf("Comment attempts after second Tick = %d, want still 2 (no retry attempt)", attempts)
 	}
 }
 
@@ -1113,6 +1139,7 @@ type commentingFixture struct {
 
 	mu        sync.Mutex
 	comments  []recordedComment
+	attempts  int
 	failFirst bool
 	failed    bool
 }
@@ -1127,6 +1154,7 @@ type recordedComment struct {
 func (c *commentingFixture) Comment(_ context.Context, project, ref, body string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.attempts++
 	if c.failFirst && !c.failed {
 		c.failed = true
 		return errors.New("boom: pickup comment failed")
@@ -1140,6 +1168,15 @@ func (c *commentingFixture) recorded() []recordedComment {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]recordedComment(nil), c.comments...)
+}
+
+// attemptCount returns the total number of Comment calls made so far,
+// successful or not, so a test can assert the exact attempt count alongside
+// the (possibly smaller) number that were actually recorded.
+func (c *commentingFixture) attemptCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.attempts
 }
 
 // cancelingHandler is a job.Handler test double that cancels a captured
