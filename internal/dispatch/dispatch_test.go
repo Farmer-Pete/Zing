@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,7 @@ const (
 	testQuestionOpen     = "open"
 
 	testReasonPlanReady = "plan ready"
+	testRuntimeFake     = "fake"
 )
 
 var testProject = store.Project{
@@ -1320,4 +1322,371 @@ type slowTracker struct {
 func (s *slowTracker) Intake(ctx context.Context, project string, rule tracker.IntakeRule) ([]tracker.Ticket, error) {
 	time.Sleep(s.delay)
 	return s.Tracker.Intake(ctx, project, rule)
+}
+
+// --- the D16 seal-mismatch, ErrNoAction, and ErrCanceled dispatcher rules,
+// and the D12 post-commit TrackerEffect (design section 4.5, 6.8) ----------
+
+// testPlanPayload is examples/artifacts/plan.json verbatim: a real,
+// schema-valid "plan" artifact, so the seal-mismatch test below fails at
+// stage "count" (an empty scenario cohort) rather than at stage "plan"
+// (design D16, section 4.5 check 1 then check 2).
+const testPlanPayload = `{
+  "overview": {
+    "objective": "Stop checkout from crashing on an empty cart.",
+    "context": "internal/cart handles cart state; internal/checkout reads it at payment time.",
+    "problem": {
+      "text": "checkout panics when cart.Items is nil instead of an empty slice.",
+      "loop": {
+        "cmd": "go test ./internal/cart/... -run TestEmptyCart",
+        "text": "fails: nil pointer dereference in checkout.Total"
+      },
+      "repro": "create a cart, call Checkout without adding items",
+      "hypotheses": [
+        {
+          "rank": 1,
+          "cause": "NewCart never initializes Items",
+          "prediction": "initializing Items to []Item{} makes the loop pass"
+        }
+      ]
+    },
+    "goals": ["checkout never panics on an empty cart"],
+    "nongoals": ["changing the checkout API"]
+  },
+  "design": {
+    "demo": {
+      "cmd": "go run ./cmd/demo -empty-cart",
+      "text": "an empty cart checks out for zero dollars instead of crashing"
+    },
+    "shape": "NewCart initializes Items to an empty slice; checkout reads it unchanged.",
+    "changes": [
+      {
+        "path": "internal/cart/cart.go",
+        "symbol": "NewCart",
+        "kind": "modified",
+        "callers": "checkout.New",
+        "callees": "none",
+        "before": "Items field left at its zero value (nil)",
+        "after": "Items: make([]Item, 0)"
+      }
+    ],
+    "types": [],
+    "migrations": { "migrations": [] }
+  },
+  "delivery": {
+    "files": [
+      { "path": "internal/cart/cart.go", "action": "modify", "reason": "initialize Items to an empty slice" }
+    ],
+    "deletions": { "deletions": [] },
+    "tests": [
+      {
+        "name": "TestEmptyCart_ReturnsEmptyOrder",
+        "seam": "cart.NewCart",
+        "kind": "regression",
+        "mocks": "",
+        "asserts": "checkout of a freshly created cart returns a zero-item order, no panic"
+      }
+    ],
+    "tasks": [
+      { "n": 1, "test": "TestEmptyCart_ReturnsEmptyOrder", "demo": true, "text": "Initialize cart.Items to an empty slice in NewCart." }
+    ]
+  },
+  "review": {
+    "trust_root": "none",
+    "alternatives": ["guard checkout.Total with a nil check instead of fixing the source"],
+    "risks": ["other constructors that build a Cart by struct literal still skip this initializer"]
+  }
+}
+`
+
+// sealMismatchHandler reserves a fresh run through Deps.Reserve, proposes a
+// real "plan" artifact for it, and requests a Seal whose ExpectedCount (2)
+// can never match the cohort's real scenario count (0, since this handler
+// inserts none): CommitHandlerResult's own tx fails at stage "count" and
+// rolls the whole commit back, including the plan artifact insert, so a
+// second call sees the same, still-empty cohort and mismatches the same way
+// (design D16, section 4.5, 6.6 branch 0).
+type sealMismatchHandler struct{}
+
+func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Artifacts: []store.Artifact{{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)}},
+		Seal:      &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+	}, nil
+}
+
+// countMarkersWithPrefix counts msgs' "update" messages whose body starts
+// with prefix (design section 5.3's marker convention).
+func countMarkersWithPrefix(msgs []store.MessageRow, prefix string) int {
+	n := 0
+	for i := range msgs {
+		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues proves the D16
+// dispatcher rule (design section 4.5, 6.6 branch 0): a seal transaction
+// mismatch releases the claim, writes a "seal mismatch cohort <runID>"
+// marker, never stops the dispatcher, and Tick returns nil so the ticket is
+// picked up again on a later tick, which mismatches (and marks) the same
+// way a second time.
+func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = sealMismatchHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a seal mismatch must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (a seal mismatch must not fail closed)")
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if got := countMarkersWithPrefix(msgs, "seal mismatch cohort"); got != 1 {
+		t.Fatalf("seal mismatch markers after first tick = %d, want 1", got)
+	}
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v, want nil", err)
+	}
+	msgs, err = s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after second tick: %v", err)
+	}
+	if got := countMarkersWithPrefix(msgs, "seal mismatch cohort"); got != 2 {
+		t.Errorf("seal mismatch markers after second tick = %d, want 2", got)
+	}
+}
+
+// noActionHandler always returns job.ErrNoAction: the entry decision found
+// nothing to do this tick (design section 4.5, 5.1 step 8).
+type noActionHandler struct{}
+
+func (noActionHandler) Run(context.Context, store.Ticket, job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{}, job.ErrNoAction
+}
+
+// TestTick_ErrNoActionReleasesClaimWithoutStopping proves job.ErrNoAction
+// releases the claim through the same no-op-commit path any other handler
+// error uses, but never stops the dispatcher (design section 4.5).
+func TestTick_ErrNoActionReleasesClaimWithoutStopping(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = noActionHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrNoAction must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (ErrNoAction must not fail closed)")
+	}
+}
+
+// cancelingReserveHandler reserves a fresh run, then returns
+// runtime.ErrCanceled with no commit, simulating a parent-context
+// cancellation (dispatcher shutdown) the runtime itself reported mid-call
+// (design D13, section 4.5).
+type cancelingReserveHandler struct{}
+
+func (cancelingReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x"); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{}, runtime.ErrCanceled
+}
+
+// TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile proves
+// runtime.ErrCanceled leaves the claim in place -- neither released nor
+// fail-closed -- so the reserved run sits with a NULL outcome until the
+// lease expires, at which point ExpireClaims (already exercised by task 4a)
+// reconciles it to error/-1 (design D13, section 4.5).
+func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = cancelingReserveHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrCanceled must not fail closed)", err)
+	}
+
+	claimed := getTicket(t, s, ticketID)
+	if claimed.State != testStateQueued {
+		t.Errorf("ticket state = %q, want unchanged queued", claimed.State)
+	}
+	if claimed.ClaimOwner == nil || claimed.ClaimExpiresAt == nil {
+		t.Fatal("claim was released, want it left in place for ExpireClaims to reconcile")
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1 (the reserved run)", len(runs))
+	}
+	if runs[0].Outcome != nil {
+		t.Errorf("run outcome = %q, want nil before the lease expires", *runs[0].Outcome)
+	}
+
+	if _, expireErr := s.ExpireClaims(t.Context(), claimed.ClaimExpiresAt.Add(time.Second)); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	runs, err = s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket after ExpireClaims: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != "error" {
+		t.Fatalf("after ExpireClaims: run = %+v, want outcome error", runs[0])
+	}
+	if runs[0].ExitCode == nil || *runs[0].ExitCode != -1 {
+		t.Errorf("after ExpireClaims: run exit_code = %v, want -1", runs[0].ExitCode)
+	}
+}
+
+// trackerEffectHandler proposes a commit carrying only a TrackerEffect: no
+// state transition, so ValidateCommit's non-empty rule is satisfied by
+// TrackerEffect alone (design section 4.5).
+type trackerEffectHandler struct{}
+
+func (trackerEffectHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		TrackerEffect: &store.TrackerEffect{Ref: testFixtureRef, Notes: "already handled elsewhere"},
+	}, nil
+}
+
+// TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit proves the D12
+// post-commit effect (design section 4.5, 6.8): once CommitHandlerResult has
+// applied, the dispatcher resolves the ticket's project binding and posts
+// tracker.NothingToDoComment for that binding's user.
+func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const bindingUser = "peter"
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := rec.recorded()
+	if len(got) != 1 {
+		t.Fatalf("tracker comments = %d, want 1", len(got))
+	}
+	wantBody := tracker.NothingToDoComment(bindingUser, "already handled elsewhere")
+	if got[0].body != wantBody {
+		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
+	}
+	if got[0].ref != testFixtureRef {
+		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+	if got[0].project != testProject.Name {
+		t.Errorf("comment project = %q, want %q", got[0].project, testProject.Name)
+	}
+}
+
+// TestTick_TrackerEffectFailureIsBestEffort proves a failing tracker comment
+// only warns: Tick still returns nil, and the ticket's own commit (already
+// applied before the tracker call runs) is untouched (design D12).
+func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	rec.failFirst = true
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a tracker comment failure is best-effort)", err)
+	}
+	if got := rec.recorded(); len(got) != 0 {
+		t.Errorf("recorded comments = %d, want 0 (the one attempt failed)", len(got))
+	}
+	if attempts := rec.attemptCount(); attempts != 1 {
+		t.Errorf("Comment attempts = %d, want 1", attempts)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
 }

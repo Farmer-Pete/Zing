@@ -313,6 +313,11 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 				return false, fmt.Errorf("commit handler result: %w", err)
 			}
 		}
+		if m.Type == msgTypeQuestion {
+			if m.Payload, err = fillQuestionKeyTx(ctx, tx, c.TicketID, m.Payload); err != nil {
+				return false, fmt.Errorf("commit handler result: %w", err)
+			}
+		}
 		if err = s.insertMessageTx(ctx, tx, m); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
@@ -699,6 +704,37 @@ func nextQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64) (int, er
 		return 0, fmt.Errorf("next question key: %w", err)
 	}
 	return n + 1, nil
+}
+
+// fillQuestionKeyTx allocates a Q<n> key for a "question" message payload
+// that arrives with Key still empty (design section 4.5, 6.7: "gate and
+// planning questions use the same Q<n> allocation" as an escalation's linked
+// question, escalateTx above), so a handler that posts a gate or a planning
+// batch question never computes the allocation itself. A payload that
+// already carries a key is returned unchanged. The allocation and this
+// message's insert share nextQuestionKeyTx's live COUNT, so two empty-key
+// questions in the same commit -- inserted one at a time by
+// CommitHandlerResult's Messages loop -- see Q1, then Q2, never a collision.
+func fillQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64, payload json.RawMessage) (json.RawMessage, error) {
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(payload, &qp); err != nil {
+		return nil, fmt.Errorf("fill question key: unmarshal payload: %w", err)
+	}
+	if qp.Key != "" {
+		return payload, nil
+	}
+
+	n, err := nextQuestionKeyTx(ctx, tx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("fill question key: %w", err)
+	}
+	qp.Key = fmt.Sprintf("Q%d", n)
+
+	out, err := json.Marshal(qp)
+	if err != nil {
+		return nil, fmt.Errorf("fill question key: marshal payload: %w", err)
+	}
+	return out, nil
 }
 
 // escalateTx inserts ec's escalation message, then its linked question

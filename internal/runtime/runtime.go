@@ -44,11 +44,16 @@ type RunRequest struct {
 	RunToken string
 }
 
-// RunResult is what a Runtime returns for one turn (design section 6.9).
+// RunResult is what a Runtime returns for one turn (design section 6.9,
+// 4.1). StderrLen and StderrSHA256 (the first 12 hex characters) are
+// populated on every path once the process has started; raw stderr itself
+// never appears here or anywhere else (design section 4.1, 10).
 type RunResult struct {
-	Response  response.Response
-	SessionID string
-	Log       string
-	AgentTime time.Duration
-	ExitCode  int
+	Response     response.Response
+	SessionID    string
+	Log          string
+	AgentTime    time.Duration
+	ExitCode     int
+	StderrLen    int64
+	StderrSHA256 string
 }

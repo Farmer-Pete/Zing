@@ -48,15 +48,28 @@ type Deps struct {
 	Floor    response.Severity
 	Owner    string
 	Expires  time.Time // the claim lease; the commit fence
+	// Reserve is the one pre-commit write a handler may make under its claim
+	// (design D13, section 4.4, 4.6): runJob is the only caller. The
+	// dispatcher wires it to a closure over store.Reserve carrying this
+	// tick's Owner and Expires, so a handler and its tests never see those
+	// two arguments directly.
+	Reserve ReserveFunc
 }
 
-// The typed job-level errors (design section 4.4). Only declared here:
-// nothing in this package returns them yet -- runJob (task 4) is what wires
-// ErrBudget and ErrNoAction into the entry decision, and ErrConfig into the
-// runtime/model/job lookups runJob itself performs. ErrConfig must never
-// reach a caller as a panic: a missing or misconfigured job, runtime, or
-// model alias is a configuration mistake to report, not a programming
-// invariant to crash on.
+// ReserveFunc reserves the next run for ticketID under the caller's claim
+// and returns it (design section 4.4, 4.5): su creates or resumes a session,
+// model is the run's exact model id. It returns store.ErrClaimLost,
+// unwrapped-but-wrappable, when the claim this call was reserved under has
+// already moved on.
+type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error)
+
+// The typed job-level errors (design section 4.4). runJob (runjob.go) wires
+// ErrBudget into its budget check and ErrConfig into the job/runtime/model
+// lookups it performs before ever reserving a run; ErrNoAction is still only
+// declared here -- wiring it into the planning entry decision is a later
+// task's job. ErrConfig must never reach a caller as a panic: a missing or
+// misconfigured job, runtime, or model alias is a configuration mistake to
+// report, not a programming invariant to crash on.
 var (
 	ErrNoAction = errors.New("job: no actionable state")
 	ErrBudget   = errors.New("job: agent budget exhausted")

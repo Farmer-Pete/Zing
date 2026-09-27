@@ -2295,3 +2295,61 @@ func TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites(t *
 		t.Errorf("messages for ticket with TrackerEffect = %d, want 1 (TrackerEffect writes nothing)", n)
 	}
 }
+
+// TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty
+// proves a "question" message posted directly through c.Messages (a gate or
+// a planning batch question, not an escalation's own linked question) gets
+// a Q<n> key allocated at commit when its payload arrives with Key still
+// empty (design section 4.5, 6.7: "gate and planning questions use the same
+// Q<n> allocation" escalateTx's own linked question already uses): two such
+// messages in one commit get Q1 then Q2, a message that already carries a
+// key is left exactly as the handler set it, and every stored payload still
+// validates against the messages/question schema (insertMessageTx's own
+// check, run after the key is filled in).
+func TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Messages: []Message{
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "A", Payload: questionPayload("")},
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "B", Payload: questionPayload("")},
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "C", Payload: questionPayload("Q7")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	open, err := s.QuestionsByState(ctx, ticketID, questionStateOpen)
+	if err != nil {
+		t.Fatalf("QuestionsByState: %v", err)
+	}
+	if len(open) != 3 {
+		t.Fatalf("open questions = %d, want 3", len(open))
+	}
+	keyByBody := make(map[string]string, 3)
+	for _, m := range open {
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &qp); err != nil {
+			t.Fatalf("unmarshal payload for %q: %v", m.Body, err)
+		}
+		keyByBody[m.Body] = qp.Key
+	}
+	if keyByBody["A"] != "Q1" {
+		t.Errorf("A's allocated key = %q, want Q1", keyByBody["A"])
+	}
+	if keyByBody["B"] != "Q2" {
+		t.Errorf("B's allocated key = %q, want Q2", keyByBody["B"])
+	}
+	if keyByBody["C"] != "Q7" {
+		t.Errorf("C's key (already set) = %q, want unchanged Q7", keyByBody["C"])
+	}
+}
