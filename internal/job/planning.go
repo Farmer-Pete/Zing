@@ -71,6 +71,15 @@ const (
 	gateOptionApprove = "a"
 	gateOptionReject  = "b"
 
+	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
+	// are the three option keys escalateTx's own linked question ever offers
+	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
+	// A round carrying replies and no option at all resolves as
+	// escalationChoiceBack (roundChoice's own default).
+	escalationChoiceRetry   = "a"
+	escalationChoiceBack    = "b"
+	escalationChoiceAbandon = "c"
+
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 
 	loopsExhaustedWhat = "raise machine.toml's planreview max_loops, or abandon"
@@ -112,6 +121,10 @@ const (
 	sealFailedWhy               = "the gate's approval pre-check found the plan cohort is not ready to seal"
 	reasonGateApproved          = "gate approved"
 	reasonGateApprovedAlready   = "gate approved (already sealed)"
+
+	// reasonAbandonedFmt is section 6.7 choice "c"'s own Reason text (design
+	// D10): "owner abandoned after <code>", the escalation's own Code.
+	reasonAbandonedFmt = "owner abandoned after %s"
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -215,10 +228,17 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 	switch {
 	case qp.Kind == response.QuestionKindGate:
 		return h.enterFromGateRound(ctx, t, d, round)
-	case round.ParentID != nil:
-		// TODO(task 13): resolve an escalation round per section 6.7's
-		// choice-by-origin table.
-		return store.HandlerCommit{}, ErrNoAction
+	case newest.ParentID != nil:
+		// The newest question's own parent id, not round.ParentID: a
+		// run-caused escalation's linked question carries the same run_id
+		// as the escalation itself (escalateTx's own RunID: ec.RunID), so
+		// AnsweredRounds groups it by run, the same as an ordinary
+		// classify/planning/planreview question batch, and round.ParentID
+		// (only ever filled for the no-run grouping, design section 4.5)
+		// stays nil. The per-message parent id escalateTx always sets,
+		// whichever grouping produced this round, is what actually tells an
+		// escalation-linked question apart from an ordinary one.
+		return h.enterFromEscalationRound(ctx, t, d, round, *newest.ParentID)
 	case round.Job == jobPlanningName:
 		return h.enterFromPlanningRound(ctx, t, d, round)
 	case round.Job == jobClassifyName:
@@ -1139,19 +1159,27 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 	return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
 }
 
-// gateRoundApproved reports whether round's sent answer chose option "a"
-// (design section 6.6): the newest sent answer naming that option wins, so a
-// round answered more than once (a corrected chip click before the batch
-// resolves) reads its final choice, not its first.
-func gateRoundApproved(round store.Round) bool {
-	approved := false
-	for i := range round.Answers {
+// newestChosenOption returns the option key of the newest sent answer among
+// answers that named one, "" when none did (design section 6.6, 6.7's own
+// "final choice wins" rule): a round answered more than once (a corrected
+// chip click before the batch resolves) reads its final choice, not its
+// first. Shared by gateRoundApproved (the gate's own a/b choice) and
+// roundChoice (an escalation round's a/b/c choice).
+func newestChosenOption(answers []store.MessageRow) string {
+	option := ""
+	for i := range answers {
 		var ap response.AnswerPayload
-		if err := json.Unmarshal(round.Answers[i].Payload, &ap); err == nil && ap.Option != nil {
-			approved = *ap.Option == gateOptionApprove
+		if err := json.Unmarshal(answers[i].Payload, &ap); err == nil && ap.Option != nil {
+			option = *ap.Option
 		}
 	}
-	return approved
+	return option
+}
+
+// gateRoundApproved reports whether round's sent answer chose option "a"
+// (design section 6.6).
+func gateRoundApproved(round store.Round) bool {
+	return newestChosenOption(round.Answers) == gateOptionApprove
 }
 
 // joinReplies renders replies' bodies newline-joined (design section 6.6,
@@ -1184,6 +1212,205 @@ func resumeOrFresh(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		return runClassify(ctx, t, d, extra, resolveIDs)
 	}
 	return runPlanningFirst(ctx, t, d, extra, resolveIDs)
+}
+
+// ---- 6.7 escalation resolution (task 13) ----------------------------------
+
+// roundChoice returns round's choice among escalationChoiceRetry,
+// escalationChoiceBack, and escalationChoiceAbandon (design section 6.7's
+// Resolve): the newest sent answer's chosen option, or escalationChoiceBack
+// when the round carries replies and no option at all ("a round with
+// replies and no option is choice b").
+func roundChoice(round store.Round) string {
+	if opt := newestChosenOption(round.Answers); opt != "" {
+		return opt
+	}
+	return escalationChoiceBack
+}
+
+// int64OrZero renders a nullable id for a log line as 0 when absent, never a
+// bare pointer (design section 9's "structured, never a raw output" rule):
+// escalation resolution's own session_id and run_id fields are both
+// sometimes nil (design section 6.7's RunID/SessionID table).
+func int64OrZero(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// enterFromEscalationRound is section 5.1 step 1(b) and section 6.7's own
+// Write/Resolve: escID is the newest question's own parent id, the
+// escalation message it answers. choice is the round's own a/b/c choice
+// (roundChoice); notes is the sent replies' bodies joined with "\n"
+// (joinReplies, reused from the gate's own reject path); errorText is the
+// escalation's what, why, and tried, newline-joined, the same "error" input
+// shape section 6.3's resume inputs describe. Choice c (abandon) resolves
+// every open or answered question and transitions straight to abandoned,
+// with no runtime call, regardless of origin; every other combination
+// routes through section 6.7's choice-by-origin table below.
+func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
+	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: %w", escID, err)
+	}
+	resolveIDs := questionIDs(round)
+	choice := roundChoice(round)
+	notes := joinReplies(round.Replies)
+	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
+	origin := response.EscalationOrigin(payload.Origin)
+	notesAndError := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+
+	var commit store.HandlerCommit
+	preserved := 0
+
+	switch {
+	case choice == escalationChoiceAbandon:
+		commit = abandonCommit(t, d, payload.Code)
+
+	case origin == response.EscalationOriginClassify:
+		// Both a and b classify fresh (design section 6.7: "kind is still
+		// unset", so there is no session to resume or restart instead).
+		commit, err = runClassify(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginPlanningFirst, origin == response.EscalationOriginPlanningResume,
+		origin == response.EscalationOriginSplit, origin == response.EscalationOriginNothingToDoClaims:
+		// Both a and b resume or fresh, identically (design section 6.7:
+		// "a retry | split, nothing_to_do_claims | same as b").
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginPlanreview && choice == escalationChoiceRetry:
+		commit, err = runPlanReview(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+	case origin == response.EscalationOriginPlanreview:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case (origin == response.EscalationOriginGateApprove || origin == response.EscalationOriginSeal) && choice == escalationChoiceRetry:
+		commit, err = gateApprove(ctx, t, d, resolveIDs)
+	case origin == response.EscalationOriginGateApprove, origin == response.EscalationOriginSeal:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginCapResumes:
+		commit, preserved, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs, int64OrZero(payload.SessionID))
+
+	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
+		findings, findErr := outstandingFloorFindings(ctx, t, d)
+		if findErr != nil {
+			return store.HandlerCommit{}, findErr
+		}
+		commit, err = resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, resolveIDs)
+	case origin == response.EscalationOriginCapLoops:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginCapBudget:
+		// Both a and b re-escalate wall_clock (design section 6.7).
+		commit = recapBudgetEscalation(t, d, resolveIDs)
+
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: unrecognized origin %q", escID, payload.Origin)
+	}
+	if err != nil {
+		return commit, err
+	}
+
+	slog.Info("escalation resolved", "ticket_id", t.ID, "session_id", int64OrZero(payload.SessionID),
+		"run_id", int64OrZero(escMsg.RunID), "code", payload.Code, "origin", payload.Origin,
+		"choice", choice, "preserved_rounds", preserved)
+	return commit, nil
+}
+
+// abandonCommit is section 6.7 choice "c" (design D10): every open or
+// answered question on the ticket resolves (ResolveAll), the ticket
+// transitions straight to abandoned, and no runtime call is made.
+func abandonCommit(t store.Ticket, d Deps, code string) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.ResolveAll = true
+	c.Next = stateAbandoned
+	c.Reason = fmt.Sprintf(reasonAbandonedFmt, code)
+	return c
+}
+
+// recapBudgetEscalation is section 6.7's cap_budget retry/back row (design
+// section 6.7): re-escalate wall_clock in this same commit, with the
+// unchanged What/Why text budgetEscalationCommit itself uses, resolving the
+// round that led here.
+func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// outstandingFloorFindings reads the current cohort's planreview artifact
+// and returns its at-or-below-floor survivors (design section 6.7's
+// cap_loops retry row): the same set maybeResumeFloorFindings itself
+// resumes with (section 5.1 step 7), independent of whether that step's own
+// "live pending marker" check would still find one live -- choosing retry on
+// the cap_loops escalation is itself the trigger. nil, nil when there is no
+// cohort or no planreview artifact at its version yet (unreachable in
+// practice: a cap_loops escalation cannot exist without one).
+func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
+	for _, f := range payload.Findings {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow = append(atOrBelow, f)
+		}
+	}
+	return atOrBelow, nil
+}
+
+// resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row
+// (design D17): the exhausted session guarantees resumeOrFresh's own
+// SessionOpen branch is unreachable, so this calls the planning first turn
+// (section 6.2) directly, carrying notes, error, and, when the exhausted
+// session preserved any answered-unresolved planning round of its own
+// (entry step 1(c), 3: "preserving any answered round"), every one of them
+// combined into a single prompt.Answers input, in AnsweredRounds' own newest-
+// first order. preserved is how many such older rounds this call folds in
+// and resolves alongside the escalation round itself (resolveIDs), the
+// "escalation resolved" log line's own preserved_rounds field.
+func resolveCapResumesEscalation(ctx context.Context, t store.Ticket, d Deps, notes, errorText string, resolveIDs []int64, sessionID int64) (store.HandlerCommit, int, error) {
+	allRounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: planning: cap_resumes retry: answered rounds: %w", err)
+	}
+
+	var parts []string
+	preserved := append([]int64{}, resolveIDs...)
+	for _, r := range allRounds {
+		if r.Job != jobPlanningName || r.SessionID == nil || *r.SessionID != sessionID {
+			continue
+		}
+		rendered, renderErr := renderRoundAnswers(r)
+		if renderErr != nil {
+			return store.HandlerCommit{}, 0, renderErr
+		}
+		parts = append(parts, rendered)
+		preserved = append(preserved, questionIDs(r)...)
+	}
+
+	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+	if len(parts) > 0 {
+		extra = append(extra, prompt.Answers(strings.Join(parts, "\n\n")))
+	}
+	commit, err := runPlanningFirst(ctx, t, d, extra, preserved)
+	return commit, len(parts), err
 }
 
 // gateApprove is section 6.6's approve pre-check, in exact branch order

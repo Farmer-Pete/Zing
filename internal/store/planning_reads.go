@@ -13,12 +13,15 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"zing/internal/response"
 )
 
 // msgTypeUpdate is the "update" message type: the system-authored markers
@@ -626,4 +629,22 @@ func (s *Store) LiveMarker(ctx context.Context, ticketID int64, pending, deliver
 		return MessageRow{}, false, nil
 	}
 	return m, true, nil
+}
+
+// EscalationByID reads the escalation message with id and decodes its
+// EscalationPayload (design section 4.5, 6.7 Resolve): the entry step 1(b)
+// read that turns an escalation-linked question's own parent id (the
+// escalation message's id) into the Code, What, Why, Tried, SessionID, and
+// Origin the owner's answered round resolves. A wrapped sql.ErrNoRows for an
+// unknown id, exactly as GetMessage's own error.
+func (s *Store) EscalationByID(ctx context.Context, id int64) (MessageRow, response.EscalationPayload, error) {
+	m, err := s.GetMessage(ctx, id)
+	if err != nil {
+		return MessageRow{}, response.EscalationPayload{}, fmt.Errorf("escalation %d: %w", id, err)
+	}
+	var payload response.EscalationPayload
+	if unmarshalErr := json.Unmarshal(m.Payload, &payload); unmarshalErr != nil {
+		return MessageRow{}, response.EscalationPayload{}, fmt.Errorf("escalation %d: unmarshal payload: %w", id, unmarshalErr)
+	}
+	return m, payload, nil
 }

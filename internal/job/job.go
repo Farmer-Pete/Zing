@@ -31,6 +31,7 @@ const (
 	stateJudging   = "judging"
 	stateShipping  = "shipping"
 	stateDone      = "done"
+	stateAbandoned = "abandoned"
 )
 
 // Deps is what a handler needs to do its work and build a commit: read-only
@@ -119,7 +120,7 @@ func Validate(m *machine.Machine, reg map[string]Handler) error {
 // states a transition (a commit with Next set) may legally target.
 var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
-	statePlanning:  {statePlanning, stateBuilding, stateDone},
+	statePlanning:  {statePlanning, stateBuilding, stateDone, stateAbandoned},
 	stateBuilding:  {stateReviewing},
 	stateReviewing: {stateJudging},
 	stateJudging:   {stateShipping},
