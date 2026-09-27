@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -466,8 +467,8 @@ func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
 // TestLatestSession_EmptyExternalIDIsAnError proves F035's schema guard: a
 // session row can never carry external_id = "" (empty is not "no id yet",
 // that is NULL, and it is not a valid runtime id either), so migration
-// 0003's CHECK on sessions rejects the raw INSERT before LatestSession ever
-// gets a chance to read such a row back.
+// 0003's BEFORE INSERT trigger on sessions rejects the raw INSERT before
+// LatestSession ever gets a chance to read such a row back.
 func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
@@ -477,7 +478,29 @@ func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
 		`INSERT INTO sessions (ticket_id, job, runtime, external_id) VALUES (?, ?, 'fake', '')`,
 		ticketID, testStatePlanning)
 	if err == nil {
-		t.Fatal("insert session with external_id = \"\": want a CHECK constraint error, got nil")
+		t.Fatal("insert session with external_id = \"\": want a trigger RAISE(ABORT) error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("insert session with external_id = \"\": err = %v, want it to mention %q", err, "must not be empty")
+	}
+}
+
+// TestLatestSession_UpdateToEmptyExternalIDIsAnError proves the BEFORE
+// UPDATE OF external_id trigger fires too: setting external_id = "" on an
+// existing session (NULL going in, same as a first-turn session before the
+// runtime has echoed one back) is rejected the same way an insert is.
+func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning) // external_id NULL
+
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET external_id = '' WHERE id = ?`, sessionID)
+	if err == nil {
+		t.Fatal("update session external_id to \"\": want a trigger RAISE(ABORT) error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("update session external_id to \"\": err = %v, want it to mention %q", err, "must not be empty")
 	}
 }
 

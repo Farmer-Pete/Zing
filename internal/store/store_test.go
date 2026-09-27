@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -791,11 +790,10 @@ func TestMigration0002_BackfillsExistingRows(t *testing.T) {
 	}
 }
 
-// TestMigration0003_ExternalIDCheckExists proves migration 0003 rebuilt
-// sessions with the CHECK (external_id IS NULL OR external_id <> ”) (F035),
-// by reading the table's own SQL back from sqlite_master, and proves the
-// rebuild kept the NULL case writable: a session with no external_id yet
-// must still insert.
+// TestMigration0003_ExternalIDCheckExists proves migration 0003 installed
+// both external_id-nonempty triggers (F035) on sessions, by reading them
+// back from sqlite_master, and proves the triggers still leave the NULL
+// case writable: a session with no external_id yet must still insert.
 func TestMigration0003_ExternalIDCheckExists(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -806,13 +804,14 @@ func TestMigration0003_ExternalIDCheckExists(t *testing.T) {
 	defer func() { _ = s.Close() }()
 	seedProjectAndTicket(t, s)
 
-	var createSQL string
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").Scan(&createSQL); err != nil {
-		t.Fatalf("read sessions table SQL: %v", err)
-	}
-	if !strings.Contains(createSQL, "external_id <> ''") {
-		t.Errorf("sessions table SQL = %q, want a CHECK containing external_id <> ''", createSQL)
+	for _, trigger := range []string{"sessions_external_id_nonempty_insert", "sessions_external_id_nonempty_update"} {
+		var name string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'sessions' AND name = ?", trigger).
+			Scan(&name)
+		if err != nil {
+			t.Errorf("trigger %s: %v", trigger, err)
+		}
 	}
 
 	if _, err := s.db.ExecContext(ctx,
