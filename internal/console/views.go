@@ -387,6 +387,33 @@ const (
 	msgTypeAnswer     = "answer"
 )
 
+// msgTypeUpdate mirrors job.msgTypeUpdate (internal/job/planning.go), the
+// same package-local-copy pattern as the msgType* block above: job's own
+// constant is unexported, and there is no shared package to import it from,
+// so this copy and job's must change together.
+const msgTypeUpdate = "update"
+
+// updateMarker* mirror the literal prefixes internal/job/planning.go writes
+// into type="update" message bodies -- planreviewPendingMarker and
+// planreviewDeliveredMarker's "planreview v<N> pending"/"...delivered",
+// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix's
+// "validation errors pending/delivered run <id>[...]",
+// invalidOutputCommit's "response invalid run <id>\n<reason>", and
+// store.CountSealMismatches' "seal mismatch cohort <id>" -- so displayBody
+// can recognize them and render an owner-facing sentence instead of the raw
+// bookkeeping body (F012). console cannot import job's own unexported
+// literals -- there is no shared package for the two to depend on -- so
+// this copy and planning.go's originals must change together.
+const (
+	updateMarkerPlanreviewPrefix          = "planreview v"
+	updateMarkerPlanreviewPendingSuffix   = " pending"
+	updateMarkerPlanreviewDeliveredSuffix = " delivered"
+	updateMarkerValidationPendingPrefix   = "validation errors pending run "
+	updateMarkerValidationDeliveredPrefix = "validation errors delivered run "
+	updateMarkerResponseInvalidPrefix     = "response invalid run "
+	updateMarkerSealMismatchPrefix        = "seal mismatch cohort "
+)
+
 // draftMessageState mirrors store's own unexported draft-state literal
 // (store.DraftInput's SaveDraft writes state="draft", console_writes.go);
 // this package needs its own copy of that one literal to recognize an
@@ -561,9 +588,66 @@ func displayBody(m *store.MessageRow) string {
 		return escalationLine(m)
 	case msgTypeAnswer:
 		return answerLine(m)
+	case msgTypeUpdate:
+		return updateLine(m)
 	default:
 		return m.Body
 	}
+}
+
+// updateLine recognizes the known planning-bookkeeping markers a type=
+// "update" message's Body carries (F012: the owner should never read
+// "planreview v3 pending" or a raw response.PathError line) and returns an
+// owner-facing sentence instead. A body that matches none of the known
+// updateMarker* prefixes is not a marker this view knows about, so it falls
+// through unchanged, the same defensive fallback stateLine, escalationLine,
+// and answerLine already use for a payload they cannot decode.
+func updateLine(m *store.MessageRow) string {
+	body := m.Body
+	switch {
+	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
+		return "Plan review found only minor findings. Planning resumes automatically to address them."
+	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
+		return "Planning resumed with the review findings."
+	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
+		return validationErrorsLine(body)
+	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
+		return "The agent received the check results."
+	case strings.HasPrefix(body, updateMarkerResponseInvalidPrefix):
+		return "The agent's last response could not be used. Zing retries once."
+	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
+		return "The scenario set changed before approval. Zing re-reads it on the next tick."
+	default:
+		return body
+	}
+}
+
+// validationErrorsLine renders a "validation errors pending run <id>"
+// body's first line as one owner-facing sentence, then one line per
+// response.PathError the run reported (formatReadyErrors,
+// internal/job/planning.go: each already its own Error() shape, "path:
+// msg"), rewritten as "Field <path>: <message>" by cutting on the first
+// ": " -- a PathError's message never contains that substring, since it is
+// generated from a small fixed set of English reasons (checkReady,
+// checkScenarioShape), not user- or model-supplied text.
+func validationErrorsLine(body string) string {
+	_, rest, hasErrors := strings.Cut(body, "\n")
+	lines := []string{"The plan did not pass its final checks. Zing is asking the agent to revise it."}
+	if !hasErrors {
+		return lines[0]
+	}
+	for line := range strings.SplitSeq(rest, "\n") {
+		if line == "" {
+			continue
+		}
+		path, msg, ok := strings.Cut(line, ": ")
+		if !ok {
+			lines = append(lines, line)
+			continue
+		}
+		lines = append(lines, "Field "+path+": "+msg)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // answerLine decodes a sent "answer" message's payload into the text its
