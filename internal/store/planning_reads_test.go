@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -915,5 +916,41 @@ func TestLiveMarker_DeliveredThenNewerPendingIsLive(t *testing.T) {
 	}
 	if !ok {
 		t.Error("LiveMarker with a newer pending after an older delivered: ok = false, want true")
+	}
+}
+
+func TestLiveMarker_OlderDeliveredDoesNotCloseNewerPendingOfDifferentRun(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	insertUpdateMarker(t, s, ticketID, "validation errors pending run 1\nerr")
+	insertUpdateMarker(t, s, ticketID, "validation errors pending run 2\nerr")
+	insertUpdateMarker(t, s, ticketID, "validation errors delivered run 1")
+
+	m, ok, err := s.LiveMarker(ctx, ticketID, "validation errors pending", "validation errors delivered")
+	if err != nil {
+		t.Fatalf("LiveMarker: %v", err)
+	}
+	if !ok {
+		t.Fatal("LiveMarker: ok = false, want true")
+	}
+	if !strings.HasPrefix(m.Body, "validation errors pending run 2") {
+		t.Errorf("Body = %q, want prefix %q", m.Body, "validation errors pending run 2")
+	}
+}
+
+func TestLiveMarker_DeliveredForSameRunClosesPending(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	insertUpdateMarker(t, s, ticketID, "validation errors pending run 1\nerr")
+	insertUpdateMarker(t, s, ticketID, "validation errors delivered run 1")
+
+	_, ok, err := s.LiveMarker(ctx, ticketID, "validation errors pending", "validation errors delivered")
+	if err != nil {
+		t.Fatalf("LiveMarker: %v", err)
+	}
+	if ok {
+		t.Error("LiveMarker after delivered for the same run: ok = true, want false")
 	}
 }

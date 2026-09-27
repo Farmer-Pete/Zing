@@ -612,3 +612,29 @@ func TestCodex_InvalidOutput(t *testing.T) {
 		})
 	}
 }
+
+// TestCodex_MissingOutputFileIsInvalidOutput covers F026: codex exiting 0
+// without ever writing the -o file is a readCapped failure that is not
+// ErrOutputTooLarge, so Run must map it to *InvalidOutputError (design
+// section 4.1's closed Run contract) rather than a bare wrapped error.
+func TestCodex_MissingOutputFileIsInvalidOutput(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "no_output_file")
+
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("err = %v, want *InvalidOutputError", err)
+	}
+	if invalidErr.Reason != reasonNoZingElement {
+		t.Errorf("Reason = %q, want %q", invalidErr.Reason, reasonNoZingElement)
+	}
+	if res.Log == "" {
+		t.Error("Log is empty, want the read-output-file error detail")
+	}
+}

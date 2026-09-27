@@ -300,7 +300,8 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if sessionID == "" {
 		uuid, err := newSessionUUID()
 		if err != nil {
-			return RunResult{}, err
+			slog.Error("claude run: new session uuid", "job", req.Job, "error", err)
+			return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 		}
 		newUUID = uuid
 		sessionID = uuid
@@ -308,7 +309,8 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	argv, err := claudeArgv(req, newUUID)
 	if err != nil {
-		return RunResult{}, err
+		slog.Error("claude run: build argv", "job", req.Job, "error", err)
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
 
 	res, runErr := c.run(ctx, req, argv, sessionID, start)
@@ -365,7 +367,8 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 
 	var cr claudeResult
 	if err := json.Unmarshal(stdout.bytes(), &cr); err != nil {
-		return res, fmt.Errorf("runtime: claude: decode output: %w", err)
+		res.Log = fmt.Sprintf("decode output: %v", err)
+		return res, &InvalidOutputError{Reason: reasonNoZingElement}
 	}
 
 	resp, logText, ferr := parseFinalMessage(cr.Result, req.Job)

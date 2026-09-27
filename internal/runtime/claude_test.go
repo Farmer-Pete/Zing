@@ -476,3 +476,34 @@ func TestClaude_StderrMetadata(t *testing.T) {
 		t.Error("Log retained raw stderr content")
 	}
 }
+
+// TestClaude_DecodeErrorIsInvalidOutput covers F026: a clean exit whose
+// stdout is not valid JSON must return *InvalidOutputError (design section
+// 4.1's closed Run contract), not a bare wrapped error, so routeFailure
+// (internal/job/planning.go) can terminalize the run instead of orphaning
+// it.
+func TestClaude_DecodeErrorIsInvalidOutput(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	if err := os.WriteFile(resultPath, []byte("not json at all"), 0o600); err != nil {
+		t.Fatalf("write result file: %v", err)
+	}
+	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE="+resultPath)
+
+	c := NewClaude(fakeClaudeScript)
+	res, err := c.Run(context.Background(), req)
+
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("err = %v, want *InvalidOutputError", err)
+	}
+	if invalidErr.Reason != reasonNoZingElement {
+		t.Errorf("Reason = %q, want %q", invalidErr.Reason, reasonNoZingElement)
+	}
+	if res.Log == "" {
+		t.Error("Log is empty, want the decode error detail")
+	}
+}

@@ -602,10 +602,17 @@ func (s *Store) PlanReviewAt(ctx context.Context, ticketID int64, version int) (
 }
 
 // LiveMarker returns the newest "update" message whose body starts with
-// pending, provided no "update" message whose body starts with delivered
-// carries a greater id (design section 5.1 steps 5 and 7): ok is false when
-// there is no pending marker, or when a later delivered marker has already
-// closed it out.
+// pending, provided no "update" message whose body EQUALS delivered plus
+// that pending's own tail carries a greater id (design section 5.1 steps 5
+// and 7): ok is false when there is no pending marker, or when a later
+// delivered marker for the SAME run has already closed it out.
+//
+// The tail is whatever follows the pending prefix on the pending body's
+// first line: "" for planreview markers (prefix and body coincide), " run
+// <id>" for validation-errors markers (design section 5.1's discriminator
+// lives in the suffix). Matching delivered+tail by exact equality, rather
+// than delivered+"%" by LIKE, is what keeps an older "delivered run A" from
+// closing a newer "pending run B": the two runs' tails never compare equal.
 func (s *Store) LiveMarker(ctx context.Context, ticketID int64, pending, delivered string) (MessageRow, bool, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+messageColumns+` FROM messages WHERE ticket_id = ? AND type = ? AND body LIKE ? ORDER BY id DESC LIMIT 1`,
@@ -618,10 +625,14 @@ func (s *Store) LiveMarker(ctx context.Context, ticketID int64, pending, deliver
 		return MessageRow{}, false, fmt.Errorf("live marker for ticket %d: %w", ticketID, err)
 	}
 
+	firstLine, _, _ := strings.Cut(m.Body, "\n")
+	tail := strings.TrimPrefix(firstLine, pending)
+	deliveredTarget := delivered + tail
+
 	var laterDelivered int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ? AND body LIKE ? AND id > ?`,
-		ticketID, msgTypeUpdate, delivered+"%", m.ID).Scan(&laterDelivered)
+		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ? AND body = ? AND id > ?`,
+		ticketID, msgTypeUpdate, deliveredTarget, m.ID).Scan(&laterDelivered)
 	if err != nil {
 		return MessageRow{}, false, fmt.Errorf("live marker for ticket %d: %w", ticketID, err)
 	}

@@ -116,6 +116,18 @@ big_output)
   head -c 6291456 /dev/zero | tr '\0' 'a' > "$outfile"
   exit 0
   ;;
+no_output_file)
+  # Codex exits 0 and streams a normal event log, but the -o file Run
+  # pre-created is gone by the time Run reads it back (F026): readCapped's
+  # os.Open then fails for a reason other than ErrOutputTooLarge, which Run
+  # must map to *InvalidOutputError, not a bare wrapped error. Removing the
+  # file, rather than just leaving it empty, is what actually reaches
+  # readCapped's error branch -- an empty file already decodes as the
+  # typed "no zing element" InvalidOutputError the unmodified code produces.
+  printf '%s\n' "$default_events"
+  rm -f "$outfile"
+  exit 0
+  ;;
 big_stderr)
   printf '%s\n' "$default_events"
   printf '%s' "$default_result" > "$outfile"

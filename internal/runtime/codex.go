@@ -54,6 +54,10 @@ func (c Codex) resolveBin() string {
 // with -c sandbox_mode="read-only" instead. The forbidden
 // --dangerously-bypass-approvals-and-sandbox flag (real, and present in both
 // --help outputs) never appears.
+//
+// req.Tools is deliberately not read here: codex exec has no per-tool
+// allowlist flag, so the read-only sandbox above is the control instead
+// (PKG7-PLAN.md section 4).
 func codexArgv(req RunRequest, outPath string) []string {
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	if req.SessionID == "" {
@@ -184,7 +188,8 @@ func (c Codex) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	dir, outPath, err := codexOutputDir()
 	if err != nil {
-		return RunResult{}, err
+		slog.Error("codex run: output dir", "job", req.Job, "error", err)
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
 	defer func() {
 		if rmErr := os.RemoveAll(dir); rmErr != nil {
@@ -258,7 +263,8 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		if errors.Is(err, ErrOutputTooLarge) {
 			return res, ErrOutputTooLarge
 		}
-		return res, err
+		res.Log = err.Error()
+		return res, &InvalidOutputError{Reason: reasonNoZingElement}
 	}
 
 	resp, logText, ferr := parseFinalMessage(string(output), req.Job)
