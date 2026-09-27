@@ -119,7 +119,7 @@ func Validate(m *machine.Machine, reg map[string]Handler) error {
 // states a transition (a commit with Next set) may legally target.
 var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
-	statePlanning:  {statePlanning, stateBuilding},
+	statePlanning:  {statePlanning, stateBuilding, stateDone},
 	stateBuilding:  {stateReviewing},
 	stateReviewing: {stateJudging},
 	stateJudging:   {stateShipping},

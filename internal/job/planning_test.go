@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	zing "zing"
 	"zing/internal/job"
 	"zing/internal/response"
 	"zing/internal/runtime"
@@ -174,7 +176,7 @@ func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planning (classify) Run: %v", err)
 	}
-	if commit.SetKind == nil || (*commit.SetKind != "bug" && *commit.SetKind != testKindFeature) {
+	if commit.SetKind == nil || (*commit.SetKind != testKindBug && *commit.SetKind != testKindFeature) {
 		t.Fatalf("commit.SetKind = %v, want bug or feature", commit.SetKind)
 	}
 	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != *commit.SetKind {
@@ -270,6 +272,52 @@ func mustPlanning(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) s
 		t.Fatalf("planning Run: %v", err)
 	}
 	return commit
+}
+
+// ---- 6.2 first turn: the prompt file follows the classified kind ----------
+
+// TestPlanningHandler_FirstTurn_PromptFileFollowsKind proves section 6.2's
+// own prompt selection (task 8, part 1): runPlanningFirst picks
+// machine.Jobs["planning"].Prompt.Bug for a bug-kind ticket and .Feature for
+// a feature-kind one, and prompt.Assemble puts JobPrompt first with nothing
+// ahead of it (design section 4.2's assembly order), so the pinned prompt
+// file's own text reaches the runtime as the assembled prompt's exact
+// prefix.
+func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome response.Outcome
+		asset   string
+	}{
+		{"bug", response.OutcomeBug, "prompts/planning-bug.md"},
+		{"feature", response.OutcomeFeature, "prompts/planning-feature.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newJobTestStore(t)
+			ticketID := seedQueuedTicket(t, s)
+			advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
+
+			rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "planning-sess")}}}
+			rt := byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{
+				response.JobClassify: &scriptedRuntime{t: t, steps: []scriptedStep{classifyResult(tc.outcome, "classify-sess")}},
+				response.JobPlanning: rec,
+			}}
+
+			apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claimWithRuntimes(t, s, rt, ticketID), ticketID)) // classify
+			if _, err := runPlanning(t, s, claimWithRuntimes(t, s, rt, ticketID), ticketID); err != nil {               // first turn
+				t.Fatalf("planning first turn: %v", err)
+			}
+
+			want, err := fs.ReadFile(zing.Assets, tc.asset)
+			if err != nil {
+				t.Fatalf("read asset %s: %v", tc.asset, err)
+			}
+			if !strings.HasPrefix(rec.lastReq.Prompt, string(want)) {
+				t.Fatalf("first-turn prompt for kind %s does not start with %s's own text:\n%s", tc.name, tc.asset, rec.lastReq.Prompt)
+			}
+		})
+	}
 }
 
 // ---- resume: fenced answers, resumes bumped, round resolved ---------------
@@ -376,6 +424,228 @@ func TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning(t *te
 	final := getTicket(t, s, ticketID)
 	if final.State != testStatePlanning || final.WaitingOn != nil {
 		t.Errorf("final ticket = (state=%q, waiting_on=%v), want (planning, nil): the review tick picks up the cohort next tick", final.State, final.WaitingOn)
+	}
+}
+
+// ---- 6.8 nothing_to_do: accept only every code claim false ----------------
+
+// nothingToDoResponse builds a *response.NothingToDoResponse naming job
+// planning and outcome nothing_to_do, the shape a scriptedRuntime step hands
+// back in place of a real agent's XML document (design section 6.8, task 8).
+func nothingToDoResponse(claims []response.Claim, notes string) *response.NothingToDoResponse {
+	return &response.NothingToDoResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeNothingToDo,
+		Claims: claims, Notes: notes,
+	}
+}
+
+// answeredRoundReadyForResume advances a fresh ticket through classify (real
+// fixture) and the first turn (real fixture, posts Q1), answers Q1, and
+// returns rt, the same runtime.Fake every prior call used, so the caller's
+// own resume call can still reuse the session it minted.
+func answeredRoundReadyForResume(t *testing.T, s *store.Store, ticketID int64) *runtime.Fake {
+	t.Helper()
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
+	answerFixtureQuestion(t, s, ticketID)
+	return rt
+}
+
+// TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone proves
+// design section 6.8's nothing_to_do accept row (task 8): a nothing_to_do
+// outcome naming at least one code claim, every one of them false,
+// terminalizes the run, transitions the ticket straight to done, and sets
+// TrackerEffect so the dispatcher posts tracker.NothingToDoComment after the
+// commit (design D12) -- proved end to end through dispatch.Tick by
+// internal/dispatch's own TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment.
+func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	claims := []response.Claim{
+		{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":1", Text: "the endpoint already returns hello"},
+		{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "a test already covers it"},
+	}
+	const notes = "the described behavior already exists and is already tested"
+	resumeRT := readyScriptedRuntime(t, readyStep(nothingToDoResponse(claims, notes), "ntd-false-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (nothing_to_do, all false) Run: %v", err)
+	}
+	if commit.Next != testStateDone {
+		t.Errorf("commit.Next = %q, want done", commit.Next)
+	}
+	if commit.Reason != "nothing to do" {
+		t.Errorf("commit.Reason = %q, want %q", commit.Reason, "nothing to do")
+	}
+	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != string(response.OutcomeNothingToDo) {
+		t.Fatalf("commit.Runs = %+v, want one terminalized run with outcome nothing_to_do", commit.Runs)
+	}
+	if commit.Session == nil {
+		t.Error("commit.Session is nil, want the resumed session's id recorded")
+	}
+	if len(commit.ResolveQuestions) != 1 {
+		t.Errorf("commit.ResolveQuestions = %v, want the resolved round's one question id", commit.ResolveQuestions)
+	}
+	if commit.TrackerEffect == nil {
+		t.Fatal("commit.TrackerEffect is nil, want {Ref: t.TrackerRef, Notes: resp.Notes}")
+	}
+	if commit.TrackerEffect.Ref != testRefFake1 || commit.TrackerEffect.Notes != notes {
+		t.Errorf("commit.TrackerEffect = %+v, want {Ref: %q, Notes: %q}", commit.TrackerEffect, testRefFake1, notes)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateDone {
+		t.Errorf("final ticket state = %q, want done", final.State)
+	}
+}
+
+// TestPlanningHandler_NothingToDo_TrueCodeClaimEscalates proves the same
+// row's escalation half: any code claim verified true cannot prove there is
+// nothing to build, so the handler escalates nothing_to_do_with_true_claims
+// naming the run, with the exact count of true claims in What, and leaves
+// the ticket waiting on the owner rather than transitioning it.
+func TestPlanningHandler_NothingToDo_TrueCodeClaimEscalates(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	claims := []response.Claim{
+		{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictTrue, Evidence: readyClaimEvidencePath + ":1", Text: "still returns the wrong status"},
+		{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "the other half already works"},
+	}
+	resumeRT := readyScriptedRuntime(t, readyStep(nothingToDoResponse(claims, "one part still needs the fix"), "ntd-true-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (nothing_to_do, true claim) Run: %v", err)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (stays in planning)", commit.Next)
+	}
+	if commit.TrackerEffect != nil {
+		t.Error("commit.TrackerEffect is set, want nil (no tracker comment on an escalation)")
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want nothing_to_do_with_true_claims")
+	}
+	if commit.Escalation.RunID == nil {
+		t.Error("commit.Escalation.RunID is nil, want the run that returned nothing_to_do")
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodeNothingToDoWithTrueClaims) || payload.Origin != string(response.EscalationOriginNothingToDoClaims) {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (nothing_to_do_with_true_claims, nothing_to_do_claims)", payload.Code, payload.Origin)
+	}
+	const wantWhat = "1 code claim(s) verified true"
+	if payload.What != wantWhat {
+		t.Errorf("payload.What = %q, want %q", payload.What, wantWhat)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.State != testStatePlanning {
+		t.Errorf("final ticket state = %q, want planning", final.State)
+	}
+}
+
+// TestPlanningHandler_NothingToDo_NoCodeClaimsEscalates proves the same
+// escalation fires when the response names no code claim at all (only env
+// claims, or none): with nothing to check, the run cannot prove there is
+// nothing to build either, so What names the zero case by name rather than
+// counting a true claim that does not exist.
+func TestPlanningHandler_NothingToDo_NoCodeClaimsEscalates(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	claims := []response.Claim{
+		{Kind: response.ClaimKindEnv, Verdict: response.ClaimVerdictFalse, Evidence: "", Text: "no environment change is needed"},
+	}
+	resumeRT := readyScriptedRuntime(t, readyStep(nothingToDoResponse(claims, "nothing needs doing"), "ntd-none-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (nothing_to_do, no code claims) Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want nothing_to_do_with_true_claims")
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodeNothingToDoWithTrueClaims) {
+		t.Errorf("payload.Code = %q, want nothing_to_do_with_true_claims", payload.Code)
+	}
+	const wantWhat = "no code claims to verify"
+	if payload.What != wantWhat {
+		t.Errorf("payload.What = %q, want %q", payload.What, wantWhat)
+	}
+	if commit.TrackerEffect != nil {
+		t.Error("commit.TrackerEffect is set, want nil (no tracker comment on an escalation)")
+	}
+}
+
+// ---- 6.8 children: escalate split_unsupported ------------------------------
+
+// TestPlanningHandler_Children_EscalatesSplitUnsupported proves design D6:
+// planning's children outcome is not yet built, so it always escalates
+// split_unsupported naming the run that returned it, and leaves the ticket
+// waiting on the owner rather than transitioning it.
+func TestPlanningHandler_Children_EscalatesSplitUnsupported(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	children := &response.ChildrenResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeChildren,
+		Children: []response.Child{
+			{Key: "c1", Title: "Part one", Body: "build the read path"},
+			{Key: "c2", Title: "Part two", Body: "build the write path"},
+		},
+		Notes: "the two halves share no code",
+	}
+	resumeRT := readyScriptedRuntime(t, readyStep(children, "children-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (children) Run: %v", err)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (stays in planning)", commit.Next)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want split_unsupported")
+	}
+	if commit.Escalation.RunID == nil {
+		t.Error("commit.Escalation.RunID is nil, want the run that returned children")
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodeSplitUnsupported) || payload.Origin != string(response.EscalationOriginSplit) {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (split_unsupported, split)", payload.Code, payload.Origin)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.State != testStatePlanning {
+		t.Errorf("final ticket state = %q, want planning", final.State)
 	}
 }
 
@@ -1876,4 +2146,110 @@ func TestPlanningHandler_ReviewTick_D14_InvalidThenValidThenInvalidDoesNotEscala
 		t.Errorf("third invalid commit.Escalation = %+v, want nil (the valid run in between reset the chain)", thirdCommit.Escalation)
 	}
 	apply(t, s, getTicket(t, s, ticketID), thirdCommit)
+}
+
+// ---- caps: the agent budget, checked identically at every runJob call -----
+
+// claimWithBudget is claimWithRuntimes with Budget zeroed out (already
+// exhausted: agentSeconds*time.Second >= 0 on the very first call) and
+// Reserve wrapped to fail the test if runJob's budget check (design section
+// 4.6 step 4, which runs before step 7's Reserve) ever lets a call through
+// to it: an exhausted budget must refuse the call with no run ever reserved
+// (design section 6.8's "none" Run column for ErrBudget).
+func claimWithBudget(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job.Deps {
+	t.Helper()
+	deps := claimWithRuntimes(t, s, rt, ticketID)
+	deps.Budget = 0
+	deps.Reserve = func(context.Context, int64, store.SessionUpsert, string) (store.Reserved, error) {
+		t.Fatal("Reserve was called, want the exhausted budget to refuse the call first")
+		return store.Reserved{}, nil
+	}
+	return deps
+}
+
+// assertWallClockEscalation asserts commit is the one shape every runJob
+// caller's ErrBudget maps to, identically, through routeFailure and
+// budgetEscalationCommit (design section 6.8, task 8 part 4): wall_clock,
+// cap_budget, a nil RunID (no run was ever reserved), the fixed What text,
+// and waiting on questions.
+func assertWallClockEscalation(t *testing.T, commit store.HandlerCommit) {
+	t.Helper()
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want wall_clock")
+	}
+	if commit.Escalation.RunID != nil {
+		t.Errorf("commit.Escalation.RunID = %v, want nil (no run was ever reserved)", commit.Escalation.RunID)
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodeWallClock) || payload.Origin != string(response.EscalationOriginCapBudget) {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (wall_clock, cap_budget)", payload.Code, payload.Origin)
+	}
+	const wantWhat = "raise budget.agent_minutes_per_ticket or abandon"
+	if payload.What != wantWhat {
+		t.Errorf("payload.What = %q, want %q", payload.What, wantWhat)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+}
+
+// TestPlanningHandler_Budget_ExhaustedBeforeClassifyEscalatesWallClock,
+// ...BeforeFirstTurn..., ...BeforeResume..., and ...BeforeReviewTick... prove
+// every one of runJob's four callers (classify, the planning first turn, a
+// resume, and the review tick) maps ErrBudget through the same helper
+// (task 8 part 4): the escalation is identical no matter which step ran out
+// of budget, and no run is ever reserved for it.
+
+func TestPlanningHandler_Budget_ExhaustedBeforeClassifyEscalatesWallClock(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
+
+	commit, err := runPlanning(t, s, claimWithBudget(t, s, fakeRuntime(t), ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (classify, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, commit)
+}
+
+func TestPlanningHandler_Budget_ExhaustedBeforeFirstTurnEscalatesWallClock(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify sets kind
+
+	commit, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (first turn, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, commit)
+}
+
+func TestPlanningHandler_Budget_ExhaustedBeforeResumeEscalatesWallClock(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := answeredRoundReadyForResume(t, s, ticketID)
+
+	commit, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (resume, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, commit)
+}
+
+func TestPlanningHandler_Budget_ExhaustedBeforeReviewTickEscalatesWallClock(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := answeredRoundReadyForResume(t, s, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // resume: stores the ready cohort
+
+	commit, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (review tick, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, commit)
 }

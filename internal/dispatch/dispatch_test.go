@@ -1975,6 +1975,94 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 	}
 }
 
+// planningNothingToDoRuntime lets classify and the planning first turn run
+// for real against the checked-in fixtures (so the ticket gets a real kind
+// and a real Q1 to answer), then swaps planning's second call (the resume)
+// for a hand-built nothing_to_do response, so a test can drive the real
+// planning handler's own design section 6.8 nothing_to_do row (task 8)
+// through a real dispatch.Tick.
+type planningNothingToDoRuntime struct {
+	t             *testing.T
+	fake          *runtime.Fake
+	resp          response.Response
+	planningCalls int
+}
+
+func (r *planningNothingToDoRuntime) Run(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+	r.t.Helper()
+	if req.Job != response.JobPlanning {
+		return r.fake.Run(ctx, req)
+	}
+	r.planningCalls++
+	if r.planningCalls == 1 {
+		return r.fake.Run(ctx, req)
+	}
+	return runtime.RunResult{Response: r.resp, SessionID: "ntd-sess", ExitCode: 0, AgentTime: time.Second}, nil
+}
+
+// TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment proves task
+// 8's nothing_to_do row end to end, through the real planning handler and a
+// real dispatch.Tick (not the trackerEffectHandler stub the previous test
+// uses): once classify and the first turn have run for real and the owner
+// has answered Q1, a resume whose nothing_to_do response names two code
+// claims, both false, terminalizes the run, moves the ticket to done, and
+// the same Tick posts exactly one tracker comment whose body is
+// tracker.NothingToDoComment(bindingUser, resp.Notes).
+func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const bindingUser = "nothing-to-do-owner"
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	const notes = "the described behavior already exists and is already tested"
+	resp := &response.NothingToDoResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeNothingToDo,
+		Claims: []response.Claim{
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":1", Text: "already returns hello"},
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "already tested"},
+		},
+		Notes: notes,
+	}
+	rt := &planningNothingToDoRuntime{t: t, fake: fakeRuntime(t), resp: resp}
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued)    // queued -> planning
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // classify: sets kind
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // first turn: posts Q1, waits
+	answerOpenQuestion(t, s, ticketID)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), rt, nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateDone {
+		t.Fatalf("final ticket state = %q, want done", final.State)
+	}
+
+	got := rec.recorded()
+	if len(got) != 1 {
+		t.Fatalf("tracker comments = %d, want 1", len(got))
+	}
+	wantBody := tracker.NothingToDoComment(bindingUser, notes)
+	if got[0].body != wantBody {
+		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
+	}
+	if got[0].ref != testFixtureRef {
+		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+}
+
 // TestTick_TrackerEffectFailureIsBestEffort proves a failing tracker comment
 // only warns: Tick still returns nil, and the ticket's own commit (already
 // applied before the tracker call runs) is untouched (design D12).

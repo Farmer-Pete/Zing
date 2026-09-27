@@ -88,8 +88,17 @@ const (
 	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
 	splitUnsupportedWhy  = "the planning run returned a children outcome"
 
-	nothingToDoArrivesWhat = "nothing_to_do handling arrives in task 8"
-	nothingToDoArrivesWhy  = "task 8 checks each code claim before deciding done or an escalation"
+	// nothingToDoNoCodeClaimsWhat and nothingToDoTrueClaimsWhatFmt are
+	// section 6.8's own nothing_to_do escalation What text (task 8): a
+	// nothing_to_do outcome accepts automatically only when it names at
+	// least one code claim and every code claim it names is false; a claim
+	// verified true, or no code claim at all, cannot prove there is nothing
+	// to build.
+	nothingToDoNoCodeClaimsWhat  = "no code claims to verify"
+	nothingToDoTrueClaimsWhatFmt = "%d code claim(s) verified true"
+	nothingToDoWhy               = "a nothing_to_do outcome must name at least one code claim and verify every code claim false to accept it automatically"
+
+	reasonNothingToDo = "nothing to do"
 
 	// The section 6.6 gate approve pre-check's own fixed What text, one
 	// per failing branch (0, 1, 2, 3, 6; branches 4 and 5 succeed). Why is
@@ -431,10 +440,9 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 // planningSuccessCommit routes a planning run's parsed response (design
 // section 6.8), shared by the first turn and the resume: questions and
 // error are the same universal handling classify uses; ready is section
-// 6.5's real cohort check and store, still followed by task 6's TEMPORARY
-// shortcut straight to building once the cohort is stored (task 7c removes
-// it); children and nothing_to_do each escalate rather than doing their
-// real section 6.8 handling, which arrive in tasks 7 and 8.
+// 6.5's real cohort check and store; children escalates split_unsupported
+// (design D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate
+// check (task 8).
 func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
@@ -449,19 +457,58 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 		c.ResolveQuestions = resolveIDs
 		return c, nil
 	case *response.NothingToDoResponse:
-		// TODO(task 8): check each code claim; nothing_to_do handling
-		// (design section 6.8) replaces this unconditional escalation.
-		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-			string(response.EscalationCodeOther), nothingToDoArrivesWhat, nothingToDoArrivesWhy, "", response.EscalationOriginNothingToDoClaims)
-		c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
-		c.Session = sessionCommit
-		c.ResolveQuestions = resolveIDs
-		return c, nil
+		return nothingToDoCommit(t, d, rr, resp, sessionCommit, resolveIDs), nil
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, origin), nil
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
+}
+
+// nothingToDoCommit is design section 6.8's nothing_to_do row (task 8): a
+// nothing_to_do outcome accepts automatically only when resp.Claims names at
+// least one code claim and every code claim in it verified false -- a claim
+// verified true, or the absence of any code claim, cannot prove there is
+// nothing to build, and escalates instead of accepting the model's word for
+// it. Acceptance terminalizes the run, transitions the ticket straight to
+// done, and sets TrackerEffect so the dispatcher posts
+// tracker.NothingToDoComment after the commit lands (design D12); an
+// escalation carries RunID and SessionID (a run did cause this) and leaves
+// the ticket waiting on the owner's retry/planning/abandon choice, exactly
+// like every other section 6.7 escalation.
+func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.NothingToDoResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) store.HandlerCommit {
+	codeClaims, trueClaims := 0, 0
+	for _, cl := range resp.Claims {
+		if cl.Kind != response.ClaimKindCode {
+			continue
+		}
+		codeClaims++
+		if cl.Verdict == response.ClaimVerdictTrue {
+			trueClaims++
+		}
+	}
+
+	if codeClaims > 0 && trueClaims == 0 {
+		c := baseCommit(t, d)
+		c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
+		c.Session = sessionCommit
+		c.ResolveQuestions = resolveIDs
+		c.Next = stateDone
+		c.Reason = reasonNothingToDo
+		c.TrackerEffect = &store.TrackerEffect{Ref: t.TrackerRef, Notes: resp.Notes}
+		return c
+	}
+
+	what := nothingToDoNoCodeClaimsWhat
+	if trueClaims > 0 {
+		what = fmt.Sprintf(nothingToDoTrueClaimsWhatFmt, trueClaims)
+	}
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodeNothingToDoWithTrueClaims), what, nothingToDoWhy, "", response.EscalationOriginNothingToDoClaims)
+	c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c
 }
 
 // ---- 6.5 ready: the cohort check and store --------------------------------
