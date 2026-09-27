@@ -61,8 +61,10 @@ fi
 # Record the -o file's mode, and its containing directory's mode, while the
 # process runs, per the test's own stat -- Run must have created the
 # directory at 0700 and the file at 0600 before ever starting this script.
+# GNU stat (-c) goes first: on Linux, BSD's -f flag also succeeds but prints
+# filesystem status, not the mode. On macOS -c fails and -f takes over.
 stat_mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
 }
 printf '%s' "$(stat_mode "$outfile")" > "$dir/o_mode"
 printf '%s' "$(stat_mode "$(dirname "$outfile")")" > "$dir/o_dir_mode"
