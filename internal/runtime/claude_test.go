@@ -334,17 +334,23 @@ func TestClaude_ErrStart(t *testing.T) {
 // maps every cmd.Start() failure to ErrStart -- not the ErrCanceled/ErrTimeout
 // the process-lifecycle tests assert. Called from the test goroutine so its
 // t.Fatalf is legal.
+//
+// It waits for the env file, not the argv file: both fakes write argv, then
+// stdin, then env, and a shell redirection creates its file before the
+// command fills it, so a reader that returned on argv's existence could see
+// it empty or half-written (seen on Linux CI). env existing means argv is
+// complete.
 func waitForFakeChild(t *testing.T, dir string) {
 	t.Helper()
-	argv := filepath.Join(dir, "argv")
+	marker := filepath.Join(dir, "env")
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(argv); err == nil {
+		if _, err := os.Stat(marker); err == nil {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("fake child did not record its argv at %s within 5s", argv)
+	t.Fatalf("fake child did not record its environment at %s within 5s", marker)
 }
 
 func TestClaude_ErrTimeout(t *testing.T) {

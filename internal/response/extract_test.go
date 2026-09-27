@@ -86,8 +86,10 @@ func TestExtractAll_ManyUnclosedStartsIsBoundedAndFast(t *testing.T) {
 	t.Parallel()
 
 	// Far more unclosed starts than the cap, so an uncapped scan would parse
-	// every one of them to EOF.
-	hostile := strings.Repeat("<zing >\n", 20000)
+	// every one of them to EOF. 2000 keeps the capped work (64 scans of a
+	// 16 KiB input) well under the guard even under -race on a slow runner;
+	// 20000 tripped the 5s guard in CI while still finishing.
+	hostile := strings.Repeat("<zing >\n", 2000)
 
 	done := make(chan []string, 1)
 	go func() { done <- ExtractAll(hostile) }()
