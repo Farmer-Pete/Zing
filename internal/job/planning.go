@@ -20,9 +20,12 @@
 // interprets the owner's answered gate round -- approve runs the seal
 // pre-check and, on success, seals the cohort and transitions to building;
 // reject (or a reply with no option) resumes or restarts planning with the
-// owner's notes. An escalation round (1b) is still left as a TODO(task 13)
-// returning ErrNoAction, so the dispatcher releases the claim rather than
-// looping.
+// owner's notes. Step 1(b), an answered escalation round, resolves through
+// enterFromEscalationRound's own section 6.7 choice-by-origin table: choice
+// c (abandon) resolves every open or answered question and transitions
+// straight to abandoned with no runtime call; every other choice retries the
+// run that escalated or falls back to resumeOrFresh, per that origin's own
+// row.
 package job
 
 import (
@@ -97,15 +100,15 @@ const (
 	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
 	splitUnsupportedWhy  = "the planning run returned a children outcome"
 
-	// nothingToDoNoCodeClaimsWhat and nothingToDoTrueClaimsWhatFmt are
-	// section 6.8's own nothing_to_do escalation What text (task 8): a
-	// nothing_to_do outcome accepts automatically only when it names at
-	// least one code claim and every code claim it names is false; a claim
-	// verified true, or no code claim at all, cannot prove there is nothing
-	// to build.
-	nothingToDoNoCodeClaimsWhat  = "no code claims to verify"
-	nothingToDoTrueClaimsWhatFmt = "%d code claim(s) verified true"
-	nothingToDoWhy               = "a nothing_to_do outcome must name at least one code claim and verify every code claim false to accept it automatically"
+	// nothingToDoNoCodeClaimsWhat is section 6.8's own nothing_to_do
+	// escalation What text (task 8, tightened by F022): response.Validate's
+	// CheckNothingToDoClaims already rejects any nothing_to_do response
+	// carrying a code claim that is not verdict=false as an InvalidOutputError,
+	// so by the time nothingToDoCommit runs, naming zero code claims is the
+	// only way left for a nothing_to_do outcome to fail to prove there is
+	// nothing to build.
+	nothingToDoNoCodeClaimsWhat = "no code claims to verify"
+	nothingToDoWhy              = "a nothing_to_do outcome must name at least one code claim and verify every code claim false to accept it automatically"
 
 	reasonNothingToDo = "nothing to do"
 
@@ -125,6 +128,12 @@ const (
 	// reasonAbandonedFmt is section 6.7 choice "c"'s own Reason text (design
 	// D10): "owner abandoned after <code>", the escalation's own Code.
 	reasonAbandonedFmt = "owner abandoned after %s"
+
+	// gateApproveExplains is F013's own addition to the gate question's
+	// body (design section 6.6, D8): the objective alone does not say what
+	// choosing "Approve" actually does, so this paragraph follows it,
+	// separated by a blank line.
+	gateApproveExplains = "Approve seals this scenario set and moves the ticket to building. This cannot be undone. Findings at or below the quality floor were already fixed automatically; only findings above the floor are shown here."
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -185,6 +194,16 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	case store.SessionNone, store.SessionIdless:
 		return runPlanningFirst(ctx, t, d, nil, nil)
 	case store.SessionExhausted:
+		// A ready produced on the final permitted resume stores a valid
+		// cohort and leaves this session exhausted (readyCommit carries no
+		// Next): review it before ever escalating the cap, or the owner sees
+		// a misleading resumes_exhausted with a reviewable cohort sitting
+		// unreviewed underneath it. The floor loop (maybeResumeFloorFindings)
+		// stays unreachable here on purpose -- it needs a planning resume,
+		// which an exhausted session cannot spend.
+		if commit, handled, reviewErr := maybeReviewTick(ctx, t, d); handled {
+			return commit, reviewErr
+		}
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
 		if hasErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: planning: has escalation: %w", hasErr)
@@ -280,6 +299,20 @@ func (h planningHandler) enterFromPlanningRound(ctx context.Context, t store.Tic
 		}
 		return runPlanningResume(ctx, t, d, sess, questionIDs(round), answers, 0)
 	case state == store.SessionExhausted && sameSession:
+		// This branch never calls runPlanningResume, so it cannot itself
+		// produce a new ready outcome; the only way round could carry a
+		// stranded ready cohort is if an earlier resume already stored one
+		// and left round unresolved, but readyCommit sets ResolveQuestions
+		// unconditionally (even on a failed validation), so any round a
+		// ready resume was given is always resolved in that same commit and
+		// never reaches AnsweredRounds again. A round surviving to here,
+		// answered against an already-exhausted session, is therefore
+		// always a "questions" batch the session posted on its own final
+		// resume, not an orphaned cohort -- exactly what capResumesEscalation
+		// (design D17) preserves rather than resolves, for
+		// resolveCapResumesEscalation to fold back in later. An orphaned
+		// ready cohort is entry step 3's own concern (planningHandler.Run's
+		// SessionExhausted case, maybeReviewTick's guard).
 		return capResumesEscalation(t, d, sess.ID), nil
 	default:
 		rendered, renderErr := renderRoundAnswers(round)
@@ -477,7 +510,7 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 		c.ResolveQuestions = resolveIDs
 		return c, nil
 	case *response.NothingToDoResponse:
-		return nothingToDoCommit(t, d, rr, resp, sessionCommit, resolveIDs), nil
+		return nothingToDoCommit(t, d, rr, resp, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, origin), nil
 	default:
@@ -485,30 +518,42 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 	}
 }
 
-// nothingToDoCommit is design section 6.8's nothing_to_do row (task 8): a
-// nothing_to_do outcome accepts automatically only when resp.Claims names at
-// least one code claim and every code claim in it verified false -- a claim
-// verified true, or the absence of any code claim, cannot prove there is
-// nothing to build, and escalates instead of accepting the model's word for
-// it. Acceptance terminalizes the run, transitions the ticket straight to
-// done, and sets TrackerEffect so the dispatcher posts
-// tracker.NothingToDoComment after the commit lands (design D12); an
+// errNothingToDoClaimNotFalse is nothingToDoCommit's own defensive sentinel
+// (design section 6.8, F022): response.Validate's CheckNothingToDoClaims
+// already rejects any nothing_to_do response carrying a code claim that is
+// not verdict=false, as an InvalidOutputError, before a handler ever sees
+// it, so this function should never observe one. It checks anyway, because
+// a scripted test runtime (standing in for a compromised or buggy agent
+// process) can hand a Response value straight to the handler with no
+// validation pass in between, and a silent accept there would be worse than
+// a loud one here.
+var errNothingToDoClaimNotFalse = errors.New("nothing_to_do code claim not verified false")
+
+// nothingToDoCommit is design section 6.8's nothing_to_do row (task 8,
+// tightened by F022, option B: the validator owns the rule, not this
+// handler): resp.Claims naming at least one code claim accepts
+// automatically, since CheckNothingToDoClaims already guarantees every code
+// claim it names is false by the time a real runtime's response reaches
+// here; naming no code claim at all cannot prove there is nothing to build,
+// and escalates instead. Acceptance terminalizes the run, transitions the
+// ticket straight to done, and sets TrackerEffect so the dispatcher posts
+// tracker.NothingToDoComment after the commit lands (design D12); the
 // escalation carries RunID and SessionID (a run did cause this) and leaves
 // the ticket waiting on the owner's retry/planning/abandon choice, exactly
 // like every other section 6.7 escalation.
-func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.NothingToDoResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) store.HandlerCommit {
-	codeClaims, trueClaims := 0, 0
+func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.NothingToDoResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	codeClaims := 0
 	for _, cl := range resp.Claims {
 		if cl.Kind != response.ClaimKindCode {
 			continue
 		}
 		codeClaims++
-		if cl.Verdict == response.ClaimVerdictTrue {
-			trueClaims++
+		if cl.Verdict != response.ClaimVerdictFalse {
+			return store.HandlerCommit{}, fmt.Errorf("nothing_to_do reached the handler with a non-false code claim: %w", errNothingToDoClaimNotFalse)
 		}
 	}
 
-	if codeClaims > 0 && trueClaims == 0 {
+	if codeClaims > 0 {
 		c := baseCommit(t, d)
 		c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
 		c.Session = sessionCommit
@@ -516,19 +561,15 @@ func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.Noth
 		c.Next = stateDone
 		c.Reason = reasonNothingToDo
 		c.TrackerEffect = &store.TrackerEffect{Ref: t.TrackerRef, Notes: resp.Notes}
-		return c
+		return c, nil
 	}
 
-	what := nothingToDoNoCodeClaimsWhat
-	if trueClaims > 0 {
-		what = fmt.Sprintf(nothingToDoTrueClaimsWhatFmt, trueClaims)
-	}
 	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-		string(response.EscalationCodeNothingToDoWithTrueClaims), what, nothingToDoWhy, "", response.EscalationOriginNothingToDoClaims)
+		string(response.EscalationCodeNothingToDoWithTrueClaims), nothingToDoNoCodeClaimsWhat, nothingToDoWhy, "", response.EscalationOriginNothingToDoClaims)
 	c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
 	c.Session = sessionCommit
 	c.ResolveQuestions = resolveIDs
-	return c
+	return c, nil
 }
 
 // ---- 6.5 ready: the cohort check and store --------------------------------
@@ -1123,8 +1164,12 @@ func renderFindings(findings []response.Finding) string {
 // recommended "a", the fixed Approve/Reject chip pair, Key left empty for
 // CommitHandlerResult's own fillQuestionKeyTx to allocate (design section
 // 4.5, 6.7: "gate and planning questions use the same Q<n> allocation"), and
-// body set to objective -- the stored plan's overview objective text, the
-// one sentence design D8 says the gate renders for the owner.
+// body set to objective (the stored plan's overview objective text, the one
+// sentence design D8 says the gate renders for the owner) then, blank-line
+// separated, gateApproveExplains (F013): splitQuestionBody (console/views.go)
+// cuts the body on its first newline, so objective still renders as the
+// question's title and gateApproveExplains as its markdown body, exactly as
+// every other question's Title/Body pair does.
 func gateQuestionMessage(ticketID int64, objective string) (store.Message, error) {
 	payload, err := json.Marshal(response.QuestionPayload{
 		Kind:        response.QuestionKindGate,
@@ -1140,7 +1185,7 @@ func gateQuestionMessage(ticketID int64, objective string) (store.Message, error
 	}
 	return store.Message{
 		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
-		State: new(questionStateOpen), Body: objective, Payload: payload,
+		State: new(questionStateOpen), Body: objective + "\n\n" + gateApproveExplains, Payload: payload,
 	}, nil
 }
 
@@ -1689,28 +1734,27 @@ func questionOutcomeCommit(t store.Ticket, d Deps, rr runResult, qr *response.Qu
 }
 
 // questionMessagesFor builds one question message per q in qs (design
-// section 6.6's mapping table, reused by classify and planning alike): the
-// stored QuestionPayload maps Key (uppercased: the wire pattern
-// ^[qQ][0-9]+$ is looser than the stored ^Q[0-9]+$), Recommended, and
-// Options straight across, with Kind and State fixed at insert; the message
-// Body carries Title as the heading, then Body. The commit allocates each
-// message's actual Q<n> once Key is left empty here... but section 6.7 says
-// only an escalation's own linked question gets an allocated key; a
-// planning or classify question batch's keys instead come straight from the
-// model's own q.Key, uppercased, exactly as the skeleton's questionMessages
-// did.
+// section 6.6's mapping table, reused by classify and planning alike, F030):
+// the stored QuestionPayload leaves Key empty for CommitHandlerResult's own
+// fillQuestionKeyTx to allocate in commit order (design section 4.5, 6.7:
+// "gate and planning questions use the same Q<n> allocation" as an
+// escalation's linked question and a gate question, gateQuestionMessage
+// above), so a planning or classify batch's keys can never collide with one
+// allocated some other way; q.Key (the model's own wire-format key) is never
+// stored, since routing is by message id, not by that key. Recommended and
+// Options map straight across; Kind and State are fixed at insert; the
+// message Body carries Title as the heading, then Body.
 func questionMessagesFor(ticketID int64, qs []response.Question) ([]store.Message, error) {
 	msgs := make([]store.Message, 0, len(qs))
-	for _, q := range qs {
+	for i, q := range qs {
 		payload, err := json.Marshal(response.QuestionPayload{
-			Key:         strings.ToUpper(q.Key),
 			Kind:        response.QuestionKindQuestion,
 			State:       response.QuestionStateOpen,
 			Recommended: q.Recommended,
 			Options:     q.Options,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("job: marshal question payload for %s: %w", q.Key, err)
+			return nil, fmt.Errorf("job: marshal question payload %d: %w", i, err)
 		}
 		msgs = append(msgs, store.Message{
 			TicketID: ticketID,

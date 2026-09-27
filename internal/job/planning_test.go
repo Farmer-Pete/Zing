@@ -238,8 +238,8 @@ func TestPlanningHandler_FirstTurn_PostsRealQuestionsBatchWithAllocatedKeys(t *t
 		if unmarshalErr := json.Unmarshal(m.Payload, &qp); unmarshalErr != nil {
 			t.Fatalf("unmarshal question payload: %v", unmarshalErr)
 		}
-		if !strings.HasPrefix(qp.Key, "Q") {
-			t.Errorf("question payload.Key = %q, want an uppercased Q<n> key", qp.Key)
+		if qp.Key != "" {
+			t.Errorf("commit question payload.Key = %q, want empty (F030: CommitHandlerResult allocates it)", qp.Key)
 		}
 	}
 
@@ -251,11 +251,19 @@ func TestPlanningHandler_FirstTurn_PostsRealQuestionsBatchWithAllocatedKeys(t *t
 	}
 	var found bool
 	for _, m := range msgs {
-		if m.Type == testMsgTypeQuestion {
-			found = true
-			if m.RunID == nil {
-				t.Error("persisted question has no run_id, want the reserved run's id")
-			}
+		if m.Type != testMsgTypeQuestion {
+			continue
+		}
+		found = true
+		if m.RunID == nil {
+			t.Error("persisted question has no run_id, want the reserved run's id")
+		}
+		var qp response.QuestionPayload
+		if unmarshalErr := json.Unmarshal(m.Payload, &qp); unmarshalErr != nil {
+			t.Fatalf("unmarshal persisted question payload: %v", unmarshalErr)
+		}
+		if !strings.HasPrefix(qp.Key, "Q") {
+			t.Errorf("persisted question payload.Key = %q, want an allocated Q<n> key", qp.Key)
 		}
 	}
 	if !found {
@@ -505,12 +513,16 @@ func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) 
 	}
 }
 
-// TestPlanningHandler_NothingToDo_TrueCodeClaimEscalates proves the same
-// row's escalation half: any code claim verified true cannot prove there is
-// nothing to build, so the handler escalates nothing_to_do_with_true_claims
-// naming the run, with the exact count of true claims in What, and leaves
-// the ticket waiting on the owner rather than transitioning it.
-func TestPlanningHandler_NothingToDo_TrueCodeClaimEscalates(t *testing.T) {
+// TestPlanningHandler_NothingToDo_TrueCodeClaimErrorsRatherThanEscalates
+// proves F022 (option B: the validator owns the nothing_to_do rule, not
+// this handler): response.Validate's CheckNothingToDoClaims already rejects
+// any code claim that is not verdict=false as an InvalidOutputError before a
+// real runtime's response ever reaches nothingToDoCommit, so a true code
+// claim reaching the handler here (only reachable through a scripted test
+// runtime that bypasses validation, standing in for a compromised or buggy
+// agent process) is a defensive error, not an escalation the handler
+// silently accepted the model's word for.
+func TestPlanningHandler_NothingToDo_TrueCodeClaimErrorsRatherThanEscalates(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	answeredRoundReadyForResume(t, s, ticketID)
@@ -522,40 +534,14 @@ func TestPlanningHandler_NothingToDo_TrueCodeClaimEscalates(t *testing.T) {
 	resumeRT := readyScriptedRuntime(t, readyStep(nothingToDoResponse(claims, "one part still needs the fix"), "ntd-true-sess"))
 
 	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
-	if err != nil {
-		t.Fatalf("planning resume (nothing_to_do, true claim) Run: %v", err)
+	if err == nil {
+		t.Fatalf("commit = %+v, err = nil, want an error: a non-false code claim must never reach an escalation or accept", commit)
 	}
-	if commit.Next != "" {
-		t.Errorf("commit.Next = %q, want empty (stays in planning)", commit.Next)
+	if !strings.Contains(err.Error(), "non-false code claim") {
+		t.Errorf("err = %q, want it to name a non-false code claim", err)
 	}
-	if commit.TrackerEffect != nil {
-		t.Error("commit.TrackerEffect is set, want nil (no tracker comment on an escalation)")
-	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation is nil, want nothing_to_do_with_true_claims")
-	}
-	if commit.Escalation.RunID == nil {
-		t.Error("commit.Escalation.RunID is nil, want the run that returned nothing_to_do")
-	}
-	var payload response.EscalationPayload
-	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
-		t.Fatalf("unmarshal escalation payload: %v", err)
-	}
-	if payload.Code != string(response.EscalationCodeNothingToDoWithTrueClaims) || payload.Origin != string(response.EscalationOriginNothingToDoClaims) {
-		t.Errorf("payload = (Code=%q, Origin=%q), want (nothing_to_do_with_true_claims, nothing_to_do_claims)", payload.Code, payload.Origin)
-	}
-	const wantWhat = "1 code claim(s) verified true"
-	if payload.What != wantWhat {
-		t.Errorf("payload.What = %q, want %q", payload.What, wantWhat)
-	}
-	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
-		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)
-	}
-
-	apply(t, s, getTicket(t, s, ticketID), commit)
-	final := getTicket(t, s, ticketID)
-	if final.State != testStatePlanning {
-		t.Errorf("final ticket state = %q, want planning", final.State)
+	if commit.TicketID != 0 || commit.Escalation != nil || commit.Next != "" || commit.TrackerEffect != nil {
+		t.Errorf("commit = %+v, want the zero value (no commit on this defensive error)", commit)
 	}
 }
 
@@ -1024,6 +1010,63 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 	_, err = runPlanning(t, s, claim(t, s, fake, ticketID), ticketID)
 	if !errors.Is(err, job.ErrNoAction) {
 		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	}
+}
+
+// TestPlanningHandler_SessionExhausted_ReadyCohortRunsReviewInsteadOfEscalating
+// proves F004: a ready produced on the final permitted resume stores a
+// valid cohort and leaves the session exhausted (readyCommit carries no
+// Next), so entry step 3's SessionExhausted case must review that cohort
+// (§6.5) before ever escalating resumes_exhausted -- otherwise the owner
+// sees a misleading cap escalation while a reviewable cohort sits
+// unreviewed underneath it. seedCohort stands in for the ready resume
+// itself (already proved by TestPlanningHandler_Ready_..., task 7a/7b); this
+// test only needs the cohort in place with its producing session exhausted.
+func TestPlanningHandler_SessionExhausted_ReadyCohortRunsReviewInsteadOfEscalating(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("A ready cohort survives resume exhaustion."), validScenarios(2, "exhausted"))
+
+	maxResumes := testMachine(t).Jobs[testStatePlanning].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, maxResumes)
+	if err != nil || state != store.SessionOpen {
+		t.Fatalf("LatestSession after seedCohort = (state=%v, err=%v), want SessionOpen", state, err)
+	}
+
+	owner := "exhausted-with-cohort-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
+
+	_, state, err = s.LatestSession(t.Context(), ticketID, testStatePlanning, maxResumes)
+	if err != nil || state != store.SessionExhausted {
+		t.Fatalf("LatestSession after bump = (state=%v, err=%v), want SessionExhausted", state, err)
+	}
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(), "post-exhaustion-review-sess")}}
+	rec := &recordingRuntime{rt: rt}
+
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run against an exhausted session with a cohort: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil: a ready cohort must be reviewed, not escalated as resumes_exhausted", commit.Escalation)
+	}
+	if len(commit.Artifacts) != 1 || commit.Artifacts[0].Type != testArtifactTypePlanreview {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one planreview artifact", commit.Artifacts)
+	}
+	if rec.lastReq.Job != response.JobPlanreview {
+		t.Errorf("last runtime request job = %s, want planreview", rec.lastReq.Job)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	// The floor loop stays unreachable here (design F004: it needs a
+	// planning resume, which an exhausted session cannot spend), so a
+	// clean review posts the gate rather than pending or resuming.
+	after := getTicket(t, s, ticketID)
+	if after.WaitingOn == nil || *after.WaitingOn != testWaitingGate {
+		t.Errorf("after the review: ticket.WaitingOn = %v, want gate", after.WaitingOn)
 	}
 }
 
@@ -1850,8 +1893,8 @@ func TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate(t *testing.T) {
 		t.Fatalf("commit.Messages = %d entries, want exactly 1 (the gate question)", len(commit.Messages))
 	}
 	msg := commit.Messages[0]
-	if msg.Body != objective {
-		t.Errorf("gate message body = %q, want the plan's objective %q", msg.Body, objective)
+	if !strings.HasPrefix(msg.Body, objective+"\n\n") {
+		t.Errorf("gate message body = %q, want it to start with the plan's objective %q, blank line, then what Approve does (F013)", msg.Body, objective)
 	}
 	var qp response.QuestionPayload
 	if err = json.Unmarshal(msg.Payload, &qp); err != nil {
@@ -1897,6 +1940,77 @@ func TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate(t *testing.T) {
 	}
 
 	_, _ = planVersion, runID
+}
+
+// storedQuestionKeys returns every persisted "question" message's allocated
+// Key on ticketID, in insertion (ListMessages) order.
+func storedQuestionKeys(t *testing.T, s *store.Store, ticketID int64) []string {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var keys []string
+	for i := range msgs {
+		if msgs[i].Type != testMsgTypeQuestion {
+			continue
+		}
+		var qp response.QuestionPayload
+		if unmarshalErr := json.Unmarshal(msgs[i].Payload, &qp); unmarshalErr != nil {
+			t.Fatalf("unmarshal question payload: %v", unmarshalErr)
+		}
+		keys = append(keys, qp.Key)
+	}
+	return keys
+}
+
+// TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions
+// proves F030: a planning question batch never stores the model's own
+// q.Key (design section 4.5, 6.7: "gate and planning questions use the same
+// Q<n> allocation"). A batch whose model keys are Q2 and Q7 lands as Q1,
+// Q2 (commit order, the model's own keys discarded), and a later gate
+// question on the same ticket continues that same count as Q3, rather than
+// colliding with either one.
+func TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+
+	batch := &response.QuestionResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{
+			{Key: "Q2", Title: "First", Body: "first body.", Options: []response.Option{{Key: "a", Text: "A"}}, Recommended: "a"},
+			{Key: "Q7", Title: "Second", Body: "second body.", Options: []response.Option{{Key: "a", Text: "A"}}, Recommended: "a"},
+		},
+	}
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: batch, SessionID: "keys-batch-sess", ExitCode: 0, AgentTime: time.Second}},
+		readyStep(findingsResponse(), "keys-review-sess"),
+	}}
+
+	commit := mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID) // first turn: posts the Q2/Q7 batch
+	for _, m := range commit.Messages {
+		var qp response.QuestionPayload
+		if unmarshalErr := json.Unmarshal(m.Payload, &qp); unmarshalErr != nil {
+			t.Fatalf("unmarshal question payload: %v", unmarshalErr)
+		}
+		if qp.Key != "" {
+			t.Errorf("commit question payload.Key = %q, want empty (store allocates in commit order)", qp.Key)
+		}
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	if got := storedQuestionKeys(t, s, ticketID); !slices.Equal(got, []string{"Q1", "Q2"}) {
+		t.Fatalf("stored question keys after the batch = %v, want [Q1 Q2] (the model's own Q2/Q7 discarded)", got)
+	}
+
+	seedCohort(t, s, ticketID, validPlan("The gate shares the Q<n> allocation."), validScenarios(2, "keys"))
+
+	gateCommit := mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID) // review tick: clean floor posts the gate
+	apply(t, s, getTicket(t, s, ticketID), gateCommit)
+
+	if got := storedQuestionKeys(t, s, ticketID); !slices.Equal(got, []string{"Q1", "Q2", "Q3"}) {
+		t.Fatalf("stored question keys after the gate = %v, want [Q1 Q2 Q3]", got)
+	}
 }
 
 // TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenStop

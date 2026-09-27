@@ -66,11 +66,14 @@ type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpser
 
 // The typed job-level errors (design section 4.4). runJob (runjob.go) wires
 // ErrBudget into its budget check and ErrConfig into the job/runtime/model
-// lookups it performs before ever reserving a run; ErrNoAction is still only
-// declared here -- wiring it into the planning entry decision is a later
-// task's job. ErrConfig must never reach a caller as a panic: a missing or
-// misconfigured job, runtime, or model alias is a configuration mistake to
-// report, not a programming invariant to crash on.
+// lookups it performs before ever reserving a run; planningHandler.Run
+// (planning.go) already wires ErrNoAction into the planning entry decision,
+// returning it from three places: an exhausted session whose cap escalation
+// is already recorded, an open session with no live step left to run, and
+// any session state the switch does not otherwise recognize. ErrConfig must
+// never reach a caller as a panic: a missing or misconfigured job, runtime,
+// or model alias is a configuration mistake to report, not a programming
+// invariant to crash on.
 var (
 	ErrNoAction = errors.New("job: no actionable state")
 	ErrBudget   = errors.New("job: agent budget exhausted")
