@@ -103,9 +103,9 @@ func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
 
 	seedTicket(t, s, "r#1", "Ticket X no messages")
 	ticketY := seedTicket(t, s, "r#2", "Ticket Y older message")
-	seedStateMessage(t, s, ticketY, "queued", "planning", "start Y")
+	seedStateMessage(t, s, ticketY, "queued", testPlanningLiteral, "start Y")
 	ticketZ := seedTicket(t, s, "r#3", "Ticket Z newer message")
-	seedStateMessage(t, s, ticketZ, "queued", "planning", "start Z")
+	seedStateMessage(t, s, ticketZ, "queued", testPlanningLiteral, "start Z")
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -153,7 +153,7 @@ func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
 	// A transition other than every other call site's queued->planning, so
 	// this fixture does not make seedStateMessage's from/to params look
 	// unconditionally hardcodable to golangci-lint's unparam check.
-	seedStateMessage(t, s, ticketID, "planning", "building", "start")
+	seedStateMessage(t, s, ticketID, testPlanningLiteral, "building", "start")
 
 	questionID := seedOpenQuestion(t, s, ticketID)
 	option := "b"
@@ -235,7 +235,7 @@ func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 	s := newConsoleTestStore(t)
 
 	ticketID := seedTicket(t, s, "t#1", "Thread ticket")
-	seedStateMessage(t, s, ticketID, "queued", "planning", "picked up")
+	seedStateMessage(t, s, ticketID, "queued", testPlanningLiteral, "picked up")
 	seedUnreadUpdate(t, s, ticketID, "working on it")
 	seedOpenQuestion(t, s, ticketID)
 
@@ -289,7 +289,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
 	answeredState := "answered"
 	if _, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: "question", Author: "zing", State: &answeredState,
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: "zing", State: &answeredState,
 		Body: "Answered question\n\nAlready decided.", Payload: answeredPayload,
 	}); err != nil {
 		t.Fatalf("InsertMessage(answered question): %v", err)
@@ -299,7 +299,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 	resolvedPayload := []byte(`{"key":"Q2","kind":"question","state":"` + resolvedState + `","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
 	if _, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: "question", Author: "zing", State: &resolvedState,
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: "zing", State: &resolvedState,
 		Body: "Resolved question\n\nSettled.", Payload: resolvedPayload,
 	}); err != nil {
 		t.Fatalf("InsertMessage(resolved question): %v", err)
@@ -346,7 +346,7 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 		t.Fatalf("marshal fixture plan: %v", err)
 	}
 	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: "plan", Payload: payload,
+		TicketID: ticketID, Type: testArtifactTypePlan, Payload: payload,
 	}); err != nil {
 		t.Fatalf("InsertArtifact(plan): %v", err)
 	}

@@ -571,7 +571,7 @@ func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broke
 		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken)
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)

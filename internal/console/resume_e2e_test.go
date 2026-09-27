@@ -52,7 +52,7 @@ const (
 // resumeE2EWantStates is the ordered "to" state of every state message the
 // fixture ticket's full run posts (design section 7.1), the same sequence
 // cmd/zing/selftest.go's e2eWantStates asserts.
-var resumeE2EWantStates = []string{"planning", "building", "reviewing", "judging", "shipping", "done"}
+var resumeE2EWantStates = []string{testPlanningLiteral, "building", "reviewing", "judging", "shipping", "done"}
 
 // resumeE2EModels and resumeE2EBudget mirror cmd/zing/selftest.go's own
 // e2eModels/e2eBudget: the job.Deps.Models alias table and Budget classify
@@ -508,7 +508,7 @@ func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	}
 	var planning []store.Session
 	for _, sess := range sessions {
-		if sess.Job == "planning" {
+		if sess.Job == testPlanningLiteral {
 			planning = append(planning, sess)
 		}
 	}

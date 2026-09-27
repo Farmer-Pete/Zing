@@ -105,10 +105,10 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: "plan", Version: 1, Payload: railPlanPayload(t)}); err != nil {
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypePlan, Version: 1, Payload: railPlanPayload(t)}); err != nil {
 		t.Fatalf("insert plan artifact: %v", err)
 	}
-	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: "scenario", Version: 1, Payload: railScenarioPayload("s1")}); err != nil {
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypeScenario, Version: 1, Payload: railScenarioPayload("s1")}); err != nil {
 		t.Fatalf("insert scenario artifact: %v", err)
 	}
 

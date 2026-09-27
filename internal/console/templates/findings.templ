@@ -1,0 +1,36 @@
+package templates
+
+// findingsSection renders the gate's above-floor findings table (design
+// section 7, D8, Task 11): lens, severity, location, text, fix, one row per
+// finding in the stored planreview artifact's own order (internal/console/
+// views.go's loadFindings, which has already dropped every finding at or
+// below the configured review.floor). Every field renders raw, escaped by
+// templ as usual. Renders nothing when findings is empty, so a clean review
+// -- or a ticket with no cohort, or no planreview artifact yet -- shows no
+// table at all.
+templ findingsSection(findings []FindingRow) {
+	if len(findings) > 0 {
+		<table class="findings">
+			<thead>
+				<tr>
+					<th>Lens</th>
+					<th>Severity</th>
+					<th>Location</th>
+					<th>Text</th>
+					<th>Fix</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, f := range findings {
+					<tr>
+						<td>{ f.Lens }</td>
+						<td>{ f.Severity }</td>
+						<td>{ f.Location }</td>
+						<td>{ f.Text }</td>
+						<td>{ f.Fix }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

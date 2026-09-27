@@ -18,6 +18,7 @@ import (
 	"zing/internal/bus"
 	"zing/internal/console"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -76,18 +77,26 @@ func newTestLogHandler(t *testing.T) *console.Handler {
 }
 
 // testTrackerGitHub, testAuthorZing, testMsgTypeQuestion,
-// testWaitingQuestions, and testRuntimeFake round up the string literals
-// this package's tests repeat three or more times: the tracker name every
-// seeded project uses, the author every zing-authored message uses, the
-// "question" message type, the "questions" ticket.waiting_on value a
-// seeded open question sets (store's own historical spelling, commit.go's
-// waitingFlagQuestions), and the "fake" runtime name.
+// testWaitingQuestions, testRuntimeFake, testArtifactTypePlan,
+// testArtifactTypeScenario, and testPlanningLiteral round up the string
+// literals this package's tests repeat three or more times: the tracker
+// name every seeded project uses, the author every zing-authored message
+// uses, the "question" message type, the "questions" ticket.waiting_on
+// value a seeded open question sets (store's own historical spelling,
+// commit.go's waitingFlagQuestions), the "fake" runtime name, the "plan"
+// and "scenario" artifacts.type values, and "planning" -- the exact spelling
+// sessions.job (a run's own job name) and tickets.state (design section
+// 5.2's own name for the ticket's state while planning runs) happen to
+// share, named once rather than twice for two meanings that collide.
 const (
-	testTrackerGitHub    = "github"
-	testAuthorZing       = "zing"
-	testMsgTypeQuestion  = "question"
-	testWaitingQuestions = "questions"
-	testRuntimeFake      = "fake"
+	testTrackerGitHub        = "github"
+	testAuthorZing           = "zing"
+	testMsgTypeQuestion      = "question"
+	testWaitingQuestions     = "questions"
+	testRuntimeFake          = "fake"
+	testArtifactTypePlan     = "plan"
+	testArtifactTypeScenario = "scenario"
+	testPlanningLiteral      = "planning"
 )
 
 var testProject = store.Project{
@@ -121,6 +130,17 @@ func newConsoleTestStore(t *testing.T) *store.Store {
 // newPushTestServer (push_test.go) instead.
 func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler) *httptest.Server {
 	t.Helper()
+	return newTestServerFloor(t, s, b, m, log, response.SeverityMinor)
+}
+
+// newTestServerFloor is newTestServer with an explicit review.floor (design
+// section 4.4, 7, D8, Task 11): every caller that does not itself need a
+// particular floor goes through newTestServer's own default
+// (response.SeverityMinor, internal/config's own applyDefaults default); the
+// gate-rendering tests that must prove behavior at more than one floor call
+// this directly.
+func newTestServerFloor(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, floor response.Severity) *httptest.Server {
+	t.Helper()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
@@ -132,7 +152,7 @@ func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machi
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -253,6 +273,46 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 	t.Fatal("seedOpenQuestion: no question message found after commit")
 	return 0
+}
+
+// seedRun claims ticketID just long enough to reserve and terminalize one
+// session and run (design section 4.5, 4.6, Task 11's own seedDemoRun),
+// releasing the claim in the same commit, and returns the new run's id: the
+// fixture the gate-rendering tests use to give a plan, scenario, or
+// planreview artifact a real, ticket-owned run_id. Distinct calls on the
+// same ticket are safe in sequence (each claims, then releases, before
+// returning), giving a test more than one cohort run on one ticket.
+func seedRun(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+
+	const owner = "test-run-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	reserved, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: testPlanningLiteral, Runtime: testRuntimeFake}, "test-model")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	outcome, exitCode, agentSeconds := "ready", 0, 1
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs: []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+	return reserved.RunID
 }
 
 // readFrame reads one SSE frame from r, bounded by frameTimeout so a hung

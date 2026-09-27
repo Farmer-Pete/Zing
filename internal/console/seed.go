@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"zing/internal/response"
 	"zing/internal/store"
@@ -137,24 +138,46 @@ const (
 	demoTicketTitle = "Add a hello endpoint"
 )
 
-// scenarioArtifactType and findingArtifactType are the artifacts.type
-// literals a scenario-writing and a review-writing commit use
-// (internal/store/schemas/artifacts/scenario.json, finding.json), matching
-// views.go's own planArtifactType for "plan".
+// scenarioArtifactType and planreviewArtifactType are the artifacts.type
+// literals a ready-checking and a plan-review commit use
+// (internal/store/schemas/artifacts/scenario.json, planreview.json),
+// matching views.go's own planArtifactType for "plan".
 const (
-	scenarioArtifactType = "scenario"
-	findingArtifactType  = "finding"
+	scenarioArtifactType   = "scenario"
+	planreviewArtifactType = "planreview"
 )
 
-// SeedDemo seeds one demo project and one demo ticket carrying a stored
-// plan artifact (a small valid response.Plan with a mermaid block in its
-// Shape), a scenario artifact set, a finding set, and one open question of
-// each of the six kinds (design section 6.15), every row through the
+// demoRunOwner and demoRunModel are the fixed claim owner and model id
+// seedDemoRun's own Claim/Reserve/CommitHandlerResult sequence uses to
+// insert the demo cohort's one session and run (design section 7, Task 11:
+// "SeedDemo inserts one session and one run for the demo ticket"): the same
+// three-call shape a real planning tick's runJob uses (design section 4.5,
+// 4.6), not a bespoke insert, so the seeded row is one a real producer
+// could have written.
+const (
+	demoRunOwner = "seed-demo"
+	demoRunModel = "claude-sonnet-5"
+)
+
+// demoRunLease bounds the Claim seedDemoRun takes: long enough that its own
+// handful of milliseconds of work never lets the lease expire out from
+// under its own CommitHandlerResult call, which fences on the exact
+// (owner, expires) pair Claim set.
+const demoRunLease = time.Hour
+
+// SeedDemo seeds one demo project and one demo ticket carrying one session
+// and run (Task 11), a stored plan artifact (a small valid response.Plan
+// with a mermaid block in its Shape) and a scenario artifact set both
+// carrying that run's id (so the gate's context region renders them through
+// the real cohort path, not the legacy fallback), a "planreview" artifact
+// at the plan's own version carrying a finding set, and one open question
+// of each of the six kinds (design section 6.15, 7), every row through the
 // store's validated inserts (InsertArtifact, InsertMessage, by way of
-// SeedQuestionFixtures), so a seeded row is a row a real producer could
-// have written. It is idempotent: a second call finds the same project and
-// ticket and skips any artifact or question already present, inserting
-// nothing new. SeedDemo never runs in a normal serve; it runs only behind
+// SeedQuestionFixtures; Claim, Reserve, and CommitHandlerResult for the run
+// itself), so a seeded row is a row a real producer could have written. It
+// is idempotent: a second call finds the same project and ticket and skips
+// every artifact, run, and question already present, inserting nothing
+// new. SeedDemo never runs in a normal serve; it runs only behind
 // `zing serve --seed-demo`, from cmd/zing's selftest, and from this
 // package's own tests.
 func SeedDemo(ctx context.Context, s *store.Store) error {
@@ -170,19 +193,79 @@ func SeedDemo(ctx context.Context, s *store.Store) error {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 
-	if err := seedDemoPlan(ctx, s, ticketID); err != nil {
-		return fmt.Errorf("seed demo: %w", err)
-	}
-	if err := seedDemoScenarios(ctx, s, ticketID); err != nil {
-		return fmt.Errorf("seed demo: %w", err)
-	}
-	if err := seedDemoFindings(ctx, s, ticketID); err != nil {
+	if err := seedDemoCohort(ctx, s, ticketID); err != nil {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 	if err := SeedQuestionFixtures(ctx, s, ticketID); err != nil {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 	return nil
+}
+
+// seedDemoCohort seeds ticketID's one run, plan, scenario cohort, and
+// planreview artifact together, exactly once: a second call finds the plan
+// artifact already stored (GetArtifact returns ok == true) and does
+// nothing, matching every other seedDemo* function's own idempotency check.
+func seedDemoCohort(ctx context.Context, s *store.Store, ticketID int64) error {
+	_, ok, err := s.GetArtifact(ctx, ticketID, planArtifactType)
+	if err != nil {
+		return fmt.Errorf("get plan artifact: %w", err)
+	}
+	if ok {
+		return nil
+	}
+
+	runID, err := seedDemoRun(ctx, s, ticketID)
+	if err != nil {
+		return fmt.Errorf("seed run: %w", err)
+	}
+	if err := seedDemoPlan(ctx, s, ticketID, runID); err != nil {
+		return fmt.Errorf("seed plan: %w", err)
+	}
+	if err := seedDemoScenarios(ctx, s, ticketID, runID); err != nil {
+		return fmt.Errorf("seed scenarios: %w", err)
+	}
+	if err := seedDemoPlanReview(ctx, s, ticketID, runID); err != nil {
+		return fmt.Errorf("seed planreview: %w", err)
+	}
+	return nil
+}
+
+// seedDemoRun claims the demo ticket just long enough to reserve and
+// terminalize its one session and run (design section 7, Task 11), through
+// the same Claim, Reserve, then CommitHandlerResult sequence a real
+// planning tick's runJob uses (design section 4.5, 4.6): reserved under a
+// claim, terminalized with a "ready" outcome (design section 6.8: "planning
+// | ready, checks pass"), and its claim released by that same commit. It
+// returns the new run's id.
+func seedDemoRun(ctx context.Context, s *store.Store, ticketID int64) (int64, error) {
+	expires := time.Now().Add(demoRunLease)
+	claimed, err := s.Claim(ctx, ticketID, demoRunOwner, expires)
+	if err != nil {
+		return 0, fmt.Errorf("claim ticket %d: %w", ticketID, err)
+	}
+	if !claimed {
+		return 0, fmt.Errorf("ticket %d is already claimed", ticketID)
+	}
+
+	reserved, err := s.Reserve(ctx, ticketID, demoRunOwner, expires,
+		store.SessionUpsert{Job: "planning", Runtime: "fake"}, demoRunModel)
+	if err != nil {
+		return 0, fmt.Errorf("reserve run: %w", err)
+	}
+
+	outcome, exitCode, agentSeconds := "ready", 0, 12
+	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+		TicketID: ticketID, Owner: demoRunOwner, Expires: expires,
+		Runs: []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("terminalize run: %w", err)
+	}
+	if !applied {
+		return 0, fmt.Errorf("ticket %d lost its claim before its run could be terminalized", ticketID)
+	}
+	return reserved.RunID, nil
 }
 
 // ensureDemoTicket returns the demo ticket's id under projectID, inserting
@@ -210,24 +293,18 @@ func ensureDemoTicket(ctx context.Context, s *store.Store, projectID int64) (int
 	return id, nil
 }
 
-// seedDemoPlan inserts ticketID's demo plan artifact once, skipping when one
-// is already stored (GetArtifact returns ok == true), so a second SeedDemo
-// call never writes a second version.
-func seedDemoPlan(ctx context.Context, s *store.Store, ticketID int64) error {
-	_, ok, err := s.GetArtifact(ctx, ticketID, planArtifactType)
-	if err != nil {
-		return fmt.Errorf("get plan artifact: %w", err)
-	}
-	if ok {
-		return nil
-	}
-
+// seedDemoPlan inserts ticketID's demo plan artifact carrying runID (design
+// section 7, Task 11): seedDemoCohort's own idempotency check is what keeps
+// a second SeedDemo call from reaching this function at all, so this always
+// inserts (version defaults to 1, InsertArtifact's own rule for a fresh
+// whole-document artifact).
+func seedDemoPlan(ctx context.Context, s *store.Store, ticketID, runID int64) error {
 	payload, err := json.Marshal(demoPlan())
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
 	}
 	if _, err := s.InsertArtifact(ctx, store.Artifact{
-		TicketID: ticketID, Type: planArtifactType, Payload: payload,
+		TicketID: ticketID, Type: planArtifactType, RunID: &runID, Payload: payload,
 	}); err != nil {
 		return fmt.Errorf("insert plan artifact: %w", err)
 	}
@@ -235,24 +312,19 @@ func seedDemoPlan(ctx context.Context, s *store.Store, ticketID int64) error {
 }
 
 // seedDemoScenarios inserts ticketID's demo scenario set, one artifact row
-// per response.Scenario at consecutive versions, once, skipping the whole
-// set when a "scenario" artifact is already stored.
-func seedDemoScenarios(ctx context.Context, s *store.Store, ticketID int64) error {
-	_, ok, err := s.GetArtifact(ctx, ticketID, scenarioArtifactType)
-	if err != nil {
-		return fmt.Errorf("get scenario artifact: %w", err)
-	}
-	if ok {
-		return nil
-	}
-
+// per response.Scenario at consecutive versions, every row carrying runID
+// (design section 7, Task 11): the same cohort run seedDemoPlan's plan
+// artifact carries, so views.go's loadScenarios reads them through
+// ScenariosForRun, the real cohort path, rather than the legacy
+// AllScenarios fallback.
+func seedDemoScenarios(ctx context.Context, s *store.Store, ticketID, runID int64) error {
 	for i, sc := range demoScenarios() {
 		payload, err := json.Marshal(sc)
 		if err != nil {
 			return fmt.Errorf("marshal scenario %s: %w", sc.ID, err)
 		}
 		if _, err := s.InsertArtifact(ctx, store.Artifact{
-			TicketID: ticketID, Type: scenarioArtifactType, Version: i + 1, Payload: payload,
+			TicketID: ticketID, Type: scenarioArtifactType, Version: i + 1, RunID: &runID, Payload: payload,
 		}); err != nil {
 			return fmt.Errorf("insert scenario %s: %w", sc.ID, err)
 		}
@@ -260,28 +332,29 @@ func seedDemoScenarios(ctx context.Context, s *store.Store, ticketID int64) erro
 	return nil
 }
 
-// seedDemoFindings inserts ticketID's demo finding set, one artifact row per
-// response.Finding at consecutive versions, once, skipping the whole set
-// when a "finding" artifact is already stored.
-func seedDemoFindings(ctx context.Context, s *store.Store, ticketID int64) error {
-	_, ok, err := s.GetArtifact(ctx, ticketID, findingArtifactType)
+// seedDemoPlanReview inserts ticketID's demo "planreview" artifact at its
+// plan cohort's exact version (design section 7, Task 11: "store the seeded
+// findings as the demo planreview artifact at the plan's version"), so
+// views.go's loadFindings (PlanReviewAt) finds it the same way a real plan
+// review's commit (job/planning.go's planReviewOkCommit) would have stored
+// it: as a planreviewFindingsPayload, not a bare []response.Finding.
+func seedDemoPlanReview(ctx context.Context, s *store.Store, ticketID, runID int64) error {
+	cohort, ok, err := s.CurrentCohort(ctx, ticketID)
 	if err != nil {
-		return fmt.Errorf("get finding artifact: %w", err)
+		return fmt.Errorf("current cohort: %w", err)
 	}
-	if ok {
-		return nil
+	if !ok {
+		return fmt.Errorf("ticket %d has no plan cohort to review yet", ticketID)
 	}
 
-	for i, f := range demoFindings() {
-		payload, err := json.Marshal(f)
-		if err != nil {
-			return fmt.Errorf("marshal finding %d: %w", i+1, err)
-		}
-		if _, err := s.InsertArtifact(ctx, store.Artifact{
-			TicketID: ticketID, Type: findingArtifactType, Version: i + 1, Payload: payload,
-		}); err != nil {
-			return fmt.Errorf("insert finding %d: %w", i+1, err)
-		}
+	payload, err := json.Marshal(planreviewFindingsPayload{Findings: demoFindings()})
+	if err != nil {
+		return fmt.Errorf("marshal findings: %w", err)
+	}
+	if _, err := s.InsertArtifact(ctx, store.Artifact{
+		TicketID: ticketID, Type: planreviewArtifactType, Version: cohort.PlanVersion, RunID: &runID, Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("insert planreview artifact: %w", err)
 	}
 	return nil
 }
