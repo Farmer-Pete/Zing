@@ -95,7 +95,7 @@ func runJob(
 		"model", req.Model,
 		"runtime", jobCfg.Runtime,
 		"exit_code", res.ExitCode,
-		"agent_seconds", int64(res.AgentTime/time.Second),
+		"agent_seconds", runtime.Seconds(res.AgentTime),
 		"err_kind", errKind(runErr),
 		"stderr_len", res.StderrLen,
 		"stderr_sha256", res.StderrSHA256,

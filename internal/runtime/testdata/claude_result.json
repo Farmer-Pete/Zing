@@ -1,0 +1,9 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "<zing job=\"classify\" outcome=\"bug\"><reason>the crash log shows a nil pointer dereference in handleRequest</reason></zing>",
+  "session_id": "9f8b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d",
+  "num_turns": 3,
+  "duration_ms": 4210
+}

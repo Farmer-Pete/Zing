@@ -8,16 +8,6 @@ import (
 
 const notImplemented = "not implemented in package 2"
 
-func TestClaude_RunNotImplemented(t *testing.T) {
-	t.Parallel()
-
-	var c Claude
-	_, err := c.Run(context.Background(), RunRequest{})
-	if err == nil || err.Error() != notImplemented {
-		t.Fatalf("Run() error = %v, want %q", err, notImplemented)
-	}
-}
-
 func TestCodex_RunNotImplemented(t *testing.T) {
 	t.Parallel()
 

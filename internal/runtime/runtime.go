@@ -35,7 +35,13 @@ type RunRequest struct {
 	Env []string
 	// Timeout bounds the run.
 	Timeout time.Duration
-	// MaxTurns caps the turns in one run (default 20).
+	// MaxTurns caps the turns in one run (default 20). Claude does not read
+	// this field in Claude Code 2.1.274: that CLI has no --max-turns flag
+	// (verified against --help; the closest related flag, --max-budget-usd,
+	// is a dollar cap, not a turn cap), so the per-job timeout runJob
+	// already applies through the context deadline is the only bound on a
+	// Claude run. The field stays for a future CLI version, or a runtime,
+	// that does read it.
 	MaxTurns int
 	// SessionID resumes a prior run's session; empty starts a new one.
 	SessionID string
@@ -56,4 +62,18 @@ type RunResult struct {
 	ExitCode     int
 	StderrLen    int64
 	StderrSHA256 string
+}
+
+// Seconds rounds d up to a whole second, minimum 1, so every caller that
+// reports agent time -- a Runtime's own logging and the job layer's
+// runJob -- shares one definition of "agent seconds" (design section 4.1,
+// 4.6): a run that took any time at all reports at least one second, and
+// a run of exactly N seconds reports N, not N+1.
+func Seconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	secs = max(secs, 1)
+	return secs
 }
