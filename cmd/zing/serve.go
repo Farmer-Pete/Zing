@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"math"
 	"net"
@@ -19,7 +18,6 @@ import (
 	"time"
 
 	zing "zing"
-	"zing/fixtures"
 	"zing/internal/bus"
 	"zing/internal/config"
 	"zing/internal/console"
@@ -192,22 +190,21 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
-	scripts, err := fs.Sub(fixtures.FS, "scripts")
+	// Production wires the two real runtimes, claude and codex, and nothing
+	// else: no fake in production (design D2, section 4.1; task 14).
+	// selftest and the dispatch/console e2e suites are the only remaining
+	// callers that build a Fake, under all three machine.toml runtime names.
+	rts, err := productionRuntimes()
 	if err != nil {
 		_ = st.Close()
-		return fmt.Errorf("serve: sub scripts fs: %w", err)
-	}
-	// Production real runtimes arrive in task 14 (Claude and Codex are
-	// still stubs); every serve run, in the meantime, maps all three
-	// machine.toml runtime names to the one Fake (design section 4.1, D2).
-	fake := runtime.NewFake(scripts)
-	rts, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake})
-	if err != nil {
-		_ = st.Close()
-		return fmt.Errorf("serve: %w", err)
+		return err
 	}
 
-	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
+	// The GitHub tracker, from the configured token and one "owner/name" per
+	// project (task 14, replacing the fixture tracker this used to build:
+	// Package 6's D6 deferred this rewire here). The fixture tracker is now
+	// built only from selftest and the test suites.
+	tr, err := productionTracker(cfg)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -310,6 +307,44 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	}
 
 	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+}
+
+// productionRuntimes builds the runtime.Set serve wires the dispatcher with:
+// the two real runtimes, claude and codex, resolved by their bare bin names
+// (an empty bin argument to runtime.NewClaude/NewCodex resolves through
+// PATH), and nothing else (design D2, section 4.1; task 14). Production
+// never maps the fake name; only selftest and the test suites still build a
+// runtime.Fake.
+func productionRuntimes() (runtime.Set, error) {
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{
+		runtimeNameClaude: runtime.NewClaude(""),
+		runtimeNameCodex:  runtime.NewCodex(""),
+	})
+	if err != nil {
+		return runtime.Set{}, fmt.Errorf("serve: %w", err)
+	}
+	return rts, nil
+}
+
+// productionTracker builds the GitHub tracker serve wires the dispatcher
+// with (task 14, replacing the fixture tracker): cfg.GitHubToken authenticates
+// the one client every configured project shares, and repos maps each
+// project's name to its own "owner/name" -- config.Project.Repo is already
+// stored in that exact shape ("zing project add"'s splitOwnerRepo validates
+// it on the way in; cmd/zing/project.go), so no parsing happens here. The
+// token is read once from cfg and passed straight into tracker.NewGitHub;
+// it is never logged and never reaches a job's environment (the runtimes'
+// own env filter already drops every *_TOKEN name by construction).
+func productionTracker(cfg *config.Config) (*tracker.GitHubTracker, error) {
+	repos := make(map[string]string, len(cfg.Projects))
+	for i := range cfg.Projects {
+		repos[cfg.Projects[i].Name] = cfg.Projects[i].Repo
+	}
+	tr, err := tracker.NewGitHub(cfg.GitHubToken, repos)
+	if err != nil {
+		return nil, fmt.Errorf("serve: %w", err)
+	}
+	return tr, nil
 }
 
 // listenOnAll opens one TCP listener per host in hosts, each at port. On

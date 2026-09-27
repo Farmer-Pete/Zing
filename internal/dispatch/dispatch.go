@@ -281,7 +281,12 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 	for _, b := range d.bindings {
 		tickets, err := d.tracker.Intake(ctx, b.TrackerProject, b.Rule)
 		if err != nil {
-			return fmt.Errorf("dispatch: intake %s: %w", b.TrackerProject, err)
+			// A single project's tracker going unreachable must not stop
+			// intake for every other project, nor fail the tick (PKG7-PLAN.md
+			// D6/section 9: "intake error (serve)"). Package 6 left this
+			// fatal; task 14 makes it resilient per-project instead.
+			slog.Warn("intake error", "project", b.TrackerProject, "err", err)
+			continue
 		}
 		for _, tk := range tickets {
 			_, ok, err := d.store.TicketByRef(ctx, b.StoreProjectID, tk.Ref)

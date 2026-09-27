@@ -1,12 +1,14 @@
 package dispatch_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -435,6 +437,105 @@ func TestTick_IntakeInsertsAndDedupsOnASecondIntake(t *testing.T) {
 	}
 	if len(second) != 1 {
 		t.Fatalf("after second Tick (dedup): %d tickets, want 1", len(second))
+	}
+}
+
+// failingIntakeTracker is a minimal Tracker test double for the intake
+// resilience test below (PKG7-PLAN.md D6, task 14): Intake fails with
+// errIntakeBoom for failProject and returns exactly one fixed ticket for any
+// other project. Comment always succeeds, since a successful intake still
+// posts a best-effort pickup comment for its new ticket; the rest are never
+// called in this test.
+type failingIntakeTracker struct {
+	failProject string
+	ticket      tracker.Ticket
+}
+
+var errIntakeBoom = errors.New("boom: intake unreachable")
+
+func (f *failingIntakeTracker) Intake(_ context.Context, project string, _ tracker.IntakeRule) ([]tracker.Ticket, error) {
+	if project == f.failProject {
+		return nil, errIntakeBoom
+	}
+	return []tracker.Ticket{f.ticket}, nil
+}
+
+func (f *failingIntakeTracker) Fetch(context.Context, string, string) (tracker.Ticket, error) {
+	panic("failingIntakeTracker: Fetch is unused by this test")
+}
+
+func (f *failingIntakeTracker) Comment(context.Context, string, string, string) error {
+	return nil
+}
+
+func (f *failingIntakeTracker) FileTicket(context.Context, string, tracker.NewTicket) (string, error) {
+	panic("failingIntakeTracker: FileTicket is unused by this test")
+}
+
+func (f *failingIntakeTracker) Collaborators(context.Context, string) ([]string, error) {
+	panic("failingIntakeTracker: Collaborators is unused by this test")
+}
+
+var _ tracker.Tracker = (*failingIntakeTracker)(nil)
+
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext proves intake
+// resilience (PKG7-PLAN.md D6, section 9's "intake error (serve)", task 14):
+// when the first of two bound projects' Tracker.Intake fails, the tick still
+// returns nil, the second project's new ticket is still inserted, and a warn
+// "intake error" naming the failing project and the error was logged. It
+// swaps the process-wide slog default to capture that line (matching
+// internal/tracker/fixture_test.go's TestFixture_CommentReturnsNil), so it
+// does not run in parallel with another subtest that touches slog.
+func TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext(t *testing.T) {
+	s := newDispatchTestStore(t)
+
+	failingProjectID := seedProject(t, s) // testProject.Name, "zing"
+
+	okProject := testProject
+	okProject.Name = "other"
+	okProject.LocalPath = testProjectDir(t)
+	okProjectID, ensureErr := s.EnsureProject(t.Context(), okProject)
+	if ensureErr != nil {
+		t.Fatalf("EnsureProject: %v", ensureErr)
+	}
+
+	bindings := []dispatch.Binding{
+		{StoreProjectID: failingProjectID, TrackerProject: testProject.Name},
+		{StoreProjectID: okProjectID, TrackerProject: okProject.Name},
+	}
+	tr := &failingIntakeTracker{
+		failProject: testProject.Name,
+		ticket:      tracker.Ticket{Ref: "fake#9", Title: "from the second project", Body: "body"},
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (one project's intake error must not fail the tick)", err)
+	}
+
+	tickets, err := s.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("ListAllTickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets after Tick = %d, want 1 (only the second project's ticket)", len(tickets))
+	}
+	if tickets[0].TrackerRef != "fake#9" || tickets[0].ProjectID != okProjectID {
+		t.Errorf("inserted ticket = %+v, want ref fake#9 under project %d", tickets[0], okProjectID)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "intake error") {
+		t.Errorf("log = %q, want it to contain \"intake error\"", logged)
+	}
+	if !strings.Contains(logged, testProject.Name) {
+		t.Errorf("log = %q, want it to name the failing project %q", logged, testProject.Name)
 	}
 }
 

@@ -9,8 +9,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -63,8 +61,9 @@ func TestParseServeFlags_RejectsUnknownFlag(t *testing.T) {
 // section 6.15: "It must NEVER run in a normal serve"): a real serve run,
 // with seedDemo false exactly as every caller that never passes
 // --seed-demo gets, is driven far enough to prove the store and dispatcher
-// are live (the configured "zing" project's fixture ticket appears), and at
-// no point does a "demo" project exist.
+// are live (a directly seeded ticket leaves "queued"; task 14's real
+// GitHub tracker cannot be relied on to land one of its own inside the poll
+// deadline), and at no point does a "demo" project exist.
 func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	t.Parallel()
 
@@ -73,19 +72,15 @@ func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	dbPath := filepath.Join(dir, "zing.db")
 
 	port := freeLoopbackPort(t)
-	// This test never resumes the fixture ticket to a ready outcome (it only
-	// waits for intake), so the configured project's path needs no
-	// "cmd/zing/main.go" fixture file; dir itself is a real directory, which
-	// is all os.OpenRoot needs if some other tick ever reaches that far.
-	doc := fmt.Sprintf(testZingTOMLFormat, port, dir)
-	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
-		t.Fatalf("write zing.toml: %v", err)
-	}
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback},
+	})
 
 	pre, err := store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatalf("pre-migrate store.Open: %v", err)
 	}
+	seedQueuedTicketForServe(t, pre)
 	if err := pre.Close(); err != nil {
 		t.Fatalf("pre-migrate store.Close: %v", err)
 	}
@@ -96,9 +91,9 @@ func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
-	// Wait for the configured project's own fixture ticket to appear
-	// (intake has run, proving the store and dispatcher are both live),
-	// asserting on every poll that no "demo" project has appeared either.
+	// Wait for the seeded ticket to leave "queued" (proving the store and
+	// dispatcher are both live), asserting on every poll that no "demo"
+	// project has appeared either.
 	waitForTicketAssertingNoDemoProject(t, dbPath, serveDone)
 
 	cancel()
@@ -112,9 +107,9 @@ func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	}
 }
 
-// waitForTicketAssertingNoDemoProject polls dbPath until the configured
-// "zing" project's fixture ticket has been inserted by intake, failing the
-// test immediately if a "demo" project shows up on any poll along the way.
+// waitForTicketAssertingNoDemoProject polls dbPath until the seeded ticket
+// has left state "queued", failing the test immediately if a "demo" project
+// shows up on any poll along the way.
 func waitForTicketAssertingNoDemoProject(t *testing.T, dbPath string, serveDone <-chan error) {
 	t.Helper()
 
@@ -130,7 +125,7 @@ func waitForTicketAssertingNoDemoProject(t *testing.T, dbPath string, serveDone 
 	for {
 		select {
 		case <-ctx.Done():
-			t.Fatal("the configured project's fixture ticket never appeared within the poll deadline")
+			t.Fatal("the seeded ticket never left state \"queued\" within the poll deadline")
 		case err := <-serveDone:
 			t.Fatalf("serve exited early: %v", err)
 		case <-ticker.C:
@@ -148,7 +143,7 @@ func waitForTicketAssertingNoDemoProject(t *testing.T, dbPath string, serveDone 
 			if err != nil {
 				t.Fatalf("ListAllTickets: %v", err)
 			}
-			if len(tickets) > 0 {
+			if len(tickets) == 1 && tickets[0].State != testServeStateQueued {
 				return
 			}
 		}
