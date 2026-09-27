@@ -487,6 +487,14 @@ func drainAndShutdown(
 // b.Publish is wired in as onWarn (design section 6a): a fresh WARN-or-above
 // record wakes every open console /stream so the #alerts region patches
 // live, the same bus every store-changing handler already publishes to.
+//
+// This is a bounded amplification, accepted rather than gated by source
+// package: a single WARN anywhere in the process wakes every open /stream,
+// and a per-tab patch-failure slog.Warn re-renders all four regions of
+// every other healthy stream. Each cycle still terminates, since a failing
+// stream exits after one frame, so it cannot compound across warnings. For
+// a single-user loopback/tailnet console this fan-out is fine; it would
+// need reconsidering before this handler served multiple concurrent users.
 func installLogHandler(ctx context.Context, st *store.Store, b *bus.Broker) (*console.Handler, error) {
 	lv := new(slog.LevelVar)
 	h := console.NewHandler(os.Stderr, lv, b.Publish)

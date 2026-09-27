@@ -112,6 +112,10 @@ func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 //     in addition to every record that already passes.
 //   - onWarn fires once per WARN-or-above record, regardless of pass, after
 //     the ring has captured it.
+//
+// A sink write error does not skip the ring add or onWarn: it is captured
+// and returned last, after both have run, so a WARN whose sink write fails
+// still reaches the ring and the alerts view instead of vanishing.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	ticketID, runID, taskN := h.resolveIDs(r)
 
@@ -119,9 +123,10 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	pass := r.Level >= h.levelVar.Level() || debugged
 	warn := r.Level >= slog.LevelWarn
 
+	var sinkErr error
 	if pass {
 		if err := h.sink.Handle(ctx, r); err != nil {
-			return fmt.Errorf("console: log handler: forward to sink: %w", err)
+			sinkErr = fmt.Errorf("console: log handler: forward to sink: %w", err)
 		}
 	}
 
@@ -139,7 +144,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	if warn && h.onWarn != nil {
 		h.onWarn()
 	}
-	return nil
+	return sinkErr
 }
 
 // WithAttrs returns a child Handler carrying attrs in addition to h's own,

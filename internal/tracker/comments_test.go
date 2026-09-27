@@ -62,6 +62,21 @@ func TestDoneComment_ExactBody(t *testing.T) {
 	}
 }
 
+// TestPickupComment_EmptyOwnerOmitsThePossessive proves an empty owner
+// renders a disclosure with no name and no dangling possessive, rather than
+// the grammatically broken "on 's behalf." the naive fmt.Sprintf produces.
+func TestPickupComment_EmptyOwnerOmitsThePossessive(t *testing.T) {
+	t.Parallel()
+
+	got := tracker.PickupComment("")
+	if !strings.HasSuffix(got, "Posted automatically by Zing.") {
+		t.Errorf("PickupComment(\"\") = %q, want it to end with the no-name disclosure", got)
+	}
+	if strings.Contains(got, "'s behalf") {
+		t.Errorf("PickupComment(\"\") = %q, want no dangling \"'s behalf\"", got)
+	}
+}
+
 // TestComments_DisclosureNamesADifferentOwner proves the disclosure line
 // is built from the owner parameter, not a hardcoded name, across all
 // four builders.

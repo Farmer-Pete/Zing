@@ -99,21 +99,40 @@ func TestWrap_MultilineText(t *testing.T) {
 // must produce on every call.
 var nonceShape = regexp.MustCompile(`^[0-9a-f]{6}$`)
 
-// TestWrap_NonceShape proves Wrap mints a fresh 6-lowercase-hex nonce on
-// each call by extracting the nonce from the header line and matching its
-// shape; it also checks two calls do not collide (not a shape guarantee,
-// but the contract is a fresh nonce per call).
-func TestWrap_NonceShape(t *testing.T) {
-	t.Parallel()
-
-	got := Wrap("hello")
-	lines := strings.SplitN(got, "\n", 2)
+// nonceFromHeader extracts the nonce from a Wrap result's "<<<UNTRUSTED
+// xxxxxx>>>" header line, failing the test if the header does not have that
+// shape.
+func nonceFromHeader(t *testing.T, wrapped string) string {
+	t.Helper()
+	lines := strings.SplitN(wrapped, "\n", 2)
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "<<<UNTRUSTED ") || !strings.HasSuffix(lines[0], ">>>") {
 		t.Fatalf("Wrap header line = %q, want \"<<<UNTRUSTED {nonce}>>>\"", lines[0])
 	}
-	nonce := strings.TrimSuffix(strings.TrimPrefix(lines[0], "<<<UNTRUSTED "), ">>>")
+	return strings.TrimSuffix(strings.TrimPrefix(lines[0], "<<<UNTRUSTED "), ">>>")
+}
+
+// TestWrap_NonceShape proves Wrap mints a fresh 6-lowercase-hex nonce on
+// each call by extracting the nonce from the header line and matching its
+// shape.
+func TestWrap_NonceShape(t *testing.T) {
+	t.Parallel()
+
+	nonce := nonceFromHeader(t, Wrap("hello"))
 	if !nonceShape.MatchString(nonce) {
 		t.Errorf("Wrap nonce = %q, want 6 lowercase hex characters", nonce)
+	}
+}
+
+// TestWrap_NonceDiffersAcrossCalls proves the fresh-nonce-per-call contract
+// by calling Wrap twice and asserting the two nonces differ (24-bit
+// collision odds across two calls are negligible).
+func TestWrap_NonceDiffersAcrossCalls(t *testing.T) {
+	t.Parallel()
+
+	first := nonceFromHeader(t, Wrap("hello"))
+	second := nonceFromHeader(t, Wrap("hello"))
+	if first == second {
+		t.Errorf("Wrap produced the same nonce %q on two consecutive calls, want a fresh nonce each call", first)
 	}
 }
 

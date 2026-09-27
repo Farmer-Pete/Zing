@@ -2,15 +2,31 @@ package console_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"zing/internal/console"
 )
+
+// errSinkWrite is the fixed error failingWriter.Write always returns, so a
+// test can assert on it with errors.Is instead of matching a string.
+var errSinkWrite = errors.New("boom: sink write failed")
+
+// failingWriter is an io.Writer whose Write always fails, letting a test
+// force Handler.Handle's sink.Handle call into its error branch without
+// reaching into slog.TextHandler's own internals.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errSinkWrite
+}
 
 // newTestHandler builds a console.Handler over a fresh buffer, seeded at
 // info, and returns both so a test can assert on the sink's own text output
@@ -374,6 +390,48 @@ func TestOnWarn_FiresOnWarnAndAboveNotBelow(t *testing.T) {
 	mu.Unlock()
 	if got != 2 {
 		t.Errorf("onWarn fired %d times after one WARN and one ERROR (plus one DEBUG and one INFO), want exactly 2", got)
+	}
+}
+
+// TestHandle_SinkErrorStillRingsAndFiresOnWarn proves a sink write failure
+// does not skip the ring add or the onWarn call: before the fix, Handle
+// returned as soon as h.sink.Handle errored, so a WARN whose sink write
+// failed vanished from the alerts view along with the record it should
+// still have logged everywhere else. Handle must still return the wrapped
+// sink error, but only after the ring and onWarn have both run.
+func TestHandle_SinkErrorStillRingsAndFiresOnWarn(t *testing.T) {
+	var mu sync.Mutex
+	var fired int
+	onWarn := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		fired++
+	}
+
+	lv := new(slog.LevelVar)
+	lv.Set(slog.LevelDebug) // pass=true, so Handle attempts the sink write that fails
+	h := console.NewHandler(failingWriter{}, lv, onWarn)
+
+	r := slog.NewRecord(time.Now(), slog.LevelWarn, "a warning whose sink write fails", 0)
+	err := h.Handle(context.Background(), r)
+
+	if err == nil {
+		t.Fatal("Handle returned nil, want the wrapped sink error")
+	}
+	if !errors.Is(err, errSinkWrite) {
+		t.Errorf("Handle error = %v, want it to wrap errSinkWrite", err)
+	}
+
+	got := h.Warnings(10)
+	if len(got) != 1 || got[0].Message != "a warning whose sink write fails" {
+		t.Fatalf("Warnings(10) = %v, want the WARN entry despite the sink error", got)
+	}
+
+	mu.Lock()
+	firedCount := fired
+	mu.Unlock()
+	if firedCount != 1 {
+		t.Errorf("onWarn fired %d times, want exactly 1 despite the sink error", firedCount)
 	}
 }
 

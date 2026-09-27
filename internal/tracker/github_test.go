@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,6 +108,16 @@ func TestNewGitHub(t *testing.T) {
 		_, err := NewGitHub("tok", nil)
 		if err == nil {
 			t.Fatal("NewGitHub: expected an error for an empty repos map, got nil")
+		}
+	})
+
+	t.Run("an empty project key is an error", func(t *testing.T) {
+		_, err := NewGitHub("tok", map[string]string{"": testRepoSpec})
+		if err == nil {
+			t.Fatal("NewGitHub: expected an error for an empty project key, got nil")
+		}
+		if !strings.Contains(err.Error(), errEmptyProjectName.Error()) {
+			t.Errorf("NewGitHub error = %q, want it to mention %q", err.Error(), errEmptyProjectName.Error())
 		}
 	})
 
@@ -219,16 +230,18 @@ func TestGitHubTrackerIntake(t *testing.T) {
 		}
 
 		want := map[string]string{"2": "An issue", "3": "Assigned proposed"}
-		if len(tickets) != len(want) {
-			t.Fatalf("Intake tickets = %+v, want %d tickets %v", tickets, len(want), want)
-		}
+		gotRefs := make(map[string]string, len(tickets)) // ref -> title, so a missing page-two ref cannot be masked by a duplicate page-one one
 		for _, tk := range tickets {
-			if want[tk.Ref] != tk.Title {
-				t.Errorf("Intake: unexpected ticket %+v", tk)
-			}
+			gotRefs[tk.Ref] = tk.Title
 			if tk.Ref == "1" {
 				t.Error("Intake: the pull request (issue #1) leaked into the tickets")
 			}
+		}
+		if len(tickets) != len(gotRefs) {
+			t.Errorf("Intake tickets = %+v, want no duplicate refs", tickets)
+		}
+		if !maps.Equal(gotRefs, want) {
+			t.Errorf("Intake tickets (by ref) = %v, want exactly %v", gotRefs, want)
 		}
 	})
 
@@ -543,13 +556,15 @@ func TestGitHubTrackerCollaborators(t *testing.T) {
 			t.Fatalf("Collaborators: made %d requests, want 2", hits)
 		}
 		want := map[string]bool{"carol": true, "dave": true}
-		if len(logins) != len(want) {
-			t.Fatalf("Collaborators = %v, want %d logins %v", logins, len(want), want)
-		}
+		gotLogins := make(map[string]bool, len(logins)) // set, so a missing page-two login cannot be masked by a duplicate page-one one
 		for _, l := range logins {
-			if !want[l] {
-				t.Errorf("Collaborators contains unexpected login %q", l)
-			}
+			gotLogins[l] = true
+		}
+		if len(logins) != len(gotLogins) {
+			t.Errorf("Collaborators = %v, want no duplicate logins", logins)
+		}
+		if !maps.Equal(gotLogins, want) {
+			t.Errorf("Collaborators (as a set) = %v, want exactly %v", gotLogins, want)
 		}
 	})
 
