@@ -10,6 +10,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/response"
 )
 
 // wantMermaidSHA256 is the digest static/ASSETS.md records for the vendored
@@ -32,7 +33,7 @@ const (
 // internal/console/server.go serves (design section 5, 12).
 func TestStaticAssetsServeWithContentType(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor))
 	defer srv.Close()
 
 	tests := []struct {
@@ -78,7 +79,7 @@ func TestStaticAssetsServeWithContentType(t *testing.T) {
 // 3, 5, 12).
 func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor))
 	defer srv.Close()
 
 	forbidden := []string{
@@ -109,7 +110,7 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 // (design section 0, dependency set).
 func TestMermaidAssetDigestMatchesRecorded(t *testing.T) {
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/mermaid.js") //nolint:noctx // a bare GET on a test server needs no deadline

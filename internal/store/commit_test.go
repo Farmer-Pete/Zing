@@ -1,8 +1,16 @@
 package store
 
 import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"zing/internal/response"
 )
 
 // testOwner and testOwnerOther are the claim owners repeated across this
@@ -17,7 +25,10 @@ const (
 
 	testWaitingQuestions = "questions"
 	testStateBuilding    = "building"
+	testStateDone        = "done"
 	testReasonPlanReady  = "plan ready"
+	testOutcomeBug       = "bug"
+	testTypePlan         = "plan"
 )
 
 // claimForCommit claims ticketID for testOwner with a lease truncated to
@@ -153,12 +164,12 @@ func TestCommitHandlerResult_FirstEntryPlanningAppliesAtomically(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 	owner, expires := claimForCommit(t, s, ticketID)
 
-	externalID := "ext-1"
+	externalID := testExternalID1
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Waiting: new(testWaitingQuestions),
-		Session: &SessionUpsert{Job: testStatePlanning, Runtime: "fake", ExternalID: &externalID},
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &externalID},
 		Runs:    []Run{{Turn: 0, Outcome: new(testTypeQuestion)}},
 		Messages: []Message{{
 			TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
@@ -338,10 +349,10 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsNonSingleRun(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 	owner, expires := claimForCommit(t, s, ticketID)
 
-	externalID := "ext-1"
+	externalID := testExternalID1
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Session: &SessionUpsert{Job: testStatePlanning, Runtime: "fake", ExternalID: &externalID},
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &externalID},
 		Runs:    nil, // zero runs, AttachRunToMsgs still set
 		Messages: []Message{{
 			TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
@@ -349,8 +360,8 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsNonSingleRun(t *testing.T) {
 		}},
 		AttachRunToMsgs: true,
 	})
-	if err == nil {
-		t.Error("CommitHandlerResult with AttachRunToMsgs and zero runs: want error, got nil")
+	if err == nil || !strings.Contains(err.Error(), "attach needs exactly one run") {
+		t.Errorf("CommitHandlerResult with AttachRunToMsgs and zero runs: err = %v, want containing %q", err, "attach needs exactly one run")
 	}
 	if applied {
 		t.Error("CommitHandlerResult with AttachRunToMsgs and zero runs: applied = true, want false")
@@ -451,6 +462,117 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	}
 	if from != testStatePlanning || to != testStateBuilding || reason != testReasonPlanReady {
 		t.Errorf("state message = (%s, %s, %s), want (%s, %s, %s)", from, to, reason, testStatePlanning, testStateBuilding, testReasonPlanReady)
+	}
+}
+
+// TestCommitHandlerResult_SessionUpsertFillsNullExternalID proves the
+// SessionUpsert extension (design section 4.5): a resume commit whose
+// ExternalID is non-nil fills a session's still-null external_id -- the
+// D13 case where Reserve created the session before the runtime call ran,
+// and this terminalizing commit is the first to learn the runtime's session
+// id -- and BumpResumes still increments alongside it.
+func TestCommitHandlerResult_SessionUpsertFillsNullExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessID := insertSession(t, s, ticketID, testStatePlanning) // external_id NULL
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	externalID := testExternalID1
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID, ExternalID: &externalID, BumpResumes: true},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var gotExternal sql.NullString
+	var gotResumes int
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT external_id, resumes FROM sessions WHERE id = ?`, sessID).
+		Scan(&gotExternal, &gotResumes); scanErr != nil {
+		t.Fatalf("read session: %v", scanErr)
+	}
+	if !gotExternal.Valid || gotExternal.String != externalID {
+		t.Errorf("session.external_id = %v, want %s", gotExternal, externalID)
+	}
+	if gotResumes != 1 {
+		t.Errorf("session.resumes = %d, want 1 (BumpResumes)", gotResumes)
+	}
+}
+
+// TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID proves
+// the UPDATE ... WHERE external_id IS NULL guard: a commit's ExternalID
+// never overwrites a session that already has one, so a later terminalizing
+// commit on the same session (a second resume, say) cannot clobber the id
+// the runtime returned on the first turn.
+func TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET external_id = ? WHERE id = ?`, "ext-old", sessID); err != nil {
+		t.Fatalf("seed external_id: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	newExternal := "ext-new"
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID, ExternalID: &newExternal},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var got string
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT external_id FROM sessions WHERE id = ?`, sessID).Scan(&got); scanErr != nil {
+		t.Fatalf("read session: %v", scanErr)
+	}
+	if got != "ext-old" {
+		t.Errorf("session.external_id = %q, want unchanged ext-old", got)
+	}
+}
+
+// TestCommitHandlerResult_RejectsEmptyExternalID proves F035's write-side
+// guard: a commit whose SessionUpsert.ExternalID points at "" fails the
+// whole commit rather than storing an empty external_id (which is not a
+// valid runtime id and not "no id yet" -- that is NULL).
+func TestCommitHandlerResult_RejectsEmptyExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	empty := ""
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &empty},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult with ExternalID = \"\": want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult with ExternalID = \"\": applied = true, want false")
+	}
+
+	sessions, sessErr := s.SessionsForTicket(ctx, ticketID)
+	if sessErr != nil {
+		t.Fatalf("SessionsForTicket: %v", sessErr)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("sessions for ticket %d = %v, want none (the whole commit must roll back)", ticketID, sessions)
 	}
 }
 
@@ -991,5 +1113,1318 @@ func TestAnswerQuestion_RejectsZeroOptionQuestion(t *testing.T) {
 	}
 	if res.Conflict != "free-text not supported" {
 		t.Errorf("Conflict = %q, want %q", res.Conflict, "free-text not supported")
+	}
+}
+
+// --- CommitHandlerResult: Runs (ID > 0 updates, PKG7-PLAN.md section 4.5) ---
+
+// scenarioPayload is a minimal, schema-valid "scenario" artifact payload
+// (schemas/artifacts/scenario.json), used by every Artifacts test below that
+// does not care about a whole-document type's version collisions.
+func scenarioPayload(id string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"id":%q,"kind":"behavior","check_cmd":"go test ./...","given":"g","when":"w","then":"t"}`, id))
+}
+
+// planPayload is the checked-in "plan" artifact example
+// (examples/artifacts/plan.json) verbatim: a whole-document type complex
+// enough that hand-writing a second minimal valid payload is not worth it,
+// so every version-collision test below reuses this one.
+func planPayload() []byte {
+	return []byte(`{
+  "overview": {
+    "objective": "Stop checkout from crashing on an empty cart.",
+    "context": "internal/cart handles cart state; internal/checkout reads it at payment time.",
+    "problem": {
+      "text": "checkout panics when cart.Items is nil instead of an empty slice.",
+      "loop": {
+        "cmd": "go test ./internal/cart/... -run TestEmptyCart",
+        "text": "fails: nil pointer dereference in checkout.Total"
+      },
+      "repro": "create a cart, call Checkout without adding items",
+      "hypotheses": [
+        {
+          "rank": 1,
+          "cause": "NewCart never initializes Items",
+          "prediction": "initializing Items to []Item{} makes the loop pass"
+        }
+      ]
+    },
+    "goals": ["checkout never panics on an empty cart"],
+    "nongoals": ["changing the checkout API"]
+  },
+  "design": {
+    "demo": {
+      "cmd": "go run ./cmd/demo -empty-cart",
+      "text": "an empty cart checks out for zero dollars instead of crashing"
+    },
+    "shape": "NewCart initializes Items to an empty slice; checkout reads it unchanged.",
+    "changes": [
+      {
+        "path": "internal/cart/cart.go",
+        "symbol": "NewCart",
+        "kind": "modified",
+        "callers": "checkout.New",
+        "callees": "none",
+        "before": "Items field left at its zero value (nil)",
+        "after": "Items: make([]Item, 0)"
+      }
+    ],
+    "types": [],
+    "migrations": { "migrations": [] }
+  },
+  "delivery": {
+    "files": [
+      { "path": "internal/cart/cart.go", "action": "modify", "reason": "initialize Items to an empty slice" }
+    ],
+    "deletions": { "deletions": [] },
+    "tests": [
+      {
+        "name": "TestEmptyCart_ReturnsEmptyOrder",
+        "seam": "cart.NewCart",
+        "kind": "regression",
+        "mocks": "",
+        "asserts": "checkout of a freshly created cart returns a zero-item order, no panic"
+      }
+    ],
+    "tasks": [
+      { "n": 1, "test": "TestEmptyCart_ReturnsEmptyOrder", "demo": true, "text": "Initialize cart.Items to an empty slice in NewCart." }
+    ]
+  },
+  "review": {
+    "trust_root": "none",
+    "alternatives": ["guard checkout.Total with a nil check instead of fixing the source"],
+    "risks": ["other constructors that build a Cart by struct literal still skip this initializer"]
+  }
+}`)
+}
+
+// TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched
+// proves the Run.ID > 0 branch (design section 4.5): it writes outcome,
+// exit_code, and agent_seconds on the run Reserve already placed, and never
+// touches model, which Reserve set at reserve time.
+func TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-opus-4-8")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs: []Run{{ID: reserved.RunID, Outcome: new(testOutcomeBug), ExitCode: new(0), AgentSeconds: new(5)}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var outcome, model string
+	var exitCode, agentSeconds int
+	if scanErr := s.db.QueryRowContext(ctx,
+		`SELECT outcome, exit_code, agent_seconds, model FROM runs WHERE id = ?`, reserved.RunID).
+		Scan(&outcome, &exitCode, &agentSeconds, &model); scanErr != nil {
+		t.Fatalf("read updated run: %v", scanErr)
+	}
+	if outcome != testOutcomeBug || exitCode != 0 || agentSeconds != 5 {
+		t.Errorf("run = (outcome %s, exit %d, seconds %d), want (bug, 0, 5)", outcome, exitCode, agentSeconds)
+	}
+	if model != "claude-opus-4-8" {
+		t.Errorf("run.model = %q, want unchanged claude-opus-4-8 (Reserve set it; an update must never touch it)", model)
+	}
+}
+
+// TestCommitHandlerResult_RunUpdateRejectsRunFromAnotherTicketsSession proves
+// the ownership subquery (design section 4.5): a Run.ID that belongs to a
+// session on a different ticket is rejected with the exact text, and the
+// run's own row is left untouched.
+func TestCommitHandlerResult_RunUpdateRejectsRunFromAnotherTicketsSession(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	ownerA, expiresA := claimForCommit(t, s, ticketA)
+	reserved, err := s.Reserve(ctx, ticketA, ownerA, expiresA,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	ownerB, expiresB := claimForCommit(t, s, ticketB)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: ownerB, Expires: expiresB,
+		Runs: []Run{{ID: reserved.RunID, Outcome: new(testOutcomeBug)}},
+	})
+	wantErr := fmt.Sprintf("run %d not owned by ticket %d", reserved.RunID, ticketB)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	var outcome sql.NullString
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT outcome FROM runs WHERE id = ?`, reserved.RunID).Scan(&outcome); scanErr != nil {
+		t.Fatalf("read run: %v", scanErr)
+	}
+	if outcome.Valid {
+		t.Errorf("run outcome = %v, want unchanged NULL (the commit must not touch another ticket's run)", outcome)
+	}
+}
+
+// --- CommitHandlerResult: AttachRunToMsgs -----------------------------------
+
+// TestCommitHandlerResult_AttachRunToMsgsAttachesUpdatedRunID proves the
+// AttachRunToMsgs extension (design section 4.5): the attach id comes from a
+// Run.ID > 0 update just as it would from a Run.ID == 0 insert.
+func TestCommitHandlerResult_AttachRunToMsgsAttachesUpdatedRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Waiting: new(testWaitingQuestions),
+		Runs:    []Run{{ID: reserved.RunID, Outcome: new(testTypeQuestion)}},
+		Messages: []Message{{
+			TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
+			State: new(questionStateOpen), Body: "Q1", Payload: questionPayload("Q1"),
+		}},
+		AttachRunToMsgs: true,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	open, qErr := s.QuestionsByState(ctx, ticketID, questionStateOpen)
+	if qErr != nil {
+		t.Fatalf("QuestionsByState: %v", qErr)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open questions = %d, want 1", len(open))
+	}
+	if open[0].RunID == nil || *open[0].RunID != reserved.RunID {
+		t.Errorf("question.RunID = %v, want the updated run id %d", open[0].RunID, reserved.RunID)
+	}
+}
+
+// TestCommitHandlerResult_AttachRunToMsgsRejectsTwoRuns is
+// AttachRunToMsgsRejectsNonSingleRun's sibling for the other non-single
+// count: two Runs entries is rejected the same way zero is.
+func TestCommitHandlerResult_AttachRunToMsgsRejectsTwoRuns(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+	externalID := testExternalID1
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session:         &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &externalID},
+		Runs:            []Run{{Turn: 0, Outcome: new(testOutcomeBug)}, {Turn: 1, Outcome: new(testOutcomeBug)}},
+		AttachRunToMsgs: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "attach needs exactly one run") {
+		t.Fatalf("err = %v, want containing %q", err, "attach needs exactly one run")
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM runs`); n != 0 {
+		t.Errorf("runs after a rejected commit = %d, want 0 (the whole commit rolled back)", n)
+	}
+}
+
+// TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero proves a
+// message whose RunID points at 0 is rejected rather than silently attached
+// (design section 4.5): 0 is never a real run id, so a handler that sends
+// one made a mistake worth failing loudly on.
+func TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	zero := int64(0)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs: []Run{{ID: reserved.RunID, Outcome: new(testTypeQuestion)}},
+		Messages: []Message{{
+			TicketID: ticketID, RunID: &zero, Type: testTypeQuestion, Author: testAuthorZing,
+			State: new(questionStateOpen), Body: "Q1", Payload: questionPayload("Q1"),
+		}},
+		AttachRunToMsgs: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "message run id 0") {
+		t.Fatalf("err = %v, want containing %q", err, "message run id 0")
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("messages after a rejected commit = %d, want 0", n)
+	}
+}
+
+// TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID proves a message
+// that already carries a non-zero RunID is left alone even when
+// AttachRunToMsgs is set: only a nil RunID is filled in.
+func TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	priorSess := insertSession(t, s, ticketID, testStatePlanning)
+	priorRunID := insertQuestionRun(t, s, priorSess)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs: []Run{{ID: reserved.RunID, Outcome: new(testTypeQuestion)}},
+		Messages: []Message{
+			{
+				TicketID: ticketID, Type: testTypeQuestion, Author: testAuthorZing,
+				State: new(questionStateOpen), Body: "Q1", Payload: questionPayload("Q1"),
+			},
+			{
+				TicketID: ticketID, RunID: &priorRunID, Type: testTypeQuestion, Author: testAuthorZing,
+				State: new(questionStateOpen), Body: "Q2", Payload: questionPayload("Q2"),
+			},
+		},
+		AttachRunToMsgs: true,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	open, qErr := s.QuestionsByState(ctx, ticketID, questionStateOpen)
+	if qErr != nil {
+		t.Fatalf("QuestionsByState: %v", qErr)
+	}
+	if len(open) != 2 {
+		t.Fatalf("open questions = %d, want 2", len(open))
+	}
+	var gotAttached, gotExplicit bool
+	for _, m := range open {
+		switch m.Body {
+		case "Q1":
+			gotAttached = true
+			if m.RunID == nil || *m.RunID != reserved.RunID {
+				t.Errorf("Q1.RunID = %v, want the attached run %d", m.RunID, reserved.RunID)
+			}
+		case "Q2":
+			gotExplicit = true
+			if m.RunID == nil || *m.RunID != priorRunID {
+				t.Errorf("Q2.RunID = %v, want the explicit prior run %d, unchanged", m.RunID, priorRunID)
+			}
+		}
+	}
+	if !gotAttached || !gotExplicit {
+		t.Fatalf("did not find both Q1 and Q2 among open questions: %+v", open)
+	}
+}
+
+// --- CommitHandlerResult: SetKind -------------------------------------------
+
+func TestCommitHandlerResult_SetKindNullToBugSucceeds(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		SetKind: new(testOutcomeBug),
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.Kind == nil || *got.Kind != testOutcomeBug {
+		t.Errorf("ticket.Kind = %v, want bug", got.Kind)
+	}
+}
+
+// TestCommitHandlerResult_SetKindSameToSameSucceeds proves "same-to-same
+// succeeds" (design section 4.5): setting kind to the value it already holds
+// is not a conflict, whether or not the driver reports it as zero rows
+// affected.
+func TestCommitHandlerResult_SetKindSameToSameSucceeds(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner1, expires1 := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner1, Expires: expires1, SetKind: new(testOutcomeBug),
+	}); err != nil {
+		t.Fatalf("seed SetKind(bug): %v", err)
+	}
+
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2, SetKind: new(testOutcomeBug),
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult(bug -> bug): %v, want nil", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.Kind == nil || *got.Kind != testOutcomeBug {
+		t.Errorf("ticket.Kind = %v, want unchanged bug", got.Kind)
+	}
+}
+
+func TestCommitHandlerResult_SetKindConflictErrors(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner1, expires1 := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner1, Expires: expires1, SetKind: new(testOutcomeBug),
+	}); err != nil {
+		t.Fatalf("seed SetKind(bug): %v", err)
+	}
+
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2, SetKind: new("feature"),
+	})
+	wantErr := "kind conflict: have bug, want feature"
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.Kind == nil || *got.Kind != testOutcomeBug {
+		t.Errorf("ticket.Kind after a rejected conflicting SetKind = %v, want unchanged bug", got.Kind)
+	}
+}
+
+// TestCommitHandlerResult_SetKindRejectsUnknownValueBeforeSQL proves an
+// out-of-set kind value is rejected before it writes anything: paired with a
+// message in the same commit, the whole commit rolls back rather than
+// partially applying.
+func TestCommitHandlerResult_SetKindRejectsUnknownValueBeforeSQL(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		SetKind: new("thing"),
+		Messages: []Message{{
+			TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress,
+		}},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult(SetKind=thing): want error, got nil")
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.Kind != nil {
+		t.Errorf("ticket.Kind = %v, want unchanged nil", got.Kind)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("messages after a rejected commit = %d, want 0 (rolled back)", n)
+	}
+}
+
+// --- CommitHandlerResult: Artifacts -----------------------------------------
+
+// TestCommitHandlerResult_ArtifactTicketIDForced proves the same forcing
+// rule commit.go already applies to Messages (design section 4.5): every
+// inserted artifact lands under c.TicketID regardless of what the commit's
+// Artifacts carried.
+func TestCommitHandlerResult_ArtifactTicketIDForced(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketB, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketB)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Artifacts: []Artifact{{TicketID: ticketA, Type: testTypeScenario, Payload: scenarioPayload("s1")}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	var gotTicketID int64
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT ticket_id FROM artifacts WHERE type = ?`, testTypeScenario).
+		Scan(&gotTicketID); scanErr != nil {
+		t.Fatalf("read artifact: %v", scanErr)
+	}
+	if gotTicketID != ticketB {
+		t.Errorf("artifact.ticket_id = %d, want forced %d (not the handler's %d)", gotTicketID, ticketB, ticketA)
+	}
+}
+
+// TestCommitHandlerResult_ArtifactRejectsRunFromAnotherTicket proves the
+// same ownership subquery Runs updates use (design section 4.5): a non-nil
+// Artifact.RunID that belongs to another ticket is rejected, and nothing is
+// inserted.
+func TestCommitHandlerResult_ArtifactRejectsRunFromAnotherTicket(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	sessA := insertSession(t, s, ticketA, testStatePlanning)
+	runA := insertQuestionRun(t, s, sessA)
+
+	owner, expires := claimForCommit(t, s, ticketB)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Artifacts: []Artifact{{RunID: &runA, Type: testTypeScenario, Payload: scenarioPayload("s1")}},
+	})
+	wantErr := fmt.Sprintf("artifact run %d not owned by ticket %d", runA, ticketB)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM artifacts`); n != 0 {
+		t.Errorf("artifacts after a rejected commit = %d, want 0", n)
+	}
+}
+
+// TestCommitHandlerResult_ArtifactZeroVersionAutoIncrements proves Version
+// == 0 becomes one past (ticket, type)'s current maximum, computed inside
+// the transaction, for a whole-document type ("plan").
+func TestCommitHandlerResult_ArtifactZeroVersionAutoIncrements(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner1, expires1 := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner1, Expires: expires1,
+		Artifacts: []Artifact{{Type: testTypePlan, Payload: planPayload()}},
+	}); err != nil {
+		t.Fatalf("first version-0 plan artifact: %v", err)
+	}
+
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2,
+		Artifacts: []Artifact{{Type: testTypePlan, Payload: planPayload()}},
+	}); err != nil {
+		t.Fatalf("second version-0 plan artifact: %v", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT version FROM artifacts WHERE ticket_id = ? AND type = ? ORDER BY version`, ticketID, testTypePlan)
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var v int
+		if scanErr := rows.Scan(&v); scanErr != nil {
+			t.Fatalf("scan version: %v", scanErr)
+		}
+		got = append(got, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate versions: %v", err)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("versions = %v, want [1 2]", got)
+	}
+}
+
+// TestCommitHandlerResult_ArtifactExplicitVersionCollisionErrors proves
+// Version > 0 is stored exactly, and a second insert at the same (ticket,
+// type, version) collides against artifacts_whole_doc_uk with the exact
+// text.
+func TestCommitHandlerResult_ArtifactExplicitVersionCollisionErrors(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner1, expires1 := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner1, Expires: expires1,
+		Artifacts: []Artifact{{Type: testTypePlan, Version: 3, Payload: planPayload()}},
+	}); err != nil {
+		t.Fatalf("first version-3 plan artifact: %v", err)
+	}
+
+	var gotVersion int
+	if scanErr := s.db.QueryRowContext(ctx, `SELECT version FROM artifacts WHERE ticket_id = ? AND type = ?`,
+		ticketID, testTypePlan).Scan(&gotVersion); scanErr != nil {
+		t.Fatalf("read version: %v", scanErr)
+	}
+	if gotVersion != 3 {
+		t.Errorf("version = %d, want 3", gotVersion)
+	}
+
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2,
+		Artifacts: []Artifact{{Type: testTypePlan, Version: 3, Payload: planPayload()}},
+	})
+	wantErr := "artifact plan version 3 exists"
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = ?`, ticketID, testTypePlan); n != 1 {
+		t.Errorf("plan artifacts = %d, want 1 (the collision must not insert a second row)", n)
+	}
+}
+
+// TestCommitHandlerResult_ArtifactInvalidPayloadRollsBackWholeCommit proves
+// insertArtifactTx still validates against the artifacts/<type> schema
+// inside the transaction (design section 4.5: "do not bypass validation"),
+// and a validation failure rolls the whole commit back, including an
+// otherwise-valid message in the same commit.
+func TestCommitHandlerResult_ArtifactInvalidPayloadRollsBackWholeCommit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Artifacts: []Artifact{{Type: testTypePlan, Payload: []byte(`{}`)}}, // missing every required field
+		Messages: []Message{{
+			TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress,
+		}},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult with an invalid artifact payload: want error, got nil")
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM artifacts WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("artifacts after a rejected commit = %d, want 0", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("messages after a rejected commit = %d, want 0 (whole commit rolled back)", n)
+	}
+}
+
+// --- CommitHandlerResult: ResolveAll -----------------------------------------
+
+// TestCommitHandlerResult_ResolveAllResolvesOpenAndAnsweredQuestionsOnly
+// proves ResolveAll's scope (design section 4.5, the abandon case): every
+// "open" or "answered" question of the ticket becomes "resolved", an
+// already-"resolved" question is untouched, and a non-question message is
+// untouched.
+func TestCommitHandlerResult_ResolveAllResolvesOpenAndAnsweredQuestionsOnly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	qOpen := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+	qAnswered := insertOpenQuestion(t, s, ticketID, runID, "Q2")
+	markAnswered(t, s, qAnswered)
+	qResolved := insertOpenQuestion(t, s, ticketID, runID, "Q3")
+	if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state = ? WHERE id = ?`, questionStateResolved, qResolved); err != nil {
+		t.Fatalf("seed resolved question: %v", err)
+	}
+	otherMsgID, insErr := s.InsertMessage(ctx, Message{TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress})
+	if insErr != nil {
+		t.Fatalf("insert non-question message: %v", insErr)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: "abandoned", Reason: "owner abandoned",
+		ResolveAll: true,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	for _, id := range []int64{qOpen, qAnswered} {
+		msg, getErr := s.GetMessage(ctx, id)
+		if getErr != nil {
+			t.Fatalf("GetMessage(%d): %v", id, getErr)
+		}
+		if msg.State == nil || *msg.State != questionStateResolved {
+			t.Errorf("question %d state = %v, want resolved", id, msg.State)
+		}
+	}
+
+	untouched, getErr := s.GetMessage(ctx, qResolved)
+	if getErr != nil {
+		t.Fatalf("GetMessage(qResolved): %v", getErr)
+	}
+	if untouched.State == nil || *untouched.State != questionStateResolved {
+		t.Errorf("already-resolved question state = %v, want unchanged resolved", untouched.State)
+	}
+
+	other, getErr := s.GetMessage(ctx, otherMsgID)
+	if getErr != nil {
+		t.Fatalf("GetMessage(other): %v", getErr)
+	}
+	if other.State != nil {
+		t.Errorf("non-question message state = %v, want unchanged nil", other.State)
+	}
+}
+
+// --- CommitHandlerResult: Seal (design D16, section 4.5) --------------------
+
+// insertRun inserts a bare runs row (outcome, exit_code, and agent_seconds
+// all NULL) directly under sessionID, the run id a Seal fixture's plan and
+// scenario artifacts attach to.
+func insertRun(t *testing.T, s *Store, sessionID int64) int64 {
+	t.Helper()
+	res, err := s.db.ExecContext(t.Context(), `INSERT INTO runs (session_id, turn) VALUES (?, 0)`, sessionID)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	return id
+}
+
+// seedSealableCohort inserts one "plan" artifact at planVersion owned by
+// runID, plus n "scenario" artifacts also owned by runID: the cohort a Seal
+// test's SealRequest targets.
+func seedSealableCohort(t *testing.T, s *Store, ticketID, runID int64, planVersion, n int) {
+	t.Helper()
+	ctx := t.Context()
+	if _, err := s.InsertArtifact(ctx, Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testTypePlan, Version: planVersion, Payload: planPayload(),
+	}); err != nil {
+		t.Fatalf("seed plan artifact: %v", err)
+	}
+	for i := range n {
+		if _, err := s.InsertArtifact(ctx, Artifact{
+			TicketID: ticketID, RunID: &runID, Type: testTypeScenario, Payload: scenarioPayload(fmt.Sprintf("s%d", i+1)),
+		}); err != nil {
+			t.Fatalf("seed scenario artifact %d: %v", i, err)
+		}
+	}
+}
+
+// assertSealMismatch asserts err is a *SealMismatchError with the given
+// stage, expected, and affected, and that it also satisfies
+// errors.Is(err, ErrSealMismatch) (design D16), so both the sentinel and the
+// typed-error styles of check work against the same failure.
+func assertSealMismatch(t *testing.T, err error, stage string, expected, affected int) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("err = nil, want a *SealMismatchError")
+	}
+	if !errors.Is(err, ErrSealMismatch) {
+		t.Errorf("errors.Is(err, ErrSealMismatch) = false, want true (err: %v)", err)
+	}
+	var mismatch *SealMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("errors.As(err, *SealMismatchError) = false, want true (err: %v)", err)
+	}
+	if mismatch.Stage != stage {
+		t.Errorf("Stage = %q, want %q", mismatch.Stage, stage)
+	}
+	if mismatch.Expected != expected {
+		t.Errorf("Expected = %d, want %d", mismatch.Expected, expected)
+	}
+	if mismatch.Affected != affected {
+		t.Errorf("Affected = %d, want %d", mismatch.Affected, affected)
+	}
+}
+
+// TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched
+// proves the happy path (design D16): sealing one run's cohort stamps every
+// one of its scenario rows with sealed_at and never touches another run's
+// cohort on the same ticket.
+func TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runA := insertRun(t, s, sess)
+	runB := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runA, 1, 3)
+	seedSealableCohort(t, s, ticketID, runB, 2, 4)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal: &SealRequest{RunID: runB, PlanVersion: 2, ExpectedCount: 4, At: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	sealedB := countRows(t, s,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? AND sealed_at IS NOT NULL`,
+		ticketID, testTypeScenario, runB)
+	if sealedB != 4 {
+		t.Errorf("sealed rows for the target cohort = %d, want 4", sealedB)
+	}
+	sealedA := countRows(t, s,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? AND sealed_at IS NOT NULL`,
+		ticketID, testTypeScenario, runA)
+	if sealedA != 0 {
+		t.Errorf("sealed rows for the other cohort = %d, want 0 (untouched)", sealedA)
+	}
+}
+
+// TestCommitHandlerResult_SealPlanVersionMismatch proves a SealRequest whose
+// PlanVersion does not match the ticket's max-version plan artifact fails at
+// stage "plan" (design D16, section 4.5 check 1).
+func TestCommitHandlerResult_SealPlanVersionMismatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Seal: &SealRequest{RunID: runID, PlanVersion: 2, ExpectedCount: 3, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "plan", 3, 0)
+}
+
+// TestCommitHandlerResult_SealCohortCountOutOfRange proves a scenario cohort
+// of 1 or 31 rows fails at stage "count" (design D16, section 4.5 check 2:
+// the count must lie in [2,30]).
+func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+	}{
+		{"one scenario is below the floor", 1},
+		{"thirty-one scenarios is above the ceiling", 31},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			setTicketState(t, s, ticketID, testStatePlanning)
+			sess := insertSession(t, s, ticketID, testStatePlanning)
+			runID := insertRun(t, s, sess)
+			seedSealableCohort(t, s, ticketID, runID, 1, tt.n)
+
+			owner, expires := claimForCommit(t, s, ticketID)
+			_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: tt.n, At: time.Now()},
+			})
+			assertSealMismatch(t, err, "count", tt.n, 0)
+		})
+	}
+}
+
+// TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate proves a
+// cohort with one row already sealed fails at stage "update" with Affected
+// == ExpectedCount-1 (design D16, section 4.5 check 3): the UPDATE only
+// touches rows still sealed_at IS NULL, so it affects one row fewer than
+// ExpectedCount.
+func TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+
+	var oneID int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM artifacts WHERE ticket_id = ? AND type = ? AND run_id = ? LIMIT 1`,
+		ticketID, testTypeScenario, runID).Scan(&oneID); err != nil {
+		t.Fatalf("find one scenario artifact: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE artifacts SET sealed_at = ? WHERE id = ?`, formatTime(time.Now()), oneID); err != nil {
+		t.Fatalf("pre-seal one scenario artifact: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "update", 3, 2)
+}
+
+// TestCommitHandlerResult_SealMismatchRollsBackWholeCommit proves a seal
+// mismatch rolls the whole commit back: the ticket's state is unchanged, its
+// claim is still held (the fenced ticket UPDATE that would release it never
+// ran), and an otherwise-valid message in the same commit was never inserted
+// (design D16).
+func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 1) // one scenario: out of range
+
+	before, err := s.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket before: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Messages: []Message{{TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress}},
+		Seal:     &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+	})
+	assertSealMismatch(t, err, "count", 1, 0)
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	after, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket after: %v", getErr)
+	}
+	if after.State != before.State {
+		t.Errorf("ticket state = %q, want unchanged %q", after.State, before.State)
+	}
+	if after.ClaimOwner == nil || *after.ClaimOwner != owner {
+		t.Error("the claim was released by a rolled-back commit, want it still held")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
+		t.Errorf("messages after a rolled-back seal mismatch = %d, want 0", n)
+	}
+}
+
+// --- CommitHandlerResult: Escalation (design D10, section 6.7) -------------
+
+// escalationTestPayload is a minimal, schema-valid EscalationPayload with
+// the given code and origin.
+func escalationTestPayload(code response.EscalationCode, origin response.EscalationOrigin) response.EscalationPayload {
+	return response.EscalationPayload{
+		Code: string(code), What: "what happened", Why: "why it happened", Tried: "what was tried",
+		Options: []string{"retry", "planning", "abandon"}, Origin: string(origin),
+	}
+}
+
+// wantEscalationOptions is the fixed retry/back-to-planning/abandon choice
+// every escalation's linked question offers (design section 6.7).
+var wantEscalationOptions = []response.Option{
+	{Key: "a", Text: "Retry"},
+	{Key: "b", Text: "Back to planning"},
+	{Key: "c", Text: "Abandon"},
+}
+
+// TestCommitHandlerResult_EscalationCapHasNilRunID proves a cap escalation
+// (no run caused it) inserts an escalation message and its linked question
+// both with RunID nil, the question parented to the escalation's own id,
+// recommended "b", offering the fixed three options, and both bodies exactly
+// as design section 6.7 specifies.
+func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	body := "wall_clock: over budget"
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: nil, Body: body,
+			Payload: escalationTestPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (escalation + question)", len(msgs))
+	}
+	esc, q := msgs[0], msgs[1]
+	if esc.Type != msgTypeEscalation {
+		t.Fatalf("msgs[0].Type = %q, want %q", esc.Type, msgTypeEscalation)
+	}
+	if q.Type != msgTypeQuestion {
+		t.Fatalf("msgs[1].Type = %q, want %q", q.Type, msgTypeQuestion)
+	}
+	if esc.RunID != nil {
+		t.Errorf("escalation.RunID = %v, want nil", esc.RunID)
+	}
+	if q.RunID != nil {
+		t.Errorf("question.RunID = %v, want nil", q.RunID)
+	}
+	if q.ParentID == nil || *q.ParentID != esc.ID {
+		t.Errorf("question.ParentID = %v, want %d (the escalation's own id)", q.ParentID, esc.ID)
+	}
+	if esc.Body != body {
+		t.Errorf("escalation.Body = %q, want %q", esc.Body, body)
+	}
+	wantQBody := body + "\n\nHow should Zing proceed?"
+	if q.Body != wantQBody {
+		t.Errorf("question.Body = %q, want %q", q.Body, wantQBody)
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if qp.Key != "Q1" {
+		t.Errorf("question.Key = %q, want Q1", qp.Key)
+	}
+	if qp.Recommended != "b" {
+		t.Errorf("question.Recommended = %q, want b", qp.Recommended)
+	}
+	if !reflect.DeepEqual(qp.Options, wantEscalationOptions) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptions)
+	}
+
+	var ep response.EscalationPayload
+	if err := json.Unmarshal(esc.Payload, &ep); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if ep.Origin != string(response.EscalationOriginCapBudget) {
+		t.Errorf("escalation.Origin = %q, want %q", ep.Origin, response.EscalationOriginCapBudget)
+	}
+	if ep.Code != string(response.EscalationCodeWallClock) {
+		t.Errorf("escalation.Code = %q, want %q", ep.Code, response.EscalationCodeWallClock)
+	}
+}
+
+// TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt proves an
+// owned escalation (a run caused it) ties both the escalation message and
+// its linked question to that same run id.
+func TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: &runID, Body: "response_invalid: invalid output twice",
+			Payload: escalationTestPayload(response.EscalationCodeResponseInvalid, response.EscalationOriginPlanningResume),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (escalation + question)", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.RunID == nil || *m.RunID != runID {
+			t.Errorf("message %d (%s) RunID = %v, want %d", m.ID, m.Type, m.RunID, runID)
+		}
+	}
+}
+
+// TestCommitHandlerResult_EscalationRejectsForeignRunID proves escalateTx
+// refuses a RunID that belongs to another ticket: the foreign key alone only
+// proves the run exists, so without this check the escalation and its linked
+// question would route through the other ticket's session and job (design
+// section 4.5, 6.7; PR #23 review).
+func TestCommitHandlerResult_EscalationRejectsForeignRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	_, otherTicketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, otherTicketID, testStatePlanning)
+	otherSess := insertSession(t, s, otherTicketID, testStatePlanning)
+	foreignRunID := insertRun(t, s, otherSess)
+
+	_, ticketID := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: &foreignRunID, Body: "response_invalid: run from another ticket",
+			Payload: escalationTestPayload(response.EscalationCodeResponseInvalid, response.EscalationOriginPlanningResume),
+		},
+	})
+	if err == nil {
+		t.Fatal("CommitHandlerResult with a foreign RunID: err = nil, want an ownership error")
+	}
+	if !strings.Contains(err.Error(), "does not belong to ticket") {
+		t.Errorf("err = %v, want it to name the ownership violation", err)
+	}
+
+	// The whole transaction rolled back: no escalation or question landed on
+	// the target ticket.
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("messages on the target ticket = %d, want 0 (the commit rolled back)", len(msgs))
+	}
+}
+
+// TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys proves
+// two escalations committed one after another on the same ticket allocate
+// Q1 then Q2 (design section 6.7): the allocation counts every "question"
+// message the ticket already carries, escalation or otherwise.
+func TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	for i := range 2 {
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:    "other: repeated escalation",
+				Payload: escalationTestPayload(response.EscalationCodeOther, response.EscalationOriginSeal),
+			},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult %d: %v", i, err)
+		}
+	}
+
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var keys []string
+	for _, m := range msgs {
+		if m.Type != msgTypeQuestion {
+			continue
+		}
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &qp); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		keys = append(keys, qp.Key)
+	}
+	if !reflect.DeepEqual(keys, []string{"Q1", "Q2"}) {
+		t.Errorf("question keys in commit order = %v, want [Q1 Q2]", keys)
+	}
+}
+
+// TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites
+// proves TrackerEffect is carried, never applied, by CommitHandlerResult
+// (design D12): a commit with and without an identical TrackerEffect writes
+// the same rows either way.
+func TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	ownerA, expiresA := claimForCommit(t, s, ticketA)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketA, Owner: ownerA, Expires: expiresA,
+		Next: testStateDone, Reason: "nothing to do",
+	}); err != nil {
+		t.Fatalf("commit without TrackerEffect: %v", err)
+	}
+
+	ownerB, expiresB := claimForCommit(t, s, ticketB)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: ownerB, Expires: expiresB,
+		Next: testStateDone, Reason: "nothing to do",
+		TrackerEffect: &TrackerEffect{Ref: "owner/repo#9", Notes: "nothing left to do"},
+	}); err != nil {
+		t.Fatalf("commit with TrackerEffect: %v", err)
+	}
+
+	ta, err := s.GetTicket(ctx, ticketA)
+	if err != nil {
+		t.Fatalf("GetTicket(A): %v", err)
+	}
+	tb, err := s.GetTicket(ctx, ticketB)
+	if err != nil {
+		t.Fatalf("GetTicket(B): %v", err)
+	}
+	if ta.State != tb.State {
+		t.Errorf("state with TrackerEffect = %q, without = %q, want equal", tb.State, ta.State)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketA); n != 1 {
+		t.Errorf("messages for ticket without TrackerEffect = %d, want 1 (the state message only)", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 1 {
+		t.Errorf("messages for ticket with TrackerEffect = %d, want 1 (TrackerEffect writes nothing)", n)
+	}
+}
+
+// TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty
+// proves a "question" message posted directly through c.Messages (a gate or
+// a planning batch question, not an escalation's own linked question) gets
+// a Q<n> key allocated at commit when its payload arrives with Key still
+// empty (design section 4.5, 6.7: "gate and planning questions use the same
+// Q<n> allocation" escalateTx's own linked question already uses): two such
+// messages in one commit get Q1 then Q2, a message that already carries a
+// key is left exactly as the handler set it, and every stored payload still
+// validates against the messages/question schema (insertMessageTx's own
+// check, run after the key is filled in).
+func TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Messages: []Message{
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "A", Payload: questionPayload("")},
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "B", Payload: questionPayload("")},
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: "C", Payload: questionPayload("Q7")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	open, err := s.QuestionsByState(ctx, ticketID, questionStateOpen)
+	if err != nil {
+		t.Fatalf("QuestionsByState: %v", err)
+	}
+	if len(open) != 3 {
+		t.Fatalf("open questions = %d, want 3", len(open))
+	}
+	keyByBody := make(map[string]string, 3)
+	for _, m := range open {
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &qp); err != nil {
+			t.Fatalf("unmarshal payload for %q: %v", m.Body, err)
+		}
+		keyByBody[m.Body] = qp.Key
+	}
+	if keyByBody["A"] != "Q1" {
+		t.Errorf("A's allocated key = %q, want Q1", keyByBody["A"])
+	}
+	if keyByBody["B"] != "Q2" {
+		t.Errorf("B's allocated key = %q, want Q2", keyByBody["B"])
+	}
+	if keyByBody["C"] != "Q7" {
+		t.Errorf("C's key (already set) = %q, want unchanged Q7", keyByBody["C"])
 	}
 }

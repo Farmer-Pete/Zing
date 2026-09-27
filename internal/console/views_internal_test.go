@@ -1,0 +1,109 @@
+// views_internal_test.go is a whitebox test for displayBody's
+// msgTypeUpdate case (views.go), F012: "the owner sees raw internal marker
+// text in the ticket thread". It lives in package console, not
+// console_test, the same rail_internal_test.go precedent, because
+// displayBody and the marker bodies it recognizes are cleanest proved
+// directly against a synthetic store.MessageRow rather than through a real
+// ticket and the job package's own commit-building machinery.
+package console
+
+import (
+	"strings"
+	"testing"
+
+	"zing/internal/store"
+)
+
+// updateRow builds a sent (never draft) type="update" message row with the
+// given body, the only two fields displayBody's update case reads.
+func updateRow(body string) *store.MessageRow {
+	return &store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+}
+
+// TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
+// "planreview vN pending" marker (job.planreviewPendingMarker) no longer
+// renders as-is, and instead reads as the owner-facing sentence explaining
+// that planning is about to resume on its own.
+func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
+	got := displayBody(updateRow("planreview v3 pending"))
+	if got == "planreview v3 pending" {
+		t.Fatalf("displayBody returned the raw marker unchanged: %q", got)
+	}
+	if !strings.Contains(got, "Planning resumes") {
+		t.Errorf("displayBody(%q) = %q, want it to contain %q", "planreview v3 pending", got, "Planning resumes")
+	}
+}
+
+// TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable proves a
+// "planreview vN delivered" marker renders as a plain sentence too.
+func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
+	const want = "Planning resumed with the review findings."
+	if got := displayBody(updateRow("planreview v3 delivered")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 delivered", got, want)
+	}
+}
+
+// TestDisplayBody_ValidationErrorsPendingRendersFieldLines proves a
+// "validation errors pending run <id>" marker's own response.PathError
+// lines (formatReadyErrors' "path: msg" shape) render as "Field <path>:
+// <message>" lines under the explanatory sentence, rather than the raw
+// path syntax the owner has no reason to parse.
+func TestDisplayBody_ValidationErrorsPendingRendersFieldLines(t *testing.T) {
+	body := "validation errors pending run 7\n" +
+		"scenarios/scenario[0]/then: then must not be empty\n" +
+		"plan/overview/problem: problem is required"
+	got := displayBody(updateRow(body))
+
+	for _, want := range []string{
+		"The plan did not pass its final checks.",
+		"Field scenarios/scenario[0]/then: then must not be empty",
+		"Field plan/overview/problem: problem is required",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("displayBody(%q) = %q, want it to contain %q", body, got, want)
+		}
+	}
+}
+
+// TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable proves a
+// "validation errors delivered run <id>" marker renders as a plain
+// sentence.
+func TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable(t *testing.T) {
+	const want = "The agent received the check results."
+	if got := displayBody(updateRow("validation errors delivered run 7")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "validation errors delivered run 7", got, want)
+	}
+}
+
+// TestDisplayBody_ResponseInvalidIsHumanReadable proves a "response invalid
+// run <id>" marker (invalidOutputCommit) renders as a plain sentence, its
+// invErr.Reason line dropped rather than shown raw.
+func TestDisplayBody_ResponseInvalidIsHumanReadable(t *testing.T) {
+	const want = "The agent's last response could not be used. Zing retries once."
+	body := "response invalid run 9\nmissing required field \"plan\""
+	if got := displayBody(updateRow(body)); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
+	}
+}
+
+// TestDisplayBody_SealMismatchIsHumanReadable proves a "seal mismatch
+// cohort <runID>" marker (store.CountSealMismatches) renders as a plain
+// sentence.
+func TestDisplayBody_SealMismatchIsHumanReadable(t *testing.T) {
+	const want = "The scenario set changed before approval. Zing re-reads it on the next tick."
+	if got := displayBody(updateRow("seal mismatch cohort 4")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "seal mismatch cohort 4", got, want)
+	}
+}
+
+// TestDisplayBody_UnknownUpdateBodyIsUnchanged proves an "update" body that
+// matches none of the known markers falls through to the raw Body
+// (updateLine's own default case), the same defensive fallback
+// stateLine, escalationLine, and answerLine already use for a payload
+// they cannot decode.
+func TestDisplayBody_UnknownUpdateBodyIsUnchanged(t *testing.T) {
+	const body = "some future bookkeeping marker nobody recognizes yet"
+	if got := displayBody(updateRow(body)); got != body {
+		t.Errorf("displayBody(%q) = %q, want it unchanged", body, got)
+	}
+}

@@ -52,6 +52,11 @@ func Parse(input []byte) (*Document, error) {
 
 const zingMarker = "<zing"
 
+// zingElementName is the root element's local name, in no namespace, that
+// every zing document (Parse) and every well-formed root (ExtractAll)
+// must match.
+const zingElementName = "zing"
+
 // candidateOffsets returns every byte offset in input where the literal
 // <zing is immediately followed by a name-boundary byte (space, tab,
 // carriage return, newline, '>', or '/'), in order, so "<zinger>" never
@@ -165,7 +170,7 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 		return nil, errMalformedCandidate
 	}
 	start, ok := tok.(xml.StartElement)
-	if !ok || start.Name.Local != "zing" || start.Name.Space != "" {
+	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
 		return nil, errMalformedCandidate
 	}
 

@@ -22,6 +22,11 @@ const wantWildcardBindError = "zing.toml: console.bind: wildcard address not all
 // or malformed alike (config.go, design section 6.14).
 const wantAllowedHostsPortError = "zing.toml: console.allowed_hosts[0]: must not include a port"
 
+// wantBudgetMinutesError is the exact error checkValues returns for any
+// budget.agent_minutes_per_ticket value outside [1, 525600] (config.go,
+// design section 4.4).
+const wantBudgetMinutesError = "zing.toml: budget.agent_minutes_per_ticket: must be between 1 and 525600 minutes"
+
 // testTracker, testCommandTest, and testCommandLint are the tracker and
 // commands values every valid Project fixture below uses, pulled out as
 // constants so goconst does not flag the repeats.
@@ -369,6 +374,21 @@ lint = "golangci-lint run"
 			want: "zing.toml: projects[0].tracker: must be github",
 		},
 		{
+			name: "duplicate project name",
+			body: minimalValidTOML + `
+[[projects]]
+name = "zing"
+repo = "git@github.com:x/other.git"
+path = "/home/peter/other"
+tracker = "github"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`,
+			want: `zing.toml: duplicate project name "zing": each project's name must be unique`,
+		},
+		{
 			name: "bad console.port too high",
 			body: minimalValidTOML + "\n[console]\nport = 99999\n",
 			want: "zing.toml: console.port: must be 1 to 65535",
@@ -382,6 +402,30 @@ lint = "golangci-lint run"
 			name: "bad budget.usage_hold_percent",
 			body: minimalValidTOML + "\n[budget]\nusage_hold_percent = 150\n",
 			want: "zing.toml: budget.usage_hold_percent: must be 0 to 100",
+		},
+		{
+			name: "budget.agent_minutes_per_ticket zero",
+			body: minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = 0\n",
+			want: wantBudgetMinutesError,
+		},
+		{
+			name: "budget.agent_minutes_per_ticket negative",
+			body: minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = -1\n",
+			want: wantBudgetMinutesError,
+		},
+		{
+			name: "budget.agent_minutes_per_ticket one past the one-year cap",
+			body: minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = 525601\n",
+			want: wantBudgetMinutesError,
+		},
+		{
+			// One past math.MaxInt64/60 (153722867280912930): large enough
+			// that converting it to a time.Duration in minutes would overflow
+			// int64 nanoseconds, so this must fail here, at load, rather than
+			// wrap silently later at the *time.Duration(minutes) conversion.
+			name: "budget.agent_minutes_per_ticket large enough to overflow a duration in minutes",
+			body: minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = 153722867280912931\n",
+			want: wantBudgetMinutesError,
 		},
 		{
 			name: "wildcard bind IPv4",
@@ -488,6 +532,36 @@ lint = "golangci-lint run"
 			}
 			if err.Error() != tt.want {
 				t.Errorf("Load() = %q, want %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestLoad_BudgetAgentMinutesPerTicketBoundaryValuesLoad proves the two
+// closed-range endpoints and the documented default all load cleanly
+// (design section 4.4): the range check must reject only outside [1,
+// 525600], never the boundary itself.
+func TestLoad_BudgetAgentMinutesPerTicketBoundaryValuesLoad(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"minimum", minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = 1\n", 1},
+		{"maximum", minimalValidTOML + "\n[budget]\nagent_minutes_per_ticket = 525600\n", 525600},
+		{"default when the key is absent", minimalValidTOML, 240},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Load(writeTOML(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Budget.AgentMinutesPerTicket != tt.want {
+				t.Errorf("Budget.AgentMinutesPerTicket = %d, want %d", cfg.Budget.AgentMinutesPerTicket, tt.want)
 			}
 		})
 	}

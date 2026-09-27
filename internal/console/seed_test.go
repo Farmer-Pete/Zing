@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"zing/internal/bus"
 	"zing/internal/console"
 	"zing/internal/response"
 	"zing/internal/store"
@@ -43,6 +44,39 @@ func TestSeedDemo_SeedsOneProjectAndTicketWithEveryArtifactAndQuestionKind(t *te
 	assertSeedDemoQuestions(ctx, t, s, ticketID)
 }
 
+// TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued proves the seeded ticket
+// ends in planning, waiting on its gate, rather than queued: a queued demo
+// ticket would be a live dispatch candidate that `zing serve --seed-demo`
+// picks up and advances into real planning, overwriting the fixture (design
+// section 6.6, 6.15; PR #23 review).
+func TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	tickets, err := s.TicketsByProject(ctx, projects[0].ID)
+	if err != nil {
+		t.Fatalf("TicketsByProject: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want exactly 1", len(tickets))
+	}
+	tk := tickets[0]
+	if tk.State != "planning" {
+		t.Errorf("seeded ticket state = %q, want planning (a queued ticket would be dispatched)", tk.State)
+	}
+	if tk.WaitingOn == nil || *tk.WaitingOn != string(response.QuestionKindGate) {
+		t.Errorf("seeded ticket waiting_on = %v, want %q", tk.WaitingOn, response.QuestionKindGate)
+	}
+}
+
 // demoTicketID asserts exactly one project and one ticket exist and returns
 // the ticket's id, failing the test otherwise.
 func demoTicketID(ctx context.Context, t *testing.T, s *store.Store) int64 {
@@ -67,18 +101,23 @@ func demoTicketID(ctx context.Context, t *testing.T, s *store.Store) int64 {
 }
 
 // assertSeedDemoArtifacts asserts ticketID carries exactly one plan
-// artifact whose Design.Shape contains a mermaid fence, plus a scenario set
-// and a finding set of at least two rows each (design section 6.15: "a
-// scenario artifact set, a finding set").
+// artifact whose Design.Shape contains a mermaid fence and whose run_id is
+// set, a scenario set of at least two rows all carrying that same run_id,
+// and a "planreview" artifact at the plan's own version carrying at least
+// two findings (design section 6.15, 7, Task 11: "a scenario artifact set",
+// "store the seeded findings as the demo planreview artifact").
 func assertSeedDemoArtifacts(ctx context.Context, t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
 
-	plan, ok, err := s.GetArtifact(ctx, ticketID, "plan")
+	plan, ok, err := s.GetArtifact(ctx, ticketID, testArtifactTypePlan)
 	if err != nil {
 		t.Fatalf("GetArtifact(plan): %v", err)
 	}
 	if !ok {
 		t.Fatal("no plan artifact stored")
+	}
+	if plan.RunID == nil {
+		t.Fatal("plan artifact carries no run_id")
 	}
 	var p response.Plan
 	if unmarshalErr := json.Unmarshal(plan.Payload, &p); unmarshalErr != nil {
@@ -92,20 +131,35 @@ func assertSeedDemoArtifacts(ctx context.Context, t *testing.T, s *store.Store, 
 	if err != nil {
 		t.Fatalf("ListArtifacts: %v", err)
 	}
-	var scenarios, findings int
-	for _, a := range artifacts {
-		switch a.Type {
-		case "scenario":
+	var scenarios int
+	var planreview *store.Artifact
+	for i := range artifacts {
+		switch artifacts[i].Type {
+		case testArtifactTypeScenario:
 			scenarios++
-		case "finding":
-			findings++
+			if artifacts[i].RunID == nil || *artifacts[i].RunID != *plan.RunID {
+				t.Errorf("scenario artifact run_id = %v, want the plan's own run %d", artifacts[i].RunID, *plan.RunID)
+			}
+		case "planreview":
+			planreview = &artifacts[i]
 		}
 	}
 	if scenarios < 2 {
 		t.Errorf("scenario artifacts = %d, want at least 2 (a set)", scenarios)
 	}
-	if findings < 2 {
-		t.Errorf("finding artifacts = %d, want at least 2 (a set)", findings)
+
+	if planreview == nil {
+		t.Fatal("no planreview artifact stored")
+	}
+	if planreview.Version != plan.Version {
+		t.Errorf("planreview version = %d, want the plan's own version %d", planreview.Version, plan.Version)
+	}
+	var findings response.FindingsResponse
+	if unmarshalErr := json.Unmarshal(planreview.Payload, &findings); unmarshalErr != nil {
+		t.Fatalf("unmarshal planreview payload: %v", unmarshalErr)
+	}
+	if len(findings.Findings) < 2 {
+		t.Errorf("planreview findings = %d, want at least 2 (a set)", len(findings.Findings))
 	}
 }
 
@@ -208,5 +262,62 @@ func TestSeedDemo_NormalServeDoesNotSeed(t *testing.T) {
 		if p.Name == "demo" {
 			t.Fatalf("a %q project exists without SeedDemo ever being called", "demo")
 		}
+	}
+}
+
+// TestSeedDemo_GateRendersScenariosAndFindings proves Task 11's demo wiring
+// end to end (design section 7, 13 task 11): the gate the console renders for
+// the seeded ticket carries the demo scenario table, and its planreview
+// artifact renders through the same review.floor every other ticket's gate
+// uses, over the live GET /stream a browser itself reads.
+func TestSeedDemo_GateRendersScenariosAndFindings(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+
+	// newTestServerFloor's own floor (response.SeverityMinor, console_test.go)
+	// matches internal/config's own applyDefaults default: demoFindings' minor
+	// finding sits at or below it (dropped, still in the review loop) and its
+	// major finding sits above it (shown at the gate).
+	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor)
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, main, _, _ := readInitialFrames(t, r)
+	assertExactSSEFraming(t, main)
+
+	groups := splitQuestionGroups(t, main)
+	gate := findGroup(t, groups, "Approve the plan?")
+
+	// demoScenarios (seed.go, unexported) writes two scenarios that share
+	// the same Given text; this file (package console_test) asserts the
+	// rendered output, not the private fixture function.
+	if !strings.Contains(gate, `class="scenarios"`) {
+		t.Errorf("gate group missing its scenarios table; got:\n%s", gate)
+	}
+	const sharedGiven = "the server is running"
+	if !strings.Contains(gate, sharedGiven) {
+		t.Errorf("gate group missing scenario text %q; got:\n%s", sharedGiven, gate)
+	}
+
+	// demoFindings (seed.go, unexported) writes one minor finding (at or
+	// below the SeverityMinor floor this test uses, so dropped) and one
+	// major finding (above it, so shown).
+	if !strings.Contains(gate, `class="findings"`) {
+		t.Errorf("gate group missing its findings table; got:\n%s", gate)
+	}
+	const aboveFloorText = "The only test covers the happy path."
+	const atOrBelowFloorText = "The shape section does not name the response content type."
+	if !strings.Contains(gate, aboveFloorText) {
+		t.Errorf("gate group missing the above-floor finding %q; got:\n%s", aboveFloorText, gate)
+	}
+	if strings.Contains(gate, atOrBelowFloorText) {
+		t.Errorf("gate group shows the at-or-below-floor finding %q, want it dropped; got:\n%s", atOrBelowFloorText, gate)
 	}
 }

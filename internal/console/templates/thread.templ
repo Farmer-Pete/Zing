@@ -78,7 +78,7 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		}
 		switch row.Question.Kind {
 			case string(response.QuestionKindGate):
-				@gateContext(row.Question.Plan)
+				@gateContext(row.Question.Plan, row.Question.Scenarios, row.Question.Findings)
 			case string(response.QuestionKindSplit):
 				@splitContext()
 			case string(response.QuestionKindMerge):
@@ -96,15 +96,21 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 	</details>
 }
 
-// gateContext is the gate kind's context region (design section 6.6, 6.9):
-// the ticket's stored plan, rendered in full by plan.templ's PlanView, or a
-// placeholder when the ticket has no plan artifact yet (a gate question can
-// only exist once a plan does, but the artifact read is defensive, matching
-// mergeContext's own "No PR yet." fallback for a value that is not always
-// there). Its class and data-context name are the seam Task 6 reserved and
-// Task 8 now fills.
-templ gateContext(plan *RenderedPlan) {
+// gateContext is the gate kind's context region (design section 6.6, 6.9,
+// 7, D8, Task 11): the current scenario cohort's table, the above-floor
+// plan-review findings' table, and the ticket's stored plan (rendered in
+// full by plan.templ's PlanView), in that order -- both tables before the
+// plan, per design section 7 -- or a placeholder when the ticket has no
+// plan artifact yet (a gate question can only exist once a plan does, but
+// the artifact read is defensive, matching mergeContext's own "No PR yet."
+// fallback for a value that is not always there). scenariosSection and
+// findingsSection each render nothing when their slice is empty, so a
+// legacy or clean ticket shows neither table. Its class and data-context
+// name are the seam Task 6 reserved and Task 8 filled.
+templ gateContext(plan *RenderedPlan, scenarios []ScenarioRow, findings []FindingRow) {
 	<div class="q-context gate-context" data-context="plan">
+		@scenariosSection(scenarios)
+		@findingsSection(findings)
 		if plan != nil {
 			@PlanView(*plan)
 		} else {

@@ -1,5 +1,7 @@
 package response
 
+import "fmt"
+
 // Job identifies which job produced a response.
 type Job string
 
@@ -195,6 +197,36 @@ func (Severity) Values() []string {
 	return []string{string(SeverityBlocker), string(SeverityMajor), string(SeverityMinor), string(SeverityNit)}
 }
 
+// ParseSeverity parses s as a Severity, accepting exactly the four closed
+// values blocker, major, minor, and nit, and erroring on anything else
+// (design section 4.4).
+func ParseSeverity(s string) (Severity, error) {
+	switch Severity(s) {
+	case SeverityBlocker, SeverityMajor, SeverityMinor, SeverityNit:
+		return Severity(s), nil
+	default:
+		return "", fmt.Errorf("response: unknown severity %q", s)
+	}
+}
+
+// Rank orders Severity from lowest (nit) to highest (blocker), so a finding
+// and a floor can be compared with sev.Rank() <= floor.Rank() for "at or
+// below floor" (design section 4.4, 6.5).
+func (s Severity) Rank() int {
+	switch s {
+	case SeverityBlocker:
+		return 3
+	case SeverityMajor:
+		return 2
+	case SeverityMinor:
+		return 1
+	case SeverityNit:
+		return 0
+	default:
+		return -1
+	}
+}
+
 // ErrorCode categorizes a run error.
 type ErrorCode string
 
@@ -209,6 +241,78 @@ const (
 func (ErrorCode) Values() []string {
 	return []string{
 		string(ErrorCodePlanGap), string(ErrorCodeCannotRun), string(ErrorCodeEnvironment), string(ErrorCodeOther),
+	}
+}
+
+// EscalationCode is the closed set an escalation payload's code may carry
+// (design section 6.7): the eight already stored, plus split_unsupported,
+// nothing_to_do_with_true_claims, runtime_exec_failed, response_invalid,
+// seal_failed, and post_run_failed. EscalationPayload.Code itself stays a
+// plain string (matching its jsonschema enum tag); these constants let Go
+// code name a code instead of writing the literal.
+type EscalationCode string
+
+const (
+	EscalationCodeResumesExhausted          EscalationCode = "resumes_exhausted"
+	EscalationCodeLoopsExhausted            EscalationCode = "loops_exhausted"
+	EscalationCodeWallClock                 EscalationCode = "wall_clock"
+	EscalationCodeUsageHold                 EscalationCode = "usage_hold"
+	EscalationCodePlanGap                   EscalationCode = "plan_gap"
+	EscalationCodeCannotRun                 EscalationCode = "cannot_run"
+	EscalationCodeEnvironment               EscalationCode = "environment"
+	EscalationCodeOther                     EscalationCode = "other"
+	EscalationCodeSplitUnsupported          EscalationCode = "split_unsupported"
+	EscalationCodeNothingToDoWithTrueClaims EscalationCode = "nothing_to_do_with_true_claims"
+	EscalationCodeRuntimeExecFailed         EscalationCode = "runtime_exec_failed"
+	EscalationCodeResponseInvalid           EscalationCode = "response_invalid"
+	EscalationCodeSealFailed                EscalationCode = "seal_failed"
+	// EscalationCodePostRunFailed is design F025's own code (section 6.8): a
+	// success builder's own store, filesystem, or marshal failure after
+	// runJob's Reserve already wrote a run -- the agent's turn completed, but
+	// Zing could not store or check its result. job.postRunFailure is its one
+	// writer.
+	EscalationCodePostRunFailed EscalationCode = "post_run_failed"
+)
+
+// Values returns every valid EscalationCode.
+func (EscalationCode) Values() []string {
+	return []string{
+		string(EscalationCodeResumesExhausted), string(EscalationCodeLoopsExhausted), string(EscalationCodeWallClock),
+		string(EscalationCodeUsageHold), string(EscalationCodePlanGap), string(EscalationCodeCannotRun),
+		string(EscalationCodeEnvironment), string(EscalationCodeOther), string(EscalationCodeSplitUnsupported),
+		string(EscalationCodeNothingToDoWithTrueClaims), string(EscalationCodeRuntimeExecFailed),
+		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed), string(EscalationCodePostRunFailed),
+	}
+}
+
+// EscalationOrigin is the step that produced an escalation (design section
+// 6.7): which job or cap check ran, driving how "resume or fresh" and choice
+// resolution behave. EscalationPayload.Origin stays a plain string (matching
+// its jsonschema enum tag); these constants let Go code name an origin
+// instead of writing the literal.
+type EscalationOrigin string
+
+const (
+	EscalationOriginClassify          EscalationOrigin = "classify"
+	EscalationOriginPlanningFirst     EscalationOrigin = "planning_first"
+	EscalationOriginPlanningResume    EscalationOrigin = "planning_resume"
+	EscalationOriginPlanreview        EscalationOrigin = "planreview"
+	EscalationOriginGateApprove       EscalationOrigin = "gate_approve"
+	EscalationOriginSeal              EscalationOrigin = "seal"
+	EscalationOriginCapResumes        EscalationOrigin = "cap_resumes"
+	EscalationOriginCapLoops          EscalationOrigin = "cap_loops"
+	EscalationOriginCapBudget         EscalationOrigin = "cap_budget"
+	EscalationOriginSplit             EscalationOrigin = "split"
+	EscalationOriginNothingToDoClaims EscalationOrigin = "nothing_to_do_claims"
+)
+
+// Values returns every valid EscalationOrigin.
+func (EscalationOrigin) Values() []string {
+	return []string{
+		string(EscalationOriginClassify), string(EscalationOriginPlanningFirst), string(EscalationOriginPlanningResume),
+		string(EscalationOriginPlanreview), string(EscalationOriginGateApprove), string(EscalationOriginSeal),
+		string(EscalationOriginCapResumes), string(EscalationOriginCapLoops), string(EscalationOriginCapBudget),
+		string(EscalationOriginSplit), string(EscalationOriginNothingToDoClaims),
 	}
 }
 

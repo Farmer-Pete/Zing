@@ -23,7 +23,7 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 	attrs, chardata, children := splitChildren(root.Children)
 
 	var buf strings.Builder
-	tag, comment := startTagAndComment(&node{Name: "zing"}, attrs, override, true)
+	tag, comment := startTagAndComment(&node{Name: zingElementName}, attrs, override, true)
 	buf.WriteString(tag + ">")
 	writeComment(&buf, comment)
 	buf.WriteByte('\n')
@@ -33,7 +33,7 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 	for _, c := range children {
 		renderChild(&buf, c, 1, override)
 	}
-	buf.WriteString("</zing>\n")
+	buf.WriteString("</" + zingElementName + ">\n")
 
 	return buf.String(), nil
 }

@@ -119,6 +119,28 @@ const e2eMaxTicks = 50
 // within one selftest process, which claims nothing concurrently).
 const e2eOwner = "selftest-e2e"
 
+// e2eBudget and e2eFloor are the fixture job.Deps.Budget and job.Deps.Floor
+// selftestResumeE2E wires the dispatcher with (design section 4.4): the
+// same values internal/config's own applyDefaults would produce from an
+// empty zing.toml (agent_minutes_per_ticket 240, review.floor "minor").
+// Nothing in this M1 task reads Budget or Floor yet; wiring them here now
+// only means task 4's runJob and the review floor split find them already
+// in place.
+var (
+	e2eBudget = 240 * time.Minute
+	e2eFloor  = response.SeverityMinor
+)
+
+// e2eModels is the fixture job.Deps.Models alias table selftestResumeE2E
+// wires the dispatcher with: the same model ids internal/config's own
+// applyDefaults would produce from an empty zing.toml's [models] table.
+var e2eModels = map[string]string{
+	modelAliasSonnet: "claude-sonnet-5",
+	modelAliasOpus:   "claude-opus-4-8",
+	modelAliasFable:  "claude-fable-5-1",
+	modelAliasCodex:  "gpt-5.5",
+}
+
 // e2eWantStates is the ordered "to" state of every state message the
 // silent ring plus the one question write, in order (design section 7.1):
 // queued -> planning carries no message at intake, so the first message is
@@ -302,11 +324,30 @@ func selftestResumeE2E(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sub scripts fs: %w", err)
 	}
-	rt := runtime.NewFake(scripts)
+	// Production real runtimes arrive in task 14 (Claude and Codex are
+	// still stubs); the selftest e2e maps all three machine.toml runtime
+	// names to the one Fake (design section 4.1, D2).
+	fake := runtime.NewFake(scripts)
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake})
+	if err != nil {
+		return fmt.Errorf("build runtime set: %w", err)
+	}
 
 	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
 	if err != nil {
 		return err
+	}
+
+	// dir must carry "cmd/zing/main.go": the planning handler's ready entry
+	// point (design section 6.5) opens the project for real through
+	// os.OpenRoot and checks the fixture cohort's one code claim
+	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60") against
+	// it.
+	if mkErr := os.MkdirAll(filepath.Join(dir, "cmd", "zing"), 0o755); mkErr != nil {
+		return fmt.Errorf("mkdir cmd/zing: %w", mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(dir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
+		return fmt.Errorf("write cmd/zing/main.go: %w", wErr)
 	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
@@ -319,7 +360,10 @@ func selftestResumeE2E(ctx context.Context) error {
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
 		[]zdispatch.Binding{{StoreProjectID: projectID, TrackerProject: "zing"}},
-		zdispatch.Config{Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner}, rt)
+		zdispatch.Config{
+			Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner,
+			Models: e2eModels, Budget: e2eBudget, Floor: e2eFloor,
+		}, rts)
 	if err != nil {
 		return err
 	}
@@ -364,7 +408,7 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	if err := driveToDone(ctx, d, st, ticketID); err != nil {
+	if err := driveToDone(ctx, d, st, srv.URL, ticketID); err != nil {
 		closeStream()
 		return err
 	}
@@ -479,8 +523,13 @@ func answerFixtureQuestion(ctx context.Context, st *store.Store, base string, ti
 }
 
 // driveToDone keeps ticking d, bounded by e2eMaxTicks, until ticketID
-// reaches state "done".
-func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, ticketID int64) error {
+// reaches state "done". Once the review tick posts the gate (design section
+// 6.6, task 7c), it answers that the same console way answerFixtureQuestion
+// answered Q1 -- a draft with option "a" then /send, which SendBatch's own
+// kindForWaitReason maps straight to the gate kind -- so the dispatcher can
+// seal the cohort and carry the ticket the rest of the way.
+func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, base string, ticketID int64) error {
+	answeredGate := false
 	for i := range e2eMaxTicks {
 		if err := d.Tick(ctx); err != nil {
 			return fmt.Errorf("post-send tick %d: %w", i, err)
@@ -490,7 +539,16 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 			return err
 		}
 		if ticket.State == "done" {
+			if !answeredGate {
+				return errors.New("e2e: ticket reached done without ever waiting on the gate")
+			}
 			return nil
+		}
+		if !answeredGate && ticket.WaitingOn != nil && *ticket.WaitingOn == "gate" {
+			if err := answerFixtureQuestion(ctx, st, base, ticketID); err != nil {
+				return fmt.Errorf("answer the gate: %w", err)
+			}
+			answeredGate = true
 		}
 	}
 	return fmt.Errorf("e2e: ticket did not reach done within %d ticks", e2eMaxTicks)
@@ -513,7 +571,7 @@ func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broke
 		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken)
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)
@@ -742,14 +800,44 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if !slices.Equal(states, e2eWantStates) {
 		return fmt.Errorf("state messages = %v, want %v", states, e2eWantStates)
 	}
-	if questions != 1 {
-		return fmt.Errorf("question messages = %d, want exactly 1", questions)
+	// Q1 (the fixture's planning question) plus the gate (design section
+	// 6.6, task 7c): two of each.
+	const wantQuestionsAnswersResolved = 2
+	if questions != wantQuestionsAnswersResolved {
+		return fmt.Errorf("question messages = %d, want exactly %d", questions, wantQuestionsAnswersResolved)
 	}
-	if answers != 1 {
-		return fmt.Errorf("answer messages = %d, want exactly 1", answers)
+	if answers != wantQuestionsAnswersResolved {
+		return fmt.Errorf("answer messages = %d, want exactly %d", answers, wantQuestionsAnswersResolved)
 	}
-	if resolved != 1 {
-		return fmt.Errorf("resolved messages = %d, want exactly 1", resolved)
+	if resolved != wantQuestionsAnswersResolved {
+		return fmt.Errorf("resolved messages = %d, want exactly %d", resolved, wantQuestionsAnswersResolved)
+	}
+	return verifySelftestCohortSealed(ctx, st, ticketID)
+}
+
+// verifySelftestCohortSealed asserts every scenario artifact of ticketID's
+// current plan cohort carries a non-nil sealed_at (design section 6.6
+// branch 4, task 7c): the gate's approval seals exactly the cohort the
+// review ran against.
+func verifySelftestCohortSealed(ctx context.Context, st *store.Store, ticketID int64) error {
+	cohort, ok, err := st.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		return fmt.Errorf("current cohort: %w", err)
+	}
+	if !ok || cohort.RunID == nil {
+		return fmt.Errorf("e2e: current cohort = %+v, ok=%v, want a cohort with a producing run", cohort, ok)
+	}
+	scenarios, err := st.ScenariosForRun(ctx, ticketID, *cohort.RunID, false)
+	if err != nil {
+		return fmt.Errorf("scenarios for run: %w", err)
+	}
+	if len(scenarios) == 0 {
+		return errors.New("e2e: ScenariosForRun returned no scenarios, want the fixture cohort's own")
+	}
+	for i, sc := range scenarios {
+		if sc.SealedAt == nil {
+			return fmt.Errorf("e2e: scenario artifact %d has no sealed_at, want every cohort scenario sealed after approval", i)
+		}
 	}
 	return nil
 }

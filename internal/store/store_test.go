@@ -19,10 +19,13 @@ const (
 	testTypePlanreview = "planreview"
 	testTypeClaims     = "claims"
 	testTypeScenario   = "scenario"
+	testTypeEscalation = "escalation"
 	testAuthorZing     = "zing"
 	testAuthorYou      = "you"
 	testRefAGo         = "a.go"
 	testRefBGo         = "b.go"
+	testRuntimeFake    = "fake"
+	testExternalID1    = "ext-1"
 )
 
 var wantTables = []string{
@@ -784,6 +787,37 @@ func TestMigration0002_BackfillsExistingRows(t *testing.T) {
 	}
 	if !createdAt.Valid || createdAt.String == "" {
 		t.Errorf("created_at after backfill = %v, want a non-null value", createdAt)
+	}
+}
+
+// TestMigration0003_ExternalIDCheckExists proves migration 0003 installed
+// both external_id-nonempty triggers (F035) on sessions, by reading them
+// back from sqlite_master, and proves the triggers still leave the NULL
+// case writable: a session with no external_id yet must still insert.
+func TestMigration0003_ExternalIDCheckExists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	for _, trigger := range []string{"sessions_external_id_nonempty_insert", "sessions_external_id_nonempty_update"} {
+		var name string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'sessions' AND name = ?", trigger).
+			Scan(&name)
+		if err != nil {
+			t.Errorf("trigger %s: %v", trigger, err)
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (ticket_id, job, runtime) VALUES (1, 'planning', 'fake')`,
+	); err != nil {
+		t.Errorf("insert session with NULL external_id: %v", err)
 	}
 }
 

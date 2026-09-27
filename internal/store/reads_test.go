@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -332,6 +333,174 @@ func TestOpenSession_NoneForJobReturnsFalse(t *testing.T) {
 	}
 	if ok {
 		t.Error("OpenSession with no session for the job: ok = true, want false")
+	}
+}
+
+// setSessionExternalID sets a session's external_id directly, arranging the
+// "runtime has echoed back a session id" fixture LatestSession's
+// idless/open/exhausted classification depends on.
+func setSessionExternalID(t *testing.T, s *Store, sessionID int64, externalID string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE sessions SET external_id = ? WHERE id = ?`, externalID, sessionID); err != nil {
+		t.Fatalf("set session external_id: %v", err)
+	}
+}
+
+// setSessionResumes sets a session's resumes counter directly, arranging the
+// open-versus-exhausted fixture LatestSession's cap comparison depends on.
+func setSessionResumes(t *testing.T, s *Store, sessionID int64, resumes int) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE sessions SET resumes = ? WHERE id = ?`, resumes, sessionID); err != nil {
+		t.Fatalf("set session resumes: %v", err)
+	}
+}
+
+// TestLatestSession_NoneReturnsSessionNone proves the no-session-yet case
+// (design D17, section 4.5): a ticket with no session at all for the job
+// gets SessionNone, not an error.
+func TestLatestSession_NoneReturnsSessionNone(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	_, state, err := s.LatestSession(ctx, ticketID, testStatePlanning, 3)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != SessionNone {
+		t.Errorf("LatestSession state = %v, want SessionNone", state)
+	}
+}
+
+// TestLatestSession_NewestNullExternalIDReturnsIdless proves the idless case
+// (design D17): the newest session for (ticketID, job) with external_id
+// still NULL -- a first turn that never got far enough for the runtime to
+// echo one back -- classifies as SessionIdless, the same as no session at
+// all for step 3's purposes.
+func TestLatestSession_NewestNullExternalIDReturnsIdless(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+
+	got, state, err := s.LatestSession(ctx, ticketID, testStatePlanning, 3)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != SessionIdless {
+		t.Errorf("LatestSession state = %v, want SessionIdless", state)
+	}
+	if got.ID != sessionID {
+		t.Errorf("LatestSession.ID = %d, want %d", got.ID, sessionID)
+	}
+}
+
+// TestLatestSession_NewestOpenBelowCapReturnsOpen proves the open case
+// (design D17): the newest session with an external_id and resumes below
+// maxResumes classifies as SessionOpen.
+func TestLatestSession_NewestOpenBelowCapReturnsOpen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	setSessionExternalID(t, s, sessionID, testExternalID1)
+	setSessionResumes(t, s, sessionID, 1)
+
+	got, state, err := s.LatestSession(ctx, ticketID, testStatePlanning, 3)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != SessionOpen {
+		t.Errorf("LatestSession state = %v, want SessionOpen", state)
+	}
+	if got.ExternalID == nil || *got.ExternalID != testExternalID1 {
+		t.Errorf("LatestSession.ExternalID = %v, want ext-1", got.ExternalID)
+	}
+}
+
+// TestLatestSession_NewestAtCapReturnsExhausted proves the exhausted case
+// (design D17): the newest session with an external_id and resumes at or
+// past maxResumes classifies as SessionExhausted.
+func TestLatestSession_NewestAtCapReturnsExhausted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	setSessionExternalID(t, s, sessionID, testExternalID1)
+	setSessionResumes(t, s, sessionID, 3)
+
+	_, state, err := s.LatestSession(ctx, ticketID, testStatePlanning, 3)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != SessionExhausted {
+		t.Errorf("LatestSession state = %v, want SessionExhausted", state)
+	}
+}
+
+// TestLatestSession_NewestByIDEvenWhenOlderIsOpen proves "newest" means
+// highest id, not "the one still open": an older, still-open session must
+// not shadow a newer session that has since gone idless.
+func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	older := insertSession(t, s, ticketID, testStatePlanning)
+	setSessionExternalID(t, s, older, "ext-old")
+	setSessionResumes(t, s, older, 0)
+
+	newer := insertSession(t, s, ticketID, testStatePlanning)
+
+	got, state, err := s.LatestSession(ctx, ticketID, testStatePlanning, 3)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if got.ID != newer {
+		t.Errorf("LatestSession.ID = %d, want the newer session %d, not the older open one %d", got.ID, newer, older)
+	}
+	if state != SessionIdless {
+		t.Errorf("LatestSession state = %v, want SessionIdless for the newer (still-idless) session", state)
+	}
+}
+
+// TestLatestSession_EmptyExternalIDIsAnError proves F035's schema guard: a
+// session row can never carry external_id = "" (empty is not "no id yet",
+// that is NULL, and it is not a valid runtime id either), so migration
+// 0003's BEFORE INSERT trigger on sessions rejects the raw INSERT before
+// LatestSession ever gets a chance to read such a row back.
+func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (ticket_id, job, runtime, external_id) VALUES (?, ?, 'fake', '')`,
+		ticketID, testStatePlanning)
+	if err == nil {
+		t.Fatal("insert session with external_id = \"\": want a trigger RAISE(ABORT) error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("insert session with external_id = \"\": err = %v, want it to mention %q", err, "must not be empty")
+	}
+}
+
+// TestLatestSession_UpdateToEmptyExternalIDIsAnError proves the BEFORE
+// UPDATE OF external_id trigger fires too: setting external_id = "" on an
+// existing session (NULL going in, same as a first-turn session before the
+// runtime has echoed one back) is rejected the same way an insert is.
+func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning) // external_id NULL
+
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET external_id = '' WHERE id = ?`, sessionID)
+	if err == nil {
+		t.Fatal("update session external_id to \"\": want a trigger RAISE(ABORT) error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("update session external_id to \"\": err = %v, want it to mention %q", err, "must not be empty")
 	}
 }
 

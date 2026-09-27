@@ -15,6 +15,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -68,7 +69,12 @@ var keysJSON []byte
 // every caller of New, including every test, now builds one (design
 // section 12, Task 10). push and pushToken back GET /push/key and POST
 // /push/subscribe (push.go, design section 6.13): push is nilable the same
-// way machine is, for a test that never exercises those two routes.
+// way machine is, for a test that never exercises those two routes. floor
+// is the configured review.floor (design section 4.4, 7, D8): the gate's
+// context region (views.go's loadFindings) keeps only a stored planreview
+// artifact's findings whose severity ranks strictly above it, the same
+// threshold job/planning.go's own floor split uses, without either package
+// importing the other.
 type console struct {
 	store     *store.Store
 	bus       *bus.Broker
@@ -76,6 +82,7 @@ type console struct {
 	log       *Handler
 	push      PushKeys
 	pushToken string
+	floor     response.Severity
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -116,11 +123,17 @@ type console struct {
 // design section 6.13): push may be nil for a caller (most tests) that
 // never exercises those two routes.
 //
+// floor is the configured review.floor (design section 4.4, 7, D8, Task
+// 11): cmd/zing's serve and selftest each parse it once (response.
+// ParseSeverity(cfg.Review.Floor)) and pass the same value here and into
+// job.Deps.Floor, so the gate's context region and the planning handler's
+// floor split agree on one threshold.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string) http.Handler {
-	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken}
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity) http.Handler {
+	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken, floor: floor}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()

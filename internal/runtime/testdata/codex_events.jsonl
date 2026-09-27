@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"0199e2b1-2c8b-7c53-8e9e-0a1b2c3d4e5f"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"Checking each finding location against the plan."}}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Checking each finding location against the plan."}}
+{"type":"item.started","item":{"id":"item_1","type":"agent_message","text":""}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"<zing job=\"planreview\" outcome=\"ok\"></zing>"}}
+{"type":"turn.completed","usage":{"input_tokens":812,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":146,"reasoning_output_tokens":32}}

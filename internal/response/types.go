@@ -62,7 +62,7 @@ type Claim struct {
 type Scenario struct {
 	ID    string       `xml:"id,attr"              json:"id"              jsonschema:"pattern=^s[0-9]+$"`
 	Kind  ScenarioKind `xml:"kind,attr"            json:"kind"`
-	Check string       `xml:"check,attr,omitempty" json:"check_cmd"       doc:"optional: one command whose exit code decides it"`
+	Check string       `xml:"check,attr,omitempty" json:"check_cmd"       doc:"one command whose exit code decides it"`
 	Given string       `xml:"given"                json:"given"           jsonschema:"minLength=1" doc:"the starting state"`
 	When  string       `xml:"when"                 json:"when"            jsonschema:"minLength=1" doc:"the action"`
 	Then  string       `xml:"then"                 json:"then"            jsonschema:"minLength=1" doc:"what a stranger would observe, from outside the code"`
@@ -323,11 +323,13 @@ type AnswerPayload struct {
 }
 
 type EscalationPayload struct {
-	Code    string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other"`
-	What    string   `json:"what"    jsonschema:"minLength=1"`
-	Why     string   `json:"why"     jsonschema:"minLength=1"`
-	Tried   string   `json:"tried"`
-	Options []string `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
+	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed"`
+	What      string   `json:"what"    jsonschema:"minLength=1"`
+	Why       string   `json:"why"     jsonschema:"minLength=1"`
+	Tried     string   `json:"tried"`
+	Options   []string `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
+	SessionID *int64   `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
+	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims" doc:"the step that produced this escalation (design section 6.7)"`
 }
 
 type StatePayload struct {

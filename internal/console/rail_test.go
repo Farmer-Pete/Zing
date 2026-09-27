@@ -53,7 +53,7 @@ func advanceTicketToBuilding(t *testing.T, s *store.Store, ticketID int64, model
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Next: string(response.TicketStateBuilding), Reason: "rail test advance",
 		Waiting: &waiting,
-		Session: &store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: "fake"},
+		Session: &store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
 		Runs:    []store.Run{{Turn: 0, Model: &model, Outcome: &outcome, AgentSeconds: &agentSeconds}},
 	})
 	if err != nil {
@@ -105,10 +105,10 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
-	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: "plan", Version: 1, Payload: railPlanPayload(t)}); err != nil {
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypePlan, Version: 1, Payload: railPlanPayload(t)}); err != nil {
 		t.Fatalf("insert plan artifact: %v", err)
 	}
-	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: "scenario", Version: 1, Payload: railScenarioPayload("s1")}); err != nil {
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypeScenario, Version: 1, Payload: railScenarioPayload("s1")}); err != nil {
 		t.Fatalf("insert scenario artifact: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestBuildLogRail_TiesKeepRunAppendOrder(t *testing.T) {
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Next: string(response.TicketStateBuilding), Reason: "rail log-tiebreak test",
 		Waiting: &waiting,
-		Session: &store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: "fake"},
+		Session: &store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
 		Runs: []store.Run{
 			{Turn: 0, Model: &model, Outcome: &outcome, AgentSeconds: &agentSeconds},
 			{Turn: 1, Model: &model, Outcome: &outcome, AgentSeconds: &agentSeconds},

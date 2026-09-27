@@ -55,6 +55,24 @@ type ThreadItem struct {
 	Ref, Text string
 }
 
+// ScenarioRow is one scenario in the gate's context region's scenarios table
+// (design section 7, D8, Task 11): the current cohort's scenario set, in
+// the store's own insertion order, decoded straight from its stored
+// response.Scenario payload by internal/console/views.go's loadScenarios.
+type ScenarioRow struct {
+	ID, Kind, Given, When, Then string
+}
+
+// FindingRow is one above-floor plan-review finding in the gate's context
+// region's findings table (design section 7, D8, Task 11):
+// internal/console/views.go's loadFindings has already dropped every
+// finding at or below the configured review.floor, so every row here is one
+// the owner, not the planning loop's own floor split (job/planning.go), must
+// decide.
+type FindingRow struct {
+	Lens, Severity, Location, Text, Fix string
+}
+
 // ThreadQuestion is the detail a "question" message renders in place of a
 // plain body: its key, title, and message count for the <details> summary
 // (design section 6.6), its body and recommendation (pre-rendered through
@@ -89,6 +107,16 @@ type ThreadQuestion struct {
 	Interactive bool
 	PRURL       string        // merge kind only; empty when the ticket has no PR link yet
 	Plan        *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
+
+	// Scenarios and Findings are the gate kind's other two context regions
+	// (design section 7, D8, Task 11), rendered before Plan inside
+	// gateContext (thread.templ): the current scenario cohort and the
+	// above-floor plan-review findings, both nil (rendering no table at
+	// all, scenarios.templ's and findings.templ's own "no empty table"
+	// rule) when the ticket has no cohort, or nothing to show at that
+	// region.
+	Scenarios []ScenarioRow
+	Findings  []FindingRow
 }
 
 // ThreadRow is one message the read-only Thread view renders: a state

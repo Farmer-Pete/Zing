@@ -1,15 +1,17 @@
 package job_test
 
 import (
-	"encoding/json"
+	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
-	"testing/fstest"
 	"time"
 
+	zing "zing"
 	"zing/fixtures"
 	"zing/internal/job"
+	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
@@ -30,15 +32,57 @@ const (
 
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
+	testWaitingGate      = "gate"
 	testAuthorZing       = "zing"
+	testRuntimeClaude    = "claude"
+	testRuntimeFake      = "fake"
+	testRuntimeCodex     = "codex"
 
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
+
+	testArtifactTypePlan       = "plan"
+	testArtifactTypeClaims     = "claims"
+	testArtifactTypeScenario   = "scenario"
+	testArtifactTypePlanreview = "planreview"
+
+	testMsgTypeUpdate = "update"
+	testKindBug       = "bug"
+	testKindFeature   = "feature"
+	testTicketTitle   = "Add a hello endpoint"
 )
 
-// testProject is the one project every test in this file seeds.
+// testProject is the one project every test in this file seeds. LocalPath
+// is filled in per test by seedQueuedTicket (testProjectDir): the ready
+// entry point (design section 6.5) now opens it for real through
+// os.OpenRoot to check a ready response's code claims, so it must be a real
+// directory, not the placeholder "/tmp/zing" this var carried through
+// task 6.
 var testProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", Tracker: "github",
+}
+
+// readyClaimEvidencePath is the file every seeded test project carries, the
+// same path fixtures/scripts/planning/2.xml's one code claim cites
+// ("cmd/zing/main.go:60"), so response.CheckCodeClaims resolves it for real
+// against testProjectDir's own os.Root (design section 6.5, D19).
+const readyClaimEvidencePath = "cmd/zing/main.go"
+
+// testProjectDir returns a fresh temp directory carrying
+// readyClaimEvidencePath, so a ready check's os.OpenRoot(project.LocalPath)
+// plus response.CheckCodeClaims can resolve the fixture cohort's one code
+// claim for real.
+func testProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	full := filepath.Join(dir, readyClaimEvidencePath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("testProjectDir: mkdir: %v", err)
+	}
+	if err := os.WriteFile(full, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("testProjectDir: write %s: %v", readyClaimEvidencePath, err)
+	}
+	return dir
 }
 
 // newJobTestStore opens a fresh Store on a temp-file database, closed on
@@ -60,12 +104,14 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	ctx := t.Context()
 
-	projectID, err := s.EnsureProject(ctx, testProject)
+	proj := testProject
+	proj.LocalPath = testProjectDir(t)
+	projectID, err := s.EnsureProject(ctx, proj)
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	ticketID, err := s.InsertTicket(ctx, store.Ticket{
-		ProjectID: projectID, TrackerRef: testRefFake1, Title: "Add a hello endpoint", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
@@ -73,10 +119,53 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 	return ticketID
 }
 
+// testMachine loads the real, checked-in machine.toml, the same process
+// definition zing serve loads: skeleton.go's building and planning handlers
+// look up their runtime by d.Machine.Jobs[job].Runtime, so every Deps this
+// file builds needs the real job-name-to-runtime-name mapping ("build" and
+// "planning" both name "claude").
+func testMachine(t *testing.T) *machine.Machine {
+	t.Helper()
+	m, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+	return m
+}
+
+// testModels and testBudget are the job.Deps.Models and job.Deps.Budget
+// classify and planning need to resolve a model alias and pass the
+// agent-time budget check (design section 4.4, 4.6), now that planning.go
+// (task 6) routes both through runJob. fakeRuntime never reads Model, so
+// the exact ids do not matter beyond matching machine.toml's alias names.
+var testModels = map[string]string{
+	"sonnet":         "claude-sonnet-5",
+	"opus":           "claude-opus-4-8",
+	"fable":          "claude-fable-5-1",
+	testRuntimeCodex: "gpt-5.5",
+}
+
+const testBudget = 240 * time.Minute
+
+// testFloor is job.Deps.Floor's value in every claim() this package builds:
+// zing.toml's own default review.floor ("minor", internal/config's
+// applyConfigDefaults), so the review-tick tests (planning_test.go, task
+// 7b) exercise the same floor a real deployment would, unless a test
+// overrides it (claimWithFloor).
+const testFloor = response.SeverityMinor
+
 // claim claims ticketID for a fresh owner and a lease truncated to second
 // precision (SQLite's TEXT timestamp round-trips at second precision), so
 // the returned expires compares equal to what a later GetTicket reads
-// back, and returns the Deps a handler test drives with.
+// back, and returns the Deps a handler test drives with. rt serves every
+// machine.toml runtime name (design section 4.1, D2: selftest and e2e map
+// claude, codex, and fake to one Fake), so a handler's
+// d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup always resolves to rt
+// regardless of which runtime name the real machine.toml gives that job.
+// Models, Budget, and Reserve are wired exactly as
+// dispatch.Dispatcher.runAndCommit wires them for a real Tick (design D13),
+// so a handler test that calls classify or planning directly needs no
+// separate setup of its own.
 func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job.Deps {
 	t.Helper()
 	owner := "test-owner"
@@ -89,7 +178,18 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 	if !claimed {
 		t.Fatal("Claim: got false, want true")
 	}
-	return job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires}
+
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: rt, testRuntimeCodex: rt, testRuntimeFake: rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	return job.Deps{
+		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
+		Owner: owner, Expires: expires,
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		},
+	}
 }
 
 // apply validates commit against t (the ticket's state before the commit)
@@ -135,13 +235,19 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 // skeleton handlers, in pipeline order, against a real temp store and the
 // real checked-in fixture scripts, applying each returned commit and
 // reclaiming between states exactly as the dispatcher will (design section
-// 6.8). Planning now takes two handler calls: first entry posts the one
-// fixture question and waits, this test answers it through
-// store.AnswerQuestion exactly as the console's POST /answer would, and only
-// then does resume run. It asserts the ticket reaches done and that a state
-// message was written on every one of the six transitions (design section
-// 6.3, 7.1) -- planning's own first-entry call writes no state message,
-// since it carries no Next.
+// 6.8). Planning now takes four handler calls (design section 5.1, task
+// 7b): a kindless ticket classifies first (fixtures/scripts/classify/1.xml,
+// no transition, no state message), the first turn posts the one fixture
+// question and waits, this test answers it through store.AnswerQuestion
+// exactly as the console's POST /answer would, the resume stores the ready
+// cohort (fixtures/scripts/planning/2.xml) and stays in planning (task 7b
+// removed the old shortcut), and the review tick
+// (fixtures/scripts/planreview/1.xml, zero findings) takes the TEMPORARY
+// clean shortcut to building. It asserts the ticket reaches done and that a
+// state message was written on every one of the six transitions (design
+// section 6.3, 7.1) -- planning's own classify, first-entry, and ready
+// calls write no state message, since none of them carries a Next; only the
+// review tick's clean shortcut does.
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
@@ -156,6 +262,23 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 		t.Fatalf("queued handler.Run: %v", err)
 	}
 	apply(t, s, ticket, commit)
+
+	// planning: classify (kind unset, stays planning, no message).
+	ticket = getTicket(t, s, ticketID)
+	deps = claim(t, s, rt, ticketID)
+	commit, err = reg[testStatePlanning].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("planning classify handler.Run: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	classified := getTicket(t, s, ticketID)
+	if classified.State != testStatePlanning || classified.WaitingOn != nil {
+		t.Fatalf("after classify: ticket = (state=%q, waiting_on=%v), want (planning, nil)", classified.State, classified.WaitingOn)
+	}
+	if classified.Kind == nil {
+		t.Fatal("after classify: ticket.Kind is nil, want bug or feature")
+	}
 
 	// planning first entry: posts the question and waits.
 	ticket = getTicket(t, s, ticketID)
@@ -175,15 +298,22 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	}
 
 	// Answer the one fixture question, exactly the console's POST /answer path.
-	answerFixtureQuestion(t, s, ticketID, "b")
+	answerFixtureQuestion(t, s, ticketID)
 
 	answered := getTicket(t, s, ticketID)
 	if answered.WaitingOn != nil {
 		t.Fatalf("after answering: ticket waiting_on = %v, want nil (wait cleared)", answered.WaitingOn)
 	}
 
-	// planning resume -> building, then the remaining code-only states.
-	order := []string{testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging, testStateShipping}
+	// planning resume (stores the cohort, stays in planning) and the review
+	// tick (clean, the temporary shortcut to building) take two more handler
+	// calls, reusing rt so the review tick's own runtime.For("codex") lookup
+	// resolves to the same Fake, registered under all three runtime names
+	// (claim's own doc comment).
+	advancePlanningWithAnAnswer(t, s, rt, ticketID)
+
+	// the remaining code-only states.
+	order := []string{testStateBuilding, testStateReviewing, testStateJudging, testStateShipping}
 	for _, state := range order {
 		ticket = getTicket(t, s, ticketID)
 		if ticket.State != state {
@@ -235,15 +365,23 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	if stateMsgs != wantStateMsgs {
 		t.Errorf("state messages = %d, want %d (one per transition)", stateMsgs, wantStateMsgs)
 	}
-	if questionMsgs != 1 {
-		t.Errorf("question messages = %d, want 1 (the one fixture question)", questionMsgs)
+	// The fixture Q1 plus the gate (design section 6.6, task 7c).
+	const wantQuestionMsgs = 2
+	if questionMsgs != wantQuestionMsgs {
+		t.Errorf("question messages = %d, want %d", questionMsgs, wantQuestionMsgs)
 	}
 }
 
-// answerFixtureQuestion answers ticketID's one open question with option,
-// through store.AnswerQuestion, and fails the test if the answer is not
-// accepted.
-func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option string) store.AnswerResult {
+// answerFixtureQuestionOption is the option every caller of
+// answerFixtureQuestion answers with: fixtures/scripts/planning/1.xml's own
+// "b" ("hello, world"), the option every test in this file and
+// planning_test.go exercises.
+const answerFixtureQuestionOption = "b"
+
+// answerFixtureQuestion answers ticketID's one open question with
+// answerFixtureQuestionOption, through store.AnswerQuestion, and fails the
+// test if the answer is not accepted.
+func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
 	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
 	if err != nil {
@@ -253,7 +391,7 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option 
 		t.Fatal("QuestionsByState(open) = no open questions, want at least one")
 	}
 	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{
-		TicketID: ticketID, QuestionID: open[0].ID, Option: option,
+		TicketID: ticketID, QuestionID: open[0].ID, Option: answerFixtureQuestionOption,
 	})
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
@@ -261,7 +399,38 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option 
 	if !result.Accepted {
 		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", result.Conflict)
 	}
-	return result
+}
+
+// TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking proves
+// the new d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup (design
+// section 4.4, task 2) fails closed: a Deps whose Set carries no runtime
+// under the name machine.toml's build job actually names ("claude") must
+// return a wrapped error, never panic.
+func TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning)
+
+	ticket := getTicket(t, s, ticketID)
+	owner := "test-owner-no-claude"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+
+	// A Set that carries only "codex", never "claude" (the name
+	// machine.toml's build job actually uses), so the lookup must fail.
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeCodex: fakeRuntime(t)})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	deps := job.Deps{Store: s, Runtimes: set, Machine: testMachine(t), Owner: owner, Expires: expires}
+
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err == nil {
+		t.Fatal("building Run with no claude runtime registered: want an error, got nil")
+	}
 }
 
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
@@ -284,10 +453,9 @@ func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
 	}
 }
 
-// advanceQueuedToPlanning claims ticketID, runs the queued handler, applies
-// its commit, and returns the ticket freshly reread from the store, now
-// sitting in planning.
-func advanceQueuedToPlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) store.Ticket {
+// advanceQueuedToPlanning claims ticketID, runs the queued handler, and
+// applies its commit, leaving the ticket sitting in planning.
+func advanceQueuedToPlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
 	ticket := getTicket(t, s, ticketID)
 	deps := claim(t, s, rt, ticketID)
@@ -296,459 +464,8 @@ func advanceQueuedToPlanning(t *testing.T, s *store.Store, rt runtime.Runtime, t
 		t.Fatalf("queued Run: %v", err)
 	}
 	apply(t, s, ticket, commit)
-	return getTicket(t, s, ticketID)
 }
 
-// TestPlanningHandler_FirstEntry_PostsQuestionAndWaits proves the first-entry
-// branch (design section 6.6 diagram, left column, and the mapping table):
-// no open session, one fake turn (fake turn 1, the real checked-in
-// fixtures/scripts/planning/1.xml), outcome question, one question message
-// per Questions[i] attached to the inserted turn-0 run through
-// AttachRunToMsgs, and the ticket waits on "questions" with no transition.
-func TestPlanningHandler_FirstEntry_PostsQuestionAndWaits(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	rt := fakeRuntime(t)
-
-	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
-	deps := claim(t, s, rt, ticketID)
-
-	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning first-entry Run: %v", err)
-	}
-
-	if commit.Next != "" {
-		t.Errorf("commit.Next = %q, want empty (no transition on first entry)", commit.Next)
-	}
-	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
-		t.Fatalf("commit.Waiting = %v, want questions", commit.Waiting)
-	}
-	if commit.Session == nil || commit.Session.Job != testStatePlanning || commit.Session.Runtime != "fake" {
-		t.Fatalf("commit.Session = %+v, want a fresh (planning, fake) session upsert", commit.Session)
-	}
-	if commit.Session.ExternalID == nil || *commit.Session.ExternalID == "" {
-		t.Error("commit.Session.ExternalID is nil or empty, want the fake's minted session id")
-	}
-	if len(commit.Runs) != 1 || commit.Runs[0].Turn != 0 || commit.Runs[0].Outcome == nil ||
-		*commit.Runs[0].Outcome != string(response.OutcomeQuestion) {
-		t.Errorf("commit.Runs = %+v, want exactly one turn-0 run with outcome question", commit.Runs)
-	}
-	if !commit.AttachRunToMsgs {
-		t.Error("commit.AttachRunToMsgs = false, want true")
-	}
-	if len(commit.Messages) != 1 {
-		t.Fatalf("commit.Messages = %d, want 1 (the one fixture question)", len(commit.Messages))
-	}
-
-	msg := commit.Messages[0]
-	if msg.Type != testMsgTypeQuestion || msg.Author != testAuthorZing {
-		t.Errorf("commit.Messages[0] = (Type=%q, Author=%q), want (question, zing)", msg.Type, msg.Author)
-	}
-	if msg.State == nil || *msg.State != "open" {
-		t.Errorf("commit.Messages[0].State = %v, want open", msg.State)
-	}
-	const wantBody = "How should the greeting read?\n\nPick the greeting style for GET /hello."
-	if msg.Body != wantBody {
-		t.Errorf("commit.Messages[0].Body = %q, want %q (title first, then body)", msg.Body, wantBody)
-	}
-
-	var payload response.QuestionPayload
-	if err = json.Unmarshal(msg.Payload, &payload); err != nil {
-		t.Fatalf("unmarshal question payload: %v", err)
-	}
-	if payload.Key != "Q1" {
-		t.Errorf("payload.Key = %q, want Q1", payload.Key)
-	}
-	if payload.Kind != response.QuestionKindQuestion || payload.State != response.QuestionStateOpen {
-		t.Errorf("payload = (Kind=%q, State=%q), want (question, open)", payload.Kind, payload.State)
-	}
-	if payload.Recommended != "b" {
-		t.Errorf("payload.Recommended = %q, want b", payload.Recommended)
-	}
-	if len(payload.Options) != 2 || payload.Options[0].Key != "a" || payload.Options[1].Key != "b" {
-		t.Errorf("payload.Options = %+v, want keys [a b]", payload.Options)
-	}
-
-	apply(t, s, ticket, commit)
-
-	final := getTicket(t, s, ticketID)
-	if final.State != testStatePlanning {
-		t.Errorf("final ticket state = %q, want unchanged planning", final.State)
-	}
-	if final.WaitingOn == nil || *final.WaitingOn != testWaitingQuestions {
-		t.Errorf("final ticket waiting_on = %v, want questions", final.WaitingOn)
-	}
-
-	msgs, err := s.ListMessages(t.Context(), ticketID)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-	var foundQuestion bool
-	for _, m := range msgs {
-		if m.Type == testMsgTypeQuestion {
-			foundQuestion = true
-			if m.RunID == nil {
-				t.Error("persisted question message has no run_id, want the turn-0 run's id (AttachRunToMsgs)")
-			}
-		}
-	}
-	if !foundQuestion {
-		t.Error("no question message persisted")
-	}
-
-	sess, ok, err := s.OpenSession(t.Context(), ticketID, testStatePlanning)
-	if err != nil {
-		t.Fatalf("OpenSession: %v", err)
-	}
-	if !ok {
-		t.Fatal("OpenSession(planning): ok = false, want true")
-	}
-	if sess.ExternalID == nil || *sess.ExternalID != *commit.Session.ExternalID {
-		t.Errorf("persisted session.ExternalID = %v, want %s", sess.ExternalID, *commit.Session.ExternalID)
-	}
-}
-
-// lowercaseKeyScript is a job-agnostic one-question QuestionResponse whose
-// question key rides the wire lowercase ("q1"), the shape
-// response.Question.Key's own pattern (^[qQ][0-9]+$) allows but the stored
-// QuestionPayload.Key's tighter pattern (^Q[0-9]+$) does not.
-const lowercaseKeyScript = `<zing job="planning" outcome="question">
-  <question key="q1">
-    <title>Question one</title>
-    <body>Body one.</body>
-    <option key="a">Option A</option>
-    <option key="b">Option B</option>
-    <recommended>a</recommended>
-  </question>
-  <progress>Asked one question before drafting the plan.</progress>
-</zing>`
-
-// TestPlanningHandler_FirstEntry_UppercasesALowercaseWireKey proves the
-// stored QuestionPayload.Key is uppercased from the wire key (design section
-// 6.6's mapping table, fix 6): a lowercase "q1" on the wire persists as the
-// schema-valid "Q1", not the raw lowercase value that would fail
-// QuestionPayload's ^Q[0-9]+$ pattern.
-func TestPlanningHandler_FirstEntry_UppercasesALowercaseWireKey(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	rt := runtime.NewFake(fstest.MapFS{testPlanningScript1: {Data: []byte(lowercaseKeyScript)}})
-
-	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
-	deps := claim(t, s, rt, ticketID)
-
-	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning first-entry Run: %v", err)
-	}
-	if len(commit.Messages) != 1 {
-		t.Fatalf("commit.Messages = %d, want 1", len(commit.Messages))
-	}
-
-	var payload response.QuestionPayload
-	if unmarshalErr := json.Unmarshal(commit.Messages[0].Payload, &payload); unmarshalErr != nil {
-		t.Fatalf("unmarshal question payload: %v", unmarshalErr)
-	}
-	if payload.Key != "Q1" {
-		t.Errorf("payload.Key = %q, want Q1 (uppercased from the wire's lowercase q1)", payload.Key)
-	}
-
-	// Persisting must succeed: a lowercase Key would fail the messages/question
-	// schema's ^Q[0-9]+$ pattern and CommitHandlerResult would error.
-	apply(t, s, ticket, commit)
-
-	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
-	if err != nil {
-		t.Fatalf("QuestionsByState(open): %v", err)
-	}
-	if len(open) != 1 {
-		t.Fatalf("QuestionsByState(open) = %d, want 1", len(open))
-	}
-	var stored response.QuestionPayload
-	if unmarshalErr := json.Unmarshal(open[0].Payload, &stored); unmarshalErr != nil {
-		t.Fatalf("unmarshal persisted question payload: %v", unmarshalErr)
-	}
-	if stored.Key != "Q1" {
-		t.Errorf("persisted payload.Key = %q, want Q1", stored.Key)
-	}
-}
-
-// TestPlanningHandler_Resume_AfterBatchAnsweredTransitionsToBuilding proves
-// the resume branch (design section 6.6 diagram, right column): an open
-// session, the batch's one answered question read back and serialized into
-// the prompt, one fake turn (fake turn 2, the session resumed), outcome
-// ready, the answered question resolved, and the ticket transitions to
-// building.
-func TestPlanningHandler_Resume_AfterBatchAnsweredTransitionsToBuilding(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	rt := fakeRuntime(t)
-
-	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
-	deps := claim(t, s, rt, ticketID)
-	firstEntry, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning first-entry Run: %v", err)
-	}
-	apply(t, s, ticket, firstEntry)
-
-	answerResult := answerFixtureQuestion(t, s, ticketID, "b")
-	if !answerResult.WaitCleared {
-		t.Fatal("AnswerQuestion: WaitCleared = false, want true (the one-question batch is done)")
-	}
-
-	answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
-	if err != nil {
-		t.Fatalf("QuestionsByState(answered): %v", err)
-	}
-	if len(answered) != 1 {
-		t.Fatalf("QuestionsByState(answered) = %d, want 1", len(answered))
-	}
-	answeredID := answered[0].ID
-
-	// A second, unrelated answered question on the same ticket, attached to
-	// an unrelated (build) session's run rather than the planning session's
-	// turn-0 run. The resume batch must be scoped to that turn-0 run
-	// (design section 6.6: QuestionsByRun, not QuestionsByState across the
-	// whole ticket), so this question must stay untouched by the resume
-	// below.
-	unrelatedID := postAndAnswerUnrelatedQuestion(t, s, rt, ticketID)
-
-	ticket = getTicket(t, s, ticketID)
-	deps = claim(t, s, rt, ticketID)
-	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning resume Run: %v", err)
-	}
-
-	if commit.Next != testStateBuilding || commit.Reason != "plan ready" {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (building, plan ready)", commit.Next, commit.Reason)
-	}
-	if commit.Waiting != nil {
-		t.Errorf("commit.Waiting = %v, want nil", *commit.Waiting)
-	}
-	if commit.Session == nil || commit.Session.ID == nil {
-		t.Fatalf("commit.Session = %+v, want an update of the existing session", commit.Session)
-	}
-	if !commit.Session.BumpResumes {
-		t.Error("commit.Session.BumpResumes = false, want true")
-	}
-	if len(commit.Runs) != 1 || commit.Runs[0].Turn != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != "ready" {
-		t.Errorf("commit.Runs = %+v, want exactly one turn-1 run with outcome ready", commit.Runs)
-	}
-	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != answeredID {
-		t.Errorf("commit.ResolveQuestions = %v, want [%d] (only the planning run's batch, not the unrelated question %d)",
-			commit.ResolveQuestions, answeredID, unrelatedID)
-	}
-
-	apply(t, s, ticket, commit)
-
-	final := getTicket(t, s, ticketID)
-	if final.State != testStateBuilding {
-		t.Errorf("final ticket state = %q, want building", final.State)
-	}
-
-	resolved, err := s.QuestionsByState(t.Context(), ticketID, "resolved")
-	if err != nil {
-		t.Fatalf("QuestionsByState(resolved): %v", err)
-	}
-	if len(resolved) != 1 || resolved[0].ID != answeredID {
-		t.Errorf("QuestionsByState(resolved) = %v, want [question %d]", resolved, answeredID)
-	}
-
-	unrelated, err := s.GetMessage(t.Context(), unrelatedID)
-	if err != nil {
-		t.Fatalf("GetMessage(unrelated): %v", err)
-	}
-	if unrelated.State == nil || *unrelated.State != "answered" {
-		t.Errorf("unrelated question state = %v, want unchanged answered (the resume must not touch it)", unrelated.State)
-	}
-}
-
-// postAndAnswerUnrelatedQuestion posts one question on ticketID through a
-// bare CommitHandlerResult (not the planning handler), attached to a fresh,
-// unrelated "build" session's turn-0 run, answers it, and returns its
-// message id. Used to prove a resume batch stays scoped to the planning
-// session's own turn-0 run rather than sweeping in every answered question
-// on the ticket (design section 6.6).
-func postAndAnswerUnrelatedQuestion(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) int64 {
-	t.Helper()
-	ctx := t.Context()
-
-	payload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q9", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
-		Recommended: "a", Options: []response.Option{{Key: "a", Text: "A"}, {Key: "b", Text: "B"}},
-	})
-	if err != nil {
-		t.Fatalf("marshal unrelated question payload: %v", err)
-	}
-
-	deps := claim(t, s, rt, ticketID)
-	ticket := getTicket(t, s, ticketID)
-	externalID := "ext-unrelated"
-	openState := "open"
-	apply(t, s, ticket, store.HandlerCommit{
-		TicketID: ticketID, Owner: deps.Owner, Expires: deps.Expires,
-		Session: &store.SessionUpsert{Job: "build", Runtime: "fake", ExternalID: &externalID},
-		Runs:    []store.Run{{Turn: 0, Outcome: new("question")}},
-		Messages: []store.Message{{
-			TicketID: ticketID, Type: "question", Author: testAuthorZing,
-			State: &openState, Body: "unrelated question", Payload: payload,
-		}},
-		AttachRunToMsgs: true,
-	})
-
-	open, err := s.QuestionsByState(ctx, ticketID, "open")
-	if err != nil {
-		t.Fatalf("QuestionsByState(open) after posting the unrelated question: %v", err)
-	}
-	if len(open) != 1 {
-		t.Fatalf("QuestionsByState(open) after posting the unrelated question = %d, want 1", len(open))
-	}
-	unrelatedID := open[0].ID
-
-	res, err := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: unrelatedID, Option: "a"})
-	if err != nil {
-		t.Fatalf("AnswerQuestion(unrelated): %v", err)
-	}
-	if !res.Accepted {
-		t.Fatalf("AnswerQuestion(unrelated): Accepted = false, Conflict = %q, want accepted", res.Conflict)
-	}
-	return unrelatedID
-}
-
-// multiQuestionScript is a job-agnostic two-question QuestionResponse,
-// inline so TestPlanningHandler_Resume_MultiQuestionBatchGatesOnAllAnswered
-// proves the batch gate without touching the real checked-in one-question
-// fixture (design section 6.6: "at most one batch is open per ticket at a
-// time").
-const multiQuestionScript = `<zing job="planning" outcome="question">
-  <question key="Q1">
-    <title>Question one</title>
-    <body>Body one.</body>
-    <option key="a">Option A1</option>
-    <option key="b">Option B1</option>
-    <recommended>a</recommended>
-  </question>
-  <question key="Q2">
-    <title>Question two</title>
-    <body>Body two.</body>
-    <option key="a">Option A2</option>
-    <option key="b">Option B2</option>
-    <recommended>b</recommended>
-  </question>
-  <progress>Asked two questions before drafting the plan.</progress>
-</zing>`
-
-// multiQuestionReadyScript is a minimal ready document this test's fake turn
-// 2 serves once the two-question batch is fully answered. The handler reads
-// only Header().Outcome at runtime (design section 6.6: "the skeleton does
-// not validate the response at runtime"), so this need not be
-// Validate-clean; it only needs to Parse.
-const multiQuestionReadyScript = `<zing job="planning" outcome="ready"></zing>`
-
-// TestPlanningHandler_Resume_MultiQuestionBatchGatesOnAllAnswered proves the
-// batch is fully-answered-gated (design section 6.6): a two-question first
-// entry posts both messages under the one turn-0 run; answering only one
-// leaves the wait set; only once both are answered does the wait clear, and
-// the resume commit resolves both question ids together.
-func TestPlanningHandler_Resume_MultiQuestionBatchGatesOnAllAnswered(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	rt := runtime.NewFake(fstest.MapFS{
-		testPlanningScript1: {Data: []byte(multiQuestionScript)},
-		"planning/2.xml":    {Data: []byte(multiQuestionReadyScript)},
-	})
-
-	ticket := advanceQueuedToPlanning(t, s, rt, ticketID)
-	deps := claim(t, s, rt, ticketID)
-	firstEntry, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning first-entry Run: %v", err)
-	}
-	if len(firstEntry.Messages) != 2 {
-		t.Fatalf("commit.Messages = %d, want 2 (the two-question batch)", len(firstEntry.Messages))
-	}
-	apply(t, s, ticket, firstEntry)
-
-	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
-	if err != nil {
-		t.Fatalf("QuestionsByState(open): %v", err)
-	}
-	if len(open) != 2 {
-		t.Fatalf("QuestionsByState(open) = %d, want 2", len(open))
-	}
-
-	// Answer the first question only: the batch is not done, so the wait
-	// must stay set (this is the store-level gate that keeps the dispatcher
-	// from ever calling the handler on a partial batch).
-	first, err := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"})
-	if err != nil {
-		t.Fatalf("AnswerQuestion(first): %v", err)
-	}
-	if !first.Accepted || first.WaitCleared {
-		t.Fatalf("AnswerQuestion(first) = %+v, want Accepted=true, WaitCleared=false", first)
-	}
-	midway := getTicket(t, s, ticketID)
-	if midway.WaitingOn == nil || *midway.WaitingOn != testWaitingQuestions {
-		t.Fatalf("midway ticket waiting_on = %v, want still questions", midway.WaitingOn)
-	}
-
-	second, err := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[1].ID, Option: "b"})
-	if err != nil {
-		t.Fatalf("AnswerQuestion(second): %v", err)
-	}
-	if !second.Accepted || !second.WaitCleared {
-		t.Fatalf("AnswerQuestion(second) = %+v, want Accepted=true, WaitCleared=true", second)
-	}
-
-	answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
-	if err != nil {
-		t.Fatalf("QuestionsByState(answered): %v", err)
-	}
-	if len(answered) != 2 {
-		t.Fatalf("QuestionsByState(answered) = %d, want 2", len(answered))
-	}
-
-	ticket = getTicket(t, s, ticketID)
-	deps = claim(t, s, rt, ticketID)
-	resume, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning resume Run: %v", err)
-	}
-	if resume.Next != testStateBuilding {
-		t.Errorf("resume commit.Next = %q, want building", resume.Next)
-	}
-
-	wantIDs := []int64{open[0].ID, open[1].ID}
-	if len(resume.ResolveQuestions) != len(wantIDs) {
-		t.Fatalf("resume commit.ResolveQuestions = %v, want %v", resume.ResolveQuestions, wantIDs)
-	}
-	for i, id := range wantIDs {
-		if resume.ResolveQuestions[i] != id {
-			t.Errorf("resume commit.ResolveQuestions[%d] = %d, want %d", i, resume.ResolveQuestions[i], id)
-		}
-	}
-
-	apply(t, s, ticket, resume)
-
-	resolved, err := s.QuestionsByState(t.Context(), ticketID, "resolved")
-	if err != nil {
-		t.Fatalf("QuestionsByState(resolved): %v", err)
-	}
-	if len(resolved) != 2 {
-		t.Errorf("QuestionsByState(resolved) = %d, want 2 (both resolved together)", len(resolved))
-	}
-
-	final := getTicket(t, s, ticketID)
-	if final.State != testStateBuilding {
-		t.Errorf("final ticket state = %q, want building", final.State)
-	}
-}
-
-// TestBuildingHandler_OkTransitionsToReviewing proves the building handler:
-// a fresh session, one fake turn (job build, label 1), outcome ok, its
-// turn-0 run persisted, and the ticket advances to reviewing.
 func TestBuildingHandler_OkTransitionsToReviewing(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
@@ -786,11 +503,11 @@ func TestBuildingHandler_OkTransitionsToReviewing(t *testing.T) {
 // order, applying every commit, so a test can arrange a ticket already
 // sitting in the state right after the last one named (each named state
 // gets its own fresh runtime.Fake, since none of the skeleton handlers
-// resumes a prior handler's session). Planning is a special case: since task
-// 7 one handler call only posts the question and waits, so this drives
-// planning's first entry, answers the one fixture question, and drives its
-// resume too, landing the ticket in building exactly as every other state's
-// single silent transition does.
+// resumes a prior handler's session). Planning is a special case (design
+// section 5.1): a kindless ticket classifies before it ever opens a
+// planning session, so this drives the planning handler in a loop -- see
+// advancePlanningWithAnAnswer -- landing the ticket in building exactly as
+// every other state's single silent transition does.
 func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states ...string) {
 	t.Helper()
 	reg := job.Registry()
@@ -801,7 +518,7 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 		}
 
 		if state == testStatePlanning {
-			advancePlanningWithAnAnswer(t, s, ticketID)
+			advancePlanningWithAnAnswer(t, s, fakeRuntime(t), ticketID)
 			continue
 		}
 
@@ -814,34 +531,79 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 	}
 }
 
-// advancePlanningWithAnAnswer drives the planning handler's first entry
-// (posts the one fixture question and waits), answers it through
-// store.AnswerQuestion exactly as the console's POST /answer would, then
-// drives the resume (resolves the batch and transitions to building). Both
-// calls share one runtime.Fake, since a resume must reuse the fake session
-// its first entry minted.
-func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, ticketID int64) {
+// advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
+// handler-call loop: classify (kind unset, stays planning), the first turn
+// (posts questions, waits), the resume (stores the ready cohort, stays
+// planning), the review tick (clean, posts the gate, task 7c), and the
+// owner's approve (seals the cohort and moves to building) is five calls;
+// the headroom catches a stuck handler instead of hanging the test.
+const advancePlanningMaxCalls = 6
+
+// advancePlanningWithAnAnswer drives the real planning handler through as
+// many calls as it now takes to reach building (design section 5.1):
+// classify runs first on a kindless ticket and sets kind but carries no
+// transition, so this loops the handler -- sharing one runtime.Runtime
+// throughout, since a resume (and, once the cohort is stored, the review
+// tick) must reuse the session an earlier call minted -- until either the
+// ticket leaves planning, waits on "questions" (answered through
+// store.AnswerQuestion exactly as the console's POST /answer would), or
+// waits on "gate" (approved the same way, design section 6.6, task 7c), and
+// keeps looping either way. rt is the caller's own runtime, not a fresh one
+// this helper mints, so a caller that already drove classify or the first
+// turn against a particular runtime.Fake can keep using it here.
+func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
-	rt := fakeRuntime(t)
 	reg := job.Registry()
 
-	ticket := getTicket(t, s, ticketID)
-	deps := claim(t, s, rt, ticketID)
-	firstEntry, err := reg[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning first-entry Run: %v", err)
-	}
-	apply(t, s, ticket, firstEntry)
+	for range advancePlanningMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		deps := claim(t, s, rt, ticketID)
+		commit, err := reg[testStatePlanning].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("planning Run: %v", err)
+		}
+		apply(t, s, ticket, commit)
 
-	answerFixtureQuestion(t, s, ticketID, "b")
-
-	ticket = getTicket(t, s, ticketID)
-	deps = claim(t, s, rt, ticketID)
-	resume, err := reg[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning resume Run: %v", err)
+		after := getTicket(t, s, ticketID)
+		if after.State != testStatePlanning {
+			return
+		}
+		if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
+			answerFixtureQuestion(t, s, ticketID)
+			continue
+		}
+		if after.WaitingOn != nil && *after.WaitingOn == testWaitingGate {
+			answerGateApprove(t, s, ticketID)
+			continue
+		}
+		if after.WaitingOn != nil {
+			t.Fatalf("advancePlanningWithAnAnswer: ticket waiting_on = %q, want questions, gate, or nil", *after.WaitingOn)
+		}
 	}
-	apply(t, s, ticket, resume)
+	t.Fatalf("advancePlanningWithAnAnswer: still in planning after %d handler calls", advancePlanningMaxCalls)
+}
+
+// answerGateApprove answers ticketID's one open gate question with option
+// "a" (Approve, design section 6.6, D8), through store.AnswerQuestion
+// exactly as the console's POST /answer would.
+func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1 (the gate)", len(open))
+	}
+	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{
+		TicketID: ticketID, QuestionID: open[0].ID, Option: "a",
+	})
+	if err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", result.Conflict)
+	}
 }
 
 // TestReviewingHandler_TransitionsToJudging, TestJudgingHandler_TransitionsToShipping,
@@ -905,81 +667,5 @@ func TestShippingHandler_TransitionsToDone(t *testing.T) {
 	apply(t, s, ticket, commit)
 	if final := getTicket(t, s, ticketID); final.State != testStateDone {
 		t.Errorf("final ticket state = %q, want done", final.State)
-	}
-}
-
-// errorScript is a job-agnostic ErrorResponse document, used only by
-// TestPlanningHandler_ErrorOutcomeEscalates: task 4 never checks a real
-// error script into fixtures/scripts (that fixture and its dispatcher-level
-// exercise are task 8's, design section 12 row 8), but section 6.7's error
-// branch is task 4's own code and needs a turn to drive it.
-const errorScript = `<zing job="planning" outcome="error">
-  <error code="plan_gap">
-    <what>could not determine the goals</what>
-    <why>the ticket body names no concrete behavior</why>
-    <tried>read the ticket body twice</tried>
-  </error>
-</zing>`
-
-// TestPlanningHandler_ErrorOutcomeEscalates proves the section 6.7 error
-// branch: an escalation message carrying RunError's fields and the fixed
-// local options, Waiting set to error, and no state transition.
-func TestPlanningHandler_ErrorOutcomeEscalates(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	ticket := getTicket(t, s, ticketID)
-	deps := claim(t, s, fakeRuntime(t), ticketID)
-	queuedCommit, err := job.Registry()[testStateQueued].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("queued Run: %v", err)
-	}
-	apply(t, s, ticket, queuedCommit)
-
-	errRT := runtime.NewFake(fstest.MapFS{testPlanningScript1: {Data: []byte(errorScript)}})
-	ticket = getTicket(t, s, ticketID)
-	deps = claim(t, s, errRT, ticketID)
-
-	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("planning Run: %v", err)
-	}
-	if commit.Next != "" {
-		t.Errorf("commit.Next = %q, want empty (no transition on error)", commit.Next)
-	}
-	if commit.Waiting == nil || *commit.Waiting != "error" {
-		t.Fatalf("commit.Waiting = %v, want error", commit.Waiting)
-	}
-	if len(commit.Messages) != 1 || commit.Messages[0].Type != "escalation" || commit.Messages[0].Author != testAuthorZing {
-		t.Fatalf("commit.Messages = %+v, want exactly one zing escalation message", commit.Messages)
-	}
-
-	var payload response.EscalationPayload
-	if err := json.Unmarshal(commit.Messages[0].Payload, &payload); err != nil {
-		t.Fatalf("unmarshal escalation payload: %v", err)
-	}
-	if payload.Code != "plan_gap" {
-		t.Errorf("payload.Code = %q, want plan_gap", payload.Code)
-	}
-	if payload.What == "" || payload.Why == "" {
-		t.Errorf("payload = %+v, want non-empty What and Why", payload)
-	}
-	wantOptions := []string{"retry", testStatePlanning, "abandon"}
-	if len(payload.Options) != len(wantOptions) {
-		t.Fatalf("payload.Options = %v, want %v", payload.Options, wantOptions)
-	}
-	for i, opt := range wantOptions {
-		if payload.Options[i] != opt {
-			t.Errorf("payload.Options[%d] = %q, want %q", i, payload.Options[i], opt)
-		}
-	}
-
-	apply(t, s, ticket, commit)
-
-	final := getTicket(t, s, ticketID)
-	if final.State != testStatePlanning {
-		t.Errorf("final ticket state = %q, want unchanged planning", final.State)
-	}
-	if final.WaitingOn == nil || *final.WaitingOn != "error" {
-		t.Errorf("final ticket waiting_on = %v, want error", final.WaitingOn)
 	}
 }

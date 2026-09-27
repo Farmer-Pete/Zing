@@ -1,8 +1,10 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 
+	"zing/internal/response"
 	"zing/internal/schemagen"
 )
 
@@ -288,4 +290,92 @@ func TestInsertMessage_PayloadRules(t *testing.T) {
 func dbPath(t *testing.T) string {
 	t.Helper()
 	return t.TempDir() + "/zing.db"
+}
+
+// escalationPayloadJSON builds a schema-shaped escalation payload with the
+// given code and origin, so TestValidate_EscalationCodeAndOrigin can swap
+// just the field under test.
+func escalationPayloadJSON(code, origin string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"code":%q,"what":"w","why":"y","tried":"t","options":["retry"],"origin":%q}`, code, origin))
+}
+
+// TestValidate_EscalationCodeAndOrigin proves every one of the fourteen
+// EscalationCode values (thirteen plus F025's post_run_failed) and the
+// eleven EscalationOrigin values validates against the committed escalation
+// schema, and an unknown value of either fails (design section 6.7, task
+// 4c).
+func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	codes := response.EscalationCode("").Values()
+	if len(codes) != 14 {
+		t.Fatalf("len(EscalationCode values) = %d, want 14", len(codes))
+	}
+	for _, code := range codes {
+		t.Run("code "+code, func(t *testing.T) {
+			t.Parallel()
+			payload := escalationPayloadJSON(code, string(response.EscalationOriginSeal))
+			if err := schemas.validate(testTableMessages, testTypeEscalation, payload); err != nil {
+				t.Errorf("validate(code=%s): %v, want nil", code, err)
+			}
+		})
+	}
+
+	origins := response.EscalationOrigin("").Values()
+	if len(origins) != 11 {
+		t.Fatalf("len(EscalationOrigin values) = %d, want 11", len(origins))
+	}
+	for _, origin := range origins {
+		t.Run("origin "+origin, func(t *testing.T) {
+			t.Parallel()
+			payload := escalationPayloadJSON(string(response.EscalationCodeOther), origin)
+			if err := schemas.validate(testTableMessages, testTypeEscalation, payload); err != nil {
+				t.Errorf("validate(origin=%s): %v, want nil", origin, err)
+			}
+		})
+	}
+
+	t.Run("unknown code fails", func(t *testing.T) {
+		t.Parallel()
+		payload := escalationPayloadJSON("bogus", string(response.EscalationOriginSeal))
+		if err := schemas.validate(testTableMessages, testTypeEscalation, payload); err == nil {
+			t.Error("validate(unknown code) = nil, want error")
+		}
+	})
+
+	t.Run("unknown origin fails", func(t *testing.T) {
+		t.Parallel()
+		payload := escalationPayloadJSON(string(response.EscalationCodeOther), "bogus")
+		if err := schemas.validate(testTableMessages, testTypeEscalation, payload); err == nil {
+			t.Error("validate(unknown origin) = nil, want error")
+		}
+	})
+}
+
+// TestValidate_EscalationSessionIDOptional proves session_id may be absent
+// (design section 6.7): an escalation payload with no session_id key
+// validates, and one with an integer session_id also validates.
+func TestValidate_EscalationSessionIDOptional(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	noSessionID := `{"code":"other","what":"w","why":"y","tried":"t","options":["retry"],"origin":"seal"}`
+	if err := schemas.validate(testTableMessages, testTypeEscalation, []byte(noSessionID)); err != nil {
+		t.Errorf("validate(no session_id): %v, want nil", err)
+	}
+
+	withSessionID := `{"code":"other","what":"w","why":"y","tried":"t","options":["retry"],"origin":"seal","session_id":42}`
+	if err := schemas.validate(testTableMessages, testTypeEscalation, []byte(withSessionID)); err != nil {
+		t.Errorf("validate(session_id=42): %v, want nil", err)
+	}
 }

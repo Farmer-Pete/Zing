@@ -165,6 +165,27 @@ func TestValidateCommit_RejectsAWhollyEmptyCommit(t *testing.T) {
 	}
 }
 
+// TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField proves the
+// emptiness check (design section 4.5) grew to cover SetKind, Artifacts, and
+// ResolveAll: a commit that sets only one of them is not the wholly empty
+// case ValidateCommit rejects.
+func TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	kind := testKindBug
+
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetKind: &kind}); err != nil {
+		t.Errorf("ValidateCommit(SetKind only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Artifacts: []store.Artifact{{Type: testArtifactTypeScenario}}}); err != nil {
+		t.Errorf("ValidateCommit(Artifacts only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, ResolveAll: true}); err != nil {
+		t.Errorf("ValidateCommit(ResolveAll only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 
@@ -193,6 +214,20 @@ func TestValidateCommit_EveryDesignSection7_1EdgeIsLegal(t *testing.T) {
 		if err := job.ValidateCommit(ticket, commit); err != nil {
 			t.Errorf("ValidateCommit(%s -> %s): %v, want nil", e.from, e.to, err)
 		}
+	}
+}
+
+// TestValidateCommit_AcceptsPlanningToDone proves section 5.2's own edge
+// (task 8): a nothing_to_do commit may transition planning straight to done,
+// alongside the older planning -> building edge the review tick's gate
+// approval already uses.
+func TestValidateCommit_AcceptsPlanningToDone(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{State: testStatePlanning}
+	commit := store.HandlerCommit{Next: testStateDone, Reason: "nothing to do"}
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(planning -> done): %v, want nil", err)
 	}
 }
 

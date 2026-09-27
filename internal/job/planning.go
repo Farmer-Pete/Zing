@@ -1,0 +1,2010 @@
+// planning.go is the real "planning" state handler (design section 5, 6.1,
+// 6.2, 6.3, 6.4, 6.5, 6.7): classify a kindless ticket, open the planning
+// interview once a kind is set, resume it once the owner (or a round's own
+// answers) has something new to say, store a valid ready cohort, and review
+// that cohort on its own tick, looping floor findings back into planning
+// under max_loops. It replaces the skeleton's fake, fixture-driven
+// planningHandler (skeleton.go carried it through task 5); the other five
+// skeleton handlers (queued, building, reviewing, judging, shipping) are
+// untouched.
+//
+// Task 6 built entry-decision steps 1(c), 1(d), 2, 3, 4, and 8 of section
+// 5.1. Task 7a built step 5 (live validation errors) and the ready cohort
+// store, behind a TEMPORARY shortcut straight to building. Task 7b removed
+// that shortcut -- a valid ready now stores the cohort and leaves the
+// ticket in planning, not waiting -- and built steps 6 and 7 (the review
+// tick and the floor loop) and entry step 1(e) (an answered planreview
+// round), behind its own TEMPORARY shortcut straight to building on a clean
+// review. This task, 7c, replaces that shortcut with section 6.6's real
+// gate: a clean review posts the gate question instead, and entry step 1(a)
+// interprets the owner's answered gate round -- approve runs the seal
+// pre-check and, on success, seals the cohort and transitions to building;
+// reject (or a reply with no option) resumes or restarts planning with the
+// owner's notes. Step 1(b), an answered escalation round, resolves through
+// enterFromEscalationRound's own section 6.7 choice-by-origin table: choice
+// c (abandon) resolves every open or answered question and transitions
+// straight to abandoned with no runtime call; every other choice retries the
+// run that escalated or falls back to resumeOrFresh, per that origin's own
+// row.
+package job
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
+	zing "zing"
+	"zing/internal/prompt"
+	"zing/internal/response"
+	"zing/internal/runtime"
+	"zing/internal/store"
+)
+
+// Job names, message and escalation text this file owns. msgTypeQuestion,
+// questionStateOpen, waitingFlagQuestions, and authorZing are skeleton.go's
+// own unexported mirrors of the store package's closed vocabulary; this file
+// reuses them rather than redeclaring. msgTypeUpdate and authorSystem are
+// new here: skeleton.go's handlers never wrote a system marker before this
+// task.
+const (
+	jobClassifyName   = string(response.JobClassify)
+	jobPlanningName   = string(response.JobPlanning)
+	jobPlanreviewName = string(response.JobPlanreview)
+
+	msgTypeUpdate = "update"
+	authorSystem  = "system"
+
+	// waitingFlagGate is design section 6.6's own waiting_on value (the
+	// gate is a QuestionKind, and console_writes.go's kindForWaitReason maps
+	// this value straight back to it): distinct from waitingFlagQuestions,
+	// so SendBatch clears it only when the ticket's open gate question (not
+	// some unrelated open question) is answered.
+	waitingFlagGate = string(response.QuestionKindGate)
+
+	// gateOptionApprove and gateOptionReject are the two option keys the
+	// gate question ever offers (design section 6.6, D8): "a" recommended.
+	gateOptionApprove = "a"
+	gateOptionReject  = "b"
+
+	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
+	// are the three option keys escalateTx's own linked question ever offers
+	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
+	// A round carrying replies and no option at all resolves as
+	// escalationChoiceBack (roundChoice's own default).
+	escalationChoiceRetry   = "a"
+	escalationChoiceBack    = "b"
+	escalationChoiceAbandon = "c"
+
+	responseInvalidWhat = "the model's final message failed validation twice in a row"
+
+	loopsExhaustedWhat = "raise machine.toml's planreview max_loops, or abandon"
+	loopsExhaustedWhy  = "the plan review has delivered the maximum number of floor-finding cycles machine.toml allows"
+
+	runtimeExecFailedWhat = "the runtime could not complete this run"
+	runtimeExecFailedWhy  = "the process failed to start, timed out, exceeded the output cap, or exited with no parseable result"
+
+	budgetExhaustedWhat = "raise budget.agent_minutes_per_ticket or abandon"
+	budgetExhaustedWhy  = "the ticket's spent agent time has reached the configured budget"
+
+	resumesExhaustedWhat = "raise machine.toml's planning max_resumes, or abandon"
+	resumesExhaustedWhy  = "the planning session has resumed the maximum number of times machine.toml allows"
+
+	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
+	splitUnsupportedWhy  = "the planning run returned a children outcome"
+
+	// nothingToDoNoCodeClaimsWhat is section 6.8's own nothing_to_do
+	// escalation What text (task 8, tightened by F022): response.Validate's
+	// CheckNothingToDoClaims already rejects any nothing_to_do response
+	// carrying a code claim that is not verdict=false as an InvalidOutputError,
+	// so by the time nothingToDoCommit runs, naming zero code claims is the
+	// only way left for a nothing_to_do outcome to fail to prove there is
+	// nothing to build.
+	nothingToDoNoCodeClaimsWhat = "no code claims to verify"
+	nothingToDoWhy              = "a nothing_to_do outcome must name at least one code claim and verify every code claim false to accept it automatically"
+
+	reasonNothingToDo = "nothing to do"
+
+	// The section 6.6 gate approve pre-check's own fixed What text, one
+	// per failing branch (0, 1, 2, 3, 6; branches 4 and 5 succeed). Why is
+	// shared across every branch: what actually differs, the What text,
+	// already names the specific failure.
+	sealFailedNoCohortWhat      = "no current plan cohort"
+	sealFailedNoRunWhat         = "cohort has no producing run"
+	sealFailedMismatchTwiceWhat = "seal transaction mismatched twice"
+	sealFailedBadCountWhatFmt   = "cohort has %d scenarios, want 2 to 30"
+	sealFailedPartialWhatFmt    = "cohort is partially or inconsistently sealed (%d of %d)"
+	sealFailedWhy               = "the gate's approval pre-check found the plan cohort is not ready to seal"
+	reasonGateApproved          = "gate approved"
+	reasonGateApprovedAlready   = "gate approved (already sealed)"
+
+	// reasonAbandonedFmt is section 6.7 choice "c"'s own Reason text (design
+	// D10): "owner abandoned after <code>", the escalation's own Code.
+	reasonAbandonedFmt = "owner abandoned after %s"
+
+	// gateApproveExplains is F013's own addition to the gate question's
+	// body (design section 6.6, D8): the objective alone does not say what
+	// choosing "Approve" actually does, so this paragraph follows it,
+	// separated by a blank line.
+	gateApproveExplains = "Approve seals this scenario set and moves the ticket to building. This cannot be undone. Findings at or below the quality floor were already fixed automatically; only findings above the floor are shown here."
+
+	// The three artifact types a stored ready cohort writes (design section
+	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
+	// are their validated shapes, and internal/store/examples/artifacts holds
+	// one worked example of each, the same JSON shape json.Marshal(resp.Plan),
+	// json.Marshal(resp.Claims), and json.Marshal(one Scenario) already
+	// produce.
+	artifactTypePlan       = "plan"
+	artifactTypeClaims     = "claims"
+	artifactTypeScenario   = "scenario"
+	artifactTypePlanreview = "planreview"
+
+	// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix are
+	// the "update" marker bodies section 5.3 pairs through LiveMarker: a
+	// failed ready check writes "<pending> run <rid>\n<errors, one per
+	// line>"; entry step 5 resumes with those errors and writes "<delivered>
+	// run <rid>" in the same commit.
+	validationErrorsPendingPrefix   = "validation errors pending"
+	validationErrorsDeliveredPrefix = "validation errors delivered"
+
+	// minReadyScenarios and maxReadyScenarios are design section 6.5's
+	// scenario-cohort bounds (the same jsonschema minItems=2, maxItems=30
+	// response.ReadyResponse.Scenarios already carries for a document that
+	// passed the runtime's own Layer 1 pass; checkScenarioShape restates it
+	// because a ready entry point is this file's only defense once a caller
+	// hands it a Response value that skipped that pass).
+	minReadyScenarios = 2
+	maxReadyScenarios = 30
+)
+
+// planningHandler runs the real planning state (design section 5.1): the
+// entry decision reads the ticket's answered rounds and its latest planning
+// session, and routes to classify (6.1), the planning first turn (6.2), or a
+// resume (6.4). It replaces the skeleton's planningHandler of the same name.
+type planningHandler struct{}
+
+func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: answered rounds: %w", err)
+	}
+	if len(rounds) > 0 {
+		return h.enterFromRound(ctx, t, d, rounds[0])
+	}
+
+	if t.Kind == nil {
+		return runClassify(ctx, t, d, nil, nil)
+	}
+
+	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPlanningName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: latest session: %w", err)
+	}
+	slog.Debug("planning entry decision", "ticket_id", t.ID, "branch", branchName(t.Branch), "session_state", sessionStateName(state))
+
+	switch state {
+	case store.SessionNone, store.SessionIdless:
+		return runPlanningFirst(ctx, t, d, nil, nil)
+	case store.SessionExhausted:
+		// A ready produced on the final permitted resume stores a valid
+		// cohort and leaves this session exhausted (readyCommit carries no
+		// Next): review it before ever escalating the cap, or the owner sees
+		// a misleading resumes_exhausted with a reviewable cohort sitting
+		// unreviewed underneath it. The floor loop (maybeResumeFloorFindings)
+		// stays unreachable here on purpose -- it needs a planning resume,
+		// which an exhausted session cannot spend.
+		if commit, handled, reviewErr := maybeReviewTick(ctx, t, d); handled {
+			return commit, reviewErr
+		}
+		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+		if hasErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planning: has escalation: %w", hasErr)
+		}
+		if has {
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		return capResumesEscalation(t, d, sess.ID), nil
+	case store.SessionOpen:
+		n, reason, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPlanningName, &sess.ID)
+		if invErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planning: consecutive invalid outputs: %w", invErr)
+		}
+		if n == 1 {
+			return runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, n)
+		}
+		if commit, handled, resumeErr := maybeResumeValidationErrors(ctx, t, d, sess); handled {
+			return commit, resumeErr
+		}
+		if commit, handled, resumeErr := maybeReviewTick(ctx, t, d); handled {
+			return commit, resumeErr
+		}
+		if commit, handled, resumeErr := maybeResumeFloorFindings(ctx, t, d, sess); handled {
+			return commit, resumeErr
+		}
+		return store.HandlerCommit{}, ErrNoAction
+	}
+	return store.HandlerCommit{}, ErrNoAction
+}
+
+// enterFromRound is section 5.1 step 1: round is the newest answered round
+// (AnsweredRounds' first element). Its newest question's kind and its
+// parent/job fields pick the branch (a) through (e).
+func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	newest := round.Questions[len(round.Questions)-1]
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(newest.Payload, &qp); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: unmarshal round question %d payload: %w", newest.ID, err)
+	}
+
+	switch {
+	case qp.Kind == response.QuestionKindGate:
+		return h.enterFromGateRound(ctx, t, d, round)
+	case newest.ParentID != nil:
+		// The newest question's own parent id, not round.ParentID: a
+		// run-caused escalation's linked question carries the same run_id
+		// as the escalation itself (escalateTx's own RunID: ec.RunID), so
+		// AnsweredRounds groups it by run, the same as an ordinary
+		// classify/planning/planreview question batch, and round.ParentID
+		// (only ever filled for the no-run grouping, design section 4.5)
+		// stays nil. The per-message parent id escalateTx always sets,
+		// whichever grouping produced this round, is what actually tells an
+		// escalation-linked question apart from an ordinary one.
+		return h.enterFromEscalationRound(ctx, t, d, round, *newest.ParentID)
+	case round.Job == jobPlanningName:
+		return h.enterFromPlanningRound(ctx, t, d, round)
+	case round.Job == jobClassifyName:
+		rendered, err := renderRoundAnswers(round)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		return runClassify(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
+	case round.Job == jobPlanreviewName:
+		rendered, err := renderRoundAnswers(round)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		return runPlanReview(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
+	default:
+		return store.HandlerCommit{}, ErrNoAction
+	}
+}
+
+// enterFromPlanningRound is section 5.1 step 1(c): a round whose questions
+// were posted by a planning run. An open session that still owns the round
+// resumes it (6.4); an exhausted session that still owns it escalates
+// resumes_exhausted without resolving the round; anything else (an older
+// round, or no session at all any more) starts the planning first turn
+// fresh with the round's answers, and resolves it there.
+func (h planningHandler) enterFromPlanningRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPlanningName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: latest session for round: %w", err)
+	}
+
+	sameSession := round.SessionID != nil && *round.SessionID == sess.ID
+	switch {
+	case state == store.SessionOpen && sameSession:
+		answers, answerErr := answerInputsForRound(round)
+		if answerErr != nil {
+			return store.HandlerCommit{}, answerErr
+		}
+		return runPlanningResume(ctx, t, d, sess, questionIDs(round), answers, 0)
+	case state == store.SessionExhausted && sameSession:
+		// This branch never calls runPlanningResume, so it cannot itself
+		// produce a new ready outcome; the only way round could carry a
+		// stranded ready cohort is if an earlier resume already stored one
+		// and left round unresolved, but readyCommit sets ResolveQuestions
+		// unconditionally (even on a failed validation), so any round a
+		// ready resume was given is always resolved in that same commit and
+		// never reaches AnsweredRounds again. A round surviving to here,
+		// answered against an already-exhausted session, is therefore
+		// always a "questions" batch the session posted on its own final
+		// resume, not an orphaned cohort -- exactly what capResumesEscalation
+		// (design D17) preserves rather than resolves, for
+		// resolveCapResumesEscalation to fold back in later. An orphaned
+		// ready cohort is entry step 3's own concern (planningHandler.Run's
+		// SessionExhausted case, maybeReviewTick's guard).
+		return capResumesEscalation(t, d, sess.ID), nil
+	default:
+		rendered, renderErr := renderRoundAnswers(round)
+		if renderErr != nil {
+			return store.HandlerCommit{}, renderErr
+		}
+		return runPlanningFirst(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
+	}
+}
+
+// ---- 6.1 classify ---------------------------------------------------------
+
+// runClassify is plan section 6.1: the D14 pre-check, the classify.md
+// prompt fenced around the ticket plus extra and, on a second consecutive
+// invalid output, the raw invalid reason, and routing runJob's result
+// through the section 6.8 outcome table. extra carries the round's rendered
+// answers when a round is being resolved (entry steps 1(d) and the
+// classify-fresh call from the top-level Kind==nil branch carries none);
+// resolveIDs, when non-empty, is that round's question ids.
+func runClassify(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobClassifyName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: classify: consecutive invalid outputs: %w", err)
+	}
+
+	inputs := append([]prompt.NamedInput{}, extra...)
+	if n == 1 {
+		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
+	}
+
+	jobCfg := d.Machine.Jobs[jobClassifyName]
+	promptText, err := readAsset(jobCfg.Prompt.Single)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: classify: %w", err)
+	}
+	schemas, err := renderSchemas(response.JobClassify, response.OutcomeBug, response.OutcomeFeature)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: classify: %w", err)
+	}
+
+	in := prompt.ForClassify(promptText, t.Title+"\n\n"+t.Body, inputs)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{Job: jobClassifyName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobClassify, Prompt: assembled}
+	return runAndRoute(ctx, d, t, jobClassifyName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginClassify,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return classifySuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs)
+		})
+}
+
+// classifySuccessCommit routes a classify run's parsed response (design
+// section 6.8): bug/feature sets the ticket's kind and stays; the two
+// universal outcomes (question, error) are shared with planning's own
+// success routing (questionOutcomeCommit, errorOutcomeCommit).
+func classifySuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	switch resp := rr.Res.Response.(type) {
+	case *response.ClassifyResponse:
+		outcome := resp.Header().Outcome
+		c := baseCommit(t, d)
+		c.Runs = terminalRuns(rr, string(outcome))
+		c.Session = sessionCommit
+		kind := string(outcome)
+		c.SetKind = &kind
+		c.ResolveQuestions = resolveIDs
+		return c, nil
+	case *response.QuestionResponse:
+		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginClassify), nil
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: classify: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// ---- 6.2 planning first turn, 6.4 resume ----------------------------------
+
+// runPlanningFirst is plan section 6.2: requires t.Kind, picks the prompt
+// file by kind, layers the job's style files, fences the ticket plus extra,
+// and routes runJob's result through planningSuccessCommit. extra and
+// resolveIDs carry a resolved round's rendered answers exactly as
+// runClassify's do.
+func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	if t.Kind == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: ticket %d has no kind", t.ID)
+	}
+	jobCfg := d.Machine.Jobs[jobPlanningName]
+
+	var promptPath string
+	switch *t.Kind {
+	case string(response.OutcomeBug):
+		promptPath = jobCfg.Prompt.Bug
+	case string(response.OutcomeFeature):
+		promptPath = jobCfg.Prompt.Feature
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: ticket %d has unknown kind %q", t.ID, *t.Kind)
+	}
+
+	promptText, err := readAsset(promptPath)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", err)
+	}
+	styles := make([]string, len(jobCfg.Style))
+	for i, p := range jobCfg.Style {
+		s, styleErr := readAsset(p)
+		if styleErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", styleErr)
+		}
+		styles[i] = s
+	}
+
+	schemas, err := planningSchemas()
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", err)
+	}
+
+	in := prompt.ForPlanningFirst(promptText, styles, t.Title+"\n\n"+t.Body, extra)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{Job: jobPlanningName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobPlanning, Prompt: assembled}
+	return runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst)
+		})
+}
+
+// runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
+// requires an open session's external id, assembles the fixed ResumeHeader
+// plus extra (either one prompt.Answer per answered question, or a single
+// prompt.Invalid for the D14 retry step 4 drives), and routes runJob's
+// result through planningSuccessCommit. priorInvalid is the consecutive
+// invalid-output count the caller already read for this session (0 for a
+// round-based resume, which carries no D14 check of its own; the actual
+// count for step 4's automatic retry), so a second consecutive invalid
+// output escalates response_invalid in the same commit that terminalizes it.
+func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, resolveIDs []int64, extra []prompt.NamedInput, priorInvalid int) (store.HandlerCommit, error) {
+	if sess.ExternalID == nil || *sess.ExternalID == "" {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: session %d has no external id", sess.ID)
+	}
+
+	schemas, err := planningSchemas()
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: %w", err)
+	}
+	in := prompt.ForPlanningResume(extra)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	req := runtime.RunRequest{Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: assembled}
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume)
+		})
+}
+
+// planningSuccessCommit routes a planning run's parsed response (design
+// section 6.8), shared by the first turn and the resume: questions and
+// error are the same universal handling classify uses; ready is section
+// 6.5's real cohort check and store; children escalates split_unsupported
+// (design D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate
+// check (task 8).
+func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
+	switch resp := rr.Res.Response.(type) {
+	case *response.QuestionResponse:
+		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ReadyResponse:
+		return readyCommit(ctx, t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ChildrenResponse:
+		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+			string(response.EscalationCodeSplitUnsupported), splitUnsupportedWhat, splitUnsupportedWhy, "", response.EscalationOriginSplit)
+		c.Runs = terminalRuns(rr, string(response.OutcomeChildren))
+		c.Session = sessionCommit
+		c.ResolveQuestions = resolveIDs
+		return c, nil
+	case *response.NothingToDoResponse:
+		return nothingToDoCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, origin), nil
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// errNothingToDoClaimNotFalse is nothingToDoCommit's own defensive sentinel
+// (design section 6.8, F022): response.Validate's CheckNothingToDoClaims
+// already rejects any nothing_to_do response carrying a code claim that is
+// not verdict=false, as an InvalidOutputError, before a handler ever sees
+// it, so this function should never observe one. It checks anyway, because
+// a scripted test runtime (standing in for a compromised or buggy agent
+// process) can hand a Response value straight to the handler with no
+// validation pass in between, and a silent accept there would be worse than
+// a loud one here.
+var errNothingToDoClaimNotFalse = errors.New("nothing_to_do code claim not verified false")
+
+// nothingToDoCommit is design section 6.8's nothing_to_do row (task 8,
+// tightened by F022, option B: the validator owns the rule, not this
+// handler): resp.Claims naming at least one code claim accepts
+// automatically, since CheckNothingToDoClaims already guarantees every code
+// claim it names is false by the time a real runtime's response reaches
+// here; naming no code claim at all cannot prove there is nothing to build,
+// and escalates instead. Acceptance terminalizes the run, transitions the
+// ticket straight to done, and sets TrackerEffect so the dispatcher posts
+// tracker.NothingToDoComment after the commit lands (design D12); the
+// escalation carries RunID and SessionID (a run did cause this) and leaves
+// the ticket waiting on the owner's retry/planning/abandon choice, exactly
+// like every other section 6.7 escalation.
+func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.NothingToDoResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	codeClaims := 0
+	for _, cl := range resp.Claims {
+		if cl.Kind != response.ClaimKindCode {
+			continue
+		}
+		codeClaims++
+		if cl.Verdict != response.ClaimVerdictFalse {
+			return store.HandlerCommit{}, fmt.Errorf("nothing_to_do reached the handler with a non-false code claim: %w", errNothingToDoClaimNotFalse)
+		}
+	}
+
+	if codeClaims > 0 {
+		c := baseCommit(t, d)
+		c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
+		c.Session = sessionCommit
+		c.ResolveQuestions = resolveIDs
+		c.Next = stateDone
+		c.Reason = reasonNothingToDo
+		c.TrackerEffect = &store.TrackerEffect{Ref: t.TrackerRef, Notes: resp.Notes}
+		return c, nil
+	}
+
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodeNothingToDoWithTrueClaims), nothingToDoNoCodeClaimsWhat, nothingToDoWhy, "", response.EscalationOriginNothingToDoClaims)
+	c.Runs = terminalRuns(rr, string(response.OutcomeNothingToDo))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c, nil
+}
+
+// ---- 6.5 ready: the cohort check and store --------------------------------
+
+// readyCommit is plan section 6.5's "On ready": checks, in order, the code
+// claims against the project's real filesystem (through os.OpenRoot, so a
+// symlink resolving outside the checkout cannot satisfy one, design D19),
+// the scenario cohort's own shape, and the plan checker (kind-aware this
+// time; the runtime's own Layer 1 pass, design D14, never learns the
+// ticket's kind, since parseFinalMessage has no ticket to read one from).
+// Failure terminalizes the run (outcome "ready") and writes the "validation
+// errors pending" marker (design section 5.3), leaving the ticket in
+// planning, not waiting, storing nothing. Success stores the plan, claims,
+// and one artifact per scenario, all under the reserved run (the cohort
+// key), terminalizes the run, and leaves the ticket in planning, not
+// waiting: the review tick (entry step 6, maybeReviewTick) picks up the new
+// cohort on the next tick. Task 6's shortcut straight to building is gone
+// (task 7b); the pinned
+// TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning
+// proves it.
+func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.ReadyResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeReady))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+
+	proj, err := d.Store.ProjectForTicket(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: project for ticket %d: %w", t.ID, err)
+	}
+	root, err := os.OpenRoot(proj.LocalPath)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: open project root %s: %w", proj.LocalPath, err)
+	}
+	defer root.Close()
+
+	errs, err := checkReady(t, resp, root.FS())
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	if len(errs) > 0 {
+		c.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("%s run %d\n%s", validationErrorsPendingPrefix, rr.Reserved.RunID, formatReadyErrors(errs)),
+		}}
+		return c, nil
+	}
+
+	artifacts, err := readyArtifacts(resp, rr.Reserved.RunID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	c.Artifacts = artifacts
+
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: current cohort: %w", err)
+	}
+	planVersion := 1
+	if ok {
+		planVersion = cohort.PlanVersion + 1
+	}
+	slog.Info("artifacts stored", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", planVersion, "scenario_count", len(resp.Scenarios))
+	return c, nil
+}
+
+// checkReady runs section 6.5's three "on ready" checks, in order, and
+// returns every failure by element path the way `zing validate` reports
+// them (response.PathError's own "path: msg" shape): the code claims, the
+// scenario cohort's shape, then the plan checker. The only real error this
+// returns is LoadChecklists failing to read its own embedded, trust-root
+// checklists.toml, which would mean that file itself is broken.
+func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*response.PathError, error) {
+	var errs []*response.PathError
+	errs = append(errs, response.CheckCodeClaims(resp.Claims, fsys)...)
+	errs = append(errs, checkScenarioShape(resp.Scenarios)...)
+
+	lists, err := response.LoadChecklists()
+	if err != nil {
+		return nil, fmt.Errorf("load checklists: %w", err)
+	}
+	bug := t.Kind != nil && *t.Kind == string(response.OutcomeBug)
+	errs = append(errs, response.CheckPlan(resp.Plan, resp.Scenarios, bug, lists, planPresenceSet(resp.Scenarios))...)
+	return errs, nil
+}
+
+// checkScenarioShape is this file's own re-check of a ready response's
+// scenario count (2 to 30) and each scenario's non-empty then (design
+// section 6.5): response.ReadyResponse.Scenarios and Scenario.Then already
+// carry jsonschema minItems=2, maxItems=30, and minLength=1, so a document
+// that passed the runtime's own Layer 1 pass (design D14) already satisfies
+// this; it defends the ready entry point itself against a Response value
+// that reached here some other way (a test's scriptedRuntime, standing in
+// for a compromised or buggy agent process, is the only caller that can).
+func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
+	var errs []*response.PathError
+	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/scenario",
+			Msg:  fmt.Sprintf("need %d to %d scenarios, have %d", minReadyScenarios, maxReadyScenarios, n),
+		})
+	}
+	for i, sc := range scenarios {
+		if strings.TrimSpace(sc.Then) == "" {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/then",
+				Msg:  "then must not be empty",
+			})
+		}
+	}
+	return errs
+}
+
+// indexedScenario formats a scenario's 0-based index the way response's own
+// element-path grammar does (design section 6.4, internal/response/epath.go),
+// e.g. indexedScenario(0) -> "scenario[0]".
+func indexedScenario(i int) string {
+	return fmt.Sprintf("scenario[%d]", i)
+}
+
+// planPresenceSet builds the presence flags response.CheckPlan reads
+// (design section 6.6): plan/overview/problem, the first test's kind
+// attribute, and each scenario's id are all schema-required fields (no
+// "omitempty" on their xml tag), so a Response value that reached this
+// point through a real Layer 1 pass already proved every one of them
+// present; a hand-built Response used only in a test may not have, which is
+// exactly what checkReady's own checks (CheckCodeClaims, checkScenarioShape)
+// exist to catch instead of a presence-map lookup.
+func planPresenceSet(scenarios []response.Scenario) map[string]bool {
+	present := map[string]bool{
+		"plan/overview/problem":            true,
+		"plan/delivery/tests/test[0]/kind": true,
+	}
+	for i := range scenarios {
+		present["scenarios/"+indexedScenario(i)+"/id"] = true
+	}
+	return present
+}
+
+// formatReadyErrors renders errs one per element path per line ("path:
+// msg", response.PathError's own Error() shape), the "validation errors
+// pending" marker body a resumed prompt.Validation later carries back into
+// the model (design section 5.3, 6.3).
+func formatReadyErrors(errs []*response.PathError) string {
+	lines := make([]string, len(errs))
+	for i, e := range errs {
+		lines[i] = e.Error()
+	}
+	return strings.Join(lines, "\n")
+}
+
+// readyArtifacts marshals a valid ready response's plan, claims, and one
+// artifact per scenario (design section 6.5), each under runID (the cohort
+// key), the same JSON shape internal/store/examples/artifacts and
+// console.SeedDemo already use for these three artifact types. Version is
+// left at its zero value on every one, so CommitHandlerResult assigns each
+// (ticket, type) pair the next version past its current maximum.
+func readyArtifacts(resp *response.ReadyResponse, runID int64) ([]store.Artifact, error) {
+	normalizePlanArrays(&resp.Plan)
+	planPayload, err := json.Marshal(resp.Plan)
+	if err != nil {
+		return nil, fmt.Errorf("marshal plan: %w", err)
+	}
+	claimsPayload, err := json.Marshal(resp.Claims)
+	if err != nil {
+		return nil, fmt.Errorf("marshal claims: %w", err)
+	}
+
+	artifacts := make([]store.Artifact, 0, 2+len(resp.Scenarios))
+	artifacts = append(artifacts,
+		store.Artifact{Type: artifactTypePlan, RunID: &runID, Payload: planPayload},
+		store.Artifact{Type: artifactTypeClaims, RunID: &runID, Payload: claimsPayload},
+	)
+	for _, sc := range resp.Scenarios {
+		payload, marshalErr := json.Marshal(sc)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal scenario %s: %w", sc.ID, marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{Type: artifactTypeScenario, RunID: &runID, Payload: payload})
+	}
+	return artifacts, nil
+}
+
+// normalizePlanArrays replaces a decoded plan's nil slices with empty ones,
+// for exactly the fields the artifacts/plan.json schema declares as a bare
+// JSON array (no jsonschema minItems, so Layer 1 never guarantees one
+// present, and no json ",omitempty" tag, so json.Marshal would otherwise
+// emit null): Design.Changes and .Types, each TypeDef's own Transitions,
+// Design.Migrations.Items, and Delivery.Deletions.Items. The XML "none"
+// union (Migrations.None, Deletions.None) has no JSON counterpart -- the
+// stored payload is always a plain, possibly empty, array either way.
+func normalizePlanArrays(p *response.Plan) {
+	if p.Design.Changes == nil {
+		p.Design.Changes = []response.Change{}
+	}
+	if p.Design.Types == nil {
+		p.Design.Types = []response.TypeDef{}
+	}
+	for i := range p.Design.Types {
+		if p.Design.Types[i].Transitions == nil {
+			p.Design.Types[i].Transitions = []response.Transition{}
+		}
+	}
+	if p.Design.Migrations.Items == nil {
+		p.Design.Migrations.Items = []response.Migration{}
+	}
+	if p.Delivery.Deletions.Items == nil {
+		p.Delivery.Deletions.Items = []response.Fence{}
+	}
+}
+
+// maybeResumeValidationErrors is section 5.1 step 5: a live "validation
+// errors pending" marker (no later "validation errors delivered" marker for
+// the same run) resumes the open session with those errors fenced behind
+// prompt.Validation, and writes the "validation errors delivered run <rid>"
+// marker in the same commit, carrying forward the pending marker's own run
+// id rather than the resume's. handled is false when there is no live
+// marker, so the caller falls through to the next entry-decision step. When
+// the resume itself returns with no commit at all (runtime.ErrCanceled, or
+// a pre-reserve failure returned unchanged), this leaves that empty commit
+// and error untouched rather than fabricate a delivered marker for a call
+// that stored nothing.
+func maybeResumeValidationErrors(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (commit store.HandlerCommit, handled bool, err error) {
+	m, live, err := d.Store.LiveMarker(ctx, t.ID, validationErrorsPendingPrefix, validationErrorsDeliveredPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: live marker: %w", err)
+	}
+	if !live {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	firstLine, errsText, _ := strings.Cut(m.Body, "\n")
+	rid := strings.TrimPrefix(firstLine, validationErrorsPendingPrefix+" run ")
+
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Validation(errsText)}, 0)
+	if err != nil {
+		return commit, true, err
+	}
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: validationErrorsDeliveredPrefix + " run " + rid,
+	})
+	return commit, true, nil
+}
+
+// ---- 6.5 plan review tick and the floor loop ------------------------------
+
+// planreviewArtifactPayload is the stored shape of a "planreview" artifact
+// (internal/store/schemas/artifacts/planreview.json): an object carrying
+// only the surviving findings, never the FindingsResponse's own Head (job,
+// outcome), which that schema's additionalProperties:false would reject.
+type planreviewArtifactPayload struct {
+	Findings []response.Finding `json:"findings"`
+}
+
+// planreviewPendingMarker and planreviewDeliveredMarker are section 5.3's
+// version-scoped marker pair: no run id, unlike the validation-errors
+// markers, because a review's own version already identifies which cohort a
+// pending or delivered cycle belongs to.
+func planreviewPendingMarker(version int) string {
+	return fmt.Sprintf("planreview v%d pending", version)
+}
+
+func planreviewDeliveredMarker(version int) string {
+	return fmt.Sprintf("planreview v%d delivered", version)
+}
+
+// maybeReviewTick is section 5.1 step 6: a stored cohort with no planreview
+// artifact yet at its exact version starts the review tick fresh. handled is
+// false when there is no cohort yet, or its planreview artifact already
+// exists, so the caller falls through to step 7.
+func maybeReviewTick(ctx context.Context, t store.Ticket, d Deps) (commit store.HandlerCommit, handled bool, err error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, false, nil
+	}
+	_, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if exists {
+		return store.HandlerCommit{}, false, nil
+	}
+	commit, err = runPlanReview(ctx, t, d, nil, nil)
+	return commit, true, err
+}
+
+// maybeResumeFloorFindings is section 5.1 step 7: a planreview artifact at
+// the current cohort's version carrying at-or-below-floor findings, with a
+// live "planreview vN pending" marker (no later "delivered" marker for that
+// same version), resumes planning with those findings fenced (design
+// section 6.3, 6.4) under machine.toml's max_loops, counting only delivered
+// cycles (CountDeliveredReviews); at the cap it escalates loops_exhausted
+// instead. handled is false when there is no cohort, no planreview artifact
+// at its version, or no live pending marker for it, so the caller falls
+// through to ErrNoAction.
+func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (commit store.HandlerCommit, handled bool, err error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, false, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	pending, delivered := planreviewPendingMarker(cohort.PlanVersion), planreviewDeliveredMarker(cohort.PlanVersion)
+	_, live, err := d.Store.LiveMarker(ctx, t.ID, pending, delivered)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: live marker: %w", err)
+	}
+	if !live {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
+	for _, f := range payload.Findings {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow = append(atOrBelow, f)
+		}
+	}
+
+	n, err := d.Store.CountDeliveredReviews(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
+	}
+	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
+		c := escalationCommit(t, d, nil, nil,
+			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		return c, true, nil
+	}
+
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0)
+	if err != nil {
+		return commit, true, err
+	}
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
+	})
+	return commit, true, nil
+}
+
+// runPlanReview is plan section 6.5's review tick (entry steps 6 and 1(e)):
+// requires a stored cohort, the D14 pre-check (planreview, nil session --
+// every review tick opens a fresh session, so the chain walks by job alone,
+// unlike planning's own session-scoped check), the planreview.md prompt with
+// each configured lens's "## In a plan" section appended, the ticket, the
+// cohort's scenarios, and the stored plan re-rendered to XML, all fenced
+// (D15), plus extra (an answered round's rendered answers, or the D14
+// invalid-retry input) when present. extra and resolveIDs carry a resolved
+// round's inputs exactly as runClassify's do.
+func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: current cohort: %w", err)
+	}
+	if !ok || cohort.RunID == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: ticket %d has no plan cohort to review", t.ID)
+	}
+
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPlanreviewName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: consecutive invalid outputs: %w", err)
+	}
+	inputs := append([]prompt.NamedInput{}, extra...)
+	if n == 1 {
+		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
+	}
+
+	jobCfg := d.Machine.Jobs[jobPlanreviewName]
+	promptText, err := readAsset(jobCfg.Prompt.Single)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+	lensSections, err := lensSectionsFor(jobCfg.Lenses)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	planArtifact, ok, err := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: get plan artifact: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: ticket %d has a cohort but no plan artifact", t.ID)
+	}
+	var plan response.Plan
+	if unmarshalErr := json.Unmarshal(planArtifact.Payload, &plan); unmarshalErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: unmarshal plan artifact: %w", unmarshalErr)
+	}
+	planXML, err := planXMLFor(plan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	scenarioArtifacts, err := d.Store.ScenariosForRun(ctx, t.ID, *cohort.RunID, false)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: scenarios for run: %w", err)
+	}
+	scenariosRendered, err := renderScenariosForReview(scenarioArtifacts)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	schemas, err := renderSchemas(response.JobPlanreview, response.OutcomeOk)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	in := prompt.ForPlanReview(promptText, lensSections, t.Title+"\n\n"+t.Body, scenariosRendered, planXML, inputs)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{Job: jobPlanreviewName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
+	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
+		})
+}
+
+// planReviewSuccessCommit routes a planreview run's parsed response (design
+// section 6.8): the universal question and error outcomes are shared with
+// classify and planning's own success routing; ok is the review's own
+// outcome, planReviewOkCommit's job. plan is the cohort's own stored plan
+// (already unmarshaled by the caller, runPlanReview, to render planXML), so
+// a clean review's gate post (design section 6.6) can read its objective
+// without a second store round trip.
+func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	switch resp := rr.Res.Response.(type) {
+	case *response.QuestionResponse:
+		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
+	case *response.FindingsResponse:
+		return planReviewOkCommit(t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// planReviewOkCommit is design section 6.5's "on ok": drop every finding
+// whose Location does not resolve as an element path in planXML
+// (response.ResolvesInPlan), store the rest as a "planreview" artifact at
+// the cohort's exact version, and split the survivors at the configured
+// floor (severity.Rank() <= d.Floor.Rank() is at-or-below). No finding
+// at-or-below the floor posts the section 6.6 gate in this same commit
+// (design section 6.6's "Post" step, task 7c); otherwise this writes the
+// "planreview vN pending" marker and leaves the ticket in planning, not
+// waiting, for entry step 7 to pick up.
+func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	kept := make([]response.Finding, 0, len(resp.Findings))
+	dropped := 0
+	for _, f := range resp.Findings {
+		if !response.ResolvesInPlan([]byte(planXML), f.Location) {
+			dropped++
+			continue
+		}
+		kept = append(kept, f)
+	}
+
+	var atOrBelow, above int
+	for _, f := range kept {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow++
+		} else {
+			above++
+		}
+	}
+	slog.Info("floor split", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "floor", string(d.Floor),
+		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped)
+
+	payload, err := json.Marshal(planreviewArtifactPayload{Findings: kept})
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: marshal findings: %w", err)
+	}
+
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	c.Artifacts = []store.Artifact{{
+		Type: artifactTypePlanreview, Version: cohort.PlanVersion, RunID: &rr.Reserved.RunID, Payload: payload,
+	}}
+
+	if atOrBelow == 0 {
+		msg, msgErr := gateQuestionMessage(t.ID, plan.Overview.Objective)
+		if msgErr != nil {
+			return store.HandlerCommit{}, msgErr
+		}
+		c.Messages = []store.Message{msg}
+		c.AttachRunToMsgs = true
+		waiting := waitingFlagGate
+		c.Waiting = &waiting
+		slog.Info("gate posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", cohort.PlanVersion)
+		return c, nil
+	}
+
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: planreviewPendingMarker(cohort.PlanVersion),
+	}}
+	return c, nil
+}
+
+// lensSectionsFor reads each of lenses' prompt files (machine.Jobs["planreview"].Lenses
+// order, the same embed.FS path machine.go's own validatePaths checks:
+// "prompts/lenses/<lens>.md") and returns each file's own "## In a plan"
+// section (prompt.PlanLensSection), the piece prompt.ForPlanReview appends
+// to the planreview prompt (design section 6.5).
+func lensSectionsFor(lenses []string) ([]string, error) {
+	out := make([]string, len(lenses))
+	for i, lens := range lenses {
+		text, err := readAsset("prompts/lenses/" + lens + ".md")
+		if err != nil {
+			return nil, err
+		}
+		section, sectionErr := prompt.PlanLensSection(text)
+		if sectionErr != nil {
+			return nil, fmt.Errorf("job: planreview: lens %s: %w", lens, sectionErr)
+		}
+		out[i] = section
+	}
+	return out, nil
+}
+
+// planXMLFor renders plan back to its XML form for the plan-review prompt
+// (design section 6.5): internal/response has no dedicated renderer for
+// response.Plan (it only ever decodes one, in Parse), so this uses
+// encoding/xml's own marshaller against Plan's wire tags directly, with a
+// "plan" start element standing in for the XMLName a decoded document
+// carries.
+func planXMLFor(plan response.Plan) (string, error) {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	if err := enc.EncodeElement(plan, xml.StartElement{Name: xml.Name{Local: "plan"}}); err != nil {
+		return "", fmt.Errorf("encode plan xml: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// renderScenariosForReview renders artifacts (ScenariosForRun's own
+// insertion order) one per line as "<id> [<kind>] given: ... when: ...
+// then: ..." (design section 6.5), the cohort text prompt.ForPlanReview
+// fences into the review prompt.
+func renderScenariosForReview(artifacts []store.Artifact) (string, error) {
+	lines := make([]string, len(artifacts))
+	for i, a := range artifacts {
+		var sc response.Scenario
+		if err := json.Unmarshal(a.Payload, &sc); err != nil {
+			return "", fmt.Errorf("unmarshal scenario artifact %d: %w", i, err)
+		}
+		lines[i] = fmt.Sprintf("%s [%s] given: %s when: %s then: %s", sc.ID, sc.Kind, sc.Given, sc.When, sc.Then)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// renderFindings renders findings one per line -- lens, severity, location,
+// text, then fix -- the shape entry step 7 fences behind prompt.Findings
+// when it resumes planning with the at-or-below-floor survivors (design
+// section 6.3, 6.4).
+func renderFindings(findings []response.Finding) string {
+	lines := make([]string, len(findings))
+	for i, f := range findings {
+		lines[i] = fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ---- 6.6 the gate: post, approve/seal, reject -----------------------------
+
+// gateQuestionMessage builds the section 6.6 "Post" message: kind gate,
+// recommended "a", the fixed Approve/Reject chip pair, Key left empty for
+// CommitHandlerResult's own fillQuestionKeyTx to allocate (design section
+// 4.5, 6.7: "gate and planning questions use the same Q<n> allocation"), and
+// body set to objective (the stored plan's overview objective text, the one
+// sentence design D8 says the gate renders for the owner) then, blank-line
+// separated, gateApproveExplains (F013): splitQuestionBody (console/views.go)
+// cuts the body on its first newline, so objective still renders as the
+// question's title and gateApproveExplains as its markdown body, exactly as
+// every other question's Title/Body pair does.
+func gateQuestionMessage(ticketID int64, objective string) (store.Message, error) {
+	payload, err := json.Marshal(response.QuestionPayload{
+		Kind:        response.QuestionKindGate,
+		State:       response.QuestionStateOpen,
+		Recommended: gateOptionApprove,
+		Options: []response.Option{
+			{Key: gateOptionApprove, Text: "Approve"},
+			{Key: gateOptionReject, Text: "Reject"},
+		},
+	})
+	if err != nil {
+		return store.Message{}, fmt.Errorf("job: gate: marshal question payload: %w", err)
+	}
+	return store.Message{
+		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: objective + "\n\n" + gateApproveExplains, Payload: payload,
+	}, nil
+}
+
+// enterFromGateRound is section 5.1 step 1(a): round is the answered gate
+// round enterFromRound just identified by its newest question's kind.
+// Option a (approve) runs the seal pre-check (gateApprove); option b, or a
+// round carrying replies and no option at all, is a reject -- "resume or
+// fresh" with the replies' bodies as notes (design section 6.6, 6.7).
+func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	resolveIDs := questionIDs(round)
+	if gateRoundApproved(round) {
+		return gateApprove(ctx, t, d, resolveIDs)
+	}
+	notes := joinReplies(round.Replies)
+	slog.Info("gate rejected", "ticket_id", t.ID)
+	return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+}
+
+// newestChosenOption returns the option key of the newest sent answer among
+// answers that named one, "" when none did (design section 6.6, 6.7's own
+// "final choice wins" rule): a round answered more than once (a corrected
+// chip click before the batch resolves) reads its final choice, not its
+// first. Shared by gateRoundApproved (the gate's own a/b choice) and
+// roundChoice (an escalation round's a/b/c choice).
+func newestChosenOption(answers []store.MessageRow) string {
+	option := ""
+	for i := range answers {
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(answers[i].Payload, &ap); err == nil && ap.Option != nil {
+			option = *ap.Option
+		}
+	}
+	return option
+}
+
+// gateRoundApproved reports whether round's sent answer chose option "a"
+// (design section 6.6).
+func gateRoundApproved(round store.Round) bool {
+	return newestChosenOption(round.Answers) == gateOptionApprove
+}
+
+// joinReplies renders replies' bodies newline-joined (design section 6.6,
+// 6.7's "the replies' bodies joined by \n"), "" when there are none: a chip
+// reject with no free-text reply carries empty notes rather than failing.
+func joinReplies(replies []store.MessageRow) string {
+	bodies := make([]string, len(replies))
+	for i := range replies {
+		bodies[i] = replies[i].Body
+	}
+	return strings.Join(bodies, "\n")
+}
+
+// resumeOrFresh is design section 6.7's "resume or fresh", shared by a gate
+// rejection (section 6.6) and, in task 13, escalation resolution: an open
+// planning session resumes (6.4) with extra; a kindless ticket has never
+// classified, so it classifies fresh (6.1) with extra instead; anything else
+// starts the planning first turn fresh (6.2) with extra. Every branch
+// resolves resolveIDs in the same commit.
+func resumeOrFresh(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPlanningName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: resume or fresh: latest session: %w", err)
+	}
+	if state == store.SessionOpen {
+		return runPlanningResume(ctx, t, d, sess, resolveIDs, extra, 0)
+	}
+	if t.Kind == nil {
+		return runClassify(ctx, t, d, extra, resolveIDs)
+	}
+	return runPlanningFirst(ctx, t, d, extra, resolveIDs)
+}
+
+// ---- 6.7 escalation resolution (task 13) ----------------------------------
+
+// roundChoice returns round's choice among escalationChoiceRetry,
+// escalationChoiceBack, and escalationChoiceAbandon (design section 6.7's
+// Resolve): the newest sent answer's chosen option, or escalationChoiceBack
+// when the round carries replies and no option at all ("a round with
+// replies and no option is choice b").
+func roundChoice(round store.Round) string {
+	if opt := newestChosenOption(round.Answers); opt != "" {
+		return opt
+	}
+	return escalationChoiceBack
+}
+
+// int64OrZero renders a nullable id for a log line as 0 when absent, never a
+// bare pointer (design section 9's "structured, never a raw output" rule):
+// escalation resolution's own session_id and run_id fields are both
+// sometimes nil (design section 6.7's RunID/SessionID table).
+func int64OrZero(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// enterFromEscalationRound is section 5.1 step 1(b) and section 6.7's own
+// Write/Resolve: escID is the newest question's own parent id, the
+// escalation message it answers. choice is the round's own a/b/c choice
+// (roundChoice); notes is the sent replies' bodies joined with "\n"
+// (joinReplies, reused from the gate's own reject path); errorText is the
+// escalation's what, why, and tried, newline-joined, the same "error" input
+// shape section 6.3's resume inputs describe. Choice c (abandon) resolves
+// every open or answered question and transitions straight to abandoned,
+// with no runtime call, regardless of origin; every other combination
+// routes through section 6.7's choice-by-origin table below.
+func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
+	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: %w", escID, err)
+	}
+	resolveIDs := questionIDs(round)
+	choice := roundChoice(round)
+	notes := joinReplies(round.Replies)
+	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
+	origin := response.EscalationOrigin(payload.Origin)
+	notesAndError := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+
+	var commit store.HandlerCommit
+	preserved := 0
+
+	switch {
+	case choice == escalationChoiceAbandon:
+		commit = abandonCommit(t, d, payload.Code)
+
+	case origin == response.EscalationOriginClassify:
+		// Both a and b classify fresh (design section 6.7: "kind is still
+		// unset", so there is no session to resume or restart instead).
+		commit, err = runClassify(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginPlanningFirst, origin == response.EscalationOriginPlanningResume,
+		origin == response.EscalationOriginSplit, origin == response.EscalationOriginNothingToDoClaims:
+		// Both a and b resume or fresh, identically (design section 6.7:
+		// "a retry | split, nothing_to_do_claims | same as b").
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginPlanreview && choice == escalationChoiceRetry:
+		commit, err = runPlanReview(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+	case origin == response.EscalationOriginPlanreview:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case (origin == response.EscalationOriginGateApprove || origin == response.EscalationOriginSeal) && choice == escalationChoiceRetry:
+		commit, err = gateApprove(ctx, t, d, resolveIDs)
+	case origin == response.EscalationOriginGateApprove, origin == response.EscalationOriginSeal:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginCapResumes:
+		commit, preserved, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs, int64OrZero(payload.SessionID))
+
+	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
+		findings, findErr := outstandingFloorFindings(ctx, t, d)
+		if findErr != nil {
+			return store.HandlerCommit{}, findErr
+		}
+		commit, err = resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, resolveIDs)
+	case origin == response.EscalationOriginCapLoops:
+		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
+
+	case origin == response.EscalationOriginCapBudget:
+		// Both a and b re-escalate wall_clock (design section 6.7).
+		commit = recapBudgetEscalation(t, d, resolveIDs)
+
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: unrecognized origin %q", escID, payload.Origin)
+	}
+	if err != nil {
+		return commit, err
+	}
+
+	slog.Info("escalation resolved", "ticket_id", t.ID, "session_id", int64OrZero(payload.SessionID),
+		"run_id", int64OrZero(escMsg.RunID), "code", payload.Code, "origin", payload.Origin,
+		"choice", choice, "preserved_rounds", preserved)
+	return commit, nil
+}
+
+// abandonCommit is section 6.7 choice "c" (design D10): every open or
+// answered question on the ticket resolves (ResolveAll), the ticket
+// transitions straight to abandoned, and no runtime call is made.
+func abandonCommit(t store.Ticket, d Deps, code string) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.ResolveAll = true
+	c.Next = stateAbandoned
+	c.Reason = fmt.Sprintf(reasonAbandonedFmt, code)
+	return c
+}
+
+// recapBudgetEscalation is section 6.7's cap_budget retry/back row (design
+// section 6.7): re-escalate wall_clock in this same commit, with the
+// unchanged What/Why text budgetEscalationCommit itself uses, resolving the
+// round that led here.
+func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// outstandingFloorFindings reads the current cohort's planreview artifact
+// and returns its at-or-below-floor survivors (design section 6.7's
+// cap_loops retry row): the same set maybeResumeFloorFindings itself
+// resumes with (section 5.1 step 7), independent of whether that step's own
+// "live pending marker" check would still find one live -- choosing retry on
+// the cap_loops escalation is itself the trigger. nil, nil when there is no
+// cohort or no planreview artifact at its version yet (unreachable in
+// practice: a cap_loops escalation cannot exist without one).
+func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("job: planning: cap_loops retry: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
+	for _, f := range payload.Findings {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow = append(atOrBelow, f)
+		}
+	}
+	return atOrBelow, nil
+}
+
+// resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row
+// (design D17): the exhausted session guarantees resumeOrFresh's own
+// SessionOpen branch is unreachable, so this calls the planning first turn
+// (section 6.2) directly, carrying notes, error, and, when the exhausted
+// session preserved any answered-unresolved planning round of its own
+// (entry step 1(c), 3: "preserving any answered round"), every one of them
+// combined into a single prompt.Answers input, in AnsweredRounds' own newest-
+// first order. preserved is how many such older rounds this call folds in
+// and resolves alongside the escalation round itself (resolveIDs), the
+// "escalation resolved" log line's own preserved_rounds field.
+func resolveCapResumesEscalation(ctx context.Context, t store.Ticket, d Deps, notes, errorText string, resolveIDs []int64, sessionID int64) (store.HandlerCommit, int, error) {
+	allRounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: planning: cap_resumes retry: answered rounds: %w", err)
+	}
+
+	var parts []string
+	preserved := append([]int64{}, resolveIDs...)
+	for _, r := range allRounds {
+		if r.Job != jobPlanningName || r.SessionID == nil || *r.SessionID != sessionID {
+			continue
+		}
+		rendered, renderErr := renderRoundAnswers(r)
+		if renderErr != nil {
+			return store.HandlerCommit{}, 0, renderErr
+		}
+		parts = append(parts, rendered)
+		preserved = append(preserved, questionIDs(r)...)
+	}
+
+	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+	if len(parts) > 0 {
+		extra = append(extra, prompt.Answers(strings.Join(parts, "\n\n")))
+	}
+	commit, err := runPlanningFirst(ctx, t, d, extra, preserved)
+	return commit, len(parts), err
+}
+
+// gateApprove is section 6.6's approve pre-check, in exact branch order
+// (design D16): branch 0 (two seal-mismatch markers for the cohort) is
+// evaluated once the cohort's run id is known, but wins over branches 3-6;
+// every failing branch (0, 1, 2, 3, 6) escalates seal_failed with RunID nil,
+// Origin seal, and resolves resolveIDs; branch 4 seals the cohort and moves
+// to building; branch 5 (already consistently sealed) moves to building
+// with no new seal. GateApproveSealRaceHook, nil in production, is a
+// test-only seam (design D16's own TOCTOU commentary): called with the
+// cohort's run id right after this function's own read of CohortSealState,
+// so a test can seal one row through a second store handle in the window
+// between that read and the commit this function builds from it.
+func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: current cohort: %w", err)
+	}
+	if !ok {
+		return sealFailedEscalation(t, d, sealFailedNoCohortWhat, resolveIDs), nil
+	}
+	if cohort.RunID == nil {
+		return sealFailedEscalation(t, d, sealFailedNoRunWhat, resolveIDs), nil
+	}
+	runID := *cohort.RunID
+
+	mismatches, err := d.Store.CountSealMismatches(ctx, t.ID, runID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: count seal mismatches: %w", err)
+	}
+	if mismatches >= 2 {
+		return sealFailedEscalation(t, d, sealFailedMismatchTwiceWhat, resolveIDs), nil
+	}
+
+	total, sealed, commonAt, err := d.Store.CohortSealState(ctx, t.ID, runID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: cohort seal state: %w", err)
+	}
+	if GateApproveSealRaceHook != nil {
+		GateApproveSealRaceHook(runID)
+	}
+	if total < minReadyScenarios || total > maxReadyScenarios {
+		what := fmt.Sprintf(sealFailedBadCountWhatFmt, total)
+		return sealFailedEscalation(t, d, what, resolveIDs), nil
+	}
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	switch {
+	case sealed == 0:
+		c.Seal = &store.SealRequest{RunID: runID, PlanVersion: cohort.PlanVersion, ExpectedCount: total, At: time.Now().UTC()}
+		c.Next = stateBuilding
+		c.Reason = reasonGateApproved
+		slog.Info("gate approved", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
+		slog.Info("scenarios sealed", "ticket_id", t.ID, "cohort_run_id", runID, "plan_version", cohort.PlanVersion,
+			"count", total, "sealed_at", c.Seal.At)
+		return c, nil
+	case sealed == total && commonAt != nil:
+		c.Next = stateBuilding
+		c.Reason = reasonGateApprovedAlready
+		slog.Info("gate already sealed", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
+		return c, nil
+	default:
+		what := fmt.Sprintf(sealFailedPartialWhatFmt, sealed, total)
+		return sealFailedEscalation(t, d, what, resolveIDs), nil
+	}
+}
+
+// GateApproveSealRaceHook is a test-only seam (design D16, section 6.6
+// branch 0). Production code never sets it; see gateApprove's own comment
+// for exactly when it runs.
+var GateApproveSealRaceHook func(runID int64)
+
+// sealFailedEscalation builds every failing gate-approve branch's commit
+// (design section 6.6): RunID nil (no run caused this, the pre-check did),
+// Origin seal, code seal_failed, and resolveIDs resolved in the same commit.
+func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeSealFailed), what, sealFailedWhy, "", response.EscalationOriginSeal)
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// ---- shared failure and escalation commit builders ------------------------
+
+// runAndRoute is the one seam every runJob call passes through on its way to
+// a commit (design F025): runClassify, runPlanningFirst, runPlanningResume,
+// and runPlanReview differ only in the request they build and the success
+// builder they route a clean run through, so this owns their identical
+// tail. sessionRecord builds the Session field from the runResult runJob
+// hands back (freshSessionRecord for a fresh call, a closure over
+// resumeSessionRecord for a resume); success is the caller's own outcome
+// router (classifySuccessCommit, planningSuccessCommit, or
+// planReviewSuccessCommit), already bound to whatever else it needs.
+//
+// runJob's Reserve is the one write that can leave a run with a NULL
+// outcome if nothing downstream ever terminalizes it (design D13): a
+// runtime failure is already terminalized by routeFailure's own exec- and
+// invalid-output branches, but a success builder's own post-run failure --
+// a store read, a filesystem open, a json.Marshal -- used to escape as a
+// plain error the dispatcher's error path could only release, never
+// terminalize, orphaning the run forever. This seam catches every error
+// that surfaces once Reserve has already run -- routeFailure's own
+// "unrecognized" fallback and success's own error alike -- and funnels it
+// through postRunFailure whenever a run was actually reserved
+// (rr.Reserved.RunID != 0). When nothing was reserved (routeFailure already
+// returns every pre-reserve case unchanged, and an unrecognized pre-reserve
+// error does too), this returns the plain error unchanged, so the
+// dispatcher's own releaseClaim path still runs and clears the claim.
+func runAndRoute(
+	ctx context.Context, d Deps, t store.Ticket, jobName string,
+	su store.SessionUpsert, req runtime.RunRequest, priorInvalid int,
+	sessionRecord func(runResult) *store.SessionUpsert,
+	resolveIDs []int64, origin response.EscalationOrigin,
+	success func(rr runResult) (store.HandlerCommit, error),
+) (store.HandlerCommit, error) {
+	rr, runErr := runJob(ctx, d, t, jobName, su, req)
+	sessionCommit := sessionRecord(rr)
+
+	if runErr != nil {
+		if c, ok, failErr := routeFailure(t, d, rr, runErr, priorInvalid, sessionCommit, resolveIDs, origin); ok {
+			return c, failErr
+		}
+		wrapped := fmt.Errorf("job: %s: unrecognized runJob error: %w", jobName, runErr)
+		if rr.Reserved.RunID != 0 {
+			return postRunFailure(t, d, rr, sessionCommit, resolveIDs, origin, wrapped), nil
+		}
+		return store.HandlerCommit{}, wrapped
+	}
+
+	// errNothingToDoClaimNotFalse is nothingToDoCommit's own defensive
+	// sentinel, not a post-run infrastructure failure: response.Validate
+	// already guarantees a real runtime's response can never trip it, so it
+	// only ever fires against a test's scripted runtime standing in for a
+	// compromised or buggy agent process, and it must keep surfacing loud (a
+	// bare error, no commit) rather than get smoothed into an owner-facing
+	// escalation the same as a store or filesystem failure would.
+	commit, err := success(rr)
+	if err != nil && rr.Reserved.RunID != 0 && !errors.Is(err, errNothingToDoClaimNotFalse) {
+		return postRunFailure(t, d, rr, sessionCommit, resolveIDs, origin, err), nil
+	}
+	return commit, err
+}
+
+// postRunFailedWhy is postRunFailure's own fixed Why text (design F025):
+// unlike every other escalation this file writes, the run itself succeeded --
+// what failed is Zing's own post-run bookkeeping, the same sentence
+// regardless of which step's success builder hit it.
+const postRunFailedWhy = "the agent's turn completed, but Zing could not store or check its result"
+
+// postRunFailedWhatFor renders postRunFailure's own short, owner-facing What
+// sentence naming the failing step (design F025): only classify,
+// planning_first, planning_resume, and planreview ever reach postRunFailure,
+// since those are the only origins the four runAndRoute callers thread
+// through.
+func postRunFailedWhatFor(origin response.EscalationOrigin) string {
+	switch origin {
+	case response.EscalationOriginClassify:
+		return "classifying the ticket"
+	case response.EscalationOriginPlanningFirst, response.EscalationOriginPlanningResume:
+		return "storing or checking the plan"
+	case response.EscalationOriginPlanreview:
+		return "storing the plan review"
+	default:
+		return "storing or checking the agent's result"
+	}
+}
+
+// postRunFailure is runAndRoute's own terminalizing commit for any error
+// surfacing once runJob has already reserved a run (design F025, section
+// 6.8): the run terminalizes as an error, the session records the same way
+// every other terminalizing commit does, and an escalation carries the new
+// post_run_failed code, err's own text as Tried, and origin exactly as
+// runAndRoute threaded it through -- the producing step's own origin, not a
+// new one invented here.
+func postRunFailure(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin, err error) store.HandlerCommit {
+	slog.Error("post-run failure", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "job", string(origin), "err", err)
+
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodePostRunFailed), postRunFailedWhatFor(origin), postRunFailedWhy, err.Error(), origin)
+	c.Runs = terminalRuns(rr, string(response.OutcomeError))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// routeFailure builds the commit for every runJob failure classify, the
+// planning first turn, and its resume all handle alike (design section 5.4,
+// 6.7, 6.8): the pre-reserve failures (ErrBudget, ErrConfig,
+// store.ErrClaimLost) either escalate (ErrBudget) or return unchanged;
+// runtime.ErrCanceled returns with no commit at all (design D13: the
+// dispatcher leaves the claim for ExpireClaims to reconcile); an exec
+// failure (ErrStart, ErrTimeout, ErrOutputTooLarge, *runtime.ExecError)
+// terminalizes the run and escalates runtime_exec_failed; an invalid output
+// applies D14. ok is false when runErr names none of these, so the caller
+// can report it as a bug rather than silently dropping it.
+func routeFailure(
+	t store.Ticket, d Deps, rr runResult, runErr error, priorInvalid int,
+	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
+) (commit store.HandlerCommit, ok bool, err error) {
+	switch {
+	case errors.Is(runErr, runtime.ErrCanceled):
+		return store.HandlerCommit{}, true, runErr
+	case errors.Is(runErr, ErrBudget):
+		return budgetEscalationCommit(t, d, resolveIDs), true, nil
+	case errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
+		return store.HandlerCommit{}, true, runErr
+	}
+
+	var invErr *runtime.InvalidOutputError
+	if errors.As(runErr, &invErr) { //nolint:modernize // errors.AsType discards its bool via _, which errcheck flags
+		return invalidOutputCommit(t, d, rr, invErr, priorInvalid, sessionCommit, resolveIDs, origin), true, nil
+	}
+	if isExecFailure(runErr) {
+		return execFailureCommit(t, d, rr, sessionCommit, resolveIDs, origin), true, nil
+	}
+	return store.HandlerCommit{}, false, nil
+}
+
+// isExecFailure reports whether err is one of the four runtime failures
+// section 6.8 escalates as runtime_exec_failed: the process could not
+// start, the job deadline killed it, its output exceeded the 4 MiB cap, or
+// it exited with no parseable result.
+func isExecFailure(err error) bool {
+	if errors.Is(err, runtime.ErrStart) || errors.Is(err, runtime.ErrTimeout) || errors.Is(err, runtime.ErrOutputTooLarge) {
+		return true
+	}
+	var execErr *runtime.ExecError
+	return errors.As(err, &execErr) //nolint:modernize // see routeFailure's comment
+}
+
+// terminalRuns is the one Runs entry every committed path after runJob's
+// Reserve terminalizes (design section 4.6, 6.8): the reserved run, its
+// outcome, its real exit code, and its agent seconds (runtime.Seconds,
+// rounded up, minimum 1).
+func terminalRuns(rr runResult, outcome string) []store.Run {
+	exitCode := rr.Res.ExitCode
+	agentSeconds := runtime.Seconds(rr.Res.AgentTime)
+	o := outcome
+	return []store.Run{{ID: rr.Reserved.RunID, Turn: rr.Reserved.Turn, Outcome: &o, ExitCode: &exitCode, AgentSeconds: &agentSeconds}}
+}
+
+// freshSessionRecord is the Session field a fresh (non-resume) terminalizing
+// commit carries (design D13): nil when the runtime never learned a session
+// id (only reachable on runtime.ErrStart), else the reserved session, with
+// its external_id filled in.
+func freshSessionRecord(rr runResult) *store.SessionUpsert {
+	if rr.Res.SessionID == "" {
+		return nil
+	}
+	ext := rr.Res.SessionID
+	return &store.SessionUpsert{ID: &rr.Reserved.SessionID, ExternalID: &ext}
+}
+
+// resumeSessionRecord is the Session field a resume's terminalizing commit
+// always carries (design section 6.4): BumpResumes is set whether or not
+// this attempt succeeded, since a resume attempt is spent either way;
+// ExternalID is filled in only when the runtime returned one (it is already
+// set on an ordinary resume, and upsertSessionTx's own "WHERE external_id IS
+// NULL" guard makes re-sending it a no-op).
+func resumeSessionRecord(sessionID int64, rr runResult) *store.SessionUpsert {
+	su := &store.SessionUpsert{ID: &sessionID, BumpResumes: true}
+	if rr.Res.SessionID != "" {
+		ext := rr.Res.SessionID
+		su.ExternalID = &ext
+	}
+	return su
+}
+
+// escalationCommit builds the section 6.7 Write shape: the escalation
+// message and its linked question, with Waiting always "questions" (every
+// escalation, cap or run-caused alike, leaves the ticket waiting on the
+// owner's retry/planning/abandon choice). Callers that also terminalize a
+// run add Runs, Session, and ResolveQuestions themselves.
+func escalationCommit(t store.Ticket, d Deps, runID, sessionID *int64, code, what, why, tried string, origin response.EscalationOrigin) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.Escalation = &store.EscalationCommit{
+		RunID: runID,
+		Body:  code + ": " + what,
+		Payload: response.EscalationPayload{
+			Code: code, What: what, Why: why, Tried: tried,
+			Options: escalationOptions, SessionID: sessionID, Origin: string(origin),
+		},
+	}
+	waiting := waitingFlagQuestions
+	c.Waiting = &waiting
+	return c
+}
+
+// budgetEscalationCommit is ErrBudget's commit (design section 6.8): no run
+// was ever reserved (runJob's budget check, step 4, runs before Reserve), so
+// RunID and SessionID are both nil.
+func budgetEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+	// Resolve the answered round that triggered this run atomically with the
+	// escalation, exactly as the sibling exec/error escalations do; otherwise
+	// budget exhaustion leaves that gate or planning round open forever.
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// capResumesEscalation is the resumes_exhausted escalation entry steps 1(c)
+// and 3 both write (design D17, section 5.1): RunID is nil (no run caused
+// it, the session cap did), SessionID names the exhausted session.
+func capResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
+	return escalationCommit(t, d, nil, &sessionID, string(response.EscalationCodeResumesExhausted), resumesExhaustedWhat, resumesExhaustedWhy, "", response.EscalationOriginCapResumes)
+}
+
+// execFailureCommit terminalizes the reserved run as an error and escalates
+// runtime_exec_failed (design section 6.8): RunID and SessionID are both
+// set, since a run always caused this.
+func execFailureCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) store.HandlerCommit {
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodeRuntimeExecFailed), runtimeExecFailedWhat, runtimeExecFailedWhy, "", origin)
+	c.Runs = terminalRuns(rr, string(response.OutcomeError))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// errorOutcomeCommit terminalizes the reserved run as an error and
+// escalates with the agent's own code, why, and tried (design section 6.8's
+// "universal error" row).
+func errorOutcomeCommit(t store.Ticket, d Deps, rr runResult, errResp *response.ErrorResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) store.HandlerCommit {
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(errResp.Error.Code), errResp.Error.What, errResp.Error.Why, errResp.Error.Tried, origin)
+	c.Runs = terminalRuns(rr, string(response.OutcomeError))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// invalidOutputCommit is D14 (design section 5.4): the run terminalizes as
+// an error and this commit writes the "response invalid run <rid>" marker;
+// the ticket stays put, not waiting. When priorInvalid (the count the
+// caller read before this run) is already 1, this run is the second
+// consecutive invalid output, and the same commit also escalates
+// response_invalid, which is why it, uniquely among this file's failure
+// commits, sometimes carries no Waiting and sometimes does.
+func invalidOutputCommit(t store.Ticket, d Deps, rr runResult, invErr *runtime.InvalidOutputError, priorInvalid int, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeError))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("response invalid run %d\n%s", rr.Reserved.RunID, invErr.Reason),
+	}}
+
+	if priorInvalid == 1 {
+		runID, sessionID := rr.Reserved.RunID, rr.Reserved.SessionID
+		c.Escalation = &store.EscalationCommit{
+			RunID: &runID,
+			Body:  string(response.EscalationCodeResponseInvalid) + ": " + responseInvalidWhat,
+			Payload: response.EscalationPayload{
+				Code: string(response.EscalationCodeResponseInvalid), What: responseInvalidWhat, Why: invErr.Reason,
+				Options: escalationOptions, SessionID: &sessionID, Origin: string(origin),
+			},
+		}
+		waiting := waitingFlagQuestions
+		c.Waiting = &waiting
+	}
+	return c
+}
+
+// questionOutcomeCommit is the universal question outcome (design section
+// 6.8), shared by classify and planning: one question message per
+// qr.Questions, attached to the terminalized run, waiting on "questions".
+func questionOutcomeCommit(t store.Ticket, d Deps, rr runResult, qr *response.QuestionResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	msgs, err := questionMessagesFor(t.ID, qr.Questions)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeQuestion))
+	c.Session = sessionCommit
+	c.Messages = msgs
+	c.AttachRunToMsgs = true
+	c.ResolveQuestions = resolveIDs
+	waiting := waitingFlagQuestions
+	c.Waiting = &waiting
+	return c, nil
+}
+
+// questionMessagesFor builds one question message per q in qs (design
+// section 6.6's mapping table, reused by classify and planning alike, F030):
+// the stored QuestionPayload leaves Key empty for CommitHandlerResult's own
+// fillQuestionKeyTx to allocate in commit order (design section 4.5, 6.7:
+// "gate and planning questions use the same Q<n> allocation" as an
+// escalation's linked question and a gate question, gateQuestionMessage
+// above), so a planning or classify batch's keys can never collide with one
+// allocated some other way; q.Key (the model's own wire-format key) is never
+// stored, since routing is by message id, not by that key. Recommended and
+// Options map straight across; Kind and State are fixed at insert; the
+// message Body carries Title as the heading, then Body.
+func questionMessagesFor(ticketID int64, qs []response.Question) ([]store.Message, error) {
+	msgs := make([]store.Message, 0, len(qs))
+	for i, q := range qs {
+		payload, err := json.Marshal(response.QuestionPayload{
+			Kind:        response.QuestionKindQuestion,
+			State:       response.QuestionStateOpen,
+			Recommended: q.Recommended,
+			Options:     q.Options,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("job: marshal question payload %d: %w", i, err)
+		}
+		msgs = append(msgs, store.Message{
+			TicketID: ticketID,
+			Type:     msgTypeQuestion,
+			Author:   authorZing,
+			State:    new(questionStateOpen),
+			Body:     q.Title + "\n\n" + q.Body,
+			Payload:  payload,
+		})
+	}
+	return msgs, nil
+}
+
+// ---- rendering a round's answers into prompt inputs -----------------------
+
+// questionIDs returns round's question ids, in the order AnsweredRounds
+// grouped them (ascending, by id).
+func questionIDs(round store.Round) []int64 {
+	ids := make([]int64, len(round.Questions))
+	for i := range round.Questions {
+		ids[i] = round.Questions[i].ID
+	}
+	return ids
+}
+
+// groupByParent buckets msgs by ParentID, the shape both an answered
+// round's Answers and its Replies arrive in (design section 4.5).
+func groupByParent(msgs []store.MessageRow) map[int64][]store.MessageRow {
+	out := make(map[int64][]store.MessageRow, len(msgs))
+	for i := range msgs {
+		if msgs[i].ParentID != nil {
+			out[*msgs[i].ParentID] = append(out[*msgs[i].ParentID], msgs[i])
+		}
+	}
+	return out
+}
+
+// optionTextFor returns the option text for key among options, or "" if
+// key names none of them (a reply-only answer, or a stale option key).
+func optionTextFor(options []response.Option, key string) string {
+	for _, o := range options {
+		if o.Key == key {
+			return o.Text
+		}
+	}
+	return ""
+}
+
+// renderAnswerText renders one question's key, stored body (title then
+// body), every sent answer's chosen option and its text, and every sent
+// reply, the shape section 6.3's per-question resume input describes.
+func renderAnswerText(q store.MessageRow, qp response.QuestionPayload, answers, replies []store.MessageRow) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s: %s\n", qp.Key, q.Body)
+	for i := range answers {
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(answers[i].Payload, &ap); err == nil && ap.Option != nil {
+			fmt.Fprintf(&sb, "chose %s: %s\n", *ap.Option, optionTextFor(qp.Options, *ap.Option))
+		}
+	}
+	for i := range replies {
+		fmt.Fprintf(&sb, "reply: %s\n", replies[i].Body)
+	}
+	return sb.String()
+}
+
+// answerInputsForRound builds one prompt.Answer per round.Questions (design
+// section 6.3, 6.4): a true resume's own input shape, one labeled block per
+// question rather than the single combined block renderRoundAnswers builds
+// for a fresh restart.
+func answerInputsForRound(round store.Round) ([]prompt.NamedInput, error) {
+	answersByQ, repliesByQ := groupByParent(round.Answers), groupByParent(round.Replies)
+	out := make([]prompt.NamedInput, 0, len(round.Questions))
+	for i := range round.Questions {
+		q := &round.Questions[i]
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(q.Payload, &qp); err != nil {
+			return nil, fmt.Errorf("job: unmarshal round question %d payload: %w", q.ID, err)
+		}
+		out = append(out, prompt.Answer(renderAnswerText(*q, qp, answersByQ[q.ID], repliesByQ[q.ID])))
+	}
+	return out, nil
+}
+
+// renderRoundAnswers renders round's questions and answers into one
+// combined block (design section 5.1 steps 1(c) and 1(d): "prompt.Answers
+// (rendered round)"), used when a round's answers restart classify or
+// planning fresh rather than resuming a session.
+func renderRoundAnswers(round store.Round) (string, error) {
+	answersByQ, repliesByQ := groupByParent(round.Answers), groupByParent(round.Replies)
+	parts := make([]string, 0, len(round.Questions))
+	for i := range round.Questions {
+		q := &round.Questions[i]
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(q.Payload, &qp); err != nil {
+			return "", fmt.Errorf("job: unmarshal round question %d payload: %w", q.ID, err)
+		}
+		parts = append(parts, strings.TrimRight(renderAnswerText(*q, qp, answersByQ[q.ID], repliesByQ[q.ID]), "\n"))
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+// ---- small shared helpers --------------------------------------------------
+
+// invalidRetryText is the D14 retry input's fixed wording (design section
+// 5.1 step 4): the closed reason sentence wrapped in Zing's own framing,
+// never owner- or model-supplied prose, so prompt.Invalid's "raw, never
+// fenced" rule still holds.
+func invalidRetryText(reason string) string {
+	return "your final message was not a valid zing document: " + reason + "; return exactly one"
+}
+
+// readAsset reads path out of the embedded zing.Assets tree (machine.toml's
+// own prompt and style paths), the same embed.FS the machine loader
+// validates those paths against.
+func readAsset(path string) (string, error) {
+	data, err := fs.ReadFile(zing.Assets, path)
+	if err != nil {
+		return "", fmt.Errorf("job: read asset %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// renderSchemas renders one response.RenderTemplate per outcome, in order,
+// then the two universal outcomes question and error (design section 4.2's
+// schema order rule).
+func renderSchemas(job response.Job, outcomes ...response.Outcome) ([]string, error) {
+	all := append(append([]response.Outcome{}, outcomes...), response.OutcomeQuestion, response.OutcomeError)
+	out := make([]string, 0, len(all))
+	for _, o := range all {
+		s, err := response.RenderTemplate(job, o)
+		if err != nil {
+			return nil, fmt.Errorf("job: render template %s/%s: %w", job, o, err)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// planningSchemas is renderSchemas for the planning job's own outcome order
+// (design section 4.2): questions, ready, children, nothing_to_do, then
+// question, error.
+func planningSchemas() ([]string, error) {
+	return renderSchemas(response.JobPlanning, response.OutcomeQuestions, response.OutcomeReady, response.OutcomeChildren, response.OutcomeNothingToDo)
+}
+
+// sessionStateName renders a store.SessionState for the entry-decision log
+// line (design section 5.1): never logged as a bare int.
+func sessionStateName(s store.SessionState) string {
+	switch s {
+	case store.SessionNone:
+		return "none"
+	case store.SessionIdless:
+		return "idless"
+	case store.SessionOpen:
+		return "open"
+	case store.SessionExhausted:
+		return "exhausted"
+	default:
+		return "unknown"
+	}
+}
+
+// branchName reads a ticket's *string Branch field for logging, "" when nil.
+func branchName(b *string) string {
+	if b == nil {
+		return ""
+	}
+	return *b
+}

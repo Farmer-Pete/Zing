@@ -62,6 +62,20 @@ func TestDoneComment_ExactBody(t *testing.T) {
 	}
 }
 
+// TestNothingToDoComment_ExactBody proves NothingToDoComment interpolates
+// owner and notes into the exact body (design D12, plan section 6.8): the
+// fixed sentence, the agent's notes, then the shared disclosure line.
+func TestNothingToDoComment_ExactBody(t *testing.T) {
+	t.Parallel()
+
+	const notes = "The requested behavior already works as described."
+	got := tracker.NothingToDoComment(testOwner, notes)
+	want := "Zing found nothing to do for this issue. " + notes + "\n\n" + disclosure
+	if got != want {
+		t.Errorf("NothingToDoComment(%q, %q) =\n%q\nwant\n%q", testOwner, notes, got, want)
+	}
+}
+
 // TestPickupComment_EmptyOwnerOmitsThePossessive proves an empty owner
 // renders a disclosure with no name and no dangling possessive, rather than
 // the grammatically broken "on 's behalf." the naive fmt.Sprintf produces.
@@ -79,7 +93,7 @@ func TestPickupComment_EmptyOwnerOmitsThePossessive(t *testing.T) {
 
 // TestComments_DisclosureNamesADifferentOwner proves the disclosure line
 // is built from the owner parameter, not a hardcoded name, across all
-// four builders.
+// five builders.
 func TestComments_DisclosureNamesADifferentOwner(t *testing.T) {
 	t.Parallel()
 
@@ -87,10 +101,11 @@ func TestComments_DisclosureNamesADifferentOwner(t *testing.T) {
 	wantSuffix := "Posted automatically by Zing, an agent working on alice's behalf."
 
 	cases := map[string]string{
-		"PickupComment": tracker.PickupComment(other),
-		"GateComment":   tracker.GateComment(other, testURL),
-		"PRComment":     tracker.PRComment(other, testURL),
-		"DoneComment":   tracker.DoneComment(other, testURL),
+		"PickupComment":      tracker.PickupComment(other),
+		"GateComment":        tracker.GateComment(other, testURL),
+		"PRComment":          tracker.PRComment(other, testURL),
+		"DoneComment":        tracker.DoneComment(other, testURL),
+		"NothingToDoComment": tracker.NothingToDoComment(other, "notes"),
 	}
 	for name, got := range cases {
 		if !strings.HasSuffix(got, wantSuffix) {

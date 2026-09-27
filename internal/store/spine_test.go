@@ -371,6 +371,178 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 	}
 }
 
+// insertRunWithOutcome inserts one turn-0 runs row directly under sessionID
+// with the given outcome (nil for NULL, the reserved-but-uncommitted case)
+// and agentSeconds (nil for NULL), and returns its id.
+func insertRunWithOutcome(t *testing.T, s *Store, sessionID int64, outcome *string, agentSeconds *int) int64 {
+	t.Helper()
+	res, err := s.db.ExecContext(t.Context(),
+		`INSERT INTO runs (session_id, turn, outcome, agent_seconds) VALUES (?, 0, ?, ?)`,
+		sessionID, outcome, agentSeconds)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	return id
+}
+
+// TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim proves the D13
+// reconcile (spine.go's reconcileReservedRunsTx): a run reserved under a
+// claim that has since expired without ever being committed -- a crash, or
+// an ErrCanceled shutdown that left no commit (design section 4.5) -- gets
+// terminalized to outcome=error, exit_code=-1, agent_seconds floored at 0,
+// in the same pass that clears the ticket's claim.
+func TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRunWithOutcome(t, s, sessionID, nil, nil)
+
+	now := time.Now()
+	if _, err := s.Claim(ctx, ticketID, "host-1", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+
+	ids, err := s.ExpireClaims(ctx, now)
+	if err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+	if !slices.Contains(ids, ticketID) {
+		t.Fatalf("ExpireClaims = %v, want it to contain the expired ticket %d", ids, ticketID)
+	}
+
+	run, ok, err := s.FirstRun(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok || run.ID != runID {
+		t.Fatalf("FirstRun = (%+v, %v), want the reserved run %d", run, ok, runID)
+	}
+	if run.Outcome == nil || *run.Outcome != "error" {
+		t.Errorf("run.Outcome = %v, want error", run.Outcome)
+	}
+	if run.ExitCode == nil || *run.ExitCode != -1 {
+		t.Errorf("run.ExitCode = %v, want -1", run.ExitCode)
+	}
+	if run.AgentSeconds == nil || *run.AgentSeconds != 0 {
+		t.Errorf("run.AgentSeconds = %v, want 0", run.AgentSeconds)
+	}
+}
+
+// TestExpireClaims_LeavesTerminalOutcomeRunUntouched proves the reconcile
+// query's WHERE outcome IS NULL clause: a run that already reached a
+// terminal outcome before the claim expired is left exactly as it was, agent
+// seconds included.
+func TestExpireClaims_LeavesTerminalOutcomeRunUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	wantSeconds := 42
+	runID := insertRunWithOutcome(t, s, sessionID, new(testTypeQuestion), &wantSeconds)
+
+	now := time.Now()
+	if _, err := s.Claim(ctx, ticketID, "host-1", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if _, err := s.ExpireClaims(ctx, now); err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok || run.ID != runID {
+		t.Fatalf("FirstRun = (%+v, %v), want run %d", run, ok, runID)
+	}
+	if run.Outcome == nil || *run.Outcome != testTypeQuestion {
+		t.Errorf("run.Outcome = %v, want unchanged %s", run.Outcome, testTypeQuestion)
+	}
+	if run.ExitCode != nil {
+		t.Errorf("run.ExitCode = %v, want still nil (never touched)", run.ExitCode)
+	}
+	if run.AgentSeconds == nil || *run.AgentSeconds != wantSeconds {
+		t.Errorf("run.AgentSeconds = %v, want unchanged %d", run.AgentSeconds, wantSeconds)
+	}
+}
+
+// TestExpireClaims_LeavesRunsOfUnexpiredClaimUntouched proves the reconcile
+// step only ever runs for a ticket ExpireClaims is actually clearing: a
+// null-outcome run under a claim that has not expired yet is left alone.
+func TestExpireClaims_LeavesRunsOfUnexpiredClaimUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRunWithOutcome(t, s, sessionID, nil, nil)
+
+	now := time.Now()
+	if _, err := s.Claim(ctx, ticketID, "host-1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if _, err := s.ExpireClaims(ctx, now); err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok || run.ID != runID {
+		t.Fatalf("FirstRun = (%+v, %v), want run %d", run, ok, runID)
+	}
+	if run.Outcome != nil {
+		t.Errorf("run.Outcome = %v, want still nil (claim not expired)", run.Outcome)
+	}
+}
+
+// TestExpireClaims_LeavesAnotherTicketsRunUntouched proves the reconcile
+// query is scoped to the expiring ticket's own sessions: a null-outcome run
+// that belongs to a different ticket's session is left alone even though its
+// own claim also expires in the same ExpireClaims pass.
+func TestExpireClaims_LeavesAnotherTicketsRunUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, expiring := seedQueuedTicket(t, s, "1")
+	_, other := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, expiring, testStatePlanning)
+	setTicketState(t, s, other, testStatePlanning)
+
+	otherSession := insertSession(t, s, other, testStatePlanning)
+	otherRunID := insertRunWithOutcome(t, s, otherSession, nil, nil)
+
+	now := time.Now()
+	if _, err := s.Claim(ctx, expiring, "host-1", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("Claim(expiring): %v", err)
+	}
+	// other's claim is never taken, so it can never appear in ExpireClaims's
+	// own cleared set; the reconcile scoping is what this test is really
+	// asserting: otherRunID's session hangs off a ticket ExpireClaims never
+	// touches at all.
+	if _, err := s.ExpireClaims(ctx, now); err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(ctx, otherSession)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok || run.ID != otherRunID {
+		t.Fatalf("FirstRun = (%+v, %v), want run %d", run, ok, otherRunID)
+	}
+	if run.Outcome != nil {
+		t.Errorf("run.Outcome = %v, want still nil (belongs to another ticket)", run.Outcome)
+	}
+}
+
 func TestExpireClaims_NoExpiredClaimsReturnsEmpty(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()

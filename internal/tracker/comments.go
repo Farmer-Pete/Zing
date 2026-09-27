@@ -42,3 +42,10 @@ func PRComment(owner, prURL string) string {
 func DoneComment(owner, prURL string) string {
 	return "Zing finished this ticket. The pull request is ready for review: " + prURL + "\n\n" + disclosure(owner)
 }
+
+// NothingToDoComment is posted when planning's nothing_to_do outcome, with
+// every code claim false, moves a ticket straight to done (design D12,
+// section 6.8): notes is the agent's own explanation.
+func NothingToDoComment(owner, notes string) string {
+	return "Zing found nothing to do for this issue. " + notes + "\n\n" + disclosure(owner)
+}

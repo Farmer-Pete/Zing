@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"math"
 	"net"
@@ -19,7 +18,6 @@ import (
 	"time"
 
 	zing "zing"
-	"zing/fixtures"
 	"zing/internal/bus"
 	"zing/internal/config"
 	"zing/internal/console"
@@ -27,9 +25,25 @@ import (
 	"zing/internal/job"
 	"zing/internal/machine"
 	"zing/internal/notify"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 	"zing/internal/tracker"
+)
+
+// The model alias names config.Models's fields key (matching machine.toml's
+// job.model values) and the runtime names machine.toml's job.runtime field
+// allows, named once here so goconst has nothing to flag across this file
+// and selftest.go, both package main.
+const (
+	modelAliasSonnet = "sonnet"
+	modelAliasOpus   = "opus"
+	modelAliasFable  = "fable"
+	modelAliasCodex  = "codex"
+
+	runtimeNameClaude = "claude"
+	runtimeNameCodex  = "codex"
+	runtimeNameFake   = "fake"
 )
 
 // drainDeadline bounds how long serve waits for the dispatcher's Run
@@ -176,17 +190,30 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
-	scripts, err := fs.Sub(fixtures.FS, "scripts")
-	if err != nil {
-		_ = st.Close()
-		return fmt.Errorf("serve: sub scripts fs: %w", err)
-	}
-	rt := runtime.NewFake(scripts)
-
-	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
+	// Production wires the two real runtimes, claude and codex, and nothing
+	// else: no fake in production (design D2, section 4.1; task 14).
+	// selftest and the dispatch/console e2e suites are the only remaining
+	// callers that build a Fake, under all three machine.toml runtime names.
+	rts, err := productionRuntimes()
 	if err != nil {
 		_ = st.Close()
 		return err
+	}
+
+	// The GitHub tracker, from the configured token and one "owner/name" per
+	// project (task 14, replacing the fixture tracker this used to build:
+	// Package 6's D6 deferred this rewire here). The fixture tracker is now
+	// built only from selftest and the test suites.
+	tr, err := productionTracker(cfg)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	floor, err := response.ParseSeverity(cfg.Review.Floor)
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	// dispCtx is deliberately not derived from ctx's cancellation: the
@@ -200,7 +227,12 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
 		Owner:       claimOwner(),
-	}, rt)
+		Models: map[string]string{
+			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
+		},
+		Budget: time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+		Floor:  floor,
+	}, rts)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -237,7 +269,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken)
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor)
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -275,6 +307,44 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	}
 
 	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+}
+
+// productionRuntimes builds the runtime.Set serve wires the dispatcher with:
+// the two real runtimes, claude and codex, resolved by their bare bin names
+// (an empty bin argument to runtime.NewClaude/NewCodex resolves through
+// PATH), and nothing else (design D2, section 4.1; task 14). Production
+// never maps the fake name; only selftest and the test suites still build a
+// runtime.Fake.
+func productionRuntimes() (runtime.Set, error) {
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{
+		runtimeNameClaude: runtime.NewClaude(""),
+		runtimeNameCodex:  runtime.NewCodex(""),
+	})
+	if err != nil {
+		return runtime.Set{}, fmt.Errorf("serve: %w", err)
+	}
+	return rts, nil
+}
+
+// productionTracker builds the GitHub tracker serve wires the dispatcher
+// with (task 14, replacing the fixture tracker): cfg.GitHubToken authenticates
+// the one client every configured project shares, and repos maps each
+// project's name to its own "owner/name" -- config.Project.Repo is already
+// stored in that exact shape ("zing project add"'s splitOwnerRepo validates
+// it on the way in; cmd/zing/project.go), so no parsing happens here. The
+// token is read once from cfg and passed straight into tracker.NewGitHub;
+// it is never logged and never reaches a job's environment (the runtimes'
+// own env filter already drops every *_TOKEN name by construction).
+func productionTracker(cfg *config.Config) (*tracker.GitHubTracker, error) {
+	repos := make(map[string]string, len(cfg.Projects))
+	for i := range cfg.Projects {
+		repos[cfg.Projects[i].Name] = cfg.Projects[i].Repo
+	}
+	tr, err := tracker.NewGitHub(cfg.GitHubToken, repos)
+	if err != nil {
+		return nil, fmt.Errorf("serve: %w", err)
+	}
+	return tr, nil
 }
 
 // listenOnAll opens one TCP listener per host in hosts, each at port. On

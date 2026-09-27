@@ -11,6 +11,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -40,7 +41,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *con
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken)
+	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken, response.SeverityMinor)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -71,7 +72,7 @@ func newMutationTestServerWithHosts(t *testing.T, s *store.Store, b *bus.Broker,
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, extraHosts, port, log, nil, testPushToken)
+	handler := console.New(s, b, nil, extraHosts, port, log, nil, testPushToken, response.SeverityMinor)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)

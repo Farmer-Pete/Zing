@@ -1,13 +1,18 @@
 package dispatch_test
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,14 +46,63 @@ const (
 	testFixtureRef = "fake#1" // fixtures/tickets.toml's one ticket
 
 	testWaitingQuestions = "questions"
+	testWaitingGate      = "gate"
 	testQuestionOpen     = "open"
 
 	testReasonPlanReady = "plan ready"
+	testRuntimeFake     = "fake"
+
+	testMsgTypeEscalation = "escalation"
+	testOutcomeError      = "error"
 )
 
+// testProject is the one project every test in this file seeds. LocalPath
+// is filled in per test by seedProject (testProjectDir): the planning
+// handler's ready entry point (design section 6.5) opens it for real
+// through os.OpenRoot to check a ready response's code claims, so it must
+// be a real directory, not a placeholder path.
 var testProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", Tracker: "github",
 }
+
+// readyClaimEvidencePath is the file every seeded test project carries, the
+// same path fixtures/scripts/planning/2.xml's one code claim cites
+// ("cmd/zing/main.go:60"), so response.CheckCodeClaims resolves it for real
+// against testProjectDir's own os.Root (design section 6.5, D19).
+const readyClaimEvidencePath = "cmd/zing/main.go"
+
+// testProjectDir returns a fresh temp directory carrying
+// readyClaimEvidencePath, so a ready check's os.OpenRoot(project.LocalPath)
+// plus response.CheckCodeClaims can resolve the fixture cohort's one code
+// claim for real.
+func testProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	full := filepath.Join(dir, readyClaimEvidencePath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("testProjectDir: mkdir: %v", err)
+	}
+	if err := os.WriteFile(full, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("testProjectDir: write %s: %v", readyClaimEvidencePath, err)
+	}
+	return dir
+}
+
+// testModels and testBudget are the job.Deps.Models and job.Deps.Budget
+// every handler that calls runJob (classify, planning, since this task)
+// needs to resolve a model alias and pass the agent-time budget check:
+// the same alias table and an ample budget cmd/zing/selftest.go's own
+// e2eModels/e2eBudget wire the real dispatcher with. fakeRuntime never
+// reads Model, so the exact ids do not matter beyond matching machine.toml's
+// alias names.
+var testModels = map[string]string{
+	"sonnet": "claude-sonnet-5",
+	"opus":   "claude-opus-4-8",
+	"fable":  "claude-fable-5-1",
+	"codex":  "gpt-5.5",
+}
+
+const testBudget = 240 * time.Minute
 
 // --- shared fixtures -------------------------------------------------------
 
@@ -97,10 +151,44 @@ func newFixtureTracker(t *testing.T) *tracker.Fixture {
 	return tr
 }
 
+// testRuntimeSet returns a runtime.Set mapping every machine.toml runtime
+// name (claude, codex, fake) to rt (design section 4.1, D2: selftest and
+// e2e map all three to one Fake), so a handler's
+// d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup always resolves to rt
+// regardless of which runtime name a job actually names.
+func testRuntimeSet(t *testing.T, rt runtime.Runtime) runtime.Set {
+	t.Helper()
+	set, err := runtime.NewSet(map[string]runtime.Runtime{"claude": rt, "codex": rt, "fake": rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	return set
+}
+
+// testDeps builds the job.Deps a handler test drives directly (bypassing
+// the dispatcher), with rt resolvable under every machine.toml runtime name,
+// the real, checked-in machine.toml as Deps.Machine, testModels/testBudget
+// so classify and planning can resolve a model and pass the budget check,
+// and Reserve wired to a real store.Reserve closure over (owner, expires),
+// exactly as dispatch.Dispatcher.runAndCommit wires it for a real Tick
+// (design D13).
+func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, expires time.Time) job.Deps {
+	t.Helper()
+	return job.Deps{
+		Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t),
+		Models: testModels, Budget: testBudget, Owner: owner, Expires: expires,
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		},
+	}
+}
+
 // seedProject inserts testProject and returns its id.
 func seedProject(t *testing.T, s *store.Store) int64 {
 	t.Helper()
-	id, err := s.EnsureProject(t.Context(), testProject)
+	proj := testProject
+	proj.LocalPath = testProjectDir(t)
+	id, err := s.EnsureProject(t.Context(), proj)
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
@@ -141,19 +229,46 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 		if ticket.State != state {
 			t.Fatalf("advanceTicket(%s): ticket state = %q, want %q", state, ticket.State, state)
 		}
-		runHandlerOnce(t, s, rt, ticketID, state)
-		// Planning is two-phase (section 6.6): the first entry posts a
-		// question and waits, and the resume advances only after the batch
-		// is answered. Answer it and re-run planning so this helper leaves
-		// the ticket in building, as its callers expect.
 		if state == testStatePlanning {
-			after := getTicket(t, s, ticketID)
-			if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
-				answerOpenQuestion(t, s, ticketID)
-				runHandlerOnce(t, s, rt, ticketID, state)
-			}
+			advancePlanning(t, s, rt, ticketID)
+			continue
+		}
+		runHandlerOnce(t, s, rt, ticketID, state)
+	}
+}
+
+// advancePlanningMaxCalls bounds advancePlanning's own handler-call loop:
+// classify (kind unset, stays planning), the first turn (posts questions,
+// waits), the resume (stores the cohort, stays planning), the review tick
+// (clean, posts the gate, design section 6.6), and the owner's approve
+// (seals the cohort, transitions to building) is five calls; the headroom
+// catches a stuck handler instead of hanging the test.
+const advancePlanningMaxCalls = 6
+
+// advancePlanning drives the real planning handler through as many calls as
+// it now takes to reach building (design section 5.1): classify runs first
+// on a kindless ticket and sets kind but carries no transition, so this
+// loops the handler until either the ticket leaves planning or it waits on
+// "questions" or "gate", in which case it answers the batch (answerOpenQuestion
+// always takes the first offered option, "a" Approve for the gate) and keeps
+// looping.
+func advancePlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	for range advancePlanningMaxCalls {
+		runHandlerOnce(t, s, rt, ticketID, testStatePlanning)
+		after := getTicket(t, s, ticketID)
+		if after.State != testStatePlanning {
+			return
+		}
+		if after.WaitingOn != nil && (*after.WaitingOn == testWaitingQuestions || *after.WaitingOn == testWaitingGate) {
+			answerOpenQuestion(t, s, ticketID)
+			continue
+		}
+		if after.WaitingOn != nil {
+			t.Fatalf("advancePlanning: ticket waiting_on = %q, want questions, gate, or nil", *after.WaitingOn)
 		}
 	}
+	t.Fatalf("advancePlanning: still in planning after %d handler calls", advancePlanningMaxCalls)
 }
 
 // runHandlerOnce claims the ticket, runs its state's handler once, and applies
@@ -167,7 +282,7 @@ func runHandlerOnce(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 	if err != nil || !claimed {
 		t.Fatalf("advanceTicket(%s): claim: claimed=%v err=%v", state, claimed, err)
 	}
-	commit, err := job.Registry()[state].Run(t.Context(), ticket, job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires})
+	commit, err := job.Registry()[state].Run(t.Context(), ticket, testDeps(t, s, rt, owner, expires))
 	if err != nil {
 		t.Fatalf("advanceTicket(%s) Run: %v", state, err)
 	}
@@ -212,7 +327,11 @@ func answerOpenQuestion(t *testing.T, s *store.Store, ticketID int64) {
 
 // newDispatcher builds a Dispatcher over the real skeleton registry, unless
 // reg is non-nil, in which case reg is used instead (a test's chance to
-// substitute a spy handler for one state).
+// substitute a spy handler for one state). cfg.Models and cfg.Budget default
+// to testModels/testBudget when the caller leaves them unset, so a bare
+// dispatch.Config{MaxParallel: N, Owner: testOwner} literal still lets
+// classify and planning resolve a model and pass the budget check once a
+// real Tick reaches them.
 func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Broker, rt runtime.Runtime,
 	reg map[string]job.Handler, bindings []dispatch.Binding, cfg dispatch.Config,
 ) *dispatch.Dispatcher {
@@ -220,7 +339,13 @@ func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Brok
 	if reg == nil {
 		reg = job.Registry()
 	}
-	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, rt)
+	if cfg.Models == nil {
+		cfg.Models = testModels
+	}
+	if cfg.Budget == 0 {
+		cfg.Budget = testBudget
+	}
+	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
 	}
@@ -239,7 +364,7 @@ func TestNew_MissingHandlerFailsAtNew(t *testing.T) {
 	reg := job.Registry()
 	delete(reg, testStatePlanning)
 
-	_, err := dispatch.New(s, newFixtureTracker(t), bus.New(), m, reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner}, fakeRuntime(t))
+	_, err := dispatch.New(s, newFixtureTracker(t), bus.New(), m, reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner}, testRuntimeSet(t, fakeRuntime(t)))
 	if err == nil {
 		t.Fatal("New with a missing handler: want an error, got nil")
 	}
@@ -315,6 +440,105 @@ func TestTick_IntakeInsertsAndDedupsOnASecondIntake(t *testing.T) {
 	}
 	if len(second) != 1 {
 		t.Fatalf("after second Tick (dedup): %d tickets, want 1", len(second))
+	}
+}
+
+// failingIntakeTracker is a minimal Tracker test double for the intake
+// resilience test below (PKG7-PLAN.md D6, task 14): Intake fails with
+// errIntakeBoom for failProject and returns exactly one fixed ticket for any
+// other project. Comment always succeeds, since a successful intake still
+// posts a best-effort pickup comment for its new ticket; the rest are never
+// called in this test.
+type failingIntakeTracker struct {
+	failProject string
+	ticket      tracker.Ticket
+}
+
+var errIntakeBoom = errors.New("boom: intake unreachable")
+
+func (f *failingIntakeTracker) Intake(_ context.Context, project string, _ tracker.IntakeRule) ([]tracker.Ticket, error) {
+	if project == f.failProject {
+		return nil, errIntakeBoom
+	}
+	return []tracker.Ticket{f.ticket}, nil
+}
+
+func (f *failingIntakeTracker) Fetch(context.Context, string, string) (tracker.Ticket, error) {
+	panic("failingIntakeTracker: Fetch is unused by this test")
+}
+
+func (f *failingIntakeTracker) Comment(context.Context, string, string, string) error {
+	return nil
+}
+
+func (f *failingIntakeTracker) FileTicket(context.Context, string, tracker.NewTicket) (string, error) {
+	panic("failingIntakeTracker: FileTicket is unused by this test")
+}
+
+func (f *failingIntakeTracker) Collaborators(context.Context, string) ([]string, error) {
+	panic("failingIntakeTracker: Collaborators is unused by this test")
+}
+
+var _ tracker.Tracker = (*failingIntakeTracker)(nil)
+
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext proves intake
+// resilience (PKG7-PLAN.md D6, section 9's "intake error (serve)", task 14):
+// when the first of two bound projects' Tracker.Intake fails, the tick still
+// returns nil, the second project's new ticket is still inserted, and a warn
+// "intake error" naming the failing project and the error was logged. It
+// swaps the process-wide slog default to capture that line (matching
+// internal/tracker/fixture_test.go's TestFixture_CommentReturnsNil), so it
+// does not run in parallel with another subtest that touches slog.
+func TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext(t *testing.T) {
+	s := newDispatchTestStore(t)
+
+	failingProjectID := seedProject(t, s) // testProject.Name, "zing"
+
+	okProject := testProject
+	okProject.Name = "other"
+	okProject.LocalPath = testProjectDir(t)
+	okProjectID, ensureErr := s.EnsureProject(t.Context(), okProject)
+	if ensureErr != nil {
+		t.Fatalf("EnsureProject: %v", ensureErr)
+	}
+
+	bindings := []dispatch.Binding{
+		{StoreProjectID: failingProjectID, TrackerProject: testProject.Name},
+		{StoreProjectID: okProjectID, TrackerProject: okProject.Name},
+	}
+	tr := &failingIntakeTracker{
+		failProject: testProject.Name,
+		ticket:      tracker.Ticket{Ref: "fake#9", Title: "from the second project", Body: "body"},
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (one project's intake error must not fail the tick)", err)
+	}
+
+	tickets, err := s.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("ListAllTickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets after Tick = %d, want 1 (only the second project's ticket)", len(tickets))
+	}
+	if tickets[0].TrackerRef != "fake#9" || tickets[0].ProjectID != okProjectID {
+		t.Errorf("inserted ticket = %+v, want ref fake#9 under project %d", tickets[0], okProjectID)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "intake error") {
+		t.Errorf("log = %q, want it to contain \"intake error\"", logged)
+	}
+	if !strings.Contains(logged, testProject.Name) {
+		t.Errorf("log = %q, want it to name the failing project %q", logged, testProject.Name)
 	}
 }
 
@@ -820,14 +1044,17 @@ func TestTick_ReleaseClaimSurvivesCancelledTickContext(t *testing.T) {
 
 // --- the minimal error path (design section 6.7) --------------------------
 
-// errorScriptXML is a minimal, valid RunError document for the planning job:
-// a universal error outcome with a code from the closed ErrorCode set. It is
-// wired into an inline fstest.MapFS fake runtime, never added to the real
-// fixtures/scripts tree, because the plan says the skeleton's real scripts
-// never error (design section 6.7, section 12 task 8).
-const errorScriptXML = `<zing job="planning" outcome="error">
+// errorScriptXML is a minimal, valid RunError document for the classify
+// job: a universal error outcome with a code from the closed ErrorCode set.
+// It is wired into an inline fstest.MapFS fake runtime, never added to the
+// real fixtures/scripts tree, because the plan says the skeleton's real
+// scripts never error (design section 6.7, section 12 task 8). classify,
+// not planning, is the job this test's freshly-queued ticket actually runs
+// first (design section 5.1 step 2: a nil Kind classifies before planning
+// ever opens a session).
+const errorScriptXML = `<zing job="classify" outcome="error">
   <error code="cannot_run">
-    <what>The planning job's environment cannot run.</what>
+    <what>The classify job's environment cannot run.</what>
     <why>The sandbox has no network access to reach the model.</why>
     <tried>Retried once; same failure.</tried>
   </error>
@@ -835,12 +1062,12 @@ const errorScriptXML = `<zing job="planning" outcome="error">
 `
 
 // TestTick_ErrorOutcomeEscalates drives a ticket already claimed into
-// planning against a fake runtime whose one scripted turn returns the
-// universal error outcome, and proves the dispatcher applies the section
-// 6.7 error-branch commit end to end: the ticket stays in its state,
-// waiting on "error", with one escalation message authored "zing" whose
-// EscalationPayload.Code is the script's RunError.Code (one of the four
-// ErrorCode values) and whose Options are the fixed local
+// planning against a fake runtime whose one scripted classify turn returns
+// the universal error outcome, and proves the dispatcher applies the
+// section 6.7 error-branch commit end to end: the ticket stays in its
+// state, waiting on "error", with one escalation message authored "zing"
+// whose EscalationPayload.Code is the script's RunError.Code (one of the
+// four ErrorCode values) and whose Options are the fixed local
 // retry/planning/abandon set.
 func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	t.Parallel()
@@ -850,7 +1077,7 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 	advanceTicket(t, s, rt, ticketID, testStateQueued) // queued -> planning, no session opened yet
 
-	errFS := fstest.MapFS{"planning/1.xml": &fstest.MapFile{Data: []byte(errorScriptXML)}}
+	errFS := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(errorScriptXML)}}
 	errRT := runtime.NewFake(errFS)
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), errRT, nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
@@ -862,8 +1089,12 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	if final.State != testStatePlanning {
 		t.Errorf("final ticket state = %q, want unchanged planning (no Next on the error branch)", final.State)
 	}
-	if final.WaitingOn == nil || *final.WaitingOn != "error" {
-		t.Errorf("final ticket waiting_on = %v, want error", final.WaitingOn)
+	// Section 6.7's Write rule sets waiting_on to "questions" for every
+	// escalation, cap or run-caused alike (the linked question offers
+	// retry/planning/abandon): this superseded the old skeleton's "error"
+	// flag once planning.go (task 6) became the real escalation writer.
+	if final.WaitingOn == nil || *final.WaitingOn != testWaitingQuestions {
+		t.Errorf("final ticket waiting_on = %v, want questions", final.WaitingOn)
 	}
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (cleared by the commit)", *final.ClaimOwner)
@@ -875,7 +1106,7 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	}
 	var escalation *store.MessageRow
 	for i := range msgs {
-		if msgs[i].Type == "escalation" {
+		if msgs[i].Type == testMsgTypeEscalation {
 			escalation = &msgs[i]
 		}
 	}
@@ -1250,7 +1481,11 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 type staleOwnerHandler struct{}
 
 func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
@@ -1270,7 +1505,11 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 type staleOwnerReleaseHandler struct{}
 
 func (staleOwnerReleaseHandler) Run(ctx context.Context, _ store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
@@ -1290,4 +1529,836 @@ type slowTracker struct {
 func (s *slowTracker) Intake(ctx context.Context, project string, rule tracker.IntakeRule) ([]tracker.Ticket, error) {
 	time.Sleep(s.delay)
 	return s.Tracker.Intake(ctx, project, rule)
+}
+
+// --- the D16 seal-mismatch, ErrNoAction, and ErrCanceled dispatcher rules,
+// and the D12 post-commit TrackerEffect (design section 4.5, 6.8) ----------
+
+// testPlanPayload is examples/artifacts/plan.json verbatim: a real,
+// schema-valid "plan" artifact, so the seal-mismatch test below fails at
+// stage "count" (an empty scenario cohort) rather than at stage "plan"
+// (design D16, section 4.5 check 1 then check 2).
+const testPlanPayload = `{
+  "overview": {
+    "objective": "Stop checkout from crashing on an empty cart.",
+    "context": "internal/cart handles cart state; internal/checkout reads it at payment time.",
+    "problem": {
+      "text": "checkout panics when cart.Items is nil instead of an empty slice.",
+      "loop": {
+        "cmd": "go test ./internal/cart/... -run TestEmptyCart",
+        "text": "fails: nil pointer dereference in checkout.Total"
+      },
+      "repro": "create a cart, call Checkout without adding items",
+      "hypotheses": [
+        {
+          "rank": 1,
+          "cause": "NewCart never initializes Items",
+          "prediction": "initializing Items to []Item{} makes the loop pass"
+        }
+      ]
+    },
+    "goals": ["checkout never panics on an empty cart"],
+    "nongoals": ["changing the checkout API"]
+  },
+  "design": {
+    "demo": {
+      "cmd": "go run ./cmd/demo -empty-cart",
+      "text": "an empty cart checks out for zero dollars instead of crashing"
+    },
+    "shape": "NewCart initializes Items to an empty slice; checkout reads it unchanged.",
+    "changes": [
+      {
+        "path": "internal/cart/cart.go",
+        "symbol": "NewCart",
+        "kind": "modified",
+        "callers": "checkout.New",
+        "callees": "none",
+        "before": "Items field left at its zero value (nil)",
+        "after": "Items: make([]Item, 0)"
+      }
+    ],
+    "types": [],
+    "migrations": { "migrations": [] }
+  },
+  "delivery": {
+    "files": [
+      { "path": "internal/cart/cart.go", "action": "modify", "reason": "initialize Items to an empty slice" }
+    ],
+    "deletions": { "deletions": [] },
+    "tests": [
+      {
+        "name": "TestEmptyCart_ReturnsEmptyOrder",
+        "seam": "cart.NewCart",
+        "kind": "regression",
+        "mocks": "",
+        "asserts": "checkout of a freshly created cart returns a zero-item order, no panic"
+      }
+    ],
+    "tasks": [
+      { "n": 1, "test": "TestEmptyCart_ReturnsEmptyOrder", "demo": true, "text": "Initialize cart.Items to an empty slice in NewCart." }
+    ]
+  },
+  "review": {
+    "trust_root": "none",
+    "alternatives": ["guard checkout.Total with a nil check instead of fixing the source"],
+    "risks": ["other constructors that build a Cart by struct literal still skip this initializer"]
+  }
+}
+`
+
+// sealMismatchHandler reserves a fresh run through Deps.Reserve, proposes a
+// real "plan" artifact for it, and requests a Seal whose ExpectedCount (2)
+// can never match the cohort's real scenario count (0, since this handler
+// inserts none): CommitHandlerResult's own tx fails at stage "count" and
+// rolls the whole commit back, including the plan artifact insert, so a
+// second call sees the same, still-empty cohort and mismatches the same way
+// (design D16, section 4.5, 6.6 branch 0).
+type sealMismatchHandler struct{}
+
+func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Artifacts: []store.Artifact{{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)}},
+		Seal:      &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+	}, nil
+}
+
+// countSealMismatchMarkers counts msgs' "update" messages whose body starts
+// with "seal mismatch cohort " (design section 5.3's marker convention,
+// D16): every caller below only ever counts this one marker.
+func countSealMismatchMarkers(msgs []store.MessageRow) int {
+	const prefix = "seal mismatch cohort"
+	n := 0
+	for i := range msgs {
+		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues proves the D16
+// dispatcher rule (design section 4.5, 6.6 branch 0): a seal transaction
+// mismatch releases the claim, writes a "seal mismatch cohort <runID>"
+// marker, never stops the dispatcher, and Tick returns nil so the ticket is
+// picked up again on a later tick, which mismatches (and marks) the same
+// way a second time.
+func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = sealMismatchHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a seal mismatch must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (a seal mismatch must not fail closed)")
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 1 {
+		t.Fatalf("seal mismatch markers after first tick = %d, want 1", got)
+	}
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v, want nil", err)
+	}
+	msgs, err = s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after second tick: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 2 {
+		t.Errorf("seal mismatch markers after second tick = %d, want 2", got)
+	}
+}
+
+// seedGateReadyTicket seeds one project, one ticket already sitting in
+// "planning" with kind "feature" (bypassing classify and the interview,
+// which the real gate approve pre-check never touches), a plan cohort of n
+// scenario artifacts (all unsealed) under a fresh reserved run, and one
+// open, then answered ("a", approve), gate question attached to that run --
+// the state design section 6.6's entry step 1(a) finds on its very first
+// tick: an answered gate round ready to interpret. It returns the ticket id
+// and the cohort's own run id.
+func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID int64) {
+	t.Helper()
+	ctx := t.Context()
+
+	projectID := seedProject(t, s)
+	kind := "feature"
+	ticketID, err := s.InsertTicket(ctx, store.Ticket{
+		ProjectID: projectID, TrackerRef: "gate-race#1", Title: "a ticket", Kind: &kind, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: InsertTicket: %v", err)
+	}
+	runHandlerOnce(t, s, fakeRuntime(t), ticketID, testStateQueued) // queued -> planning
+
+	owner := "seed-gate-ready"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(ctx, ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedGateReadyTicket: claim: claimed=%v err=%v", claimed, err)
+	}
+	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: reserve: %v", err)
+	}
+
+	extID := "seed-gate-ready-ext"
+	artifacts := make([]store.Artifact, 0, 1+n)
+	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)})
+	for i := range n {
+		sc := response.Scenario{
+			ID: fmt.Sprintf("s%d", i+1), Kind: response.ScenarioKindBehavior,
+			Given: "the server is running", When: "a client sends a request", Then: "the response is correct",
+		}
+		payload, marshalErr := json.Marshal(sc)
+		if marshalErr != nil {
+			t.Fatalf("seedGateReadyTicket: marshal scenario: %v", marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "scenario", Payload: payload})
+	}
+
+	outcome, exitCode, agentSeconds := "ready", 0, 1
+	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session:   &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &extID},
+		Runs:      []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Artifacts: artifacts,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedGateReadyTicket: store the cohort: applied=%v err=%v", applied, err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: marshal gate question payload: %v", err)
+	}
+	const authorZing = "zing" // avoids a third bare "zing" literal (goconst)
+	qID, err := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, RunID: &rsv.RunID, Type: "question", Author: authorZing,
+		State: new("open"), Body: "the plan objective", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: insert gate question: %v", err)
+	}
+	if res, ansErr := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); ansErr != nil || !res.Accepted {
+		t.Fatalf("seedGateReadyTicket: AnswerQuestion: %+v, %v", res, ansErr)
+	}
+
+	return ticketID, rsv.RunID
+}
+
+// TestTick_GateApproveTOCTOURace_MismatchReleasesThenPreCheckTakesBranch6
+// proves the D16 TOCTOU race design section 6.6 branch 0's own commentary
+// names as "unreachable in practice" under the single-owner claim, made
+// reachable here through job.GateApproveSealRaceHook (a test-only seam):
+// between the real gate approve pre-check's own read of CohortSealState
+// (sealed == 0) and the commit it builds from that read (branch 4, sealing
+// the whole cohort), a second store handle seals one scenario row through a
+// raw SQL update, so the commit's own sealCohortTx sees an "update" stage
+// mismatch (it sealed 2 of 3 rows, not all 3). The dispatcher's existing
+// ErrSealMismatch rule (design D16, proved generically by
+// TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues above) releases
+// the claim and writes one "seal mismatch cohort <runID>" marker without
+// resolving the gate round (the whole mismatched tx rolled back); the next
+// tick re-enters the same still-answered round, and this time
+// CohortSealState reports 1 of 3 scenarios sealed -- branch 6 (design
+// section 6.6), not branch 4 again -- so it escalates seal_failed and
+// resolves the round, without writing a second marker.
+func TestTick_GateApproveTOCTOURace_MismatchReleasesThenPreCheckTakesBranch6(t *testing.T) {
+	// Not t.Parallel(): this test installs job.GateApproveSealRaceHook, a
+	// package-level seam shared by every ticket's gate approve call, so it
+	// must not run alongside another test whose own ticket might also reach
+	// gateApprove concurrently. Go only runs t.Parallel() tests together
+	// after every non-parallel test in the package has finished, so leaving
+	// this one sequential is what keeps the hook's install/reset window
+	// free of any other test's own gate approve call.
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	const scenarioCount = 3
+	ticketID, runID := seedGateReadyTicket(t, s, scenarioCount)
+
+	var raceOnce sync.Once
+	job.GateApproveSealRaceHook = func(gotRunID int64) {
+		raceOnce.Do(func() {
+			if gotRunID != runID {
+				t.Errorf("GateApproveSealRaceHook: runID = %d, want %d", gotRunID, runID)
+			}
+			db2, openErr := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+			if openErr != nil {
+				t.Fatalf("race: open second db handle: %v", openErr)
+			}
+			defer func() { _ = db2.Close() }()
+			if _, execErr := db2.ExecContext(t.Context(),
+				`UPDATE artifacts SET sealed_at = ? WHERE id = (
+					SELECT id FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? ORDER BY id LIMIT 1
+				)`,
+				time.Now().UTC().Format(time.RFC3339), ticketID, gotRunID,
+			); execErr != nil {
+				t.Fatalf("race: seal one scenario row through the second handle: %v", execErr)
+			}
+		})
+	}
+	t.Cleanup(func() { job.GateApproveSealRaceHook = nil })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("first Tick: %v, want nil (a seal mismatch must not fail closed)", err)
+	}
+
+	afterFirst := getTicket(t, s, ticketID)
+	if afterFirst.State != testStatePlanning {
+		t.Errorf("after the raced tick: ticket state = %q, want unchanged planning", afterFirst.State)
+	}
+	if afterFirst.ClaimOwner != nil {
+		t.Errorf("after the raced tick: claim owner = %v, want nil (released)", *afterFirst.ClaimOwner)
+	}
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after first tick: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 1 {
+		t.Fatalf("seal mismatch markers after the raced tick = %d, want 1", got)
+	}
+	answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByState(answered) after first tick: %v", err)
+	}
+	if len(answered) != 1 {
+		t.Fatalf("answered questions after the raced tick = %d, want 1 (the mismatched tx rolled back the resolution)", len(answered))
+	}
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v, want nil", err)
+	}
+
+	afterSecond := getTicket(t, s, ticketID)
+	if afterSecond.State != testStatePlanning {
+		t.Errorf("after the second tick: ticket state = %q, want unchanged planning (branch 6 only escalates)", afterSecond.State)
+	}
+	if afterSecond.WaitingOn == nil || *afterSecond.WaitingOn != testWaitingQuestions {
+		t.Errorf("after the second tick: waiting_on = %v, want questions (the seal_failed escalation)", afterSecond.WaitingOn)
+	}
+
+	msgs, err = s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after second tick: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 1 {
+		t.Errorf("seal mismatch markers after the second tick = %d, want still 1 (no new mismatch)", got)
+	}
+	var escalation *response.EscalationPayload
+	for i := range msgs {
+		if msgs[i].Type != testMsgTypeEscalation {
+			continue
+		}
+		var p response.EscalationPayload
+		if unmarshalErr := json.Unmarshal(msgs[i].Payload, &p); unmarshalErr != nil {
+			t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
+		}
+		escalation = &p
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message found after the second tick")
+	}
+	if escalation.Code != string(response.EscalationCodeSealFailed) {
+		t.Errorf("escalation.Code = %q, want seal_failed", escalation.Code)
+	}
+	wantWhat := "cohort is partially or inconsistently sealed (1 of 3)"
+	if escalation.What != wantWhat {
+		t.Errorf("escalation.What = %q, want %q", escalation.What, wantWhat)
+	}
+
+	resolved, err := s.QuestionsByState(t.Context(), ticketID, "resolved")
+	if err != nil {
+		t.Fatalf("QuestionsByState(resolved) after second tick: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Errorf("resolved questions after the second tick = %d, want 1 (the gate round)", len(resolved))
+	}
+}
+
+// noActionHandler always returns job.ErrNoAction: the entry decision found
+// nothing to do this tick (design section 4.5, 5.1 step 8).
+type noActionHandler struct{}
+
+func (noActionHandler) Run(context.Context, store.Ticket, job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{}, job.ErrNoAction
+}
+
+// TestTick_ErrNoActionReleasesClaimWithoutStopping proves job.ErrNoAction
+// releases the claim through the same no-op-commit path any other handler
+// error uses, but never stops the dispatcher (design section 4.5).
+func TestTick_ErrNoActionReleasesClaimWithoutStopping(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = noActionHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrNoAction must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (ErrNoAction must not fail closed)")
+	}
+}
+
+// cancelingReserveHandler reserves a fresh run, then returns
+// runtime.ErrCanceled with no commit, simulating a parent-context
+// cancellation (dispatcher shutdown) the runtime itself reported mid-call
+// (design D13, section 4.5).
+type cancelingReserveHandler struct{}
+
+func (cancelingReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x"); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{}, runtime.ErrCanceled
+}
+
+// TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile proves
+// runtime.ErrCanceled leaves the claim in place -- neither released nor
+// fail-closed -- so the reserved run sits with a NULL outcome until the
+// lease expires, at which point ExpireClaims (already exercised by task 4a)
+// reconciles it to error/-1 (design D13, section 4.5).
+func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = cancelingReserveHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrCanceled must not fail closed)", err)
+	}
+
+	claimed := getTicket(t, s, ticketID)
+	if claimed.State != testStateQueued {
+		t.Errorf("ticket state = %q, want unchanged queued", claimed.State)
+	}
+	if claimed.ClaimOwner == nil || claimed.ClaimExpiresAt == nil {
+		t.Fatal("claim was released, want it left in place for ExpireClaims to reconcile")
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1 (the reserved run)", len(runs))
+	}
+	if runs[0].Outcome != nil {
+		t.Errorf("run outcome = %q, want nil before the lease expires", *runs[0].Outcome)
+	}
+
+	if _, expireErr := s.ExpireClaims(t.Context(), claimed.ClaimExpiresAt.Add(time.Second)); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	runs, err = s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket after ExpireClaims: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
+		t.Fatalf("after ExpireClaims: run = %+v, want outcome error", runs[0])
+	}
+	if runs[0].ExitCode == nil || *runs[0].ExitCode != -1 {
+		t.Errorf("after ExpireClaims: run exit_code = %v, want -1", runs[0].ExitCode)
+	}
+}
+
+// postRunFailureHandler reserves a fresh run through Deps.Reserve, then
+// returns the exact commit shape job.postRunFailure builds for design F025
+// (a run terminalized as an error, plus a post_run_failed escalation), with
+// no error at all -- since job.postRunFailure is unexported, this stands in
+// for calling it directly, the fallback the F025 test plan itself allows.
+// The point of this test is the dispatcher side of the fix: proving that
+// once the job package has funneled a post-run failure into an ordinary
+// commit, the dispatcher applies it through its normal CommitHandlerResult
+// path (clearing the claim as part of that same fenced transaction) rather
+// than through releaseClaim, which is what a plain error returned after
+// Reserve used to force before the fix, orphaning the run with a NULL
+// outcome forever.
+type postRunFailureHandler struct{}
+
+func (postRunFailureHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	outcome := testOutcomeError
+	exitCode := 0
+	agentSeconds := 1
+	waiting := testWaitingQuestions
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Runs: []store.Run{{ID: rsv.RunID, Turn: rsv.Turn, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Escalation: &store.EscalationCommit{
+			RunID: &rsv.RunID,
+			Body:  string(response.EscalationCodePostRunFailed) + ": storing or checking the plan",
+			Payload: response.EscalationPayload{
+				Code: string(response.EscalationCodePostRunFailed), What: "storing or checking the plan",
+				Why:       "the agent's turn completed, but Zing could not store or check its result",
+				Tried:     "boom: project for ticket: store lookup failed",
+				Options:   []string{"retry", "planning", "abandon"},
+				SessionID: &rsv.SessionID, Origin: string(response.EscalationOriginPlanningFirst),
+			},
+		},
+		Waiting: &waiting,
+	}, nil
+}
+
+// TestTick_HandlerErrorAfterReserve proves design F025's dispatcher-side
+// half: a commit shaped like job.postRunFailure's own (a reserved run
+// terminalized as an error, plus a post_run_failed escalation) commits clean
+// through the dispatcher's ordinary path -- the claim clears as part of that
+// same commit, never through releaseClaim -- Tick returns nil, and the
+// dispatcher never stops.
+func TestTick_HandlerErrorAfterReserve(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = postRunFailureHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (cleared by the commit, not releaseClaim)", *final.ClaimOwner)
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
+		t.Fatalf("runs = %+v, want exactly 1 with outcome error", runs)
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var escalation *store.MessageRow
+	for i := range msgs {
+		if msgs[i].Type == testMsgTypeEscalation {
+			escalation = &msgs[i]
+		}
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message persisted")
+	}
+	var payload response.EscalationPayload
+	if err = json.Unmarshal(escalation.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodePostRunFailed) {
+		t.Errorf("escalation payload.Code = %q, want %q", payload.Code, response.EscalationCodePostRunFailed)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false")
+	}
+}
+
+// claimLostBeforeReserveHandler steals its own ticket's lease (expiring
+// every claim as of just past its own Expires, the same technique
+// staleOwnerHandler uses) and then calls Deps.Reserve, which fences on the
+// exact claim it was handed and finds it already gone: store.ErrClaimLost,
+// with the runtime never called at all (design F021, section 4.6 step 7).
+// It returns that error wrapped, exactly the shape a real handler's runJob
+// call would produce.
+type claimLostBeforeReserveHandler struct{}
+
+func (claimLostBeforeReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err == nil {
+		return store.HandlerCommit{}, errors.New("Reserve unexpectedly succeeded after the lease was stolen")
+	}
+	return store.HandlerCommit{}, fmt.Errorf("job: claim lost before reserve: %w", err)
+}
+
+// TestTick_ClaimLostBeforeReserveDoesNotFailClosed proves design F021: a
+// handler error wrapping store.ErrClaimLost from before runJob ever reserved
+// a run (nothing was written, the runtime never ran) logs and moves on --
+// Tick returns nil, the dispatcher never stops, and the runtime is never
+// called -- unlike the genuine post-runtime lease-loss case
+// (staleOwnerHandler, staleOwnerReleaseHandler), which still fails closed.
+func TestTick_ClaimLostBeforeReserveDoesNotFailClosed(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = claimLostBeforeReserveHandler{}
+
+	rt := &countingRuntime{rt: fakeRuntime(t)}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrClaimLost before Reserve must not fail closed)", err)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (ErrClaimLost before Reserve must not fail closed)")
+	}
+	if got := rt.calls.Load(); got != 0 {
+		t.Errorf("runtime calls = %d, want 0 (the runtime must never be called)", got)
+	}
+}
+
+// trackerEffectHandler proposes a commit carrying only a TrackerEffect: no
+// state transition, so ValidateCommit's non-empty rule is satisfied by
+// TrackerEffect alone (design section 4.5).
+type trackerEffectHandler struct{}
+
+func (trackerEffectHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		TrackerEffect: &store.TrackerEffect{Ref: testFixtureRef, Notes: "already handled elsewhere"},
+	}, nil
+}
+
+// TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit proves the D12
+// post-commit effect (design section 4.5, 6.8): once CommitHandlerResult has
+// applied, the dispatcher resolves the ticket's project binding and posts
+// tracker.NothingToDoComment for that binding's user.
+func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const bindingUser = "peter"
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := rec.recorded()
+	if len(got) != 1 {
+		t.Fatalf("tracker comments = %d, want 1", len(got))
+	}
+	wantBody := tracker.NothingToDoComment(bindingUser, "already handled elsewhere")
+	if got[0].body != wantBody {
+		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
+	}
+	if got[0].ref != testFixtureRef {
+		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+	if got[0].project != testProject.Name {
+		t.Errorf("comment project = %q, want %q", got[0].project, testProject.Name)
+	}
+}
+
+// planningNothingToDoRuntime lets classify and the planning first turn run
+// for real against the checked-in fixtures (so the ticket gets a real kind
+// and a real Q1 to answer), then swaps planning's second call (the resume)
+// for a hand-built nothing_to_do response, so a test can drive the real
+// planning handler's own design section 6.8 nothing_to_do row (task 8)
+// through a real dispatch.Tick.
+type planningNothingToDoRuntime struct {
+	t             *testing.T
+	fake          *runtime.Fake
+	resp          response.Response
+	planningCalls int
+}
+
+func (r *planningNothingToDoRuntime) Run(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+	r.t.Helper()
+	if req.Job != response.JobPlanning {
+		return r.fake.Run(ctx, req)
+	}
+	r.planningCalls++
+	if r.planningCalls == 1 {
+		return r.fake.Run(ctx, req)
+	}
+	return runtime.RunResult{Response: r.resp, SessionID: "ntd-sess", ExitCode: 0, AgentTime: time.Second}, nil
+}
+
+// TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment proves task
+// 8's nothing_to_do row end to end, through the real planning handler and a
+// real dispatch.Tick (not the trackerEffectHandler stub the previous test
+// uses): once classify and the first turn have run for real and the owner
+// has answered Q1, a resume whose nothing_to_do response names two code
+// claims, both false, terminalizes the run, moves the ticket to done, and
+// the same Tick posts exactly one tracker comment whose body is
+// tracker.NothingToDoComment(bindingUser, resp.Notes).
+func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const bindingUser = "nothing-to-do-owner"
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	const notes = "the described behavior already exists and is already tested"
+	resp := &response.NothingToDoResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeNothingToDo,
+		Claims: []response.Claim{
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":1", Text: "already returns hello"},
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "already tested"},
+		},
+		Notes: notes,
+	}
+	rt := &planningNothingToDoRuntime{t: t, fake: fakeRuntime(t), resp: resp}
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued)    // queued -> planning
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // classify: sets kind
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // first turn: posts Q1, waits
+	answerOpenQuestion(t, s, ticketID)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), rt, nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateDone {
+		t.Fatalf("final ticket state = %q, want done", final.State)
+	}
+
+	got := rec.recorded()
+	if len(got) != 1 {
+		t.Fatalf("tracker comments = %d, want 1", len(got))
+	}
+	wantBody := tracker.NothingToDoComment(bindingUser, notes)
+	if got[0].body != wantBody {
+		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
+	}
+	if got[0].ref != testFixtureRef {
+		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+}
+
+// TestTick_TrackerEffectFailureIsBestEffort proves a failing tracker comment
+// only warns: Tick still returns nil, and the ticket's own commit (already
+// applied before the tracker call runs) is untouched (design D12).
+func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	rec.failFirst = true
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a tracker comment failure is best-effort)", err)
+	}
+	if got := rec.recorded(); len(got) != 0 {
+		t.Errorf("recorded comments = %d, want 0 (the one attempt failed)", len(got))
+	}
+	if attempts := rec.attemptCount(); attempts != 1 {
+		t.Errorf("Comment attempts = %d, want 1", attempts)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
 }

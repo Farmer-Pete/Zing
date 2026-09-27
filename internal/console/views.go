@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -215,7 +216,15 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if planErr != nil {
 			return nil, planErr
 		}
-		threadRows, buildErr := buildThreadRows(&ticket, rows, plan)
+		scenarios, scenariosErr := c.loadScenarios(ctx, open)
+		if scenariosErr != nil {
+			return nil, scenariosErr
+		}
+		findings, findingsErr := c.loadFindings(ctx, open)
+		if findingsErr != nil {
+			return nil, findingsErr
+		}
+		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -256,6 +265,112 @@ func (c *console) loadPlan(ctx context.Context, ticketID int64) (*templates.Rend
 	return &rendered, nil
 }
 
+// loadScenarios reads ticketID's current scenario cohort for the gate's
+// context region (design section 7, D8, Task 11): CurrentCohort names the
+// producing run; ScenariosForRun(*cohort.RunID, sealedOnly=false) reads it
+// when there is one, so a still-pending (unsealed) cohort still renders.
+// cohort.RunID == nil is a legacy plan artifact stored before every artifact
+// carried run_id, so this falls back to AllScenarios (every scenario the
+// ticket has ever carried, across every run) and logs the design section 9
+// "legacy uncohorted scenarios rendered" debug line. Returns nil, nil, the
+// same "nothing to show" shape scenariosSection's own empty-slice check
+// renders as no table at all, when the ticket has no plan cohort yet.
+func (c *console) loadScenarios(ctx context.Context, ticketID int64) ([]templates.ScenarioRow, error) {
+	cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("console: current cohort for ticket %d: %w", ticketID, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	var artifacts []store.Artifact
+	if cohort.RunID != nil {
+		artifacts, err = c.store.ScenariosForRun(ctx, ticketID, *cohort.RunID, false)
+		if err != nil {
+			return nil, fmt.Errorf("console: scenarios for ticket %d run %d: %w", ticketID, *cohort.RunID, err)
+		}
+	} else {
+		artifacts, err = c.store.AllScenarios(ctx, ticketID)
+		if err != nil {
+			return nil, fmt.Errorf("console: all scenarios for ticket %d: %w", ticketID, err)
+		}
+		slog.Debug("legacy uncohorted scenarios rendered", "ticket_id", ticketID)
+	}
+	return buildScenarioRows(ticketID, artifacts)
+}
+
+// buildScenarioRows decodes every scenario artifact's stored
+// response.Scenario payload into the gate context's view model, preserving
+// artifacts' own order (the store's insertion order; see loadScenarios).
+func buildScenarioRows(ticketID int64, artifacts []store.Artifact) ([]templates.ScenarioRow, error) {
+	rows := make([]templates.ScenarioRow, 0, len(artifacts))
+	for i := range artifacts {
+		var sc response.Scenario
+		if err := json.Unmarshal(artifacts[i].Payload, &sc); err != nil {
+			return nil, fmt.Errorf("console: unmarshal scenario artifact %d for ticket %d: %w", i, ticketID, err)
+		}
+		rows = append(rows, templates.ScenarioRow{
+			ID: sc.ID, Kind: string(sc.Kind), Given: sc.Given, When: sc.When, Then: sc.Then,
+		})
+	}
+	return rows, nil
+}
+
+// planreviewFindingsPayload is the JSON shape a "planreview" artifact's
+// Payload carries (internal/store/schemas/artifacts/planreview.json):
+// mirrored here, rather than imported, from internal/job/planning.go's own
+// identical, unexported planreviewArtifactPayload -- this package has no
+// other reason to depend on internal/job, and the wire shape is the
+// schema's, not that type's, to keep in sync.
+type planreviewFindingsPayload struct {
+	Findings []response.Finding `json:"findings"`
+}
+
+// loadFindings reads ticketID's above-floor plan-review findings for the
+// gate's context region (design section 7, D8, Task 11): the "planreview"
+// artifact stored at the current cohort's exact plan version
+// (PlanReviewAt), filtered to findings whose severity ranks strictly above
+// c.floor. job/planning.go's own floor split (planReviewOkCommit) keeps
+// every finding at or below the floor in its own resume loop, so only the
+// findings a human, not that loop, must decide belong here. Returns nil,
+// nil -- scenariosSection's and findingsSection's own "no empty table" rule
+// -- when the ticket has no cohort yet, or no planreview artifact stored at
+// its version.
+func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates.FindingRow, error) {
+	cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("console: current cohort for ticket %d: %w", ticketID, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	artifact, ok, err := c.store.PlanReviewAt(ctx, ticketID, cohort.PlanVersion)
+	if err != nil {
+		return nil, fmt.Errorf("console: planreview at version %d for ticket %d: %w", cohort.PlanVersion, ticketID, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	var payload planreviewFindingsPayload
+	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, err)
+	}
+
+	rows := make([]templates.FindingRow, 0, len(payload.Findings))
+	for _, f := range payload.Findings {
+		if f.Severity.Rank() <= c.floor.Rank() {
+			continue
+		}
+		rows = append(rows, templates.FindingRow{
+			Lens: string(f.Lens), Severity: string(f.Severity), Location: f.Location, Text: f.Text, Fix: f.Fix,
+		})
+	}
+	return rows, nil
+}
+
 // msgTypeState, msgTypeQuestion, msgTypeEscalation, and msgTypeAnswer name
 // the message types the read-only Thread view renders specially (design
 // section 6.6): a state message as a centered separator, a question message
@@ -270,6 +385,33 @@ const (
 	msgTypeQuestion   = "question"
 	msgTypeEscalation = "escalation"
 	msgTypeAnswer     = "answer"
+)
+
+// msgTypeUpdate mirrors job.msgTypeUpdate (internal/job/planning.go), the
+// same package-local-copy pattern as the msgType* block above: job's own
+// constant is unexported, and there is no shared package to import it from,
+// so this copy and job's must change together.
+const msgTypeUpdate = "update"
+
+// updateMarker* mirror the literal prefixes internal/job/planning.go writes
+// into type="update" message bodies -- planreviewPendingMarker and
+// planreviewDeliveredMarker's "planreview v<N> pending"/"...delivered",
+// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix's
+// "validation errors pending/delivered run <id>[...]",
+// invalidOutputCommit's "response invalid run <id>\n<reason>", and
+// store.CountSealMismatches' "seal mismatch cohort <id>" -- so displayBody
+// can recognize them and render an owner-facing sentence instead of the raw
+// bookkeeping body (F012). console cannot import job's own unexported
+// literals -- there is no shared package for the two to depend on -- so
+// this copy and planning.go's originals must change together.
+const (
+	updateMarkerPlanreviewPrefix          = "planreview v"
+	updateMarkerPlanreviewPendingSuffix   = " pending"
+	updateMarkerPlanreviewDeliveredSuffix = " delivered"
+	updateMarkerValidationPendingPrefix   = "validation errors pending run "
+	updateMarkerValidationDeliveredPrefix = "validation errors delivered run "
+	updateMarkerResponseInvalidPrefix     = "response invalid run "
+	updateMarkerSealMismatchPrefix        = "seal mismatch cohort "
 )
 
 // draftMessageState mirrors store's own unexported draft-state literal
@@ -317,11 +459,14 @@ func questionStateLabel(state *string) string {
 // buildThreadRows turns store rows into the Thread view's rows (design
 // section 6.6): a question message becomes an interactive group dispatching
 // on its payload's Kind (Task 6), every other type a plain row. ticket
-// carries the merge kind's PR-link context, and plan the gate kind's
-// (buildThreadQuestion); ticket may be nil only when the caller has no
-// ticket at all (templates.Thread's own nil guard), never when rows is
-// non-empty. plan is nil when the ticket has no stored plan artifact yet.
-func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan) ([]templates.ThreadRow, error) {
+// carries the merge kind's PR-link context, and plan, scenarios, and
+// findings the gate kind's three context regions (buildThreadQuestion);
+// ticket may be nil only when the caller has no ticket at all
+// (templates.Thread's own nil guard), never when rows is non-empty. plan is
+// nil, and scenarios and findings are both nil, when the ticket carries
+// nothing yet for that region (views.go's loadPlan, loadScenarios,
+// loadFindings).
+func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
 	rows = visibleRows(rows)
 
 	// messageCounts holds, per question message id, how many other messages
@@ -338,7 +483,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
-		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan)
+		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings)
 		if err != nil {
 			return nil, err
 		}
@@ -354,15 +499,16 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 // buildThreadQuestion returns the detail a "question" message renders
 // instead of its plain Body, or nil for every other type. messageCount is
 // the question's own message (1) plus every reply, answer, followup, or
-// resolved row that names it as a parent (buildThreadRows). plan is the
-// gate kind's context (design section 6.9), set on q only when payload.Kind
-// is gate. An unparseable payload falls back to nil (renders as a plain
-// row) rather than failing the whole thread render, since the commit that
-// wrote it already validated it against the messages/question schema; a
-// markdown render failure, by contrast, is a real error (design section
-// 6.10: Render can fail), and is returned rather than silently dropping the
-// question's body.
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan) (*templates.ThreadQuestion, error) {
+// resolved row that names it as a parent (buildThreadRows). plan,
+// scenarios, and findings are the gate kind's three context regions (design
+// section 6.9, 7, D8), set on q only when payload.Kind is gate. An
+// unparseable payload falls back to nil (renders as a plain row) rather
+// than failing the whole thread render, since the commit that wrote it
+// already validated it against the messages/question schema; a markdown
+// render failure, by contrast, is a real error (design section 6.10: Render
+// can fail), and is returned rather than silently dropping the question's
+// body.
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -412,6 +558,8 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 	}
 	if payload.Kind == response.QuestionKindGate {
 		q.Plan = plan
+		q.Scenarios = scenarios
+		q.Findings = findings
 	}
 	return q, nil
 }
@@ -440,9 +588,66 @@ func displayBody(m *store.MessageRow) string {
 		return escalationLine(m)
 	case msgTypeAnswer:
 		return answerLine(m)
+	case msgTypeUpdate:
+		return updateLine(m)
 	default:
 		return m.Body
 	}
+}
+
+// updateLine recognizes the known planning-bookkeeping markers a type=
+// "update" message's Body carries (F012: the owner should never read
+// "planreview v3 pending" or a raw response.PathError line) and returns an
+// owner-facing sentence instead. A body that matches none of the known
+// updateMarker* prefixes is not a marker this view knows about, so it falls
+// through unchanged, the same defensive fallback stateLine, escalationLine,
+// and answerLine already use for a payload they cannot decode.
+func updateLine(m *store.MessageRow) string {
+	body := m.Body
+	switch {
+	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
+		return "Plan review found only minor findings. Planning resumes automatically to address them."
+	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
+		return "Planning resumed with the review findings."
+	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
+		return validationErrorsLine(body)
+	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
+		return "The agent received the check results."
+	case strings.HasPrefix(body, updateMarkerResponseInvalidPrefix):
+		return "The agent's last response could not be used. Zing retries once."
+	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
+		return "The scenario set changed before approval. Zing re-reads it on the next tick."
+	default:
+		return body
+	}
+}
+
+// validationErrorsLine renders a "validation errors pending run <id>"
+// body's first line as one owner-facing sentence, then one line per
+// response.PathError the run reported (formatReadyErrors,
+// internal/job/planning.go: each already its own Error() shape, "path:
+// msg"), rewritten as "Field <path>: <message>" by cutting on the first
+// ": " -- a PathError's message never contains that substring, since it is
+// generated from a small fixed set of English reasons (checkReady,
+// checkScenarioShape), not user- or model-supplied text.
+func validationErrorsLine(body string) string {
+	_, rest, hasErrors := strings.Cut(body, "\n")
+	lines := []string{"The plan did not pass its final checks. Zing is asking the agent to revise it."}
+	if !hasErrors {
+		return lines[0]
+	}
+	for line := range strings.SplitSeq(rest, "\n") {
+		if line == "" {
+			continue
+		}
+		path, msg, ok := strings.Cut(line, ": ")
+		if !ok {
+			lines = append(lines, line)
+			continue
+		}
+		lines = append(lines, "Field "+path+": "+msg)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // answerLine decodes a sent "answer" message's payload into the text its

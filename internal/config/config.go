@@ -130,6 +130,16 @@ var (
 // bearer token.
 const minPushTokenLen = 16
 
+// minBudgetMinutes and maxBudgetMinutes bound budget.agent_minutes_per_ticket
+// (design section 4.4, D5): 1 minute at the floor, 525600 (60*24*365, one
+// non-leap year) at the ceiling. The ceiling also keeps
+// time.Duration(minutes)*time.Minute (job.Deps.Budget) well clear of
+// int64 nanosecond overflow.
+const (
+	minBudgetMinutes = 1
+	maxBudgetMinutes = 525600
+)
+
 // Load reads and validates the zing.toml at path, in this exact order so the
 // first reported error is deterministic: mode repair, decode, unknown-key
 // check, missing-required check, value checks, then defaults. It requires at
@@ -369,9 +379,10 @@ func checkRequiredKeys(cfg Config, allowEmptyProjects bool) error {
 }
 
 // checkValues runs the fixed-order value checks. A field with a default
-// (floor, method, port, usage_hold_percent) is only checked when the key was
-// explicitly present, so an absent key defers to applyDefaults and an
-// explicit out-of-range value (including an explicit zero) is rejected here.
+// (floor, method, port, usage_hold_percent, agent_minutes_per_ticket) is
+// only checked when the key was explicitly present, so an absent key defers
+// to applyDefaults and an explicit out-of-range value (including an explicit
+// zero) is rejected here.
 func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("review", "floor") && !slices.Contains(validReviewFloors, cfg.Review.Floor) {
 		return fmt.Errorf("zing.toml: review.floor: must be one of %s", strings.Join(validReviewFloors, ", "))
@@ -397,8 +408,24 @@ func checkValues(md toml.MetaData, cfg Config) error {
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
 	}
+	if md.IsDefined("budget", "agent_minutes_per_ticket") &&
+		(cfg.Budget.AgentMinutesPerTicket < minBudgetMinutes || cfg.Budget.AgentMinutesPerTicket > maxBudgetMinutes) {
+		return fmt.Errorf("zing.toml: budget.agent_minutes_per_ticket: must be between %d and %d minutes", minBudgetMinutes, maxBudgetMinutes)
+	}
 	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
 		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)
+	}
+	// Project names must be unique: serve keys the tracker's repo map by name
+	// (cmd/zing's productionTracker), so two projects sharing a name would
+	// silently collide and send one project's intake and comments to the
+	// other's repository.
+	seenProjectNames := make(map[string]bool, len(cfg.Projects))
+	for i := range cfg.Projects {
+		name := cfg.Projects[i].Name
+		if seenProjectNames[name] {
+			return fmt.Errorf("zing.toml: duplicate project name %q: each project's name must be unique", name)
+		}
+		seenProjectNames[name] = true
 	}
 	return nil
 }

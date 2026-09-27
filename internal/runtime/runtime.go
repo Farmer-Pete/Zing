@@ -35,7 +35,13 @@ type RunRequest struct {
 	Env []string
 	// Timeout bounds the run.
 	Timeout time.Duration
-	// MaxTurns caps the turns in one run (default 20).
+	// MaxTurns caps the turns in one run (default 20). Claude does not read
+	// this field in Claude Code 2.1.274: that CLI has no --max-turns flag
+	// (verified against --help; the closest related flag, --max-budget-usd,
+	// is a dollar cap, not a turn cap), so the per-job timeout runJob
+	// already applies through the context deadline is the only bound on a
+	// Claude run. The field stays for a future CLI version, or a runtime,
+	// that does read it.
 	MaxTurns int
 	// SessionID resumes a prior run's session; empty starts a new one.
 	SessionID string
@@ -44,11 +50,35 @@ type RunRequest struct {
 	RunToken string
 }
 
-// RunResult is what a Runtime returns for one turn (design section 6.9).
+// RunResult is what a Runtime returns for one turn (design section 6.9,
+// 4.1). StderrLen and StderrSHA256 (the first 12 hex characters) are
+// populated on every path once the process has started; raw stderr itself
+// never appears here or anywhere else (design section 4.1, 10).
 type RunResult struct {
-	Response  response.Response
-	SessionID string
-	Log       string
-	AgentTime time.Duration
-	ExitCode  int
+	Response     response.Response
+	SessionID    string
+	Log          string
+	AgentTime    time.Duration
+	ExitCode     int
+	StderrLen    int64
+	StderrSHA256 string
+}
+
+// Seconds rounds d up to a whole second, minimum 1, so every caller that
+// reports agent time -- a Runtime's own logging and the job layer's
+// runJob -- shares one definition of "agent seconds" (design section 4.1,
+// 4.6): a run that took any time at all reports at least one second, and
+// a run of exactly N seconds reports N, not N+1.
+func Seconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	// Compute the quotient and remainder separately, rather than adding
+	// (time.Second - 1) up front, so a duration within one second of
+	// time.Duration's maximum cannot overflow and wrap to a bogus value.
+	secs := int(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return max(secs, 1)
 }

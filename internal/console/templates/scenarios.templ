@@ -1,0 +1,36 @@
+package templates
+
+// scenariosSection renders the gate's scenario cohort table (design section
+// 7, D8, Task 11): id, kind, given, when, then, one row per scenario in the
+// order internal/console/views.go's loadScenarios returns them (the store's
+// own insertion order, ScenariosForRun/AllScenarios's own "ORDER BY
+// artifacts.id"). Every field renders raw -- a human reads a scenario, not
+// another agent -- escaped by templ as usual. Renders nothing when
+// scenarios is empty, matching findingsSection's own "no empty table" rule:
+// a ticket with no cohort, or a cohort with none yet, shows no table at all.
+templ scenariosSection(scenarios []ScenarioRow) {
+	if len(scenarios) > 0 {
+		<table class="scenarios">
+			<thead>
+				<tr>
+					<th>ID</th>
+					<th>Kind</th>
+					<th>Given</th>
+					<th>When</th>
+					<th>Then</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range scenarios {
+					<tr>
+						<td>{ s.ID }</td>
+						<td>{ s.Kind }</td>
+						<td>{ s.Given }</td>
+						<td>{ s.When }</td>
+						<td>{ s.Then }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

@@ -116,17 +116,58 @@ func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.
 }
 
 // ExpireClaims clears the claim on every ticket whose claim_expires_at is at
-// or before now, and returns the ids it cleared. RETURNING makes the clear
-// and the id collection one statement, so no ticket clears between the scan
-// that finds it and the update that would otherwise re-select it.
+// or before now, and returns the ids it cleared. It runs in one transaction:
+// for each expiring ticket, reconcileReservedRunsTx (design D13, section 4.5)
+// terminalizes any run left reserved with no outcome -- a crash, or an
+// ErrCanceled shutdown that left no commit -- before that ticket's own claim
+// is cleared, so the reconcile and the clear land together. Sharing one
+// BeginTx across the read and every clear gives the same atomicity the prior
+// single RETURNING statement did (SetMaxOpenConns(1) means this Store's sole
+// connection is held for the whole transaction, so no other write can land
+// between the scan that finds an expiring ticket and the clear that follows
+// it).
 func (s *Store) ExpireClaims(ctx context.Context, now time.Time) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`UPDATE tickets SET claim_owner = NULL, claim_expires_at = NULL
-		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
-		 RETURNING id`,
-		formatTime(now))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("expire claims: begin tx: %w", err)
+	}
+	defer rollback(tx)
+
+	ids, err := expiringTicketIDsTx(ctx, tx, now)
 	if err != nil {
 		return nil, fmt.Errorf("expire claims: %w", err)
+	}
+
+	for _, id := range ids {
+		if err := reconcileReservedRunsTx(ctx, tx, id); err != nil {
+			return nil, fmt.Errorf("expire claims: reconcile ticket %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tickets SET claim_owner = NULL, claim_expires_at = NULL WHERE id = ?`, id); err != nil {
+			return nil, fmt.Errorf("expire claims: clear ticket %d: %w", id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("expire claims: commit tx: %w", err)
+	}
+
+	for _, id := range ids {
+		slog.Info("claim expired", "ticket_id", id)
+	}
+	return ids, nil
+}
+
+// expiringTicketIDsTx returns every ticket id whose claim is set and expires
+// at or before now, the set ExpireClaims reconciles and clears inside its
+// one transaction.
+func expiringTicketIDsTx(ctx context.Context, tx *sql.Tx, now time.Time) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM tickets
+		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+		formatTime(now))
+	if err != nil {
+		return nil, fmt.Errorf("select expiring: %w", err)
 	}
 	defer rows.Close()
 
@@ -134,15 +175,81 @@ func (s *Store) ExpireClaims(ctx context.Context, now time.Time) ([]int64, error
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("expire claims: %w", err)
+			return nil, fmt.Errorf("select expiring: %w", err)
 		}
 		ids = append(ids, id)
-		slog.Info("claim expired", "ticket_id", id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("expire claims: %w", err)
+		return nil, fmt.Errorf("select expiring: %w", err)
 	}
 	return ids, nil
+}
+
+// reservedRunTarget is one runs row reconcileReservedRunsTx is about to
+// terminalize: enough to log it (design section 9's "reserved run
+// reconciled" event), read before the update so the log can name each
+// affected run by id, session, and job.
+type reservedRunTarget struct {
+	runID, sessionID int64
+	job              string
+}
+
+// reservedRunTargetsTx returns every run with no outcome yet on any session
+// belonging to ticketID -- the exact set the UPDATE in
+// reconcileReservedRunsTx is about to terminalize.
+func reservedRunTargetsTx(ctx context.Context, tx *sql.Tx, ticketID int64) ([]reservedRunTarget, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT r.id, r.session_id, s.job FROM runs r
+		 JOIN sessions s ON s.id = r.session_id
+		 WHERE r.outcome IS NULL AND r.session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)`,
+		ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("select reserved runs for ticket %d: %w", ticketID, err)
+	}
+	defer rows.Close()
+
+	var out []reservedRunTarget
+	for rows.Next() {
+		var r reservedRunTarget
+		if err := rows.Scan(&r.runID, &r.sessionID, &r.job); err != nil {
+			return nil, fmt.Errorf("scan reserved run for ticket %d: %w", ticketID, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("select reserved runs for ticket %d: %w", ticketID, err)
+	}
+	return out, nil
+}
+
+// reconcileReservedRunsTx terminalizes every run left with a null outcome on
+// ticketID's sessions as outcome=error, exit_code=-1, agent_seconds floored
+// at 0 (design D13, section 4.5): the placeholder Reserve inserted under a
+// claim that expired before any handler commit landed, whether that is a
+// crash or an ErrCanceled shutdown that deliberately left the lease to
+// expire rather than releasing it. It runs inside tx, before ExpireClaims
+// clears ticketID's claim, so the reconcile and the claim clear share one
+// commit.
+func reconcileReservedRunsTx(ctx context.Context, tx *sql.Tx, ticketID int64) error {
+	targets, err := reservedRunTargetsTx(ctx, tx, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE runs SET outcome = 'error', exit_code = -1, agent_seconds = COALESCE(agent_seconds, 0)
+		 WHERE outcome IS NULL AND session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)`,
+		ticketID); err != nil {
+		return fmt.Errorf("reconcile reserved runs for ticket %d: %w", ticketID, err)
+	}
+
+	for _, r := range targets {
+		slog.Warn("reserved run reconciled", "ticket_id", ticketID, "session_id", r.sessionID, "run_id", r.runID, "job", r.job)
+	}
+	return nil
 }
 
 // SetDraining sets the "draining" setting flag.

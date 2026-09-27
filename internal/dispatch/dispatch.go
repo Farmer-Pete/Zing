@@ -15,6 +15,7 @@ import (
 	"zing/internal/bus"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 	"zing/internal/tracker"
@@ -39,6 +40,16 @@ const (
 // defaultCodeTimeout is the claim/run timeout a code-only state's handler
 // runs under (design section 6.8 step 6).
 const defaultCodeTimeout = 5 * time.Minute
+
+// The message type and author the seal-mismatch marker and every other
+// system-authored "update" message this file writes share (design D16,
+// section 4.5, 5.3). store.go's own msgTypeUpdate and authorSystem are
+// unexported, so this package names its own copies of the same two closed
+// values rather than reaching into store's internals.
+const (
+	msgTypeUpdate = "update"
+	authorSystem  = "system"
+)
 
 // claimGrace is the extra time a claim's expiry carries past the run
 // deadline: checkpoint grace, not run time (design section 6.8 step 7).
@@ -73,11 +84,17 @@ type Binding struct {
 	User string
 }
 
-// Config is the dispatcher's run-time tuning (design section 6.8).
+// Config is the dispatcher's run-time tuning (design section 6.8). Models,
+// Budget, and Floor (design section 4.4) are threaded straight into every
+// job.Deps runAndCommit builds; task 2 only threads them, nothing in this
+// package reads them yet.
 type Config struct {
-	Interval    time.Duration // Run's tick period
-	MaxParallel int           // the active-run guard (design section 6.8 step 4)
-	Owner       string        // this process's claim owner id, <hostname>-<pid>
+	Interval    time.Duration     // Run's tick period
+	MaxParallel int               // the active-run guard (design section 6.8 step 4)
+	Owner       string            // this process's claim owner id, <hostname>-<pid>
+	Models      map[string]string // alias -> exact model id (config.Models)
+	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
+	Floor       response.Severity // config.Review.Floor, parsed
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -88,7 +105,7 @@ type Dispatcher struct {
 	bus      *bus.Broker
 	machine  *machine.Machine
 	reg      map[string]job.Handler
-	rt       runtime.Runtime
+	rts      runtime.Set
 	bindings []Binding
 	cfg      Config
 	drainCh  chan struct{}
@@ -105,11 +122,13 @@ const deferredMechanics = "dependency-blocking of tickets with unmerged depends_
 // handler in reg (job.Validate), so a missing handler fails at startup,
 // never at a nil map read mid-tick, and returns a Dispatcher ready to tick.
 //
-// New's signature matches the plan (design section 6.8): rt is threaded
-// into job.Deps.Runtime on every handler call.
+// New's signature matches the plan (design section 6.8, 4.1 D2): rts is
+// threaded into job.Deps.Runtimes on every handler call, so a handler
+// resolves its job's runtime by the name machine.toml's job.runtime field
+// gives it.
 func New(
 	s *store.Store, tr tracker.Tracker, b *bus.Broker, m *machine.Machine,
-	reg map[string]job.Handler, bindings []Binding, cfg Config, rt runtime.Runtime,
+	reg map[string]job.Handler, bindings []Binding, cfg Config, rts runtime.Set,
 ) (*Dispatcher, error) {
 	if err := job.Validate(m, reg); err != nil {
 		return nil, fmt.Errorf("dispatch: %w", err)
@@ -117,7 +136,7 @@ func New(
 	slog.Info("deferred section 10 mechanics are explicit no-ops in this package",
 		"mechanics", deferredMechanics, "owner", "Package 7")
 	return &Dispatcher{
-		store: s, tracker: tr, bus: b, machine: m, reg: reg, rt: rt, bindings: bindings, cfg: cfg,
+		store: s, tracker: tr, bus: b, machine: m, reg: reg, rts: rts, bindings: bindings, cfg: cfg,
 		drainCh: make(chan struct{}, 1),
 	}, nil
 }
@@ -235,24 +254,42 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case <-d.drainCh:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return fmt.Errorf("dispatch: read flags: %w", err)
+				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
 			}
 			if draining {
 				return nil
 			}
 		case <-ticker.C:
 			if err := d.Tick(ctx); err != nil {
-				return err
+				return ctxErrOr(ctx, err)
 			}
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return fmt.Errorf("dispatch: read flags: %w", err)
+				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
 			}
 			if draining {
 				return nil
 			}
 		}
 	}
+}
+
+// ctxErrOr returns ctx.Err() in place of err whenever ctx has already been
+// canceled or has expired. A store call that straddles the moment ctx ends
+// races database/sql's own context-driven teardown (it cancels the
+// in-flight statement and, for a transaction, auto-rolls it back), so the
+// error that surfaces is whichever side of that race lost -- for example
+// "sql: transaction has already been committed or rolled back" or the
+// driver's own "interrupted" -- never context.DeadlineExceeded or
+// context.Canceled itself, even though ctx ending is what really caused the
+// failure. Run's contract is to end because ctx is done; once it is, that
+// is the reason to report, not an artifact of an operation ctx cut off
+// mid-flight.
+func ctxErrOr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
@@ -262,7 +299,12 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 	for _, b := range d.bindings {
 		tickets, err := d.tracker.Intake(ctx, b.TrackerProject, b.Rule)
 		if err != nil {
-			return fmt.Errorf("dispatch: intake %s: %w", b.TrackerProject, err)
+			// A single project's tracker going unreachable must not stop
+			// intake for every other project, nor fail the tick (PKG7-PLAN.md
+			// D6/section 9: "intake error (serve)"). Package 6 left this
+			// fatal; task 14 makes it resilient per-project instead.
+			slog.Warn("intake error", "project", b.TrackerProject, "err", err)
+			continue
 		}
 		for _, tk := range tickets {
 			_, ok, err := d.store.TicketByRef(ctx, b.StoreProjectID, tk.Ref)
@@ -324,23 +366,36 @@ func jobNameForState(state string) (string, bool) {
 // timeout, not the tick-start now (so time already spent on reconcile and
 // intake earlier in this same Tick never eats into the handler's own
 // budget) and not the later claim expiry, validate and apply its commit,
-// and resolve one of three outcomes (design section 6.8 step 7): a handler
-// error or an invalid commit releases the claim and leaves the ticket's
-// state for a later retry; a lost lease or a commit error fails the
-// dispatcher closed; a valid, applied commit publishes. expires is the
-// claim lease Claim was already called with (step 6), computed from a fresh
-// post-intake time.Now() taken there (design section "dispatch" fix 5), and
-// stays as-is here so it remains consistent with what was actually claimed.
-// Every post-handler store write below (the commit, the release, and the
-// fail-closed SetStopped) runs under a detached, bounded context
-// (postHandlerContext), not ctx or runCtx directly, so a cancelled handler
-// context cannot abort recording what the runtime already did (design
-// section "dispatch" fix 4).
+// and resolve one of five outcomes (design section 6.8 step 7, 4.5, D16):
+// runtime.ErrCanceled leaves the claim in place for ExpireClaims to
+// reconcile; job.ErrNoAction and a store.ErrSealMismatch commit each release
+// the claim and continue, never stopping the dispatcher; any other handler
+// error or invalid commit releases the claim and leaves the ticket's state
+// for a later retry; a lost lease or any other commit error fails the
+// dispatcher closed; a valid, applied commit runs its TrackerEffect, if any,
+// and publishes. expires is the claim lease Claim was already called with
+// (step 6), computed from a fresh post-intake time.Now() taken there (design
+// section "dispatch" fix 5), and stays as-is here so it remains consistent
+// with what was actually claimed. Every post-handler store write below (the
+// commit, the release, and the fail-closed SetStopped) runs under a
+// detached, bounded context (postHandlerContext), not ctx or runCtx
+// directly, so a cancelled handler context cannot abort recording what the
+// runtime already did (design section "dispatch" fix 4).
 func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, timeout time.Duration, expires time.Time) error {
 	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
 
-	deps := job.Deps{Store: d.store, Runtime: d.rt, Owner: d.cfg.Owner, Expires: expires}
+	deps := job.Deps{
+		Store: d.store, Runtimes: d.rts, Machine: d.machine,
+		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
+		Owner: d.cfg.Owner, Expires: expires,
+		// Reserve closes over this tick's own owner and expires (the same
+		// lease Claim above just took out), so a handler's runJob call never
+		// sees either directly (design D13, section 4.4, 4.6).
+		Reserve: func(reserveCtx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
+			return d.store.Reserve(reserveCtx, ticketID, d.cfg.Owner, expires, su, model)
+		},
+	}
 
 	handler, ok := d.reg[ticket.State]
 	if !ok {
@@ -359,6 +414,38 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		err = job.ValidateCommit(ticket, commit)
 	}
 	if err != nil {
+		// runtime.ErrCanceled (design D13, section 4.5, 6.8): the parent
+		// context was canceled (dispatcher shutdown), not a failure to
+		// escalate. The claim is left in place -- releasing it would clear
+		// claim_expires_at, and ExpireClaims reconciles only a lease that
+		// has actually expired, so a release here would orphan the run
+		// Reserve already wrote with a null outcome. Letting the lease
+		// expire is what lets reconcile mark it error instead.
+		if errors.Is(err, runtime.ErrCanceled) {
+			slog.Warn("run canceled by shutdown", "ticket_id", ticket.ID)
+			return nil
+		}
+		// job.ErrNoAction (design section 4.5, 5.1 step 8): the entry
+		// decision found nothing to do this tick. The claim is released the
+		// same way any other handler error's is, but never escalates to
+		// fail-closed even when the release itself finds the lease already
+		// gone: "no action" is not itself a runtime-desync risk.
+		if errors.Is(err, job.ErrNoAction) {
+			return d.releaseClaimNoStop(ctx, ticket.ID, expires, "claim released, no action")
+		}
+		// store.ErrClaimLost from a handler that never reached runJob's
+		// Reserve (design section 4.6 step 7, section 6.8): the lease this
+		// tick claimed was already gone before anything ran, so nothing was
+		// reserved and no run needs reconciling. This is the same kind of
+		// non-runtime-desync condition ErrNoAction is (job.ErrNoAction,
+		// above): log and move on, never fail closed. A post-Reserve lease
+		// loss (rt.Run already started or finished under a stale lease) is a
+		// different case entirely and still falls through to the generic
+		// releaseClaim below, which fails closed exactly as before.
+		if errors.Is(err, store.ErrClaimLost) {
+			slog.Warn("claim lost before reserve; nothing ran", "ticket_id", ticket.ID, "state", ticket.State)
+			return nil
+		}
 		slog.Error("handler error", "ticket_id", ticket.ID, "state", ticket.State, "err", err)
 		return d.releaseClaim(ctx, ticket.ID, expires)
 	}
@@ -366,6 +453,17 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	commitCtx, cancelCommit := postHandlerContext(ctx)
 	defer cancelCommit()
 	applied, err := d.store.CommitHandlerResult(commitCtx, commit)
+	if err != nil {
+		// store.ErrSealMismatch (design D16, section 4.5, 6.6 branch 0): a
+		// seal transaction mismatch is a TOCTOU race the gate's own pre-check
+		// re-runs next tick, bounded at two attempts by branch 0's own
+		// escalation. It releases the claim and writes a marker, but never
+		// stops the dispatcher.
+		var mismatch *store.SealMismatchError
+		if errors.Is(err, store.ErrSealMismatch) && errors.As(err, &mismatch) {
+			return d.releaseAfterSealMismatch(ctx, ticket.ID, commit, expires, mismatch)
+		}
+	}
 	if err != nil || !applied {
 		if err != nil {
 			slog.Error("commit failed", "ticket_id", ticket.ID, "err", err)
@@ -387,8 +485,77 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		return fmt.Errorf("%w: ticket %d: the lease was lost", ErrFailClosed, ticket.ID)
 	}
 
+	d.postCommitTrackerEffect(ctx, ticket, commit)
 	d.bus.Publish()
 	return nil
+}
+
+// releaseAfterSealMismatch is the D16 dispatcher rule (section 4.5, 6.6
+// branch 0): log the mismatch at error with the cohort run id the commit's
+// own Seal request named, write the "seal mismatch cohort <runID>" marker
+// (author system), and release the claim through the same no-op-commit path
+// releaseClaim uses, without ever calling SetStopped -- the gate's pre-check
+// simply re-runs on the ticket's next tick.
+func (d *Dispatcher) releaseAfterSealMismatch(
+	ctx context.Context, ticketID int64, commit store.HandlerCommit, expires time.Time, mismatch *store.SealMismatchError,
+) error {
+	var cohortRunID int64
+	if commit.Seal != nil {
+		cohortRunID = commit.Seal.RunID
+	}
+	slog.Error("seal invariant mismatch",
+		"ticket_id", ticketID, "cohort_run_id", cohortRunID,
+		"stage", mismatch.Stage, "expected", mismatch.Expected, "affected", mismatch.Affected)
+
+	marker := store.Message{
+		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("seal mismatch cohort %d", cohortRunID),
+	}
+	return d.releaseClaimNoStop(ctx, ticketID, expires, "claim released after seal mismatch", marker)
+}
+
+// postCommitTrackerEffect runs commit.TrackerEffect, if any, only after
+// CommitHandlerResult has already applied cleanly (design D12, section 4.5,
+// 6.8): it resolves the binding for ticket.ProjectID the same way intake
+// (above) resolves one for its pickup comment, builds the nothing_to_do
+// comment body, and posts it best-effort -- a failure only warns, since the
+// ticket's own state has already committed and must not be undone by a
+// tracker-side failure.
+func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.Ticket, commit store.HandlerCommit) {
+	if commit.TrackerEffect == nil {
+		return
+	}
+	e := commit.TrackerEffect
+
+	b, ok := d.bindingForProject(ticket.ProjectID)
+	if !ok {
+		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", "no binding for project")
+		return
+	}
+
+	body := tracker.NothingToDoComment(b.User, e.Notes)
+	// Unlike the store writes above (which detach with WithoutCancel so they
+	// still land after a cancel), this comment is best-effort and the commit
+	// has already succeeded, so it derives from ctx and is cancelled by a
+	// shutdown -- still bounded by postHandlerWriteTimeout, but never able to
+	// keep Run alive past the drain deadline on a blocked tracker.
+	commentCtx, cancel := context.WithTimeout(ctx, postHandlerWriteTimeout)
+	defer cancel()
+	if err := d.tracker.Comment(commentCtx, b.TrackerProject, e.Ref, body); err != nil {
+		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
+	}
+}
+
+// bindingForProject returns the Binding whose StoreProjectID matches
+// storeProjectID, the same lookup intake's pickup comment (above) already
+// makes implicitly by iterating d.bindings one binding at a time.
+func (d *Dispatcher) bindingForProject(storeProjectID int64) (Binding, bool) {
+	for _, b := range d.bindings {
+		if b.StoreProjectID == storeProjectID {
+			return b, true
+		}
+	}
+	return Binding{}, false
 }
 
 // releaseClaim clears ticket's claim with a fenced no-op commit: no state
@@ -429,4 +596,30 @@ func (d *Dispatcher) releaseClaim(ctx context.Context, ticketID int64, expires t
 		return fmt.Errorf("%w: ticket %d: release claim: %w", ErrFailClosed, ticketID, err)
 	}
 	return fmt.Errorf("%w: ticket %d: release claim: the lease was already lost", ErrFailClosed, ticketID)
+}
+
+// releaseClaimNoStop releases ticketID's claim with the same fenced no-op
+// commit releaseClaim uses (optionally carrying msgs, such as the
+// seal-mismatch marker), but never escalates to fail-closed: unlike an
+// ordinary handler error, job.ErrNoAction and a seal-transaction mismatch
+// are not themselves signs the runtime has moved ahead of what this process
+// believes, so a lease already gone (applied=false) or a write error only
+// warns, and the dispatcher keeps ticking (design section 4.5, D16).
+// successLog names the event to log at warn when the release actually
+// applies.
+func (d *Dispatcher) releaseClaimNoStop(ctx context.Context, ticketID int64, expires time.Time, successLog string, msgs ...store.Message) error {
+	noop := store.HandlerCommit{TicketID: ticketID, Owner: d.cfg.Owner, Expires: expires, Messages: msgs}
+	commitCtx, cancelCommit := postHandlerContext(ctx)
+	defer cancelCommit()
+	applied, err := d.store.CommitHandlerResult(commitCtx, noop)
+	switch {
+	case err != nil:
+		slog.Warn("claim release failed", "ticket_id", ticketID, "err", err)
+	case !applied:
+		slog.Warn("claim already lost", "ticket_id", ticketID)
+	default:
+		slog.Warn(successLog, "ticket_id", ticketID)
+		d.bus.Publish()
+	}
+	return nil
 }
