@@ -72,7 +72,7 @@ func testMachine(t *testing.T) *machine.Machine {
 // wrote and changed.
 func newTestLogHandler(t *testing.T) *console.Handler {
 	t.Helper()
-	return console.NewHandler(io.Discard, new(slog.LevelVar))
+	return console.NewHandler(io.Discard, new(slog.LevelVar), nil)
 }
 
 // testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, and

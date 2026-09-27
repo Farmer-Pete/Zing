@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"zing/internal/bus"
+	"zing/internal/console"
 )
 
 // streamURL builds a GET /stream request url sending view, open, and
@@ -43,18 +46,20 @@ func openStream(t *testing.T, base, view string, open, project int64) (*http.Res
 	return resp, bufio.NewReader(resp.Body), cancel
 }
 
-// readInitialFrames reads the three frames one /stream connect always sends
-// (design section 6.3: "always patch three regions by id"), in the fixed
-// order patchRegions writes them: #nav, then #main, then #rail.
-func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail string) {
+// readInitialFrames reads the four frames one /stream connect always sends
+// (design section 6.3: "always patch ... regions by id"; design section 6a,
+// D8: "#alerts ... patched on every frame"), in the fixed order
+// patchRegions writes them: #nav, then #main, then #rail, then #alerts.
+func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail, alerts string) {
 	t.Helper()
 	nav = readFrame(t, r)
 	main = readFrame(t, r)
 	rail = readFrame(t, r)
-	return nav, main, rail
+	alerts = readFrame(t, r)
+	return nav, main, rail, alerts
 }
 
-func TestStreamPatchesAllThreeRegionsOnConnect(t *testing.T) {
+func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID)
@@ -65,10 +70,11 @@ func TestStreamPatchesAllThreeRegionsOnConnect(t *testing.T) {
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
-	nav, main, rail := readInitialFrames(t, r)
+	nav, main, rail, alerts := readInitialFrames(t, r)
 	assertExactSSEFraming(t, nav)
 	assertExactSSEFraming(t, main)
 	assertExactSSEFraming(t, rail)
+	assertExactSSEFraming(t, alerts)
 
 	if !strings.Contains(nav, `id="nav"`) {
 		t.Errorf("initial nav frame missing #nav; got:\n%s", nav)
@@ -81,6 +87,9 @@ func TestStreamPatchesAllThreeRegionsOnConnect(t *testing.T) {
 	}
 	if !strings.Contains(rail, `id="rail"`) {
 		t.Errorf("initial rail frame missing #rail; got:\n%s", rail)
+	}
+	if !strings.Contains(alerts, `id="alerts"`) {
+		t.Errorf("initial alerts frame missing #alerts; got:\n%s", alerts)
 	}
 }
 
@@ -95,10 +104,11 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
-	nav1, main1, rail1 := readInitialFrames(t, r)
+	nav1, main1, rail1, alerts1 := readInitialFrames(t, r)
 	assertExactSSEFraming(t, nav1)
 	assertExactSSEFraming(t, main1)
 	assertExactSSEFraming(t, rail1)
+	assertExactSSEFraming(t, alerts1)
 	if !strings.Contains(main1, "Ticket one") {
 		t.Errorf("initial main frame (view=recent) missing the seeded ticket; got:\n%s", main1)
 	}
@@ -106,10 +116,11 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 	seedTicket(t, s, "fake#2", "Ticket two")
 	b.Publish()
 
-	nav2, main2, rail2 := readInitialFrames(t, r)
+	nav2, main2, rail2, alerts2 := readInitialFrames(t, r)
 	assertExactSSEFraming(t, nav2)
 	assertExactSSEFraming(t, main2)
 	assertExactSSEFraming(t, rail2)
+	assertExactSSEFraming(t, alerts2)
 	if !strings.Contains(main2, "Ticket two") {
 		t.Errorf("post-publish main frame missing the newly seeded ticket; got:\n%s", main2)
 	}
@@ -131,12 +142,12 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer threadCancel()
 	defer func() { _ = threadResp.Body.Close() }()
-	_, _, threadRail := readInitialFrames(t, threadR)
+	_, _, threadRail, _ := readInitialFrames(t, threadR)
 
 	inboxResp, inboxR, inboxCancel := openStream(t, srv.URL, "inbox", 0, 0)
 	defer inboxCancel()
 	defer func() { _ = inboxResp.Body.Close() }()
-	_, _, inboxRail := readInitialFrames(t, inboxR)
+	_, _, inboxRail, _ := readInitialFrames(t, inboxR)
 
 	if strings.Contains(threadRail, `<aside id="rail"></aside>`) {
 		t.Errorf("view=thread rail frame is still the empty placeholder; got:\n%s", threadRail)
@@ -227,18 +238,20 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
 
 	resp1, r1, cancel1 := openStream(t, srv.URL, "inbox", 0, 0)
-	nav1, main1, rail1 := readInitialFrames(t, r1)
+	nav1, main1, rail1, alerts1 := readInitialFrames(t, r1)
 	assertExactSSEFraming(t, nav1)
 	assertExactSSEFraming(t, main1)
 	assertExactSSEFraming(t, rail1)
+	assertExactSSEFraming(t, alerts1)
 
 	resp2, r2, cancel2 := openStream(t, srv.URL, "recent", 0, 0)
 	defer cancel2()
 	defer func() { _ = resp2.Body.Close() }()
-	nav2, main2, rail2 := readInitialFrames(t, r2)
+	nav2, main2, rail2, alerts2 := readInitialFrames(t, r2)
 	assertExactSSEFraming(t, nav2)
 	assertExactSSEFraming(t, main2)
 	assertExactSSEFraming(t, rail2)
+	assertExactSSEFraming(t, alerts2)
 
 	// The count with both streams live and confirmed (each has delivered
 	// its initial frames) is the reference point for the cancellation
@@ -262,10 +275,11 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 	// The second stream is the one live subscriber left: a publish must
 	// still reach it promptly, framed exactly like any other patch set.
 	b.Publish()
-	nav3, main3, rail3 := readInitialFrames(t, r2)
+	nav3, main3, rail3, alerts3 := readInitialFrames(t, r2)
 	assertExactSSEFraming(t, nav3)
 	assertExactSSEFraming(t, main3)
 	assertExactSSEFraming(t, rail3)
+	assertExactSSEFraming(t, alerts3)
 }
 
 func TestStreamRejectsMalformedSignalsWith400(t *testing.T) {
@@ -281,4 +295,105 @@ func TestStreamRejectsMalformedSignalsWith400(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("GET /stream with malformed signals: status = %d, want 400", resp.StatusCode)
 	}
+}
+
+// noCascadeWait bounds how long TestStreamAlertsPatchesOnceOnAWarningNoCascade
+// waits to prove absence, not presence: a real cascade (onWarn firing again
+// from inside the very patch it caused) would re-publish synchronously, in
+// the same call stack that already delivered the expected patch set, so it
+// would arrive within milliseconds, not merely be slow. This bound is short
+// on purpose, to keep the test fast; it would only mask a cascade that
+// somehow took longer than this to occur, which the mechanism here (a
+// synchronous bus.Publish inside Handle) does not produce.
+const noCascadeWait = 300 * time.Millisecond
+
+// newTestLogHandlerWithBus builds a console.Handler wired the same way
+// cmd/zing's installLogHandler wires the real one (design section 6a):
+// onWarn is b.Publish, so a WARN-or-above record wakes every open /stream
+// subscriber through the same bus the console itself publishes store
+// changes on.
+func newTestLogHandlerWithBus(t *testing.T, b *bus.Broker) *console.Handler {
+	t.Helper()
+	return console.NewHandler(io.Discard, new(slog.LevelVar), b.Publish)
+}
+
+// expectNoMoreFrames fails the test if another SSE frame arrives on r
+// within wait. It reads in its own goroutine, exactly like readFrame,
+// skipping the same stray leading blank separator line readFrame's own
+// doc comment explains (datastar-go's sse.go writes a double newline
+// between events, so one blank line is always left over from the prior
+// frame and must not itself be mistaken for a new one). A genuine absence
+// just lets that goroutine block until the test's deferred cancel tears
+// the connection down.
+func expectNoMoreFrames(t *testing.T, r *bufio.Reader, wait time.Duration) {
+	t.Helper()
+	ch := make(chan string, 1)
+	go func() {
+		var sb strings.Builder
+		started := false
+		for {
+			line, err := r.ReadString('\n')
+			if !started {
+				if line == "\n" && err == nil {
+					continue // the stray separator blank line before any real frame
+				}
+				started = true
+			}
+			sb.WriteString(line)
+			if err != nil {
+				return
+			}
+			if line == "\n" {
+				ch <- sb.String()
+				return
+			}
+		}
+	}()
+	select {
+	case frame := <-ch:
+		t.Errorf("unexpected extra SSE frame (a cascade): %q", frame)
+	case <-time.After(wait):
+	}
+}
+
+// TestStreamAlertsPatchesOnceOnAWarningNoCascade is the plan's own
+// no-cascade test (design section 6a, 8, 14: "a single warning produces one
+// stream frame, not a cascade"): logging one WARN wakes the one open
+// /stream subscriber through onWarn -> bus.Publish, the very next patch set
+// carries that warning in #alerts, and nothing further arrives afterward.
+// A cascade would mean the alerts render itself logged at warn (it does
+// not) or a patch failure's own slog.Warn re-triggered the wake loop on a
+// healthy connection (it should not, since every patch here succeeds).
+func TestStreamAlertsPatchesOnceOnAWarningNoCascade(t *testing.T) {
+	s := newConsoleTestStore(t)
+	b := bus.New()
+	log := newTestLogHandlerWithBus(t, b)
+
+	srv := newTestServer(t, s, b, nil, log)
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, _, _, alerts1 := readInitialFrames(t, r)
+	assertExactSSEFraming(t, alerts1)
+	if strings.Contains(alerts1, "a live warning reaches the alerts view") {
+		t.Fatalf("initial alerts frame already carries the warning; got:\n%s", alerts1)
+	}
+
+	slog.New(log).Warn("a live warning reaches the alerts view")
+
+	nav2, main2, rail2, alerts2 := readInitialFrames(t, r)
+	assertExactSSEFraming(t, nav2)
+	assertExactSSEFraming(t, main2)
+	assertExactSSEFraming(t, rail2)
+	assertExactSSEFraming(t, alerts2)
+	if !strings.Contains(alerts2, "a live warning reaches the alerts view") {
+		t.Errorf("post-warning alerts frame missing the warning; got:\n%s", alerts2)
+	}
+	if !strings.Contains(alerts2, "WARN") {
+		t.Errorf("post-warning alerts frame missing its level; got:\n%s", alerts2)
+	}
+
+	expectNoMoreFrames(t, r, noCascadeWait)
 }

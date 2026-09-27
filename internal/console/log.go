@@ -49,6 +49,16 @@ type Handler struct {
 	ring     *logRing
 	debug    *debugSet
 
+	// onWarn is called, synchronously, once per record at slog.LevelWarn or
+	// above, after the ring has captured it (design section 6a). It is set
+	// only at construction, through NewHandler's parameter, never by a
+	// post-construction setter: a setter would race with a concurrent
+	// Handle call, and WithAttrs/WithGroup copy the struct by value, so a
+	// setter applied after a child was already derived would leave that
+	// child holding a stale callback. nil means no-op. cmd/zing passes
+	// bus.Publish, so a fresh warning wakes every open console stream.
+	onWarn func()
+
 	// attrs is this handler node's own flat copy of every attribute
 	// accumulated through WithAttrs, used only to resolve ticket_id/run_id/
 	// task_n (resolveIDs below). It is deliberately not group-namespaced:
@@ -66,13 +76,16 @@ var _ slog.Handler = (*Handler)(nil)
 // levelVar (design section 6.12: "It holds a *slog.LevelVar seeded from
 // settings.log_level"; seeding it is the caller's job, since that needs a
 // store read this package-level constructor does not take). levelVar must
-// not be nil.
-func NewHandler(w io.Writer, levelVar *slog.LevelVar) *Handler {
+// not be nil. onWarn, when non-nil, is called once per record at
+// slog.LevelWarn or above (design section 6a); pass nil for no-op, which
+// every caller that does not wire the console's live alerts view does.
+func NewHandler(w io.Writer, levelVar *slog.LevelVar, onWarn func()) *Handler {
 	return &Handler{
 		levelVar: levelVar,
 		sink:     slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}),
 		ring:     newLogRing(RingCapacity),
 		debug:    newDebugSet(),
+		onWarn:   onWarn,
 	}
 }
 
@@ -86,29 +99,46 @@ func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
 }
 
 // Handle resolves ticket_id (from the record and from WithAttrs/WithGroup-
-// accumulated attrs), emits the record to the sink and the ring when its
-// level clears levelVar or its ticket_id is in the debug set, and otherwise
-// drops it (design section 6.12).
+// accumulated attrs) and then decides, independently, what each of the
+// sink, the ring, and onWarn see (design section 6a, reconciling a real
+// bug: the ring used to share the sink's level-or-debug gate, so at
+// log_level=error a WARN would never reach the ring or the alerts view
+// that reads it).
+//
+//   - pass, the sink's own gate, unchanged: level clears levelVar, or the
+//     record's ticket_id is in the per-ticket debug set.
+//   - the text sink is written only when pass.
+//   - the ring always captures a WARN-or-above record, regardless of pass,
+//     in addition to every record that already passes.
+//   - onWarn fires once per WARN-or-above record, regardless of pass, after
+//     the ring has captured it.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	ticketID, runID, taskN := h.resolveIDs(r)
 
 	debugged := ticketID != nil && h.debug.has(*ticketID)
-	if r.Level < h.levelVar.Level() && !debugged {
-		return nil
+	pass := r.Level >= h.levelVar.Level() || debugged
+	warn := r.Level >= slog.LevelWarn
+
+	if pass {
+		if err := h.sink.Handle(ctx, r); err != nil {
+			return fmt.Errorf("console: log handler: forward to sink: %w", err)
+		}
 	}
 
-	if err := h.sink.Handle(ctx, r); err != nil {
-		return fmt.Errorf("console: log handler: forward to sink: %w", err)
+	if pass || warn {
+		h.ring.add(LogEntry{
+			Time:     r.Time,
+			Level:    r.Level,
+			Message:  r.Message,
+			TicketID: ticketID,
+			RunID:    runID,
+			TaskN:    taskN,
+		})
 	}
 
-	h.ring.add(LogEntry{
-		Time:     r.Time,
-		Level:    r.Level,
-		Message:  r.Message,
-		TicketID: ticketID,
-		RunID:    runID,
-		TaskN:    taskN,
-	})
+	if warn && h.onWarn != nil {
+		h.onWarn()
+	}
 	return nil
 }
 
@@ -178,6 +208,14 @@ func (h *Handler) ToggleDebug(ticketID int64) (on bool) {
 // retain or mutate it freely.
 func (h *Handler) Tail(runID int64) []LogEntry {
 	return h.ring.byRunID(runID)
+}
+
+// Warnings returns the ring's slog.LevelWarn-and-above entries, newest
+// first, capped at limit (design section 6a: the console alerts view's own
+// read). The returned slice is a fresh copy, never the guarded slice
+// itself; the caller may retain or mutate it freely.
+func (h *Handler) Warnings(limit int) []LogEntry {
+	return h.ring.warnings(limit)
 }
 
 // resolveIDs finds ticket_id, run_id, and task_n by searching, for each
@@ -293,6 +331,25 @@ func (r *logRing) byRunID(runID int64) []LogEntry {
 	for _, e := range r.entries {
 		if e.RunID != nil && *e.RunID == runID {
 			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// warnings returns the slog.LevelWarn-and-above entries, newest first,
+// capped at limit, as a fresh copy (design section 6a). A non-positive
+// limit returns an empty, non-nil slice rather than panicking make with a
+// negative capacity.
+func (r *logRing) warnings(limit int) []LogEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		return []LogEntry{}
+	}
+	out := make([]LogEntry, 0, limit)
+	for i := len(r.entries) - 1; i >= 0 && len(out) < limit; i-- {
+		if r.entries[i].Level >= slog.LevelWarn {
+			out = append(out, r.entries[i])
 		}
 	}
 	return out

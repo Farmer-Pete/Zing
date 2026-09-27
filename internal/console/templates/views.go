@@ -166,6 +166,19 @@ type LogRail struct {
 	Lines []LogLine
 }
 
+// AlertLine is one row the #alerts region renders (design section 6a, D8):
+// one console.LogEntry from the ring buffer's WARN-and-above slice,
+// pre-formatted by console.buildAlertLines (views.go) so this package
+// never imports log/slog of its own, matching LogLine's own separation.
+// TicketID is meaningful only when HasTicket is true, the same shape
+// LogEntry's own *int64 TicketID collapses to once console has decided
+// there is one to show.
+type AlertLine struct {
+	Time, Level, Message string
+	TicketID             int64
+	HasTicket            bool
+}
+
 // RailModel is the #rail region's full content (design section 6.11), built
 // by console.buildRailModel from the open ticket's store reads plus
 // machine.States.Order. Rail(nil) renders the same empty placeholder every

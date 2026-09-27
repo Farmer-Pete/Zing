@@ -38,6 +38,50 @@ const (
 // belt and suspenders, not the only guard.
 const feedLimit = 200
 
+// alertsLimit caps the #alerts region (design section 6a, D8): "Warnings
+// (alertsLimit = 20)". The ring itself (RingCapacity, log.go) remembers far
+// more; the alerts strip is a live glance at the newest ones, not a full
+// history -- the Log rail (rail.go's buildLogRail), filtered to one
+// ticket's run_ids, is where the fuller history lives.
+const alertsLimit = 20
+
+// alertLineTimeFormat is the alerts region's per-line clock time (design
+// section 6a: "the time (15:04:05)"), distinct from the Log rail's own
+// millisecond-precision logLineTimeFormat (rail.go): an operator glancing
+// at a live warning strip needs the second it happened, not sub-second
+// precision.
+const alertLineTimeFormat = "15:04:05"
+
+// alertsComponent builds the #alerts region (design section 6a, D8): every
+// WARN-and-above line the log Handler's ring currently holds, newest first.
+// Unlike #main and #rail, it takes no navigation signals: it renders the
+// same content on every frame regardless of which view or ticket is open,
+// so patchRegions (stream.go) can call it without sig.
+func (c *console) alertsComponent() templ.Component {
+	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)))
+}
+
+// buildAlertLines turns the handler's ring entries into the #alerts
+// region's view model: a compact clock time, the level's own String, the
+// message verbatim (LogEntry never holds a body; see log.go's FencedAttr
+// discipline), and the ticket id when the entry carries one.
+func buildAlertLines(entries []LogEntry) []templates.AlertLine {
+	lines := make([]templates.AlertLine, 0, len(entries))
+	for _, e := range entries {
+		line := templates.AlertLine{
+			Time:    e.Time.Format(alertLineTimeFormat),
+			Level:   e.Level.String(),
+			Message: e.Message,
+		}
+		if e.TicketID != nil {
+			line.TicketID = *e.TicketID
+			line.HasTicket = true
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 // navComponent builds the #nav region: every project, and the per-thread
 // blocking/unread badge list built from store.InboxItems, the same
 // blocking-or-unread predicate section 6.8 defines (design section 6.3).

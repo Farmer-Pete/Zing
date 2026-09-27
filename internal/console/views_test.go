@@ -26,7 +26,7 @@ func mainFrame(t *testing.T, base, view string, open, project int64) string {
 	resp, r, cancel := openStream(t, base, view, open, project)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, main, _ := readInitialFrames(t, r)
+	_, main, _, _ := readInitialFrames(t, r)
 	return main
 }
 

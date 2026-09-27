@@ -127,7 +127,14 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
-	logHandler, err := installLogHandler(ctx, st)
+	// Built before the log handler (design section 6a), so its Publish
+	// method can be wired in as onWarn: a fresh WARN-or-above record then
+	// wakes every open console stream, the same wake-up path a store change
+	// already uses, so the alerts view (internal/console/log.go's Warnings,
+	// patchRegions' #alerts patch) needs no signal of its own.
+	b := bus.New()
+
+	logHandler, err := installLogHandler(ctx, st, b)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -181,8 +188,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		_ = st.Close()
 		return err
 	}
-
-	b := bus.New()
 
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
@@ -478,9 +483,13 @@ func drainAndShutdown(
 // always runs them first, so this is defensive, not an expected path)
 // defaults to info and is logged once, rather than failing serve over a bad
 // setting.
-func installLogHandler(ctx context.Context, st *store.Store) (*console.Handler, error) {
+//
+// b.Publish is wired in as onWarn (design section 6a): a fresh WARN-or-above
+// record wakes every open console /stream so the #alerts region patches
+// live, the same bus every store-changing handler already publishes to.
+func installLogHandler(ctx context.Context, st *store.Store, b *bus.Broker) (*console.Handler, error) {
 	lv := new(slog.LevelVar)
-	h := console.NewHandler(os.Stderr, lv)
+	h := console.NewHandler(os.Stderr, lv, b.Publish)
 	slog.SetDefault(slog.New(h))
 
 	stored, ok, err := st.GetSetting(ctx, "log_level")

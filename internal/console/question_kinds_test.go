@@ -64,7 +64,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
-	_, main, _ := readInitialFrames(t, r)
+	_, main, _, _ := readInitialFrames(t, r)
 	assertExactSSEFraming(t, main)
 
 	groups := splitQuestionGroups(t, main)

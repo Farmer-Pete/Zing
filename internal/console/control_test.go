@@ -26,7 +26,7 @@ func TestLogLevel_ChangesLiveAndWritesSetting(t *testing.T) {
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
-	log := console.NewHandler(&bytes.Buffer{}, lv)
+	log := console.NewHandler(&bytes.Buffer{}, lv, nil)
 	srv, _ := newMutationTestServer(t, s, bus.New(), log)
 
 	resp := doRequest(t, mutationRequest(t, srv, "/loglevel", `{"level":"debug"}`))
@@ -55,7 +55,7 @@ func TestLogLevel_RejectsAnUnknownLevel(t *testing.T) {
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
-	log := console.NewHandler(&bytes.Buffer{}, lv)
+	log := console.NewHandler(&bytes.Buffer{}, lv, nil)
 	srv, _ := newMutationTestServer(t, s, bus.New(), log)
 
 	resp := doRequest(t, mutationRequest(t, srv, "/loglevel", `{"level":"trace"}`))
@@ -92,7 +92,7 @@ func TestLogLevel_ConcurrentRequestsStayConsistent(t *testing.T) {
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
-	log := console.NewHandler(&bytes.Buffer{}, lv)
+	log := console.NewHandler(&bytes.Buffer{}, lv, nil)
 	srv, _ := newMutationTestServer(t, s, bus.New(), log)
 
 	levels := []string{"debug", "info", "warn", "error"}
@@ -149,7 +149,7 @@ func TestDebug_TogglesPerTicketDebugSet(t *testing.T) {
 	buf := &bytes.Buffer{}
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo) // above debug, so an undebugged ticket's debug line is gated out
-	log := console.NewHandler(buf, lv)
+	log := console.NewHandler(buf, lv, nil)
 	srv, _ := newMutationTestServer(t, s, bus.New(), log)
 	logger := slog.New(log)
 
@@ -219,7 +219,7 @@ func TestLogTail_FiltersByOpenTicketRunIDs(t *testing.T) {
 
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
-	log := console.NewHandler(&bytes.Buffer{}, lv)
+	log := console.NewHandler(&bytes.Buffer{}, lv, nil)
 	logger := slog.New(log)
 	logger.Info("line belonging to ticket A", "run_id", runsA[0].ID)
 	logger.Info("line belonging to ticket B", "run_id", runsB[0].ID)
@@ -229,7 +229,7 @@ func TestLogTail_FiltersByOpenTicketRunIDs(t *testing.T) {
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketA, 0)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, _, rail := readInitialFrames(t, r)
+	_, _, rail, _ := readInitialFrames(t, r)
 
 	if !strings.Contains(rail, "line belonging to ticket A") {
 		t.Errorf("rail missing ticket A's own log line; got:\n%s", rail)
@@ -247,7 +247,7 @@ func TestFencedAttrThroughTheWiredHandler(t *testing.T) {
 	buf := &bytes.Buffer{}
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelDebug)
-	log := console.NewHandler(buf, lv)
+	log := console.NewHandler(buf, lv, nil)
 
 	const secret = "sk-super-secret-token-do-not-log"
 	slog.New(log).Debug("body received", console.FencedAttr("body", secret))

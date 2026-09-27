@@ -184,7 +184,7 @@ func selftestSeedDemo(ctx context.Context) error {
 		return err
 	}
 
-	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar))
+	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar), nil)
 	srv, err := newSelftestConsoleServer(ctx, st, bus.New(), nil, logHandler)
 	if err != nil {
 		return fmt.Errorf("start console server: %w", err)
@@ -330,7 +330,7 @@ func selftestResumeE2E(ctx context.Context) error {
 	// suite never exercises /loglevel or /debug, so the Task 5/10 log
 	// handler console.New now requires is a throwaway one over a discarded
 	// sink, not the process's installed default (run's own, serve.go).
-	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar))
+	logHandler := console.NewHandler(io.Discard, new(slog.LevelVar), nil)
 	srv, err := newSelftestConsoleServer(ctx, st, b, m, logHandler)
 	if err != nil {
 		return fmt.Errorf("start console server: %w", err)

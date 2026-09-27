@@ -1,11 +1,14 @@
 package templates
 
-// Shell renders the "/" page (design section 6.3, 7.1): the palette, the
-// three regions (#nav, #main, #rail, each rendered once by the caller for
-// the shell's default signals) and the #stream-ctl bridge that hands
-// navigation over to GET /stream. nav, main, and rail are the same
-// templ.Component values GET /stream itself patches with on every frame, so
-// the very first paint and the live stream render through one code path.
+// Shell renders the "/" page (design section 6.3, 7.1, 6a): the palette,
+// the four regions (#alerts, #nav, #main, #rail, each rendered once by the
+// caller for the shell's default signals) and the #stream-ctl bridge that
+// hands navigation over to GET /stream. nav, main, rail, and alerts are the
+// same templ.Component values GET /stream itself patches with on every
+// frame, so the very first paint and the live stream render through one
+// code path. #alerts sits above the .layout grid, not inside it: it is a
+// live warning strip across the whole page, not one of the three
+// navigation columns.
 //
 // The body's data-signals declares the three navigation signals with their
 // defaults (design section 6.3): the first /stream request this fires
@@ -23,7 +26,7 @@ package templates
 // ES-module entry point Task 1 first vendored and Task 5 replaced. Loading
 // it here, once, is the only mermaid script on the page: render.go's
 // goldmark-diagram wiring never emits a second one (design section 6.10).
-templ Shell(nav, main, rail templ.Component) {
+templ Shell(nav, main, rail, alerts templ.Component) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -34,6 +37,7 @@ templ Shell(nav, main, rail templ.Component) {
 			<script src="/static/mermaid.js"></script>
 		</head>
 		<body data-signals="{view: 'inbox', open: 0, project: 0}">
+			@alerts
 			<div class="layout">
 				@nav
 				@main
@@ -84,6 +88,28 @@ templ palette() {
 			grid-template-columns: 18rem 1fr 18rem;
 			min-height: 100vh;
 		}
+		/* #alerts (design section 6a, D8): a live strip above .layout, empty
+		   (and so invisible, no border/padding to show) when there are no
+		   WARN-or-above lines. */
+		#alerts:empty { display: none; }
+		.alert-lines {
+			list-style: none;
+			margin: 0;
+			padding: 0.5rem 1rem;
+			border-bottom: 1px solid var(--zing-border);
+			background: var(--zing-surface);
+		}
+		.alert-line {
+			display: flex;
+			align-items: baseline;
+			gap: 0.5rem;
+			padding: 0.125rem 0;
+			font-size: 0.8rem;
+		}
+		.alert-time, .alert-ticket { color: var(--zing-text-dim); }
+		.alert-level { text-transform: uppercase; font-size: 0.7rem; }
+		.alert-level-WARN { color: var(--zing-warn); }
+		.alert-level-ERROR { color: var(--zing-danger); }
 		#nav {
 			border-right: 1px solid var(--zing-border);
 			padding: 1rem;
