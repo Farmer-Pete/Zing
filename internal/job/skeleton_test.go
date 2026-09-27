@@ -32,6 +32,7 @@ const (
 
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
+	testWaitingGate      = "gate"
 	testAuthorZing       = "zing"
 	testRuntimeClaude    = "claude"
 	testRuntimeFake      = "fake"
@@ -363,8 +364,10 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	if stateMsgs != wantStateMsgs {
 		t.Errorf("state messages = %d, want %d (one per transition)", stateMsgs, wantStateMsgs)
 	}
-	if questionMsgs != 1 {
-		t.Errorf("question messages = %d, want 1 (the one fixture question)", questionMsgs)
+	// The fixture Q1 plus the gate (design section 6.6, task 7c).
+	const wantQuestionMsgs = 2
+	if questionMsgs != wantQuestionMsgs {
+		t.Errorf("question messages = %d, want %d", questionMsgs, wantQuestionMsgs)
 	}
 }
 
@@ -530,9 +533,9 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 // advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
 // handler-call loop: classify (kind unset, stays planning), the first turn
 // (posts questions, waits), the resume (stores the ready cohort, stays
-// planning, task 7b removed its shortcut), and the review tick (clean,
-// task 7b's own temporary shortcut to building) is four calls; the headroom
-// catches a stuck handler instead of hanging the test.
+// planning), the review tick (clean, posts the gate, task 7c), and the
+// owner's approve (seals the cohort and moves to building) is five calls;
+// the headroom catches a stuck handler instead of hanging the test.
 const advancePlanningMaxCalls = 6
 
 // advancePlanningWithAnAnswer drives the real planning handler through as
@@ -541,11 +544,12 @@ const advancePlanningMaxCalls = 6
 // transition, so this loops the handler -- sharing one runtime.Runtime
 // throughout, since a resume (and, once the cohort is stored, the review
 // tick) must reuse the session an earlier call minted -- until either the
-// ticket leaves planning or it waits on "questions", in which case it
-// answers the batch through store.AnswerQuestion exactly as the console's
-// POST /answer would, and keeps looping. rt is the caller's own runtime, not
-// a fresh one this helper mints, so a caller that already drove classify or
-// the first turn against a particular runtime.Fake can keep using it here.
+// ticket leaves planning, waits on "questions" (answered through
+// store.AnswerQuestion exactly as the console's POST /answer would), or
+// waits on "gate" (approved the same way, design section 6.6, task 7c), and
+// keeps looping either way. rt is the caller's own runtime, not a fresh one
+// this helper mints, so a caller that already drove classify or the first
+// turn against a particular runtime.Fake can keep using it here.
 func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
 	reg := job.Registry()
@@ -567,11 +571,38 @@ func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, rt runtime.Runtim
 			answerFixtureQuestion(t, s, ticketID)
 			continue
 		}
+		if after.WaitingOn != nil && *after.WaitingOn == testWaitingGate {
+			answerGateApprove(t, s, ticketID)
+			continue
+		}
 		if after.WaitingOn != nil {
-			t.Fatalf("advancePlanningWithAnAnswer: ticket waiting_on = %q, want questions or nil", *after.WaitingOn)
+			t.Fatalf("advancePlanningWithAnAnswer: ticket waiting_on = %q, want questions, gate, or nil", *after.WaitingOn)
 		}
 	}
 	t.Fatalf("advancePlanningWithAnAnswer: still in planning after %d handler calls", advancePlanningMaxCalls)
+}
+
+// answerGateApprove answers ticketID's one open gate question with option
+// "a" (Approve, design section 6.6, D8), through store.AnswerQuestion
+// exactly as the console's POST /answer would.
+func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1 (the gate)", len(open))
+	}
+	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{
+		TicketID: ticketID, QuestionID: open[0].ID, Option: "a",
+	})
+	if err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", result.Conflict)
+	}
 }
 
 // TestReviewingHandler_TransitionsToJudging, TestJudgingHandler_TransitionsToShipping,

@@ -10,15 +10,19 @@
 //
 // Task 6 built entry-decision steps 1(c), 1(d), 2, 3, 4, and 8 of section
 // 5.1. Task 7a built step 5 (live validation errors) and the ready cohort
-// store, behind a TEMPORARY shortcut straight to building. This task, 7b,
-// removes that shortcut -- a valid ready now stores the cohort and leaves
-// the ticket in planning, not waiting -- and builds steps 6 and 7 (the
-// review tick and the floor loop) and entry step 1(e) (an answered
-// planreview round). A clean review's own shortcut straight to building
-// (skipping section 6.6's gate) is now the TEMPORARY one; task 7c replaces
-// it. A gate round (1a) and an escalation round (1b) are still left as a
-// TODO(task 7) returning ErrNoAction, so the dispatcher releases the claim
-// rather than looping.
+// store, behind a TEMPORARY shortcut straight to building. Task 7b removed
+// that shortcut -- a valid ready now stores the cohort and leaves the
+// ticket in planning, not waiting -- and built steps 6 and 7 (the review
+// tick and the floor loop) and entry step 1(e) (an answered planreview
+// round), behind its own TEMPORARY shortcut straight to building on a clean
+// review. This task, 7c, replaces that shortcut with section 6.6's real
+// gate: a clean review posts the gate question instead, and entry step 1(a)
+// interprets the owner's answered gate round -- approve runs the seal
+// pre-check and, on success, seals the cohort and transitions to building;
+// reject (or a reply with no option) resumes or restarts planning with the
+// owner's notes. An escalation round (1b) is still left as a TODO(task 13)
+// returning ErrNoAction, so the dispatcher releases the claim rather than
+// looping.
 package job
 
 import (
@@ -32,6 +36,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	zing "zing"
 	"zing/internal/prompt"
@@ -54,16 +59,17 @@ const (
 	msgTypeUpdate = "update"
 	authorSystem  = "system"
 
-	// reasonPlanReviewCleanShortcut is a TEMPORARY shortcut (design section
-	// 6.5, task 7b): a plan review with no at-or-below-floor findings goes
-	// straight to building rather than posting the section 6.6 gate. The
-	// text names itself a shortcut so a reader (and
-	// TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding)
-	// can find it and remove it once task 7c posts the gate instead.
-	//
-	// TODO(task 7c): post the gate (design section 6.6) instead of this
-	// shortcut.
-	reasonPlanReviewCleanShortcut = "plan review clean (task 7b shortcut; task 7c posts the gate)"
+	// waitingFlagGate is design section 6.6's own waiting_on value (the
+	// gate is a QuestionKind, and console_writes.go's kindForWaitReason maps
+	// this value straight back to it): distinct from waitingFlagQuestions,
+	// so SendBatch clears it only when the ticket's open gate question (not
+	// some unrelated open question) is answered.
+	waitingFlagGate = string(response.QuestionKindGate)
+
+	// gateOptionApprove and gateOptionReject are the two option keys the
+	// gate question ever offers (design section 6.6, D8): "a" recommended.
+	gateOptionApprove = "a"
+	gateOptionReject  = "b"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 
@@ -84,6 +90,19 @@ const (
 
 	nothingToDoArrivesWhat = "nothing_to_do handling arrives in task 8"
 	nothingToDoArrivesWhy  = "task 8 checks each code claim before deciding done or an escalation"
+
+	// The section 6.6 gate approve pre-check's own fixed What text, one
+	// per failing branch (0, 1, 2, 3, 6; branches 4 and 5 succeed). Why is
+	// shared across every branch: what actually differs, the What text,
+	// already names the specific failure.
+	sealFailedNoCohortWhat      = "no current plan cohort"
+	sealFailedNoRunWhat         = "cohort has no producing run"
+	sealFailedMismatchTwiceWhat = "seal transaction mismatched twice"
+	sealFailedBadCountWhatFmt   = "cohort has %d scenarios, want 2 to 30"
+	sealFailedPartialWhatFmt    = "cohort is partially or inconsistently sealed (%d of %d)"
+	sealFailedWhy               = "the gate's approval pre-check found the plan cohort is not ready to seal"
+	reasonGateApproved          = "gate approved"
+	reasonGateApprovedAlready   = "gate approved (already sealed)"
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -186,11 +205,9 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 
 	switch {
 	case qp.Kind == response.QuestionKindGate:
-		// TODO(task 7): route an answered gate round to section 6.6's
-		// approve/reject handling.
-		return store.HandlerCommit{}, ErrNoAction
+		return h.enterFromGateRound(ctx, t, d, round)
 	case round.ParentID != nil:
-		// TODO(task 7): resolve an escalation round per section 6.7's
+		// TODO(task 13): resolve an escalation round per section 6.7's
 		// choice-by-origin table.
 		return store.HandlerCommit{}, ErrNoAction
 	case round.Job == jobPlanningName:
@@ -882,21 +899,24 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: unrecognized runJob error: %w", runErr)
 	}
-	return planReviewSuccessCommit(t, d, rr, cohort, planXML, sessionCommit, resolveIDs)
+	return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, sessionCommit, resolveIDs)
 }
 
 // planReviewSuccessCommit routes a planreview run's parsed response (design
 // section 6.8): the universal question and error outcomes are shared with
 // classify and planning's own success routing; ok is the review's own
-// outcome, planReviewOkCommit's job.
-func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+// outcome, planReviewOkCommit's job. plan is the cohort's own stored plan
+// (already unmarshaled by the caller, runPlanReview, to render planXML), so
+// a clean review's gate post (design section 6.6) can read its objective
+// without a second store round trip.
+func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
 		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
 	case *response.FindingsResponse:
-		return planReviewOkCommit(t, d, rr, resp, cohort, planXML, sessionCommit, resolveIDs)
+		return planReviewOkCommit(t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
@@ -907,11 +927,11 @@ func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.
 // (response.ResolvesInPlan), store the rest as a "planreview" artifact at
 // the cohort's exact version, and split the survivors at the configured
 // floor (severity.Rank() <= d.Floor.Rank() is at-or-below). No finding
-// at-or-below the floor takes the TEMPORARY clean shortcut straight to
-// building (task 7c replaces it with the section 6.6 gate); otherwise this
-// writes the "planreview vN pending" marker and leaves the ticket in
-// planning, not waiting, for entry step 7 to pick up.
-func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+// at-or-below the floor posts the section 6.6 gate in this same commit
+// (design section 6.6's "Post" step, task 7c); otherwise this writes the
+// "planreview vN pending" marker and leaves the ticket in planning, not
+// waiting, for entry step 7 to pick up.
+func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	kept := make([]response.Finding, 0, len(resp.Findings))
 	dropped := 0
 	for _, f := range resp.Findings {
@@ -947,8 +967,15 @@ func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.Fin
 	}}
 
 	if atOrBelow == 0 {
-		c.Next = stateBuilding
-		c.Reason = reasonPlanReviewCleanShortcut
+		msg, msgErr := gateQuestionMessage(t.ID, plan.Overview.Objective)
+		if msgErr != nil {
+			return store.HandlerCommit{}, msgErr
+		}
+		c.Messages = []store.Message{msg}
+		c.AttachRunToMsgs = true
+		waiting := waitingFlagGate
+		c.Waiting = &waiting
+		slog.Info("gate posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", cohort.PlanVersion)
 		return c, nil
 	}
 
@@ -1021,6 +1048,175 @@ func renderFindings(findings []response.Finding) string {
 		lines[i] = fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ---- 6.6 the gate: post, approve/seal, reject -----------------------------
+
+// gateQuestionMessage builds the section 6.6 "Post" message: kind gate,
+// recommended "a", the fixed Approve/Reject chip pair, Key left empty for
+// CommitHandlerResult's own fillQuestionKeyTx to allocate (design section
+// 4.5, 6.7: "gate and planning questions use the same Q<n> allocation"), and
+// body set to objective -- the stored plan's overview objective text, the
+// one sentence design D8 says the gate renders for the owner.
+func gateQuestionMessage(ticketID int64, objective string) (store.Message, error) {
+	payload, err := json.Marshal(response.QuestionPayload{
+		Kind:        response.QuestionKindGate,
+		State:       response.QuestionStateOpen,
+		Recommended: gateOptionApprove,
+		Options: []response.Option{
+			{Key: gateOptionApprove, Text: "Approve"},
+			{Key: gateOptionReject, Text: "Reject"},
+		},
+	})
+	if err != nil {
+		return store.Message{}, fmt.Errorf("job: gate: marshal question payload: %w", err)
+	}
+	return store.Message{
+		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: objective, Payload: payload,
+	}, nil
+}
+
+// enterFromGateRound is section 5.1 step 1(a): round is the answered gate
+// round enterFromRound just identified by its newest question's kind.
+// Option a (approve) runs the seal pre-check (gateApprove); option b, or a
+// round carrying replies and no option at all, is a reject -- "resume or
+// fresh" with the replies' bodies as notes (design section 6.6, 6.7).
+func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	resolveIDs := questionIDs(round)
+	if gateRoundApproved(round) {
+		return gateApprove(ctx, t, d, resolveIDs)
+	}
+	notes := joinReplies(round.Replies)
+	slog.Info("gate rejected", "ticket_id", t.ID)
+	return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+}
+
+// gateRoundApproved reports whether round's sent answer chose option "a"
+// (design section 6.6): the newest sent answer naming that option wins, so a
+// round answered more than once (a corrected chip click before the batch
+// resolves) reads its final choice, not its first.
+func gateRoundApproved(round store.Round) bool {
+	approved := false
+	for i := range round.Answers {
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(round.Answers[i].Payload, &ap); err == nil && ap.Option != nil {
+			approved = *ap.Option == gateOptionApprove
+		}
+	}
+	return approved
+}
+
+// joinReplies renders replies' bodies newline-joined (design section 6.6,
+// 6.7's "the replies' bodies joined by \n"), "" when there are none: a chip
+// reject with no free-text reply carries empty notes rather than failing.
+func joinReplies(replies []store.MessageRow) string {
+	bodies := make([]string, len(replies))
+	for i := range replies {
+		bodies[i] = replies[i].Body
+	}
+	return strings.Join(bodies, "\n")
+}
+
+// resumeOrFresh is design section 6.7's "resume or fresh", shared by a gate
+// rejection (section 6.6) and, in task 13, escalation resolution: an open
+// planning session resumes (6.4) with extra; a kindless ticket has never
+// classified, so it classifies fresh (6.1) with extra instead; anything else
+// starts the planning first turn fresh (6.2) with extra. Every branch
+// resolves resolveIDs in the same commit.
+func resumeOrFresh(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPlanningName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: resume or fresh: latest session: %w", err)
+	}
+	if state == store.SessionOpen {
+		return runPlanningResume(ctx, t, d, sess, resolveIDs, extra, 0)
+	}
+	if t.Kind == nil {
+		return runClassify(ctx, t, d, extra, resolveIDs)
+	}
+	return runPlanningFirst(ctx, t, d, extra, resolveIDs)
+}
+
+// gateApprove is section 6.6's approve pre-check, in exact branch order
+// (design D16): branch 0 (two seal-mismatch markers for the cohort) is
+// evaluated once the cohort's run id is known, but wins over branches 3-6;
+// every failing branch (0, 1, 2, 3, 6) escalates seal_failed with RunID nil,
+// Origin seal, and resolves resolveIDs; branch 4 seals the cohort and moves
+// to building; branch 5 (already consistently sealed) moves to building
+// with no new seal. GateApproveSealRaceHook, nil in production, is a
+// test-only seam (design D16's own TOCTOU commentary): called with the
+// cohort's run id right after this function's own read of CohortSealState,
+// so a test can seal one row through a second store handle in the window
+// between that read and the commit this function builds from it.
+func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: current cohort: %w", err)
+	}
+	if !ok {
+		return sealFailedEscalation(t, d, sealFailedNoCohortWhat, resolveIDs), nil
+	}
+	if cohort.RunID == nil {
+		return sealFailedEscalation(t, d, sealFailedNoRunWhat, resolveIDs), nil
+	}
+	runID := *cohort.RunID
+
+	mismatches, err := d.Store.CountSealMismatches(ctx, t.ID, runID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: count seal mismatches: %w", err)
+	}
+	if mismatches >= 2 {
+		return sealFailedEscalation(t, d, sealFailedMismatchTwiceWhat, resolveIDs), nil
+	}
+
+	total, sealed, commonAt, err := d.Store.CohortSealState(ctx, t.ID, runID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: cohort seal state: %w", err)
+	}
+	if GateApproveSealRaceHook != nil {
+		GateApproveSealRaceHook(runID)
+	}
+	if total < minReadyScenarios || total > maxReadyScenarios {
+		what := fmt.Sprintf(sealFailedBadCountWhatFmt, total)
+		return sealFailedEscalation(t, d, what, resolveIDs), nil
+	}
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	switch {
+	case sealed == 0:
+		c.Seal = &store.SealRequest{RunID: runID, PlanVersion: cohort.PlanVersion, ExpectedCount: total, At: time.Now().UTC()}
+		c.Next = stateBuilding
+		c.Reason = reasonGateApproved
+		slog.Info("gate approved", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
+		slog.Info("scenarios sealed", "ticket_id", t.ID, "cohort_run_id", runID, "plan_version", cohort.PlanVersion,
+			"count", total, "sealed_at", c.Seal.At)
+		return c, nil
+	case sealed == total && commonAt != nil:
+		c.Next = stateBuilding
+		c.Reason = reasonGateApprovedAlready
+		slog.Info("gate already sealed", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
+		return c, nil
+	default:
+		what := fmt.Sprintf(sealFailedPartialWhatFmt, sealed, total)
+		return sealFailedEscalation(t, d, what, resolveIDs), nil
+	}
+}
+
+// GateApproveSealRaceHook is a test-only seam (design D16, section 6.6
+// branch 0). Production code never sets it; see gateApprove's own comment
+// for exactly when it runs.
+var GateApproveSealRaceHook func(runID int64)
+
+// sealFailedEscalation builds every failing gate-approve branch's commit
+// (design section 6.6): RunID nil (no run caused this, the pre-check did),
+// Origin seal, code seal_failed, and resolveIDs resolved in the same commit.
+func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeSealFailed), what, sealFailedWhy, "", response.EscalationOriginSeal)
+	c.ResolveQuestions = resolveIDs
+	return c
 }
 
 // ---- shared failure and escalation commit builders ------------------------

@@ -1549,26 +1549,84 @@ func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *te
 	}
 }
 
-// TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding
-// pins task 7b's TEMPORARY shortcut by name: a clean review (no
-// at-or-below-floor findings) goes straight to building, with a Reason
-// naming itself a shortcut, rather than section 6.6's real gate (task 7c).
-func TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding(t *testing.T) {
+// TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate proves section 6.6's
+// "Post" step (task 7c): a clean review (no at-or-below-floor findings)
+// posts exactly one gate question in the same commit that stores the
+// planreview artifact -- kind gate, options a/b, recommended "a", an
+// allocated Q<n>, attached to the review run, body the plan's own objective
+// -- and leaves the ticket in planning, waiting on "gate", rather than
+// task 7b's removed shortcut straight to building.
+func TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
-	seedCohort(t, s, ticketID, validPlan("Clean review shortcut."), validScenarios(2, "clean"))
+	const objective = "Clean review posts the gate."
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "clean"))
 
 	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(), "clean-sess")}}
 	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
 	if err != nil {
 		t.Fatalf("review tick Run: %v", err)
 	}
-	if commit.Next != testStateBuilding {
-		t.Errorf("commit.Next = %q, want building", commit.Next)
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (the gate is a wait, not a transition)", commit.Next)
 	}
-	if !strings.Contains(commit.Reason, "shortcut") {
-		t.Errorf("commit.Reason = %q, want it to name itself a temporary shortcut", commit.Reason)
+	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
+		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
 	}
+	if !commit.AttachRunToMsgs {
+		t.Error("commit.AttachRunToMsgs = false, want true (the gate question attaches to the review run)")
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %d entries, want exactly 1 (the gate question)", len(commit.Messages))
+	}
+	msg := commit.Messages[0]
+	if msg.Body != objective {
+		t.Errorf("gate message body = %q, want the plan's objective %q", msg.Body, objective)
+	}
+	var qp response.QuestionPayload
+	if err = json.Unmarshal(msg.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal gate question payload: %v", err)
+	}
+	if qp.Kind != response.QuestionKindGate {
+		t.Errorf("gate question Kind = %q, want gate", qp.Kind)
+	}
+	if qp.Key != "" {
+		t.Errorf("gate question Key = %q, want empty (allocated by the commit)", qp.Key)
+	}
+	if qp.Recommended != "a" {
+		t.Errorf("gate question Recommended = %q, want a", qp.Recommended)
+	}
+	wantOptions := []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}}
+	if !slices.Equal(qp.Options, wantOptions) {
+		t.Errorf("gate question Options = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if qp.Items != nil {
+		t.Errorf("gate question Items = %+v, want nil", qp.Items)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	posted, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(posted) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly 1", posted, err)
+	}
+	var postedPayload response.QuestionPayload
+	if err := json.Unmarshal(posted[0].Payload, &postedPayload); err != nil {
+		t.Fatalf("unmarshal posted gate question payload: %v", err)
+	}
+	if !strings.HasPrefix(postedPayload.Key, "Q") {
+		t.Errorf("posted gate question Key = %q, want an allocated Q<n>", postedPayload.Key)
+	}
+	if posted[0].RunID == nil {
+		t.Error("posted gate question RunID is nil, want it attached to the review run")
+	}
+
+	after := getTicket(t, s, ticketID)
+	if after.State != testStatePlanning || after.WaitingOn == nil || *after.WaitingOn != testWaitingGate {
+		t.Errorf("after posting the gate: ticket = (state=%q, waiting_on=%v), want (planning, gate)", after.State, after.WaitingOn)
+	}
+
+	_, _ = planVersion, runID
 }
 
 // TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenStop

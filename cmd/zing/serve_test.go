@@ -74,9 +74,13 @@ func freeLoopbackPort(t *testing.T) int {
 	return addr.Port
 }
 
+// testStatePlanning names the "planning" ticket state, spelled out three or
+// more times below (goconst).
+const testStatePlanning = "planning"
+
 // stateSequenceWant is the ordered "state" message sequence design section
 // 7.1's table drives the fixture ticket through, queued to done.
-var stateSequenceWant = []string{"planning", "building", "reviewing", "judging", "shipping", "done"}
+var stateSequenceWant = []string{testStatePlanning, "building", "reviewing", "judging", "shipping", "done"}
 
 // TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown is the
 // end-to-end integration test (PKG3-PLAN.md section 12 rows 5 and 7, section
@@ -134,12 +138,18 @@ func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	ticketID, questionID := waitForOpenQuestion(t, dbPath, serveDone)
 	answerQuestion(t, baseURL, ticketID, questionID, "b")
 
+	// The review tick posts the gate once the resumed turn's ready cohort
+	// reviews clean (design section 6.6, task 7c); approve it the same way,
+	// so the dispatcher can seal the cohort and carry the ticket to done.
+	gateQuestionID := waitForOpenGateQuestion(t, dbPath, ticketID, serveDone)
+	answerQuestion(t, baseURL, ticketID, gateQuestionID, "a")
+
 	ticket := waitForDoneTicket(t, dbPath, serveDone)
 	if ticket.ID != ticketID {
 		t.Fatalf("done ticket id = %d, want the same ticket that asked the question (%d)", ticket.ID, ticketID)
 	}
 	assertStateSequence(t, dbPath, ticket.ID)
-	assertExactlyOneQuestionAnswered(t, dbPath, ticket.ID)
+	assertExactlyTwoQuestionsAnswered(t, dbPath, ticket.ID)
 
 	cancel()
 
@@ -184,7 +194,7 @@ func waitForOpenQuestion(t *testing.T, dbPath string, serveDone <-chan error) (t
 				continue
 			}
 			ticket := tickets[0]
-			if ticket.State != "planning" || ticket.WaitingOn == nil || *ticket.WaitingOn != "questions" {
+			if ticket.State != testStatePlanning || ticket.WaitingOn == nil || *ticket.WaitingOn != "questions" {
 				continue
 			}
 			open, err := st.QuestionsByState(ctx, ticket.ID, "open")
@@ -195,6 +205,48 @@ func waitForOpenQuestion(t *testing.T, dbPath string, serveDone <-chan error) (t
 				continue
 			}
 			return ticket.ID, open[0].ID
+		}
+	}
+}
+
+// waitForOpenGateQuestion polls a second store.Open on dbPath until
+// ticketID is in planning, waiting on "gate", with at least one open
+// question message (design section 6.6, task 7c), and returns that
+// question's message id, so the test can approve it.
+func waitForOpenGateQuestion(t *testing.T, dbPath string, ticketID int64, serveDone <-chan error) int64 {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	st := openStoreWithRetry(ctx, t, dbPath)
+	defer func() { _ = st.Close() }()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("ticket did not reach an open gate question within the poll deadline")
+		case err := <-serveDone:
+			t.Fatalf("serve exited early: %v", err)
+		case <-ticker.C:
+			ticket, err := st.GetTicket(ctx, ticketID)
+			if err != nil {
+				t.Fatalf("GetTicket: %v", err)
+			}
+			if ticket.State != testStatePlanning || ticket.WaitingOn == nil || *ticket.WaitingOn != "gate" {
+				continue
+			}
+			open, err := st.QuestionsByState(ctx, ticketID, "open")
+			if err != nil {
+				t.Fatalf("QuestionsByState(open): %v", err)
+			}
+			if len(open) == 0 {
+				continue
+			}
+			return open[0].ID
 		}
 	}
 }
@@ -354,10 +406,12 @@ func assertStateSequence(t *testing.T, dbPath string, ticketID int64) {
 	}
 }
 
-// assertExactlyOneQuestionAnswered reads ticketID's messages through a fresh
-// store handle and asserts exactly one "answer" message was recorded, so the
-// POST /draft + POST /send this test drove is the only one that landed.
-func assertExactlyOneQuestionAnswered(t *testing.T, dbPath string, ticketID int64) {
+// assertExactlyTwoQuestionsAnswered reads ticketID's messages through a
+// fresh store handle and asserts exactly two "answer" messages were
+// recorded -- the planning question and the gate (design section 6.6, task
+// 7c) -- so the two POST /draft + POST /send round trips this test drove
+// are the only ones that landed.
+func assertExactlyTwoQuestionsAnswered(t *testing.T, dbPath string, ticketID int64) {
 	t.Helper()
 
 	ctx := t.Context()
@@ -378,8 +432,9 @@ func assertExactlyOneQuestionAnswered(t *testing.T, dbPath string, ticketID int6
 			answers++
 		}
 	}
-	if answers != 1 {
-		t.Errorf("answer messages = %d, want 1", answers)
+	const wantAnswers = 2
+	if answers != wantAnswers {
+		t.Errorf("answer messages = %d, want %d", answers, wantAnswers)
 	}
 }
 

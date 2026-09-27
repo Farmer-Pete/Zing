@@ -2,11 +2,13 @@
 // 14): drive the fixture ticket from queued through planning until it posts
 // its Q1 question and waits, answer it through the console's real POST
 // /draft then POST /send exactly as a browser's chip click and send chord
-// would, and watch the dispatcher resume the planning run once and carry
-// the ticket the rest of the way to done, over the console's own live
-// GET /stream. It uses the real dispatcher, the fixture tracker, the fake
-// runtime, the real store, the real bus, and the real console endpoints --
-// nothing is mocked.
+// would, and watch the dispatcher resume the planning run once, store the
+// ready cohort, review it clean, and post the gate (design section 6.6,
+// task 7c) -- answered the same console way -- which seals the cohort and
+// carries the ticket the rest of the way to done, over the console's own
+// live GET /stream. It uses the real dispatcher, the fixture tracker, the
+// fake runtime, the real store, the real bus, and the real console
+// endpoints -- nothing is mocked.
 package console_test
 
 import (
@@ -16,6 +18,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -181,59 +184,23 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 	streamResp, streamReader, cancelStream := openThreadStream(t, srv.URL, ticketID)
 	frames := newFrameCollector(streamReader)
 
-	open, err := st.QuestionsByState(ctx, ticketID, "open")
-	if err != nil {
-		t.Fatalf("QuestionsByState(open): %v", err)
-	}
-	if len(open) != 1 {
-		t.Fatalf("open questions on the fixture ticket = %d, want exactly 1 (Q1)", len(open))
-	}
-	var payload response.QuestionPayload
-	if unmarshalErr := json.Unmarshal(open[0].Payload, &payload); unmarshalErr != nil {
-		t.Fatalf("unmarshal question payload: %v", unmarshalErr)
-	}
-	if len(payload.Options) == 0 {
-		t.Fatal("Q1 has no options")
-	}
-	chosen := payload.Options[0].Key // "a", the worked example's own pick (design section 6.7)
-
-	// POST /draft with the chosen option, then POST /send: the same
-	// keyboard-driven two-step the composer takes (design section 6.4, 6.7).
-	// Both requests set Close so their connections do not linger in the
-	// client's keep-alive pool, which would otherwise show up as apparent
-	// growth in the goroutine-settle check below even though nothing leaked.
-	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, open[0].ID, chosen)
-	draftReq := mutationRequest(t, srv, "/draft", draftBody)
-	draftReq.Close = true
-	draftResp := doRequest(t, draftReq)
-	_ = draftResp.Body.Close()
-	if draftResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /draft status = %d, want 204", draftResp.StatusCode)
-	}
-
-	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
-	sendReq := mutationRequest(t, srv, "/send", sendBody)
-	sendReq.Close = true
-	sendResp := doRequest(t, sendReq)
-	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
-	}
-
-	afterSend, err := st.GetTicket(ctx, ticketID)
-	if err != nil {
-		t.Fatalf("GetTicket after send: %v", err)
-	}
-	if afterSend.WaitingOn != nil {
-		t.Fatalf("ticket.WaitingOn after send = %q, want nil (the batch cleared the wait)", *afterSend.WaitingOn)
-	}
+	// POST /draft with the fixture question's own recommended option, then
+	// POST /send: the same keyboard-driven two-step the composer takes
+	// (design section 6.4, 6.7).
+	answerOpenQuestionViaConsole(t, st, srv, ticketID)
 
 	// Keep ticking: the next tick picks the now-eligible ticket back up
 	// (design section 14 reconciliation: "dispatch resume is emergent ...
 	// for the verify-by ... the cleared ticket is picked on the next
-	// tick"), resumes the planning run once, and carries the ticket the
-	// rest of the way to done.
+	// tick"), resumes the planning run once, and carries the ticket through
+	// the review tick to the gate (design section 6.6, task 7c). Answering
+	// the gate the same way (a draft with option "a" then /send --
+	// kindForWaitReason maps waiting_on = "gate" to the gate kind, so
+	// SendBatch clears it exactly as it clears "questions") lets the
+	// dispatcher seal the cohort and carry the ticket the rest of the way to
+	// done.
 	reachedDone := false
+	answeredGate := false
 	for i := range resumeE2EMaxTicks {
 		if tickErr := d.Tick(ctx); tickErr != nil {
 			t.Fatalf("post-send tick %d: %v", i, tickErr)
@@ -246,13 +213,21 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 			reachedDone = true
 			break
 		}
+		if !answeredGate && ticket.WaitingOn != nil && *ticket.WaitingOn == testWaitingGate {
+			answerOpenQuestionViaConsole(t, st, srv, ticketID)
+			answeredGate = true
+		}
 	}
 	if !reachedDone {
 		t.Fatalf("ticket did not reach done within the post-send tick budget; last state %q waiting_on %v", ticket.State, ticket.WaitingOn)
 	}
+	if !answeredGate {
+		t.Fatal("ticket reached done without ever waiting on the gate; want the review tick to have posted it")
+	}
 
 	assertResumeE2EStateSequence(t, st, ticketID)
 	assertResumeE2EResumedOnce(t, st, ticketID)
+	assertResumeE2ECohortSealed(t, st, ticketID)
 
 	// Poll (bounded, not a fixed sleep) until the live stream itself has
 	// shown every state transition, including "done": the ticket reaching
@@ -285,6 +260,92 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 	case <-ch:
 	case <-time.After(frameTimeout):
 		t.Fatal("a fresh subscriber saw no publish after the resume stream disconnected")
+	}
+}
+
+// answerOpenQuestionViaConsole posts a POST /draft with ticketID's one open
+// question's first offered option, then POST /send, exactly as a browser's
+// chip click and send chord would (design section 6.4, 6.7). It answers
+// both the fixture's own planning question (Q1) and, once posted, the gate
+// (design section 6.6, task 7c) -- kindForWaitReason already maps
+// waiting_on = "gate" to the gate kind, so SendBatch clears it the same way.
+// Both requests set Close so their connections do not linger in the
+// client's keep-alive pool, which would otherwise show up as apparent
+// growth in this file's goroutine-settle check even though nothing leaked.
+func answerOpenQuestionViaConsole(t *testing.T, st *store.Store, srv *httptest.Server, ticketID int64) {
+	t.Helper()
+	ctx := t.Context()
+
+	open, err := st.QuestionsByState(ctx, ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open questions on ticket %d = %d, want exactly 1", ticketID, len(open))
+	}
+	var payload response.QuestionPayload
+	if unmarshalErr := json.Unmarshal(open[0].Payload, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal question payload: %v", unmarshalErr)
+	}
+	if len(payload.Options) == 0 {
+		t.Fatalf("question %d has no options", open[0].ID)
+	}
+	chosen := payload.Options[0].Key // "a" on both Q1 and the gate (design section 6.7, 6.6)
+
+	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":%q}`, ticketID, open[0].ID, chosen)
+	draftReq := mutationRequest(t, srv, "/draft", draftBody)
+	draftReq.Close = true
+	draftResp := doRequest(t, draftReq)
+	_ = draftResp.Body.Close()
+	if draftResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft status = %d, want 204", draftResp.StatusCode)
+	}
+
+	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	sendReq := mutationRequest(t, srv, "/send", sendBody)
+	sendReq.Close = true
+	sendResp := doRequest(t, sendReq)
+	_ = sendResp.Body.Close()
+	if sendResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	}
+
+	after, err := st.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket after send: %v", err)
+	}
+	if after.WaitingOn != nil {
+		t.Fatalf("ticket.WaitingOn after send = %q, want nil (the batch cleared the wait)", *after.WaitingOn)
+	}
+}
+
+// assertResumeE2ECohortSealed asserts every scenario artifact of ticketID's
+// current plan cohort carries a non-nil sealed_at (design section 6.6
+// branch 4, task 7c): the gate's approval seals exactly the cohort the
+// review ran against.
+func assertResumeE2ECohortSealed(t *testing.T, st *store.Store, ticketID int64) {
+	t.Helper()
+	ctx := t.Context()
+
+	cohort, ok, err := st.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("CurrentCohort: %v", err)
+	}
+	if !ok || cohort.RunID == nil {
+		t.Fatalf("CurrentCohort = %+v, ok=%v, want a cohort with a producing run", cohort, ok)
+	}
+
+	scenarios, err := st.ScenariosForRun(ctx, ticketID, *cohort.RunID, false)
+	if err != nil {
+		t.Fatalf("ScenariosForRun: %v", err)
+	}
+	if len(scenarios) == 0 {
+		t.Fatal("ScenariosForRun returned no scenarios, want the fixture cohort's own")
+	}
+	for i, sc := range scenarios {
+		if sc.SealedAt == nil {
+			t.Errorf("scenario artifact %d has no sealed_at, want every cohort scenario sealed after approval", i)
+		}
 	}
 }
 
@@ -421,14 +482,17 @@ func assertResumeE2EStateSequence(t *testing.T, st *store.Store, ticketID int64)
 	if !slices.Equal(states, resumeE2EWantStates) {
 		t.Errorf("state messages = %v, want %v", states, resumeE2EWantStates)
 	}
-	if questions != 1 {
-		t.Errorf("question messages = %d, want exactly 1", questions)
+	// Q1 (the fixture's planning question) plus the gate (design section
+	// 6.6, task 7c): two of each.
+	const wantQuestionsAnswersResolved = 2
+	if questions != wantQuestionsAnswersResolved {
+		t.Errorf("question messages = %d, want exactly %d", questions, wantQuestionsAnswersResolved)
 	}
-	if answers != 1 {
-		t.Errorf("answer messages = %d, want exactly 1", answers)
+	if answers != wantQuestionsAnswersResolved {
+		t.Errorf("answer messages = %d, want exactly %d", answers, wantQuestionsAnswersResolved)
 	}
-	if resolved != 1 {
-		t.Errorf("resolved messages = %d, want exactly 1", resolved)
+	if resolved != wantQuestionsAnswersResolved {
+		t.Errorf("resolved messages = %d, want exactly %d", resolved, wantQuestionsAnswersResolved)
 	}
 }
 

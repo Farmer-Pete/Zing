@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,7 @@ const (
 	testFixtureRef = "fake#1" // fixtures/tickets.toml's one ticket
 
 	testWaitingQuestions = "questions"
+	testWaitingGate      = "gate"
 	testQuestionOpen     = "open"
 
 	testReasonPlanReady = "plan ready"
@@ -232,15 +234,19 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 
 // advancePlanningMaxCalls bounds advancePlanning's own handler-call loop:
 // classify (kind unset, stays planning), the first turn (posts questions,
-// waits), and the resume (transitions to building) is three calls; the
-// headroom catches a stuck handler instead of hanging the test.
+// waits), the resume (stores the cohort, stays planning), the review tick
+// (clean, posts the gate, design section 6.6), and the owner's approve
+// (seals the cohort, transitions to building) is five calls; the headroom
+// catches a stuck handler instead of hanging the test.
 const advancePlanningMaxCalls = 6
 
 // advancePlanning drives the real planning handler through as many calls as
 // it now takes to reach building (design section 5.1): classify runs first
 // on a kindless ticket and sets kind but carries no transition, so this
 // loops the handler until either the ticket leaves planning or it waits on
-// "questions", in which case it answers the batch and keeps looping.
+// "questions" or "gate", in which case it answers the batch (answerOpenQuestion
+// always takes the first offered option, "a" Approve for the gate) and keeps
+// looping.
 func advancePlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
 	for range advancePlanningMaxCalls {
@@ -249,12 +255,12 @@ func advancePlanning(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 		if after.State != testStatePlanning {
 			return
 		}
-		if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
+		if after.WaitingOn != nil && (*after.WaitingOn == testWaitingQuestions || *after.WaitingOn == testWaitingGate) {
 			answerOpenQuestion(t, s, ticketID)
 			continue
 		}
 		if after.WaitingOn != nil {
-			t.Fatalf("advancePlanning: ticket waiting_on = %q, want questions or nil", *after.WaitingOn)
+			t.Fatalf("advancePlanning: ticket waiting_on = %q, want questions, gate, or nil", *after.WaitingOn)
 		}
 	}
 	t.Fatalf("advancePlanning: still in planning after %d handler calls", advancePlanningMaxCalls)
@@ -1517,9 +1523,11 @@ func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) 
 	}, nil
 }
 
-// countMarkersWithPrefix counts msgs' "update" messages whose body starts
-// with prefix (design section 5.3's marker convention).
-func countMarkersWithPrefix(msgs []store.MessageRow, prefix string) int {
+// countSealMismatchMarkers counts msgs' "update" messages whose body starts
+// with "seal mismatch cohort " (design section 5.3's marker convention,
+// D16): every caller below only ever counts this one marker.
+func countSealMismatchMarkers(msgs []store.MessageRow) int {
+	const prefix = "seal mismatch cohort"
 	n := 0
 	for i := range msgs {
 		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, prefix) {
@@ -1569,7 +1577,7 @@ func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if got := countMarkersWithPrefix(msgs, "seal mismatch cohort"); got != 1 {
+	if got := countSealMismatchMarkers(msgs); got != 1 {
 		t.Fatalf("seal mismatch markers after first tick = %d, want 1", got)
 	}
 
@@ -1580,8 +1588,226 @@ func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages after second tick: %v", err)
 	}
-	if got := countMarkersWithPrefix(msgs, "seal mismatch cohort"); got != 2 {
+	if got := countSealMismatchMarkers(msgs); got != 2 {
 		t.Errorf("seal mismatch markers after second tick = %d, want 2", got)
+	}
+}
+
+// seedGateReadyTicket seeds one project, one ticket already sitting in
+// "planning" with kind "feature" (bypassing classify and the interview,
+// which the real gate approve pre-check never touches), a plan cohort of n
+// scenario artifacts (all unsealed) under a fresh reserved run, and one
+// open, then answered ("a", approve), gate question attached to that run --
+// the state design section 6.6's entry step 1(a) finds on its very first
+// tick: an answered gate round ready to interpret. It returns the ticket id
+// and the cohort's own run id.
+func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID int64) {
+	t.Helper()
+	ctx := t.Context()
+
+	projectID := seedProject(t, s)
+	kind := "feature"
+	ticketID, err := s.InsertTicket(ctx, store.Ticket{
+		ProjectID: projectID, TrackerRef: "gate-race#1", Title: "a ticket", Kind: &kind, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: InsertTicket: %v", err)
+	}
+	runHandlerOnce(t, s, fakeRuntime(t), ticketID, testStateQueued) // queued -> planning
+
+	owner := "seed-gate-ready"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(ctx, ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedGateReadyTicket: claim: claimed=%v err=%v", claimed, err)
+	}
+	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: reserve: %v", err)
+	}
+
+	extID := "seed-gate-ready-ext"
+	artifacts := make([]store.Artifact, 0, 1+n)
+	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)})
+	for i := range n {
+		sc := response.Scenario{
+			ID: fmt.Sprintf("s%d", i+1), Kind: response.ScenarioKindBehavior,
+			Given: "the server is running", When: "a client sends a request", Then: "the response is correct",
+		}
+		payload, marshalErr := json.Marshal(sc)
+		if marshalErr != nil {
+			t.Fatalf("seedGateReadyTicket: marshal scenario: %v", marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "scenario", Payload: payload})
+	}
+
+	outcome, exitCode, agentSeconds := "ready", 0, 1
+	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session:   &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &extID},
+		Runs:      []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Artifacts: artifacts,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedGateReadyTicket: store the cohort: applied=%v err=%v", applied, err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: marshal gate question payload: %v", err)
+	}
+	const authorZing = "zing" // avoids a third bare "zing" literal (goconst)
+	qID, err := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, RunID: &rsv.RunID, Type: "question", Author: authorZing,
+		State: new("open"), Body: "the plan objective", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("seedGateReadyTicket: insert gate question: %v", err)
+	}
+	if res, ansErr := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); ansErr != nil || !res.Accepted {
+		t.Fatalf("seedGateReadyTicket: AnswerQuestion: %+v, %v", res, ansErr)
+	}
+
+	return ticketID, rsv.RunID
+}
+
+// TestTick_GateApproveTOCTOURace_MismatchReleasesThenPreCheckTakesBranch6
+// proves the D16 TOCTOU race design section 6.6 branch 0's own commentary
+// names as "unreachable in practice" under the single-owner claim, made
+// reachable here through job.GateApproveSealRaceHook (a test-only seam):
+// between the real gate approve pre-check's own read of CohortSealState
+// (sealed == 0) and the commit it builds from that read (branch 4, sealing
+// the whole cohort), a second store handle seals one scenario row through a
+// raw SQL update, so the commit's own sealCohortTx sees an "update" stage
+// mismatch (it sealed 2 of 3 rows, not all 3). The dispatcher's existing
+// ErrSealMismatch rule (design D16, proved generically by
+// TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues above) releases
+// the claim and writes one "seal mismatch cohort <runID>" marker without
+// resolving the gate round (the whole mismatched tx rolled back); the next
+// tick re-enters the same still-answered round, and this time
+// CohortSealState reports 1 of 3 scenarios sealed -- branch 6 (design
+// section 6.6), not branch 4 again -- so it escalates seal_failed and
+// resolves the round, without writing a second marker.
+func TestTick_GateApproveTOCTOURace_MismatchReleasesThenPreCheckTakesBranch6(t *testing.T) {
+	// Not t.Parallel(): this test installs job.GateApproveSealRaceHook, a
+	// package-level seam shared by every ticket's gate approve call, so it
+	// must not run alongside another test whose own ticket might also reach
+	// gateApprove concurrently. Go only runs t.Parallel() tests together
+	// after every non-parallel test in the package has finished, so leaving
+	// this one sequential is what keeps the hook's install/reset window
+	// free of any other test's own gate approve call.
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	const scenarioCount = 3
+	ticketID, runID := seedGateReadyTicket(t, s, scenarioCount)
+
+	var raceOnce sync.Once
+	job.GateApproveSealRaceHook = func(gotRunID int64) {
+		raceOnce.Do(func() {
+			if gotRunID != runID {
+				t.Errorf("GateApproveSealRaceHook: runID = %d, want %d", gotRunID, runID)
+			}
+			db2, openErr := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+			if openErr != nil {
+				t.Fatalf("race: open second db handle: %v", openErr)
+			}
+			defer func() { _ = db2.Close() }()
+			if _, execErr := db2.ExecContext(t.Context(),
+				`UPDATE artifacts SET sealed_at = ? WHERE id = (
+					SELECT id FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? ORDER BY id LIMIT 1
+				)`,
+				time.Now().UTC().Format(time.RFC3339), ticketID, gotRunID,
+			); execErr != nil {
+				t.Fatalf("race: seal one scenario row through the second handle: %v", execErr)
+			}
+		})
+	}
+	t.Cleanup(func() { job.GateApproveSealRaceHook = nil })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("first Tick: %v, want nil (a seal mismatch must not fail closed)", err)
+	}
+
+	afterFirst := getTicket(t, s, ticketID)
+	if afterFirst.State != testStatePlanning {
+		t.Errorf("after the raced tick: ticket state = %q, want unchanged planning", afterFirst.State)
+	}
+	if afterFirst.ClaimOwner != nil {
+		t.Errorf("after the raced tick: claim owner = %v, want nil (released)", *afterFirst.ClaimOwner)
+	}
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after first tick: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 1 {
+		t.Fatalf("seal mismatch markers after the raced tick = %d, want 1", got)
+	}
+	answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByState(answered) after first tick: %v", err)
+	}
+	if len(answered) != 1 {
+		t.Fatalf("answered questions after the raced tick = %d, want 1 (the mismatched tx rolled back the resolution)", len(answered))
+	}
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v, want nil", err)
+	}
+
+	afterSecond := getTicket(t, s, ticketID)
+	if afterSecond.State != testStatePlanning {
+		t.Errorf("after the second tick: ticket state = %q, want unchanged planning (branch 6 only escalates)", afterSecond.State)
+	}
+	if afterSecond.WaitingOn == nil || *afterSecond.WaitingOn != testWaitingQuestions {
+		t.Errorf("after the second tick: waiting_on = %v, want questions (the seal_failed escalation)", afterSecond.WaitingOn)
+	}
+
+	msgs, err = s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages after second tick: %v", err)
+	}
+	if got := countSealMismatchMarkers(msgs); got != 1 {
+		t.Errorf("seal mismatch markers after the second tick = %d, want still 1 (no new mismatch)", got)
+	}
+	var escalation *response.EscalationPayload
+	for i := range msgs {
+		if msgs[i].Type != "escalation" {
+			continue
+		}
+		var p response.EscalationPayload
+		if unmarshalErr := json.Unmarshal(msgs[i].Payload, &p); unmarshalErr != nil {
+			t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
+		}
+		escalation = &p
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message found after the second tick")
+	}
+	if escalation.Code != string(response.EscalationCodeSealFailed) {
+		t.Errorf("escalation.Code = %q, want seal_failed", escalation.Code)
+	}
+	wantWhat := "cohort is partially or inconsistently sealed (1 of 3)"
+	if escalation.What != wantWhat {
+		t.Errorf("escalation.What = %q, want %q", escalation.What, wantWhat)
+	}
+
+	resolved, err := s.QuestionsByState(t.Context(), ticketID, "resolved")
+	if err != nil {
+		t.Fatalf("QuestionsByState(resolved) after second tick: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Errorf("resolved questions after the second tick = %d, want 1 (the gate round)", len(resolved))
 	}
 }
 

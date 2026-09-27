@@ -408,7 +408,7 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	if err := driveToDone(ctx, d, st, ticketID); err != nil {
+	if err := driveToDone(ctx, d, st, srv.URL, ticketID); err != nil {
 		closeStream()
 		return err
 	}
@@ -523,8 +523,13 @@ func answerFixtureQuestion(ctx context.Context, st *store.Store, base string, ti
 }
 
 // driveToDone keeps ticking d, bounded by e2eMaxTicks, until ticketID
-// reaches state "done".
-func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, ticketID int64) error {
+// reaches state "done". Once the review tick posts the gate (design section
+// 6.6, task 7c), it answers that the same console way answerFixtureQuestion
+// answered Q1 -- a draft with option "a" then /send, which SendBatch's own
+// kindForWaitReason maps straight to the gate kind -- so the dispatcher can
+// seal the cohort and carry the ticket the rest of the way.
+func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, base string, ticketID int64) error {
+	answeredGate := false
 	for i := range e2eMaxTicks {
 		if err := d.Tick(ctx); err != nil {
 			return fmt.Errorf("post-send tick %d: %w", i, err)
@@ -534,7 +539,16 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 			return err
 		}
 		if ticket.State == "done" {
+			if !answeredGate {
+				return errors.New("e2e: ticket reached done without ever waiting on the gate")
+			}
 			return nil
+		}
+		if !answeredGate && ticket.WaitingOn != nil && *ticket.WaitingOn == "gate" {
+			if err := answerFixtureQuestion(ctx, st, base, ticketID); err != nil {
+				return fmt.Errorf("answer the gate: %w", err)
+			}
+			answeredGate = true
 		}
 	}
 	return fmt.Errorf("e2e: ticket did not reach done within %d ticks", e2eMaxTicks)
@@ -786,14 +800,44 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if !slices.Equal(states, e2eWantStates) {
 		return fmt.Errorf("state messages = %v, want %v", states, e2eWantStates)
 	}
-	if questions != 1 {
-		return fmt.Errorf("question messages = %d, want exactly 1", questions)
+	// Q1 (the fixture's planning question) plus the gate (design section
+	// 6.6, task 7c): two of each.
+	const wantQuestionsAnswersResolved = 2
+	if questions != wantQuestionsAnswersResolved {
+		return fmt.Errorf("question messages = %d, want exactly %d", questions, wantQuestionsAnswersResolved)
 	}
-	if answers != 1 {
-		return fmt.Errorf("answer messages = %d, want exactly 1", answers)
+	if answers != wantQuestionsAnswersResolved {
+		return fmt.Errorf("answer messages = %d, want exactly %d", answers, wantQuestionsAnswersResolved)
 	}
-	if resolved != 1 {
-		return fmt.Errorf("resolved messages = %d, want exactly 1", resolved)
+	if resolved != wantQuestionsAnswersResolved {
+		return fmt.Errorf("resolved messages = %d, want exactly %d", resolved, wantQuestionsAnswersResolved)
+	}
+	return verifySelftestCohortSealed(ctx, st, ticketID)
+}
+
+// verifySelftestCohortSealed asserts every scenario artifact of ticketID's
+// current plan cohort carries a non-nil sealed_at (design section 6.6
+// branch 4, task 7c): the gate's approval seals exactly the cohort the
+// review ran against.
+func verifySelftestCohortSealed(ctx context.Context, st *store.Store, ticketID int64) error {
+	cohort, ok, err := st.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		return fmt.Errorf("current cohort: %w", err)
+	}
+	if !ok || cohort.RunID == nil {
+		return fmt.Errorf("e2e: current cohort = %+v, ok=%v, want a cohort with a producing run", cohort, ok)
+	}
+	scenarios, err := st.ScenariosForRun(ctx, ticketID, *cohort.RunID, false)
+	if err != nil {
+		return fmt.Errorf("scenarios for run: %w", err)
+	}
+	if len(scenarios) == 0 {
+		return errors.New("e2e: ScenariosForRun returned no scenarios, want the fixture cohort's own")
+	}
+	for i, sc := range scenarios {
+		if sc.SealedAt == nil {
+			return fmt.Errorf("e2e: scenario artifact %d has no sealed_at, want every cohort scenario sealed after approval", i)
+		}
 	}
 	return nil
 }

@@ -540,6 +540,23 @@ func invalidOutputReasons(ctx context.Context, s *Store, ticketID int64) (map[in
 	return out, nil
 }
 
+// CountSealMismatches counts ticketID's "seal mismatch cohort <runID>"
+// markers for runID (design D16, section 6.6 branch 0): the dispatcher
+// writes one exact-body "update" message (author "system") each time a seal
+// transaction mismatches (internal/dispatch's releaseAfterSealMismatch);
+// the gate's approve pre-check escalates seal_failed once this reaches two,
+// bounding the theoretical retry loop at two attempts.
+func (s *Store) CountSealMismatches(ctx context.Context, ticketID, runID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ? AND body = ?`,
+		ticketID, msgTypeUpdate, fmt.Sprintf("seal mismatch cohort %d", runID)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count seal mismatches for ticket %d run %d: %w", ticketID, runID, err)
+	}
+	return n, nil
+}
+
 // HasEscalation reports whether an "escalation" message exists for ticketID
 // whose JSON payload has origin == origin and session_id == sessionID (using
 // SQLite json_extract): the "already escalated this session once" check that
