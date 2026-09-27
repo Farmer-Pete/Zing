@@ -165,7 +165,7 @@ const (
 // id, never by which older one happens to still be open.
 //
 // A scanned external_id of "" is impossible in a healthy database (F035:
-// migration 0003's CHECK forbids it, and upsertSessionTx rejects it before
+// migration 0003's triggers forbid it, and upsertSessionTx rejects it before
 // any commit can write one), so LatestSession treats it as a store error
 // rather than silently classifying it as idless, open, or exhausted.
 func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, maxResumes int) (Session, SessionState, error) {
