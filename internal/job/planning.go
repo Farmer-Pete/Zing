@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"strings"
 
 	zing "zing"
@@ -68,6 +69,33 @@ const (
 
 	nothingToDoArrivesWhat = "nothing_to_do handling arrives in task 8"
 	nothingToDoArrivesWhy  = "task 8 checks each code claim before deciding done or an escalation"
+
+	// The three artifact types a stored ready cohort writes (design section
+	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
+	// are their validated shapes, and internal/store/examples/artifacts holds
+	// one worked example of each, the same JSON shape json.Marshal(resp.Plan),
+	// json.Marshal(resp.Claims), and json.Marshal(one Scenario) already
+	// produce.
+	artifactTypePlan     = "plan"
+	artifactTypeClaims   = "claims"
+	artifactTypeScenario = "scenario"
+
+	// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix are
+	// the "update" marker bodies section 5.3 pairs through LiveMarker: a
+	// failed ready check writes "<pending> run <rid>\n<errors, one per
+	// line>"; entry step 5 resumes with those errors and writes "<delivered>
+	// run <rid>" in the same commit.
+	validationErrorsPendingPrefix   = "validation errors pending"
+	validationErrorsDeliveredPrefix = "validation errors delivered"
+
+	// minReadyScenarios and maxReadyScenarios are design section 6.5's
+	// scenario-cohort bounds (the same jsonschema minItems=2, maxItems=30
+	// response.ReadyResponse.Scenarios already carries for a document that
+	// passed the runtime's own Layer 1 pass; checkScenarioShape restates it
+	// because a ready entry point is this file's only defense once a caller
+	// hands it a Response value that skipped that pass).
+	minReadyScenarios = 2
+	maxReadyScenarios = 30
 )
 
 // planningHandler runs the real planning state (design section 5.1): the
@@ -116,12 +144,13 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if n == 1 {
 			return runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, n)
 		}
-		// TODO(task 7): steps 5-7 of section 5.1 land here: a live
-		// "validation errors pending" marker resumes with the fenced errors,
-		// a stored ready cohort with no planreview artifact starts the
-		// review tick, and a live "planreview vN pending" marker resumes
-		// with the fenced findings (or escalates loops_exhausted at the
-		// cap).
+		if commit, handled, resumeErr := maybeResumeValidationErrors(ctx, t, d, sess); handled {
+			return commit, resumeErr
+		}
+		// TODO(task 7): steps 6-7 of section 5.1 land here: a stored ready
+		// cohort with no planreview artifact starts the review tick, and a
+		// live "planreview vN pending" marker resumes with the fenced
+		// findings (or escalates loops_exhausted at the cap).
 		return store.HandlerCommit{}, ErrNoAction
 	}
 	return store.HandlerCommit{}, ErrNoAction
@@ -322,7 +351,7 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: unrecognized runJob error: %w", runErr)
 	}
-	return planningSuccessCommit(t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningFirst)
+	return planningSuccessCommit(ctx, t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningFirst)
 }
 
 // runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
@@ -358,30 +387,22 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: unrecognized runJob error: %w", runErr)
 	}
-	return planningSuccessCommit(t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningResume)
+	return planningSuccessCommit(ctx, t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningResume)
 }
 
 // planningSuccessCommit routes a planning run's parsed response (design
 // section 6.8), shared by the first turn and the resume: questions and
-// error are the same universal handling classify uses; ready is TEMPORARY,
-// a shortcut straight to building (TODO(task 7): validate the claims,
-// scenarios, and plan, and store the cohort instead); children and
-// nothing_to_do each escalate rather than doing their real section 6.8
-// handling, which arrive in tasks 7 and 8.
-func planningSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
+// error are the same universal handling classify uses; ready is section
+// 6.5's real cohort check and store, still followed by task 6's TEMPORARY
+// shortcut straight to building once the cohort is stored (task 7c removes
+// it); children and nothing_to_do each escalate rather than doing their
+// real section 6.8 handling, which arrive in tasks 7 and 8.
+func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
 		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
 	case *response.ReadyResponse:
-		c := baseCommit(t, d)
-		c.Runs = terminalRuns(rr, string(response.OutcomeReady))
-		c.Session = sessionCommit
-		c.ResolveQuestions = resolveIDs
-		// TODO(task 7): check the claims and scenarios (design section 6.5)
-		// and store the cohort artifacts instead of shortcutting to building.
-		c.Next = stateBuilding
-		c.Reason = reasonPlanReadyShortcut
-		return c, nil
+		return readyCommit(ctx, t, d, rr, resp, sessionCommit, resolveIDs)
 	case *response.ChildrenResponse:
 		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
 			string(response.EscalationCodeSplitUnsupported), splitUnsupportedWhat, splitUnsupportedWhy, "", response.EscalationOriginSplit)
@@ -403,6 +424,248 @@ func planningSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
+}
+
+// ---- 6.5 ready: the cohort check and store --------------------------------
+
+// readyCommit is plan section 6.5's "On ready": checks, in order, the code
+// claims against the project's real filesystem (through os.OpenRoot, so a
+// symlink resolving outside the checkout cannot satisfy one, design D19),
+// the scenario cohort's own shape, and the plan checker (kind-aware this
+// time; the runtime's own Layer 1 pass, design D14, never learns the
+// ticket's kind, since parseFinalMessage has no ticket to read one from).
+// Failure terminalizes the run (outcome "ready") and writes the "validation
+// errors pending" marker (design section 5.3), leaving the ticket in
+// planning, not waiting, storing nothing. Success stores the plan, claims,
+// and one artifact per scenario, all under the reserved run (the cohort
+// key), terminalizes the run, and only then applies task 6's TEMPORARY
+// shortcut straight to building (task 7c replaces the shortcut with the
+// review tick).
+func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.ReadyResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeReady))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+
+	proj, err := d.Store.ProjectForTicket(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: project for ticket %d: %w", t.ID, err)
+	}
+	root, err := os.OpenRoot(proj.LocalPath)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: open project root %s: %w", proj.LocalPath, err)
+	}
+	defer root.Close()
+
+	errs, err := checkReady(t, resp, root.FS())
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	if len(errs) > 0 {
+		c.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("%s run %d\n%s", validationErrorsPendingPrefix, rr.Reserved.RunID, formatReadyErrors(errs)),
+		}}
+		return c, nil
+	}
+
+	artifacts, err := readyArtifacts(resp, rr.Reserved.RunID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	c.Artifacts = artifacts
+	c.Next = stateBuilding
+	c.Reason = reasonPlanReadyShortcut
+
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: current cohort: %w", err)
+	}
+	planVersion := 1
+	if ok {
+		planVersion = cohort.PlanVersion + 1
+	}
+	slog.Info("artifacts stored", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", planVersion, "scenario_count", len(resp.Scenarios))
+	return c, nil
+}
+
+// checkReady runs section 6.5's three "on ready" checks, in order, and
+// returns every failure by element path the way `zing validate` reports
+// them (response.PathError's own "path: msg" shape): the code claims, the
+// scenario cohort's shape, then the plan checker. The only real error this
+// returns is LoadChecklists failing to read its own embedded, trust-root
+// checklists.toml, which would mean that file itself is broken.
+func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*response.PathError, error) {
+	var errs []*response.PathError
+	errs = append(errs, response.CheckCodeClaims(resp.Claims, fsys)...)
+	errs = append(errs, checkScenarioShape(resp.Scenarios)...)
+
+	lists, err := response.LoadChecklists()
+	if err != nil {
+		return nil, fmt.Errorf("load checklists: %w", err)
+	}
+	bug := t.Kind != nil && *t.Kind == string(response.OutcomeBug)
+	errs = append(errs, response.CheckPlan(resp.Plan, resp.Scenarios, bug, lists, planPresenceSet(resp.Scenarios))...)
+	return errs, nil
+}
+
+// checkScenarioShape is this file's own re-check of a ready response's
+// scenario count (2 to 30) and each scenario's non-empty then (design
+// section 6.5): response.ReadyResponse.Scenarios and Scenario.Then already
+// carry jsonschema minItems=2, maxItems=30, and minLength=1, so a document
+// that passed the runtime's own Layer 1 pass (design D14) already satisfies
+// this; it defends the ready entry point itself against a Response value
+// that reached here some other way (a test's scriptedRuntime, standing in
+// for a compromised or buggy agent process, is the only caller that can).
+func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
+	var errs []*response.PathError
+	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/scenario",
+			Msg:  fmt.Sprintf("need %d to %d scenarios, have %d", minReadyScenarios, maxReadyScenarios, n),
+		})
+	}
+	for i, sc := range scenarios {
+		if strings.TrimSpace(sc.Then) == "" {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/then",
+				Msg:  "then must not be empty",
+			})
+		}
+	}
+	return errs
+}
+
+// indexedScenario formats a scenario's 0-based index the way response's own
+// element-path grammar does (design section 6.4, internal/response/epath.go),
+// e.g. indexedScenario(0) -> "scenario[0]".
+func indexedScenario(i int) string {
+	return fmt.Sprintf("scenario[%d]", i)
+}
+
+// planPresenceSet builds the presence flags response.CheckPlan reads
+// (design section 6.6): plan/overview/problem, the first test's kind
+// attribute, and each scenario's id are all schema-required fields (no
+// "omitempty" on their xml tag), so a Response value that reached this
+// point through a real Layer 1 pass already proved every one of them
+// present; a hand-built Response used only in a test may not have, which is
+// exactly what checkReady's own checks (CheckCodeClaims, checkScenarioShape)
+// exist to catch instead of a presence-map lookup.
+func planPresenceSet(scenarios []response.Scenario) map[string]bool {
+	present := map[string]bool{
+		"plan/overview/problem":            true,
+		"plan/delivery/tests/test[0]/kind": true,
+	}
+	for i := range scenarios {
+		present["scenarios/"+indexedScenario(i)+"/id"] = true
+	}
+	return present
+}
+
+// formatReadyErrors renders errs one per element path per line ("path:
+// msg", response.PathError's own Error() shape), the "validation errors
+// pending" marker body a resumed prompt.Validation later carries back into
+// the model (design section 5.3, 6.3).
+func formatReadyErrors(errs []*response.PathError) string {
+	lines := make([]string, len(errs))
+	for i, e := range errs {
+		lines[i] = e.Error()
+	}
+	return strings.Join(lines, "\n")
+}
+
+// readyArtifacts marshals a valid ready response's plan, claims, and one
+// artifact per scenario (design section 6.5), each under runID (the cohort
+// key), the same JSON shape internal/store/examples/artifacts and
+// console.SeedDemo already use for these three artifact types. Version is
+// left at its zero value on every one, so CommitHandlerResult assigns each
+// (ticket, type) pair the next version past its current maximum.
+func readyArtifacts(resp *response.ReadyResponse, runID int64) ([]store.Artifact, error) {
+	normalizePlanArrays(&resp.Plan)
+	planPayload, err := json.Marshal(resp.Plan)
+	if err != nil {
+		return nil, fmt.Errorf("marshal plan: %w", err)
+	}
+	claimsPayload, err := json.Marshal(resp.Claims)
+	if err != nil {
+		return nil, fmt.Errorf("marshal claims: %w", err)
+	}
+
+	artifacts := make([]store.Artifact, 0, 2+len(resp.Scenarios))
+	artifacts = append(artifacts,
+		store.Artifact{Type: artifactTypePlan, RunID: &runID, Payload: planPayload},
+		store.Artifact{Type: artifactTypeClaims, RunID: &runID, Payload: claimsPayload},
+	)
+	for _, sc := range resp.Scenarios {
+		payload, marshalErr := json.Marshal(sc)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal scenario %s: %w", sc.ID, marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{Type: artifactTypeScenario, RunID: &runID, Payload: payload})
+	}
+	return artifacts, nil
+}
+
+// normalizePlanArrays replaces a decoded plan's nil slices with empty ones,
+// for exactly the fields the artifacts/plan.json schema declares as a bare
+// JSON array (no jsonschema minItems, so Layer 1 never guarantees one
+// present, and no json ",omitempty" tag, so json.Marshal would otherwise
+// emit null): Design.Changes and .Types, each TypeDef's own Transitions,
+// Design.Migrations.Items, and Delivery.Deletions.Items. The XML "none"
+// union (Migrations.None, Deletions.None) has no JSON counterpart -- the
+// stored payload is always a plain, possibly empty, array either way.
+func normalizePlanArrays(p *response.Plan) {
+	if p.Design.Changes == nil {
+		p.Design.Changes = []response.Change{}
+	}
+	if p.Design.Types == nil {
+		p.Design.Types = []response.TypeDef{}
+	}
+	for i := range p.Design.Types {
+		if p.Design.Types[i].Transitions == nil {
+			p.Design.Types[i].Transitions = []response.Transition{}
+		}
+	}
+	if p.Design.Migrations.Items == nil {
+		p.Design.Migrations.Items = []response.Migration{}
+	}
+	if p.Delivery.Deletions.Items == nil {
+		p.Delivery.Deletions.Items = []response.Fence{}
+	}
+}
+
+// maybeResumeValidationErrors is section 5.1 step 5: a live "validation
+// errors pending" marker (no later "validation errors delivered" marker for
+// the same run) resumes the open session with those errors fenced behind
+// prompt.Validation, and writes the "validation errors delivered run <rid>"
+// marker in the same commit, carrying forward the pending marker's own run
+// id rather than the resume's. handled is false when there is no live
+// marker, so the caller falls through to the next entry-decision step. When
+// the resume itself returns with no commit at all (runtime.ErrCanceled, or
+// a pre-reserve failure returned unchanged), this leaves that empty commit
+// and error untouched rather than fabricate a delivered marker for a call
+// that stored nothing.
+func maybeResumeValidationErrors(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (commit store.HandlerCommit, handled bool, err error) {
+	m, live, err := d.Store.LiveMarker(ctx, t.ID, validationErrorsPendingPrefix, validationErrorsDeliveredPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: live marker: %w", err)
+	}
+	if !live {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	firstLine, errsText, _ := strings.Cut(m.Body, "\n")
+	rid := strings.TrimPrefix(firstLine, validationErrorsPendingPrefix+" run ")
+
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Validation(errsText)}, 0)
+	if err != nil {
+		return commit, true, err
+	}
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: validationErrorsDeliveredPrefix + " run " + rid,
+	})
+	return commit, true, nil
 }
 
 // ---- shared failure and escalation commit builders ------------------------

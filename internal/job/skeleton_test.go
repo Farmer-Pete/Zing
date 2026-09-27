@@ -3,6 +3,7 @@ package job_test
 import (
 	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -36,11 +37,43 @@ const (
 
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
+
+	testArtifactTypePlan     = "plan"
+	testArtifactTypeClaims   = "claims"
+	testArtifactTypeScenario = "scenario"
 )
 
-// testProject is the one project every test in this file seeds.
+// testProject is the one project every test in this file seeds. LocalPath
+// is filled in per test by seedQueuedTicket (testProjectDir): the ready
+// entry point (design section 6.5) now opens it for real through
+// os.OpenRoot to check a ready response's code claims, so it must be a real
+// directory, not the placeholder "/tmp/zing" this var carried through
+// task 6.
 var testProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", Tracker: "github",
+}
+
+// readyClaimEvidencePath is the file every seeded test project carries, the
+// same path fixtures/scripts/planning/2.xml's one code claim cites
+// ("cmd/zing/main.go:60"), so response.CheckCodeClaims resolves it for real
+// against testProjectDir's own os.Root (design section 6.5, D19).
+const readyClaimEvidencePath = "cmd/zing/main.go"
+
+// testProjectDir returns a fresh temp directory carrying
+// readyClaimEvidencePath, so a ready check's os.OpenRoot(project.LocalPath)
+// plus response.CheckCodeClaims can resolve the fixture cohort's one code
+// claim for real.
+func testProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	full := filepath.Join(dir, readyClaimEvidencePath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("testProjectDir: mkdir: %v", err)
+	}
+	if err := os.WriteFile(full, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("testProjectDir: write %s: %v", readyClaimEvidencePath, err)
+	}
+	return dir
 }
 
 // newJobTestStore opens a fresh Store on a temp-file database, closed on
@@ -62,7 +95,9 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	ctx := t.Context()
 
-	projectID, err := s.EnsureProject(ctx, testProject)
+	proj := testProject
+	proj.LocalPath = testProjectDir(t)
+	projectID, err := s.EnsureProject(ctx, proj)
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
@@ -243,7 +278,7 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	}
 
 	// Answer the one fixture question, exactly the console's POST /answer path.
-	answerFixtureQuestion(t, s, ticketID, "b")
+	answerFixtureQuestion(t, s, ticketID)
 
 	answered := getTicket(t, s, ticketID)
 	if answered.WaitingOn != nil {
@@ -308,10 +343,16 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	}
 }
 
-// answerFixtureQuestion answers ticketID's one open question with option,
-// through store.AnswerQuestion, and fails the test if the answer is not
-// accepted.
-func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option string) {
+// answerFixtureQuestionOption is the option every caller of
+// answerFixtureQuestion answers with: fixtures/scripts/planning/1.xml's own
+// "b" ("hello, world"), the option every test in this file and
+// planning_test.go exercises.
+const answerFixtureQuestionOption = "b"
+
+// answerFixtureQuestion answers ticketID's one open question with
+// answerFixtureQuestionOption, through store.AnswerQuestion, and fails the
+// test if the answer is not accepted.
+func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
 	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
 	if err != nil {
@@ -321,7 +362,7 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option 
 		t.Fatal("QuestionsByState(open) = no open questions, want at least one")
 	}
 	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{
-		TicketID: ticketID, QuestionID: open[0].ID, Option: option,
+		TicketID: ticketID, QuestionID: open[0].ID, Option: answerFixtureQuestionOption,
 	})
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
@@ -496,7 +537,7 @@ func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, ticketID int64) {
 			return
 		}
 		if after.WaitingOn != nil && *after.WaitingOn == testWaitingQuestions {
-			answerFixtureQuestion(t, s, ticketID, "b")
+			answerFixtureQuestion(t, s, ticketID)
 			continue
 		}
 		if after.WaitingOn != nil {

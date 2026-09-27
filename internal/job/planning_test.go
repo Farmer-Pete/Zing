@@ -12,6 +12,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -344,7 +348,7 @@ func TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding(t *te
 	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
 	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
 
-	answerFixtureQuestion(t, s, ticketID, "b")
+	answerFixtureQuestion(t, s, ticketID)
 
 	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
 	if err != nil {
@@ -733,5 +737,490 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 	_, err = runPlanning(t, s, claim(t, s, fake, ticketID), ticketID)
 	if !errors.Is(err, job.ErrNoAction) {
 		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	}
+}
+
+// ---- 6.5 ready: the cohort check and store (task 7a) -----------------------
+
+// validPlan returns a plan that passes every response.CheckPlan rule (no
+// placeholder or vague words, no performance claim without a measurement,
+// no scenario-leak) for a feature ticket (task 7a never drives this through
+// the bug-shape rules): every prose field distinct from
+// validScenarios' own Given/When/Then text, so nothing here accidentally
+// restates a scenario's acceptance.
+func validPlan(objective string) response.Plan {
+	return response.Plan{
+		Overview: response.Overview{
+			Objective: objective,
+			Context:   "internal/job/planning.go stores the ready cohort once its checks pass.",
+			Problem:   response.Problem{Text: "Without a stored cohort the build step has nothing to act on."},
+			Goals:     []string{"the ready cohort round-trips through the store"},
+			NonGoals:  []string{"the review tick, which a later task adds"},
+		},
+		Design: response.Design{
+			Demo:  response.Demo{Cmd: "go test ./internal/job/...", Text: "the new test passes"},
+			Shape: "readyCommit checks the claims, the scenario shape, and the plan, then stores three artifact types under one run id.",
+		},
+		Delivery: response.Delivery{
+			Files: []response.FileChange{{Path: "internal/job/planning.go", Action: response.FileActionModify, Reason: "store the ready cohort"}},
+			Tests: []response.TestCase{{Name: "TestReadyCohort", Seam: "readyCommit", Kind: response.TestKindIntegration, Asserts: "the cohort round-trips"}},
+			Tasks: []response.Task{{N: 1, Test: "TestReadyCohort", Demo: true, Text: "Store the plan, claims, and scenarios under the reserved run."}},
+		},
+		Review: response.Review{
+			TrustRoot:    "none",
+			Alternatives: []string{"store the plan without a scenario cohort: rejected, the build step needs both"},
+			Risks:        []string{"a later revision must not collide with an earlier plan version"},
+		},
+	}
+}
+
+// validClaims returns one true code claim citing readyClaimEvidencePath
+// (skeleton_test.go's testProjectDir writes this file into every seeded
+// test project), so response.CheckCodeClaims resolves it for real.
+func validClaims() []response.Claim {
+	return []response.Claim{
+		{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictTrue, Evidence: readyClaimEvidencePath + ":1", Text: "the file exists"},
+	}
+}
+
+// validScenarios returns n scenarios tagged with tag, each with distinct,
+// unrelated Given/When/Then text so no plan built by validPlan ever
+// restates one verbatim (response.CheckPlan's scenario-leak rule).
+func validScenarios(n int, tag string) []response.Scenario {
+	out := make([]response.Scenario, n)
+	for i := range out {
+		out[i] = response.Scenario{
+			ID:    fmt.Sprintf("s%d", i+1),
+			Kind:  response.ScenarioKindBehavior,
+			Given: fmt.Sprintf("%s scenario %d starts from a fresh store", tag, i+1),
+			When:  fmt.Sprintf("%s scenario %d runs the ready check", tag, i+1),
+			Then:  fmt.Sprintf("%s scenario %d observes the stored artifact", tag, i+1),
+		}
+	}
+	return out
+}
+
+// readyResponse builds a *response.ReadyResponse naming job planning and
+// outcome ready, the shape a scriptedRuntime step hands back in place of a
+// real agent's XML document.
+func readyResponse(plan response.Plan, claims []response.Claim, scenarios []response.Scenario) *response.ReadyResponse {
+	return &response.ReadyResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeReady,
+		Claims:    claims,
+		Scenarios: scenarios,
+		Plan:      plan,
+	}
+}
+
+// readyScriptedRuntime builds a byJobRuntime dispatching only JobPlanning to
+// a scriptedRuntime carrying steps, the shape every ready-cohort test below
+// drives planning turns through once classify (a real fixture run) has
+// already set the ticket's kind.
+func readyScriptedRuntime(t *testing.T, steps ...scriptedStep) byJobRuntime {
+	t.Helper()
+	return byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{
+		response.JobPlanning: &scriptedRuntime{t: t, steps: steps},
+	}}
+}
+
+// readyStep wraps resp as a scriptedStep whose Response is a valid or
+// hand-broken ready document under sessionID.
+func readyStep(resp response.Response, sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{Response: resp, SessionID: sessionID, ExitCode: 0, AgentTime: time.Second}}
+}
+
+// TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts proves
+// section 6.5's success path against the real fixture cohort
+// (fixtures/scripts/planning/2.xml, two scenarios): exactly one plan
+// artifact (version 1), one claims artifact (version 1), and one scenario
+// artifact per Scenario, every one carrying the reserved run's id; the
+// stored plan payload round-trips to the fixture's own plan; and only after
+// the cohort is stored does the pinned shortcut
+// (TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding)
+// fire.
+func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
+
+	answerFixtureQuestion(t, s, ticketID)
+
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (ready) Run: %v", err)
+	}
+	if len(commit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one terminalized run", commit.Runs)
+	}
+	runID := commit.Runs[0].ID
+	const wantArtifacts = 4 // plan + claims + 2 scenarios
+	if len(commit.Artifacts) != wantArtifacts {
+		t.Fatalf("commit.Artifacts = %d entries, want %d (plan, claims, 2 scenarios)", len(commit.Artifacts), wantArtifacts)
+	}
+
+	var plans, claims, scenarios int
+	var planPayload json.RawMessage
+	for _, a := range commit.Artifacts {
+		if a.RunID == nil || *a.RunID != runID {
+			t.Errorf("artifact %s carries run_id %v, want %d", a.Type, a.RunID, runID)
+		}
+		switch a.Type {
+		case testArtifactTypePlan:
+			plans++
+			planPayload = a.Payload
+		case testArtifactTypeClaims:
+			claims++
+		case testArtifactTypeScenario:
+			scenarios++
+		default:
+			t.Errorf("unexpected artifact type %q", a.Type)
+		}
+	}
+	if plans != 1 || claims != 1 || scenarios != 2 {
+		t.Errorf("artifact counts = (plan=%d, claims=%d, scenario=%d), want (1, 1, 2)", plans, claims, scenarios)
+	}
+
+	var roundTripped response.Plan
+	if unmarshalErr := json.Unmarshal(planPayload, &roundTripped); unmarshalErr != nil {
+		t.Fatalf("unmarshal stored plan payload: %v", unmarshalErr)
+	}
+	const wantObjective = "Add a hello endpoint so a caller can get a plain-text greeting back over HTTP."
+	if roundTripped.Overview.Objective != wantObjective {
+		t.Errorf("stored plan objective = %q, want %q", roundTripped.Overview.Objective, wantObjective)
+	}
+	if len(roundTripped.Delivery.Tasks) != 1 || roundTripped.Review.TrustRoot != "none" {
+		t.Errorf("stored plan = %+v, does not round-trip the fixture's own plan", roundTripped)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	stored, err := s.ListArtifacts(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListArtifacts: %v", err)
+	}
+	if len(stored) != wantArtifacts {
+		t.Fatalf("stored artifacts = %d, want %d", len(stored), wantArtifacts)
+	}
+	var scenarioVersions []int
+	for _, a := range stored {
+		switch a.Type {
+		case testArtifactTypePlan, testArtifactTypeClaims:
+			if a.Version != 1 {
+				t.Errorf("artifact %s version = %d, want 1 (the only one on this ticket)", a.Type, a.Version)
+			}
+		case testArtifactTypeScenario:
+			scenarioVersions = append(scenarioVersions, a.Version)
+		}
+		if a.RunID == nil || *a.RunID != runID {
+			t.Errorf("stored artifact %s run_id = %v, want %d", a.Type, a.RunID, runID)
+		}
+	}
+	slices.Sort(scenarioVersions)
+	if !slices.Equal(scenarioVersions, []int{1, 2}) {
+		t.Errorf("scenario artifact versions = %v, want [1 2] (one row per scenario, consecutively versioned)", scenarioVersions)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateBuilding {
+		t.Errorf("final ticket state = %q, want building (task 6's temporary shortcut)", final.State)
+	}
+}
+
+// TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched
+// proves a revised plan on the same ticket: a second ready call stores plan
+// version 2 and a new scenario cohort under a new run id, while the first
+// cohort's rows (a different run id, plan version 1) sit untouched. The
+// first ready's commit is applied with Next and Reason stripped -- a
+// test-only stand-in for the review tick a later task adds, which is what
+// would ordinarily keep the ticket in planning between two ready turns
+// instead of task 6's shortcut to building. The second ready arrives
+// through the ordinary answered-round resume path (design section 5.1 step
+// 1(c), 6.4): a question tied to the first run's session, answered exactly
+// as AnsweredRounds expects, whether or not a real model turn asked it.
+func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify: feature
+
+	planA := readyResponse(validPlan("Store the ready cohort, version A."), validClaims(), validScenarios(2, "A"))
+	planB := readyResponse(validPlan("Store the ready cohort, version B, a revision of A."), validClaims(), validScenarios(3, "B"))
+	byJob := readyScriptedRuntime(t, readyStep(planA, "plan-sess-1"), readyStep(planB, "plan-sess-1"))
+
+	firstCommit := mustPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if len(firstCommit.Artifacts) != 4 {
+		t.Fatalf("first commit.Artifacts = %d, want 4 (plan, claims, 2 scenarios)", len(firstCommit.Artifacts))
+	}
+	firstRunID := firstCommit.Runs[0].ID
+
+	stripped := firstCommit
+	stripped.Next = ""
+	stripped.Reason = ""
+	apply(t, s, getTicket(t, s, ticketID), stripped)
+
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Revise the plan"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	openState := "open"
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, RunID: &firstRunID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: &openState, Body: "Revise the plan?\n\nShould the plan be revised?", Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); answerErr != nil {
+		t.Fatalf("AnswerQuestion: %v", answerErr)
+	}
+
+	secondCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("second planning Run: %v", err)
+	}
+	if len(secondCommit.Artifacts) != 5 {
+		t.Fatalf("second commit.Artifacts = %d, want 5 (plan, claims, 3 scenarios)", len(secondCommit.Artifacts))
+	}
+	secondRunID := secondCommit.Runs[0].ID
+	if secondRunID == firstRunID {
+		t.Fatalf("second ready reused run id %d, want a new run", secondRunID)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+
+	stored, err := s.ListArtifacts(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListArtifacts: %v", err)
+	}
+	var planVersions, claimsVersions []int
+	var oldScenarios, newScenarios int
+	for _, a := range stored {
+		switch a.Type {
+		case testArtifactTypePlan:
+			planVersions = append(planVersions, a.Version)
+		case testArtifactTypeClaims:
+			claimsVersions = append(claimsVersions, a.Version)
+		case testArtifactTypeScenario:
+			switch {
+			case a.RunID != nil && *a.RunID == firstRunID:
+				oldScenarios++
+			case a.RunID != nil && *a.RunID == secondRunID:
+				newScenarios++
+			}
+		}
+	}
+	if !slices.Contains(planVersions, 1) || !slices.Contains(planVersions, 2) {
+		t.Errorf("plan versions = %v, want both 1 and 2", planVersions)
+	}
+	if !slices.Contains(claimsVersions, 1) || !slices.Contains(claimsVersions, 2) {
+		t.Errorf("claims versions = %v, want both 1 and 2", claimsVersions)
+	}
+	if oldScenarios != 2 {
+		t.Errorf("old cohort (run %d) scenario rows = %d, want 2 (untouched)", firstRunID, oldScenarios)
+	}
+	if newScenarios != 3 {
+		t.Errorf("new cohort (run %d) scenario rows = %d, want 3", secondRunID, newScenarios)
+	}
+
+	cohort, ok, err := s.CurrentCohort(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CurrentCohort: %+v, %v", cohort, err)
+	}
+	if cohort.PlanVersion != 2 || cohort.RunID == nil || *cohort.RunID != secondRunID {
+		t.Errorf("CurrentCohort = %+v, want (version 2, run %d)", cohort, secondRunID)
+	}
+}
+
+// TestPlanningHandler_Ready_ClaimThroughOutwardSymlinkFailsAndPends proves
+// D19: a code claim citing a path that resolves through a symlink pointing
+// outside the checkout fails the claim check (os.Root cannot follow it),
+// the pending marker names the claim's own element path, nothing is
+// stored, and the ticket stays in planning, not waiting.
+func TestPlanningHandler_Ready_ClaimThroughOutwardSymlinkFailsAndPends(t *testing.T) {
+	s := newJobTestStore(t)
+
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.go"), []byte("package secret\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	projectDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(outsideDir, "secret.go"), filepath.Join(projectDir, "escape.go")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: projectDir, Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: "Add a hello endpoint", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
+
+	claims := []response.Claim{{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictTrue, Evidence: "escape.go:1", Text: "reads the outside file"}}
+	resp := readyResponse(validPlan("Store the ready cohort."), claims, validScenarios(2, "sym"))
+	byJob := readyScriptedRuntime(t, readyStep(resp, "sym-sess-1"))
+
+	commit := mustPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if len(commit.Artifacts) != 0 {
+		t.Fatalf("commit.Artifacts = %d, want 0 (the claim check must fail)", len(commit.Artifacts))
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly one pending marker", commit.Messages)
+	}
+	body := commit.Messages[0].Body
+	if !strings.HasPrefix(body, "validation errors pending run ") {
+		t.Errorf("marker body = %q, want it to start with the pending prefix", body)
+	}
+	if !strings.Contains(body, "claims/claim[0]/evidence") {
+		t.Errorf("marker body = %q, want the claim's own element path", body)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (the ticket stays in planning)", commit.Next)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.State != testStatePlanning || final.WaitingOn != nil {
+		t.Errorf("final ticket = (state=%q, waiting_on=%v), want (planning, nil)", final.State, final.WaitingOn)
+	}
+}
+
+// TestPlanningHandler_Ready_ScenarioShapeFailuresNameTheElementPath covers
+// section 6.5's scenario-cohort re-check: 1 scenario, 31 scenarios, and one
+// empty then, each failing with the pending marker naming the specific
+// element path and rule.
+func TestPlanningHandler_Ready_ScenarioShapeFailuresNameTheElementPath(t *testing.T) {
+	emptyThen := validScenarios(2, "empty")
+	emptyThen[0].Then = ""
+
+	cases := []struct {
+		name      string
+		scenarios []response.Scenario
+		wantErr   string
+	}{
+		{name: "one scenario", scenarios: validScenarios(1, "one"), wantErr: "need 2 to 30 scenarios, have 1"},
+		{name: "thirty-one scenarios", scenarios: validScenarios(31, "many"), wantErr: "need 2 to 30 scenarios, have 31"},
+		{name: "empty then", scenarios: emptyThen, wantErr: "scenarios/scenario[0]/then: then must not be empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newJobTestStore(t)
+			ticketID := seedQueuedTicket(t, s)
+			fake := fakeRuntime(t)
+			advanceQueuedToPlanning(t, s, fake, ticketID)
+			apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID))
+
+			resp := readyResponse(validPlan("Store the ready cohort."), validClaims(), tc.scenarios)
+			byJob := readyScriptedRuntime(t, readyStep(resp, "shape-sess"))
+
+			commit := mustPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+			if len(commit.Artifacts) != 0 {
+				t.Fatalf("commit.Artifacts = %d, want 0", len(commit.Artifacts))
+			}
+			if len(commit.Messages) != 1 || !strings.Contains(commit.Messages[0].Body, tc.wantErr) {
+				t.Fatalf("commit.Messages = %+v, want the pending marker to carry %q", commit.Messages, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestPlanningHandler_Ready_PlanCheckerFailureNamesElementPathAndRule proves
+// a plan checker failure (a TODO placeholder) writes the pending marker
+// with the checker's own element path and rule.
+func TestPlanningHandler_Ready_PlanCheckerFailureNamesElementPathAndRule(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID))
+
+	plan := validPlan("Store the ready cohort.")
+	plan.Design.Shape = "TODO: describe the shape."
+	resp := readyResponse(plan, validClaims(), validScenarios(2, "todo"))
+	byJob := readyScriptedRuntime(t, readyStep(resp, "todo-sess"))
+
+	commit := mustPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if len(commit.Artifacts) != 0 {
+		t.Fatalf("commit.Artifacts = %d, want 0", len(commit.Artifacts))
+	}
+	const wantErr = `plan/design/shape: placeholder "TODO" not allowed`
+	if len(commit.Messages) != 1 || !strings.Contains(commit.Messages[0].Body, wantErr) {
+		t.Fatalf("commit.Messages = %+v, want the pending marker to carry %q", commit.Messages, wantErr)
+	}
+}
+
+// TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDelivers
+// proves entry-decision step 5: a live "validation errors pending" marker
+// resumes the open session with those errors fenced behind
+// prompt.Validation (captured through a recordingRuntime), writes the
+// "validation errors delivered" marker in that same commit, and a later
+// tick -- with the marker now delivered -- does not resume again.
+func TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDelivers(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
+
+	badResp := readyResponse(validPlan("Store the ready cohort."), validClaims(), validScenarios(1, "bad"))
+	goodResp := &response.QuestionResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q1", Title: "Continue?", Body: "Body.",
+			Options: []response.Option{{Key: "a", Text: "Yes"}, {Key: "b", Text: "No"}}, Recommended: "a",
+		}},
+	}
+	byJob := readyScriptedRuntime(t, readyStep(badResp, "step5-sess"), readyStep(goodResp, "step5-sess"))
+
+	firstCommit := mustPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if len(firstCommit.Messages) != 1 || !strings.HasPrefix(firstCommit.Messages[0].Body, "validation errors pending run ") {
+		t.Fatalf("first commit.Messages = %+v, want one pending marker", firstCommit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	rec := &recordingRuntime{rt: byJob}
+	secondCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("second planning Run: %v", err)
+	}
+	if rec.lastReq.Prompt == "" {
+		t.Fatal("recordingRuntime saw an empty resume prompt")
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "<<<UNTRUSTED ") || !strings.Contains(rec.lastReq.Prompt, "<<<END ") {
+		t.Errorf("resume prompt does not carry the fence markers:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "need 2 to 30 scenarios") {
+		t.Errorf("resume prompt does not carry the validation errors:\n%s", rec.lastReq.Prompt)
+	}
+
+	var delivered int
+	for _, m := range secondCommit.Messages {
+		if strings.HasPrefix(m.Body, "validation errors delivered run ") {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("second commit.Messages = %+v, want exactly one delivered marker", secondCommit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+
+	_, err = runPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("third tick: err = %v, want job.ErrNoAction (no second resume)", err)
 	}
 }

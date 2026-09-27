@@ -27,7 +27,12 @@ import (
 // advances one state per second instead of stalling on the default 30s.
 // %d takes a free loopback port: config.Load rejects an explicit
 // console.port of 0 (checkValues requires 1-65535), so the test picks one
-// itself instead of asking serve for an ephemeral one.
+// itself instead of asking serve for an ephemeral one. %q takes the
+// project's path: it must be a real directory carrying "cmd/zing/main.go",
+// since the planning handler's ready entry point (design section 6.5) opens
+// it for real through os.OpenRoot and checks the fixture cohort's one code
+// claim (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60")
+// against it.
 const testZingTOMLFormat = `
 user = "test-user"
 github_token = "test-github-token"
@@ -43,7 +48,7 @@ max_parallel = 1
 [[projects]]
 name = "zing"
 repo = "https://example.com/zing.git"
-path = "/tmp/zing-project"
+path = %q
 tracker = "github"
 commands = { test = "go test ./...", lint = "golangci-lint run" }
 `
@@ -93,7 +98,15 @@ func TestServe_RingToDoneAnsweringOneQuestionThenCleanShutdown(t *testing.T) {
 	port := freeLoopbackPort(t)
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	doc := fmt.Sprintf(testZingTOMLFormat, port)
+	projectDir := t.TempDir()
+	if mkErr := os.MkdirAll(filepath.Join(projectDir, "cmd", "zing"), 0o755); mkErr != nil {
+		t.Fatalf("mkdir cmd/zing: %v", mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(projectDir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
+		t.Fatalf("write cmd/zing/main.go: %v", wErr)
+	}
+
+	doc := fmt.Sprintf(testZingTOMLFormat, port, projectDir)
 	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
 	}

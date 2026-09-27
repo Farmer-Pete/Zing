@@ -178,7 +178,7 @@ func TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField(t *testing.T
 	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetKind: &kind}); err != nil {
 		t.Errorf("ValidateCommit(SetKind only): %v, want nil", err)
 	}
-	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Artifacts: []store.Artifact{{Type: "scenario"}}}); err != nil {
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Artifacts: []store.Artifact{{Type: testArtifactTypeScenario}}}); err != nil {
 		t.Errorf("ValidateCommit(Artifacts only): %v, want nil", err)
 	}
 	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, ResolveAll: true}); err != nil {

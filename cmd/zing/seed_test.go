@@ -73,7 +73,11 @@ func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	dbPath := filepath.Join(dir, "zing.db")
 
 	port := freeLoopbackPort(t)
-	doc := fmt.Sprintf(testZingTOMLFormat, port)
+	// This test never resumes the fixture ticket to a ready outcome (it only
+	// waits for intake), so the configured project's path needs no
+	// "cmd/zing/main.go" fixture file; dir itself is a real directory, which
+	// is all os.OpenRoot needs if some other tick ever reaches that far.
+	doc := fmt.Sprintf(testZingTOMLFormat, port, dir)
 	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
 	}

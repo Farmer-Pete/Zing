@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,8 +49,36 @@ const (
 	testRuntimeFake     = "fake"
 )
 
+// testProject is the one project every test in this file seeds. LocalPath
+// is filled in per test by seedProject (testProjectDir): the planning
+// handler's ready entry point (design section 6.5) opens it for real
+// through os.OpenRoot to check a ready response's code claims, so it must
+// be a real directory, not a placeholder path.
 var testProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", Tracker: "github",
+}
+
+// readyClaimEvidencePath is the file every seeded test project carries, the
+// same path fixtures/scripts/planning/2.xml's one code claim cites
+// ("cmd/zing/main.go:60"), so response.CheckCodeClaims resolves it for real
+// against testProjectDir's own os.Root (design section 6.5, D19).
+const readyClaimEvidencePath = "cmd/zing/main.go"
+
+// testProjectDir returns a fresh temp directory carrying
+// readyClaimEvidencePath, so a ready check's os.OpenRoot(project.LocalPath)
+// plus response.CheckCodeClaims can resolve the fixture cohort's one code
+// claim for real.
+func testProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	full := filepath.Join(dir, readyClaimEvidencePath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("testProjectDir: mkdir: %v", err)
+	}
+	if err := os.WriteFile(full, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("testProjectDir: write %s: %v", readyClaimEvidencePath, err)
+	}
+	return dir
 }
 
 // testModels and testBudget are the job.Deps.Models and job.Deps.Budget
@@ -150,7 +179,9 @@ func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, ex
 // seedProject inserts testProject and returns its id.
 func seedProject(t *testing.T, s *store.Store) int64 {
 	t.Helper()
-	id, err := s.EnsureProject(t.Context(), testProject)
+	proj := testProject
+	proj.LocalPath = testProjectDir(t)
+	id, err := s.EnsureProject(t.Context(), proj)
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}

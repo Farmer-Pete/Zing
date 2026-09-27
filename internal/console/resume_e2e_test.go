@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -98,8 +100,21 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("tracker.NewFixture: %v", err)
 	}
 
+	// The project's LocalPath must be a real directory carrying
+	// "cmd/zing/main.go": the planning handler's ready entry point (design
+	// section 6.5) opens it for real through os.OpenRoot and checks the
+	// fixture cohort's one code claim (fixtures/scripts/planning/2.xml cites
+	// "cmd/zing/main.go:60") against it.
+	projectDir := t.TempDir()
+	if mkErr := os.MkdirAll(filepath.Join(projectDir, "cmd", "zing"), 0o755); mkErr != nil {
+		t.Fatalf("mkdir cmd/zing: %v", mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(projectDir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
+		t.Fatalf("write cmd/zing/main.go: %v", wErr)
+	}
+
 	projectID, err := st.EnsureProject(ctx, store.Project{
-		Name: testAuthorZing, RepoURL: "https://example.invalid/zing", LocalPath: t.TempDir(), Tracker: testTrackerGitHub,
+		Name: testAuthorZing, RepoURL: "https://example.invalid/zing", LocalPath: projectDir, Tracker: testTrackerGitHub,
 	})
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)

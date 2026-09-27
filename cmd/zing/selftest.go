@@ -338,6 +338,18 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
+	// dir must carry "cmd/zing/main.go": the planning handler's ready entry
+	// point (design section 6.5) opens the project for real through
+	// os.OpenRoot and checks the fixture cohort's one code claim
+	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60") against
+	// it.
+	if mkErr := os.MkdirAll(filepath.Join(dir, "cmd", "zing"), 0o755); mkErr != nil {
+		return fmt.Errorf("mkdir cmd/zing: %w", mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(dir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
+		return fmt.Errorf("write cmd/zing/main.go: %w", wErr)
+	}
+
 	projectID, err := st.EnsureProject(ctx, store.Project{
 		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: dir, Tracker: "github",
 	})
