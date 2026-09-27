@@ -254,24 +254,42 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case <-d.drainCh:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return fmt.Errorf("dispatch: read flags: %w", err)
+				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
 			}
 			if draining {
 				return nil
 			}
 		case <-ticker.C:
 			if err := d.Tick(ctx); err != nil {
-				return err
+				return ctxErrOr(ctx, err)
 			}
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return fmt.Errorf("dispatch: read flags: %w", err)
+				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
 			}
 			if draining {
 				return nil
 			}
 		}
 	}
+}
+
+// ctxErrOr returns ctx.Err() in place of err whenever ctx has already been
+// canceled or has expired. A store call that straddles the moment ctx ends
+// races database/sql's own context-driven teardown (it cancels the
+// in-flight statement and, for a transaction, auto-rolls it back), so the
+// error that surfaces is whichever side of that race lost -- for example
+// "sql: transaction has already been committed or rolled back" or the
+// driver's own "interrupted" -- never context.DeadlineExceeded or
+// context.Canceled itself, even though ctx ending is what really caused the
+// failure. Run's contract is to end because ctx is done; once it is, that
+// is the reason to report, not an artifact of an operation ctx cut off
+// mid-flight.
+func ctxErrOr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
