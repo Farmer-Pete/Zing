@@ -15,6 +15,7 @@ import (
 	"zing/internal/bus"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 	"zing/internal/tracker"
@@ -73,11 +74,17 @@ type Binding struct {
 	User string
 }
 
-// Config is the dispatcher's run-time tuning (design section 6.8).
+// Config is the dispatcher's run-time tuning (design section 6.8). Models,
+// Budget, and Floor (design section 4.4) are threaded straight into every
+// job.Deps runAndCommit builds; task 2 only threads them, nothing in this
+// package reads them yet.
 type Config struct {
-	Interval    time.Duration // Run's tick period
-	MaxParallel int           // the active-run guard (design section 6.8 step 4)
-	Owner       string        // this process's claim owner id, <hostname>-<pid>
+	Interval    time.Duration     // Run's tick period
+	MaxParallel int               // the active-run guard (design section 6.8 step 4)
+	Owner       string            // this process's claim owner id, <hostname>-<pid>
+	Models      map[string]string // alias -> exact model id (config.Models)
+	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
+	Floor       response.Severity // config.Review.Floor, parsed
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -88,7 +95,7 @@ type Dispatcher struct {
 	bus      *bus.Broker
 	machine  *machine.Machine
 	reg      map[string]job.Handler
-	rt       runtime.Runtime
+	rts      runtime.Set
 	bindings []Binding
 	cfg      Config
 	drainCh  chan struct{}
@@ -105,11 +112,13 @@ const deferredMechanics = "dependency-blocking of tickets with unmerged depends_
 // handler in reg (job.Validate), so a missing handler fails at startup,
 // never at a nil map read mid-tick, and returns a Dispatcher ready to tick.
 //
-// New's signature matches the plan (design section 6.8): rt is threaded
-// into job.Deps.Runtime on every handler call.
+// New's signature matches the plan (design section 6.8, 4.1 D2): rts is
+// threaded into job.Deps.Runtimes on every handler call, so a handler
+// resolves its job's runtime by the name machine.toml's job.runtime field
+// gives it.
 func New(
 	s *store.Store, tr tracker.Tracker, b *bus.Broker, m *machine.Machine,
-	reg map[string]job.Handler, bindings []Binding, cfg Config, rt runtime.Runtime,
+	reg map[string]job.Handler, bindings []Binding, cfg Config, rts runtime.Set,
 ) (*Dispatcher, error) {
 	if err := job.Validate(m, reg); err != nil {
 		return nil, fmt.Errorf("dispatch: %w", err)
@@ -117,7 +126,7 @@ func New(
 	slog.Info("deferred section 10 mechanics are explicit no-ops in this package",
 		"mechanics", deferredMechanics, "owner", "Package 7")
 	return &Dispatcher{
-		store: s, tracker: tr, bus: b, machine: m, reg: reg, rt: rt, bindings: bindings, cfg: cfg,
+		store: s, tracker: tr, bus: b, machine: m, reg: reg, rts: rts, bindings: bindings, cfg: cfg,
 		drainCh: make(chan struct{}, 1),
 	}, nil
 }
@@ -340,7 +349,11 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
 
-	deps := job.Deps{Store: d.store, Runtime: d.rt, Owner: d.cfg.Owner, Expires: expires}
+	deps := job.Deps{
+		Store: d.store, Runtimes: d.rts, Machine: d.machine,
+		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
+		Owner: d.cfg.Owner, Expires: expires,
+	}
 
 	handler, ok := d.reg[ticket.State]
 	if !ok {

@@ -75,17 +75,19 @@ func newTestLogHandler(t *testing.T) *console.Handler {
 	return console.NewHandler(io.Discard, new(slog.LevelVar), nil)
 }
 
-// testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, and
-// testWaitingQuestions round up the string literals this package's tests
-// repeat three or more times: the tracker name every seeded project uses,
-// the author every zing-authored message uses, the "question" message
-// type, and the "questions" ticket.waiting_on value a seeded open question
-// sets (store's own historical spelling, commit.go's waitingFlagQuestions).
+// testTrackerGitHub, testAuthorZing, testMsgTypeQuestion,
+// testWaitingQuestions, and testRuntimeFake round up the string literals
+// this package's tests repeat three or more times: the tracker name every
+// seeded project uses, the author every zing-authored message uses, the
+// "question" message type, the "questions" ticket.waiting_on value a
+// seeded open question sets (store's own historical spelling, commit.go's
+// waitingFlagQuestions), and the "fake" runtime name.
 const (
 	testTrackerGitHub    = "github"
 	testAuthorZing       = "zing"
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
+	testRuntimeFake      = "fake"
 )
 
 var testProject = store.Project{

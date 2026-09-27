@@ -70,6 +70,13 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("sub scripts fs: %v", err)
 	}
 	rt := zruntime.NewFake(scripts)
+	// Production real runtimes arrive in task 14 (Claude and Codex are
+	// still stubs); this e2e maps all three machine.toml runtime names to
+	// the one Fake (design section 4.1, D2).
+	rts, err := zruntime.NewSet(map[string]zruntime.Runtime{"claude": rt, "codex": rt, testRuntimeFake: rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
 
 	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
 	if err != nil {
@@ -86,7 +93,7 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
 		[]zdispatch.Binding{{StoreProjectID: projectID, TrackerProject: testAuthorZing}},
-		zdispatch.Config{Interval: time.Millisecond, MaxParallel: 2, Owner: resumeE2EOwner}, rt)
+		zdispatch.Config{Interval: time.Millisecond, MaxParallel: 2, Owner: resumeE2EOwner}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
 	}

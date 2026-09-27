@@ -1,5 +1,7 @@
 package response
 
+import "fmt"
+
 // Job identifies which job produced a response.
 type Job string
 
@@ -193,6 +195,36 @@ const (
 // Values returns every valid Severity.
 func (Severity) Values() []string {
 	return []string{string(SeverityBlocker), string(SeverityMajor), string(SeverityMinor), string(SeverityNit)}
+}
+
+// ParseSeverity parses s as a Severity, accepting exactly the four closed
+// values blocker, major, minor, and nit, and erroring on anything else
+// (design section 4.4).
+func ParseSeverity(s string) (Severity, error) {
+	switch Severity(s) {
+	case SeverityBlocker, SeverityMajor, SeverityMinor, SeverityNit:
+		return Severity(s), nil
+	default:
+		return "", fmt.Errorf("response: unknown severity %q", s)
+	}
+}
+
+// Rank orders Severity from lowest (nit) to highest (blocker), so a finding
+// and a floor can be compared with sev.Rank() <= floor.Rank() for "at or
+// below floor" (design section 4.4, 6.5).
+func (s Severity) Rank() int {
+	switch s {
+	case SeverityBlocker:
+		return 3
+	case SeverityMajor:
+		return 2
+	case SeverityMinor:
+		return 1
+	case SeverityNit:
+		return 0
+	default:
+		return -1
+	}
 }
 
 // ErrorCode categorizes a run error.

@@ -1,0 +1,58 @@
+package response
+
+import "testing"
+
+// TestParseSeverity_AcceptsExactlyTheFourClosedValues proves ParseSeverity
+// round-trips every valid Severity and errors on anything else, including a
+// near-miss (design section 4.4).
+func TestParseSeverity_AcceptsExactlyTheFourClosedValues(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []Severity{SeverityBlocker, SeverityMajor, SeverityMinor, SeverityNit} {
+		got, err := ParseSeverity(string(want))
+		if err != nil {
+			t.Errorf("ParseSeverity(%q): %v, want nil", want, err)
+		}
+		if got != want {
+			t.Errorf("ParseSeverity(%q) = %q, want %q", want, got, want)
+		}
+	}
+}
+
+func TestParseSeverity_RejectsAnUnknownValue(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []string{"", "Blocker", "critical", "blockers", " blocker"} {
+		if _, err := ParseSeverity(bad); err == nil {
+			t.Errorf("ParseSeverity(%q): want an error, got nil", bad)
+		}
+	}
+}
+
+// TestSeverity_Rank_OrdersLowestToHighest proves Rank gives blocker the
+// highest rank and nit the lowest, so two severities compare with <=
+// (design section 4.4, 6.5's "at-or-below floor").
+func TestSeverity_Rank_OrdersLowestToHighest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sev  Severity
+		want int
+	}{
+		{SeverityBlocker, 3},
+		{SeverityMajor, 2},
+		{SeverityMinor, 1},
+		{SeverityNit, 0},
+	}
+	for _, tt := range tests {
+		if got := tt.sev.Rank(); got != tt.want {
+			t.Errorf("%s.Rank() = %d, want %d", tt.sev, got, tt.want)
+		}
+	}
+
+	if SeverityNit.Rank() >= SeverityMinor.Rank() ||
+		SeverityMinor.Rank() >= SeverityMajor.Rank() ||
+		SeverityMajor.Rank() >= SeverityBlocker.Rank() {
+		t.Error("Rank() must strictly increase nit < minor < major < blocker")
+	}
+}

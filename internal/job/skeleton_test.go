@@ -8,8 +8,10 @@ import (
 	"testing/fstest"
 	"time"
 
+	zing "zing"
 	"zing/fixtures"
 	"zing/internal/job"
+	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
@@ -31,6 +33,7 @@ const (
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
 	testAuthorZing       = "zing"
+	testRuntimeFake      = "fake"
 
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
@@ -73,10 +76,28 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 	return ticketID
 }
 
+// testMachine loads the real, checked-in machine.toml, the same process
+// definition zing serve loads: skeleton.go's building and planning handlers
+// look up their runtime by d.Machine.Jobs[job].Runtime, so every Deps this
+// file builds needs the real job-name-to-runtime-name mapping ("build" and
+// "planning" both name "claude").
+func testMachine(t *testing.T) *machine.Machine {
+	t.Helper()
+	m, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+	return m
+}
+
 // claim claims ticketID for a fresh owner and a lease truncated to second
 // precision (SQLite's TEXT timestamp round-trips at second precision), so
 // the returned expires compares equal to what a later GetTicket reads
-// back, and returns the Deps a handler test drives with.
+// back, and returns the Deps a handler test drives with. rt serves every
+// machine.toml runtime name (design section 4.1, D2: selftest and e2e map
+// claude, codex, and fake to one Fake), so a handler's
+// d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup always resolves to rt
+// regardless of which runtime name the real machine.toml gives that job.
 func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job.Deps {
 	t.Helper()
 	owner := "test-owner"
@@ -89,7 +110,12 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 	if !claimed {
 		t.Fatal("Claim: got false, want true")
 	}
-	return job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires}
+
+	set, err := runtime.NewSet(map[string]runtime.Runtime{"claude": rt, "codex": rt, testRuntimeFake: rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	return job.Deps{Store: s, Runtimes: set, Machine: testMachine(t), Owner: owner, Expires: expires}
 }
 
 // apply validates commit against t (the ticket's state before the commit)
@@ -264,6 +290,38 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64, option 
 	return result
 }
 
+// TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking proves
+// the new d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup (design
+// section 4.4, task 2) fails closed: a Deps whose Set carries no runtime
+// under the name machine.toml's build job actually names ("claude") must
+// return a wrapped error, never panic.
+func TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning)
+
+	ticket := getTicket(t, s, ticketID)
+	owner := "test-owner-no-claude"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+
+	// A Set that carries only "codex", never "claude" (the name
+	// machine.toml's build job actually uses), so the lookup must fail.
+	set, err := runtime.NewSet(map[string]runtime.Runtime{"codex": fakeRuntime(t)})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	deps := job.Deps{Store: s, Runtimes: set, Machine: testMachine(t), Owner: owner, Expires: expires}
+
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err == nil {
+		t.Fatal("building Run with no claude runtime registered: want an error, got nil")
+	}
+}
+
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
 // queuedHandler's commit shape (design section 6.5).
 func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
@@ -324,7 +382,7 @@ func TestPlanningHandler_FirstEntry_PostsQuestionAndWaits(t *testing.T) {
 	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
 		t.Fatalf("commit.Waiting = %v, want questions", commit.Waiting)
 	}
-	if commit.Session == nil || commit.Session.Job != testStatePlanning || commit.Session.Runtime != "fake" {
+	if commit.Session == nil || commit.Session.Job != testStatePlanning || commit.Session.Runtime != testRuntimeFake {
 		t.Fatalf("commit.Session = %+v, want a fresh (planning, fake) session upsert", commit.Session)
 	}
 	if commit.Session.ExternalID == nil || *commit.Session.ExternalID == "" {
@@ -589,7 +647,7 @@ func postAndAnswerUnrelatedQuestion(t *testing.T, s *store.Store, rt runtime.Run
 	openState := "open"
 	apply(t, s, ticket, store.HandlerCommit{
 		TicketID: ticketID, Owner: deps.Owner, Expires: deps.Expires,
-		Session: &store.SessionUpsert{Job: "build", Runtime: "fake", ExternalID: &externalID},
+		Session: &store.SessionUpsert{Job: "build", Runtime: testRuntimeFake, ExternalID: &externalID},
 		Runs:    []store.Run{{Turn: 0, Outcome: new("question")}},
 		Messages: []store.Message{{
 			TicketID: ticketID, Type: "question", Author: testAuthorZing,

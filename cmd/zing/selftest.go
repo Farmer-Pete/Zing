@@ -119,6 +119,28 @@ const e2eMaxTicks = 50
 // within one selftest process, which claims nothing concurrently).
 const e2eOwner = "selftest-e2e"
 
+// e2eBudget and e2eFloor are the fixture job.Deps.Budget and job.Deps.Floor
+// selftestResumeE2E wires the dispatcher with (design section 4.4): the
+// same values internal/config's own applyDefaults would produce from an
+// empty zing.toml (agent_minutes_per_ticket 240, review.floor "minor").
+// Nothing in this M1 task reads Budget or Floor yet; wiring them here now
+// only means task 4's runJob and the review floor split find them already
+// in place.
+var (
+	e2eBudget = 240 * time.Minute
+	e2eFloor  = response.SeverityMinor
+)
+
+// e2eModels is the fixture job.Deps.Models alias table selftestResumeE2E
+// wires the dispatcher with: the same model ids internal/config's own
+// applyDefaults would produce from an empty zing.toml's [models] table.
+var e2eModels = map[string]string{
+	modelAliasSonnet: "claude-sonnet-5",
+	modelAliasOpus:   "claude-opus-4-8",
+	modelAliasFable:  "claude-fable-5-1",
+	modelAliasCodex:  "gpt-5.5",
+}
+
 // e2eWantStates is the ordered "to" state of every state message the
 // silent ring plus the one question write, in order (design section 7.1):
 // queued -> planning carries no message at intake, so the first message is
@@ -302,7 +324,14 @@ func selftestResumeE2E(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sub scripts fs: %w", err)
 	}
-	rt := runtime.NewFake(scripts)
+	// Production real runtimes arrive in task 14 (Claude and Codex are
+	// still stubs); the selftest e2e maps all three machine.toml runtime
+	// names to the one Fake (design section 4.1, D2).
+	fake := runtime.NewFake(scripts)
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake})
+	if err != nil {
+		return fmt.Errorf("build runtime set: %w", err)
+	}
 
 	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
 	if err != nil {
@@ -319,7 +348,10 @@ func selftestResumeE2E(ctx context.Context) error {
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
 		[]zdispatch.Binding{{StoreProjectID: projectID, TrackerProject: "zing"}},
-		zdispatch.Config{Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner}, rt)
+		zdispatch.Config{
+			Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner,
+			Models: e2eModels, Budget: e2eBudget, Floor: e2eFloor,
+		}, rts)
 	if err != nil {
 		return err
 	}

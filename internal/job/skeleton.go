@@ -132,7 +132,12 @@ type buildingHandler struct{}
 const buildLabel = "1"
 
 func (buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	res, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobBuild, Label: buildLabel})
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobBuild)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve runtime: %w", err)
+	}
+
+	res, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobBuild, Label: buildLabel})
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: run: %w", err)
 	}
@@ -177,7 +182,12 @@ func (planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.H
 // the inserted turn-0 run, and waits on "questions". It carries no Next: the
 // ticket stays in planning (design section 6.6 diagram, left column).
 func planningFirstEntry(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	res, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning})
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first entry: resolve runtime: %w", err)
+	}
+
+	res, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning})
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: first entry: run: %w", err)
 	}
@@ -245,7 +255,12 @@ func planningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Sess
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: %w", err)
 	}
 
-	res, err := d.Runtime.Run(ctx, runtime.RunRequest{
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: resolve runtime: %w", err)
+	}
+
+	res, err := rt.Run(ctx, runtime.RunRequest{
 		Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: prompt,
 	})
 	if err != nil {

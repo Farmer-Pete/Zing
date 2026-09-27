@@ -97,6 +97,28 @@ func newFixtureTracker(t *testing.T) *tracker.Fixture {
 	return tr
 }
 
+// testRuntimeSet returns a runtime.Set mapping every machine.toml runtime
+// name (claude, codex, fake) to rt (design section 4.1, D2: selftest and
+// e2e map all three to one Fake), so a handler's
+// d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup always resolves to rt
+// regardless of which runtime name a job actually names.
+func testRuntimeSet(t *testing.T, rt runtime.Runtime) runtime.Set {
+	t.Helper()
+	set, err := runtime.NewSet(map[string]runtime.Runtime{"claude": rt, "codex": rt, "fake": rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	return set
+}
+
+// testDeps builds the job.Deps a handler test drives directly (bypassing
+// the dispatcher), with rt resolvable under every machine.toml runtime name
+// and the real, checked-in machine.toml as Deps.Machine.
+func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, expires time.Time) job.Deps {
+	t.Helper()
+	return job.Deps{Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t), Owner: owner, Expires: expires}
+}
+
 // seedProject inserts testProject and returns its id.
 func seedProject(t *testing.T, s *store.Store) int64 {
 	t.Helper()
@@ -167,7 +189,7 @@ func runHandlerOnce(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 	if err != nil || !claimed {
 		t.Fatalf("advanceTicket(%s): claim: claimed=%v err=%v", state, claimed, err)
 	}
-	commit, err := job.Registry()[state].Run(t.Context(), ticket, job.Deps{Store: s, Runtime: rt, Owner: owner, Expires: expires})
+	commit, err := job.Registry()[state].Run(t.Context(), ticket, testDeps(t, s, rt, owner, expires))
 	if err != nil {
 		t.Fatalf("advanceTicket(%s) Run: %v", state, err)
 	}
@@ -220,7 +242,7 @@ func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Brok
 	if reg == nil {
 		reg = job.Registry()
 	}
-	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, rt)
+	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
 	}
@@ -239,7 +261,7 @@ func TestNew_MissingHandlerFailsAtNew(t *testing.T) {
 	reg := job.Registry()
 	delete(reg, testStatePlanning)
 
-	_, err := dispatch.New(s, newFixtureTracker(t), bus.New(), m, reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner}, fakeRuntime(t))
+	_, err := dispatch.New(s, newFixtureTracker(t), bus.New(), m, reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner}, testRuntimeSet(t, fakeRuntime(t)))
 	if err == nil {
 		t.Fatal("New with a missing handler: want an error, got nil")
 	}
@@ -1250,7 +1272,11 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 type staleOwnerHandler struct{}
 
 func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
@@ -1270,7 +1296,11 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 type staleOwnerReleaseHandler struct{}
 
 func (staleOwnerReleaseHandler) Run(ctx context.Context, _ store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Runtime.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
+	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobPlanning)].Runtime)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {

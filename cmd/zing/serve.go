@@ -27,9 +27,25 @@ import (
 	"zing/internal/job"
 	"zing/internal/machine"
 	"zing/internal/notify"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 	"zing/internal/tracker"
+)
+
+// The model alias names config.Models's fields key (matching machine.toml's
+// job.model values) and the runtime names machine.toml's job.runtime field
+// allows, named once here so goconst has nothing to flag across this file
+// and selftest.go, both package main.
+const (
+	modelAliasSonnet = "sonnet"
+	modelAliasOpus   = "opus"
+	modelAliasFable  = "fable"
+	modelAliasCodex  = "codex"
+
+	runtimeNameClaude = "claude"
+	runtimeNameCodex  = "codex"
+	runtimeNameFake   = "fake"
 )
 
 // drainDeadline bounds how long serve waits for the dispatcher's Run
@@ -181,12 +197,26 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		_ = st.Close()
 		return fmt.Errorf("serve: sub scripts fs: %w", err)
 	}
-	rt := runtime.NewFake(scripts)
+	// Production real runtimes arrive in task 14 (Claude and Codex are
+	// still stubs); every serve run, in the meantime, maps all three
+	// machine.toml runtime names to the one Fake (design section 4.1, D2).
+	fake := runtime.NewFake(scripts)
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake})
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: %w", err)
+	}
 
 	tr, err := tracker.NewFixture(fixtures.FS, "tickets.toml")
 	if err != nil {
 		_ = st.Close()
 		return err
+	}
+
+	floor, err := response.ParseSeverity(cfg.Review.Floor)
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	// dispCtx is deliberately not derived from ctx's cancellation: the
@@ -200,7 +230,12 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
 		Owner:       claimOwner(),
-	}, rt)
+		Models: map[string]string{
+			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
+		},
+		Budget: time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+		Floor:  floor,
+	}, rts)
 	if err != nil {
 		_ = st.Close()
 		return err

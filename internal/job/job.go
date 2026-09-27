@@ -9,12 +9,14 @@ package job
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"time"
 
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 )
@@ -32,15 +34,34 @@ const (
 )
 
 // Deps is what a handler needs to do its work and build a commit: read-only
-// store access, the runtime that serves the job's fake or real turns, and
+// store access, the runtime set a job resolves its runtime from by name, the
+// process definition and the model alias table a handler reads a job's
+// config out of, the per-ticket agent-time budget and the review floor, and
 // the claim this run holds (Owner, Expires), which every commit must carry
-// back unchanged as its fence.
+// back unchanged as its fence (design section 4.4).
 type Deps struct {
-	Store   *store.Store    // reads only inside a handler
-	Runtime runtime.Runtime // the fake; carries its own script fs
-	Owner   string
-	Expires time.Time // the claim lease; the commit fence
+	Store    *store.Store // reads only inside a handler
+	Runtimes runtime.Set  // resolves a job's machine.toml runtime name to a Runtime
+	Machine  *machine.Machine
+	Models   map[string]string // alias -> exact model id (config.Models)
+	Budget   time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
+	Floor    response.Severity
+	Owner    string
+	Expires  time.Time // the claim lease; the commit fence
 }
+
+// The typed job-level errors (design section 4.4). Only declared here:
+// nothing in this package returns them yet -- runJob (task 4) is what wires
+// ErrBudget and ErrNoAction into the entry decision, and ErrConfig into the
+// runtime/model/job lookups runJob itself performs. ErrConfig must never
+// reach a caller as a panic: a missing or misconfigured job, runtime, or
+// model alias is a configuration mistake to report, not a programming
+// invariant to crash on.
+var (
+	ErrNoAction = errors.New("job: no actionable state")
+	ErrBudget   = errors.New("job: agent budget exhausted")
+	ErrConfig   = errors.New("job: configuration error")
+)
 
 // Handler runs one pipeline state's job for ticket t and returns the commit
 // the dispatcher should validate and apply. It writes nothing itself.
