@@ -459,8 +459,14 @@ func verifyParentForTicket(ctx context.Context, tx *sql.Tx, ticketID, parentID i
 // still NULL, so a second terminalizing commit on the same session (the
 // D13 case where Reserve created the session before the runtime call ran,
 // and every later commit on it also carries RunResult.SessionID) can never
-// clobber the id the first commit recorded.
+// clobber the id the first commit recorded. ExternalID pointing at "" is
+// rejected outright (F035): an empty external_id never means anything, so
+// the whole commit fails rather than storing one.
 func upsertSessionTx(ctx context.Context, tx *sql.Tx, ticketID int64, su SessionUpsert) (int64, error) {
+	if su.ExternalID != nil && *su.ExternalID == "" {
+		return 0, errors.New("upsert session: external_id must not be empty")
+	}
+
 	if su.ID != nil {
 		if su.BumpResumes {
 			if _, err := tx.ExecContext(ctx, `UPDATE sessions SET resumes = resumes + 1 WHERE id = ?`, *su.ID); err != nil {

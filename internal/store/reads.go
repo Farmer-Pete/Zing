@@ -163,6 +163,11 @@ const (
 // and resumes is at or past maxResumes. A ticket with several sessions for
 // the same job (one per fresh entry, section 5.1) is judged by its highest
 // id, never by which older one happens to still be open.
+//
+// A scanned external_id of "" is impossible in a healthy database (F035:
+// migration 0003's CHECK forbids it, and upsertSessionTx rejects it before
+// any commit can write one), so LatestSession treats it as a store error
+// rather than silently classifying it as idless, open, or exhausted.
 func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, maxResumes int) (Session, SessionState, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, ticket_id, job, runtime, external_id, resumes
@@ -179,6 +184,9 @@ func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, m
 		return Session{}, SessionNone, fmt.Errorf("latest session for ticket %d job %s: %w", ticketID, job, err)
 	}
 	if externalID.Valid {
+		if externalID.String == "" {
+			return Session{}, SessionNone, fmt.Errorf("store: session %d has an empty external_id", sess.ID)
+		}
 		sess.ExternalID = &externalID.String
 	}
 

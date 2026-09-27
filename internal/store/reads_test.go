@@ -463,6 +463,24 @@ func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
 	}
 }
 
+// TestLatestSession_EmptyExternalIDIsAnError proves F035's schema guard: a
+// session row can never carry external_id = "" (empty is not "no id yet",
+// that is NULL, and it is not a valid runtime id either), so migration
+// 0003's CHECK on sessions rejects the raw INSERT before LatestSession ever
+// gets a chance to read such a row back.
+func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (ticket_id, job, runtime, external_id) VALUES (?, ?, 'fake', '')`,
+		ticketID, testStatePlanning)
+	if err == nil {
+		t.Fatal("insert session with external_id = \"\": want a CHECK constraint error, got nil")
+	}
+}
+
 func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()

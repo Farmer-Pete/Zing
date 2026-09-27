@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -787,6 +788,37 @@ func TestMigration0002_BackfillsExistingRows(t *testing.T) {
 	}
 	if !createdAt.Valid || createdAt.String == "" {
 		t.Errorf("created_at after backfill = %v, want a non-null value", createdAt)
+	}
+}
+
+// TestMigration0003_ExternalIDCheckExists proves migration 0003 rebuilt
+// sessions with the CHECK (external_id IS NULL OR external_id <> ”) (F035),
+// by reading the table's own SQL back from sqlite_master, and proves the
+// rebuild kept the NULL case writable: a session with no external_id yet
+// must still insert.
+func TestMigration0003_ExternalIDCheckExists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	var createSQL string
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").Scan(&createSQL); err != nil {
+		t.Fatalf("read sessions table SQL: %v", err)
+	}
+	if !strings.Contains(createSQL, "external_id <> ''") {
+		t.Errorf("sessions table SQL = %q, want a CHECK containing external_id <> ''", createSQL)
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (ticket_id, job, runtime) VALUES (1, 'planning', 'fake')`,
+	); err != nil {
+		t.Errorf("insert session with NULL external_id: %v", err)
 	}
 }
 

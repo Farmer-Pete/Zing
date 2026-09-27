@@ -544,6 +544,38 @@ func TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID(t *testi
 	}
 }
 
+// TestCommitHandlerResult_RejectsEmptyExternalID proves F035's write-side
+// guard: a commit whose SessionUpsert.ExternalID points at "" fails the
+// whole commit rather than storing an empty external_id (which is not a
+// valid runtime id and not "no id yet" -- that is NULL).
+func TestCommitHandlerResult_RejectsEmptyExternalID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	empty := ""
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake, ExternalID: &empty},
+	})
+	if err == nil {
+		t.Error("CommitHandlerResult with ExternalID = \"\": want error, got nil")
+	}
+	if applied {
+		t.Error("CommitHandlerResult with ExternalID = \"\": applied = true, want false")
+	}
+
+	sessions, sessErr := s.SessionsForTicket(ctx, ticketID)
+	if sessErr != nil {
+		t.Fatalf("SessionsForTicket: %v", sessErr)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("sessions for ticket %d = %v, want none (the whole commit must roll back)", ticketID, sessions)
+	}
+}
+
 // TestCommitHandlerResult_RejectsSessionFromAnotherTicket proves every write
 // in one commit is scoped to c.TicketID (section 6.3): a commit naming
 // another ticket's session errors and writes nothing, rather than silently
