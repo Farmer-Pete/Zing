@@ -16,7 +16,8 @@
         "nothing_to_do_with_true_claims",
         "runtime_exec_failed",
         "response_invalid",
-        "seal_failed"
+        "seal_failed",
+        "post_run_failed"
       ]
     },
     "what": {

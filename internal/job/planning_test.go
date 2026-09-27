@@ -1260,6 +1260,68 @@ func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning(t
 	}
 }
 
+// TestReadyCommit_PostRunStoreFailureTerminalizesRun proves design F025:
+// readyCommit's own os.OpenRoot failure (here, a project whose checkout
+// directory does not exist) is a post-run infrastructure failure, not a
+// runtime failure -- it surfaces only after runJob's Reserve has already
+// written a run. Before the fix this escaped runPlanningResume as a bare
+// error, which the dispatcher's release path could only release, not
+// terminalize, orphaning the run with a NULL outcome forever. runAndRoute's
+// postRunFailure seam now catches it: the reserved run terminalizes as an
+// error, a post_run_failed escalation lands naming the same run, and the
+// handler itself returns a nil error, so the commit reaches the dispatcher
+// as an ordinary commit rather than a failure to release.
+func TestReadyCommit_PostRunStoreFailureTerminalizesRun(t *testing.T) {
+	s := newJobTestStore(t)
+
+	proj := testProject
+	proj.LocalPath = filepath.Join(t.TempDir(), "does-not-exist")
+	projectID, err := s.EnsureProject(t.Context(), proj)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	plan := validPlan("Add a hello endpoint so a caller can get a plain-text greeting back over HTTP.")
+	resumeRT := readyScriptedRuntime(t, readyStep(readyResponse(plan, validClaims(), validScenarios(2, "post-run")), "post-run-fail-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (ready, missing checkout) Run: %v, want nil -- postRunFailure funnels the error into the commit", err)
+	}
+	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != string(response.OutcomeError) {
+		t.Fatalf("commit.Runs = %+v, want exactly one terminalized run with outcome error", commit.Runs)
+	}
+	if commit.Session == nil {
+		t.Error("commit.Session is nil, want the resumed session recorded")
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want a post_run_failed escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodePostRunFailed) {
+		t.Errorf("commit.Escalation.Payload.Code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodePostRunFailed)
+	}
+	if commit.Escalation.RunID == nil || *commit.Escalation.RunID != commit.Runs[0].ID {
+		t.Errorf("commit.Escalation.RunID = %v, want %d (the same reserved run)", commit.Escalation.RunID, commit.Runs[0].ID)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginPlanningResume) {
+		t.Errorf("commit.Escalation.Payload.Origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginPlanningResume)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.WaitingOn == nil || *final.WaitingOn != testWaitingQuestions {
+		t.Errorf("final ticket waiting_on = %v, want questions", final.WaitingOn)
+	}
+}
+
 // TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched
 // proves a revised plan on the same ticket: a second ready call stores plan
 // version 2 and a new scenario cohort under a new run id, while the first

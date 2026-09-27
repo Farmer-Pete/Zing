@@ -51,6 +51,9 @@ const (
 
 	testReasonPlanReady = "plan ready"
 	testRuntimeFake     = "fake"
+
+	testMsgTypeEscalation = "escalation"
+	testOutcomeError      = "error"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -1103,7 +1106,7 @@ func TestTick_ErrorOutcomeEscalates(t *testing.T) {
 	}
 	var escalation *store.MessageRow
 	for i := range msgs {
-		if msgs[i].Type == "escalation" {
+		if msgs[i].Type == testMsgTypeEscalation {
 			escalation = &msgs[i]
 		}
 	}
@@ -1883,7 +1886,7 @@ func TestTick_GateApproveTOCTOURace_MismatchReleasesThenPreCheckTakesBranch6(t *
 	}
 	var escalation *response.EscalationPayload
 	for i := range msgs {
-		if msgs[i].Type != "escalation" {
+		if msgs[i].Type != testMsgTypeEscalation {
 			continue
 		}
 		var p response.EscalationPayload
@@ -2013,11 +2016,168 @@ func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunsForTicket after ExpireClaims: %v", err)
 	}
-	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != "error" {
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
 		t.Fatalf("after ExpireClaims: run = %+v, want outcome error", runs[0])
 	}
 	if runs[0].ExitCode == nil || *runs[0].ExitCode != -1 {
 		t.Errorf("after ExpireClaims: run exit_code = %v, want -1", runs[0].ExitCode)
+	}
+}
+
+// postRunFailureHandler reserves a fresh run through Deps.Reserve, then
+// returns the exact commit shape job.postRunFailure builds for design F025
+// (a run terminalized as an error, plus a post_run_failed escalation), with
+// no error at all -- since job.postRunFailure is unexported, this stands in
+// for calling it directly, the fallback the F025 test plan itself allows.
+// The point of this test is the dispatcher side of the fix: proving that
+// once the job package has funneled a post-run failure into an ordinary
+// commit, the dispatcher applies it through its normal CommitHandlerResult
+// path (clearing the claim as part of that same fenced transaction) rather
+// than through releaseClaim, which is what a plain error returned after
+// Reserve used to force before the fix, orphaning the run with a NULL
+// outcome forever.
+type postRunFailureHandler struct{}
+
+func (postRunFailureHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	outcome := testOutcomeError
+	exitCode := 0
+	agentSeconds := 1
+	waiting := testWaitingQuestions
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Runs: []store.Run{{ID: rsv.RunID, Turn: rsv.Turn, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Escalation: &store.EscalationCommit{
+			RunID: &rsv.RunID,
+			Body:  string(response.EscalationCodePostRunFailed) + ": storing or checking the plan",
+			Payload: response.EscalationPayload{
+				Code: string(response.EscalationCodePostRunFailed), What: "storing or checking the plan",
+				Why:       "the agent's turn completed, but Zing could not store or check its result",
+				Tried:     "boom: project for ticket: store lookup failed",
+				Options:   []string{"retry", "planning", "abandon"},
+				SessionID: &rsv.SessionID, Origin: string(response.EscalationOriginPlanningFirst),
+			},
+		},
+		Waiting: &waiting,
+	}, nil
+}
+
+// TestTick_HandlerErrorAfterReserve proves design F025's dispatcher-side
+// half: a commit shaped like job.postRunFailure's own (a reserved run
+// terminalized as an error, plus a post_run_failed escalation) commits clean
+// through the dispatcher's ordinary path -- the claim clears as part of that
+// same commit, never through releaseClaim -- Tick returns nil, and the
+// dispatcher never stops.
+func TestTick_HandlerErrorAfterReserve(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = postRunFailureHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (cleared by the commit, not releaseClaim)", *final.ClaimOwner)
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
+		t.Fatalf("runs = %+v, want exactly 1 with outcome error", runs)
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var escalation *store.MessageRow
+	for i := range msgs {
+		if msgs[i].Type == testMsgTypeEscalation {
+			escalation = &msgs[i]
+		}
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message persisted")
+	}
+	var payload response.EscalationPayload
+	if err = json.Unmarshal(escalation.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != string(response.EscalationCodePostRunFailed) {
+		t.Errorf("escalation payload.Code = %q, want %q", payload.Code, response.EscalationCodePostRunFailed)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false")
+	}
+}
+
+// claimLostBeforeReserveHandler steals its own ticket's lease (expiring
+// every claim as of just past its own Expires, the same technique
+// staleOwnerHandler uses) and then calls Deps.Reserve, which fences on the
+// exact claim it was handed and finds it already gone: store.ErrClaimLost,
+// with the runtime never called at all (design F021, section 4.6 step 7).
+// It returns that error wrapped, exactly the shape a real handler's runJob
+// call would produce.
+type claimLostBeforeReserveHandler struct{}
+
+func (claimLostBeforeReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	if err == nil {
+		return store.HandlerCommit{}, errors.New("Reserve unexpectedly succeeded after the lease was stolen")
+	}
+	return store.HandlerCommit{}, fmt.Errorf("job: claim lost before reserve: %w", err)
+}
+
+// TestTick_ClaimLostBeforeReserveDoesNotFailClosed proves design F021: a
+// handler error wrapping store.ErrClaimLost from before runJob ever reserved
+// a run (nothing was written, the runtime never ran) logs and moves on --
+// Tick returns nil, the dispatcher never stops, and the runtime is never
+// called -- unlike the genuine post-runtime lease-loss case
+// (staleOwnerHandler, staleOwnerReleaseHandler), which still fails closed.
+func TestTick_ClaimLostBeforeReserveDoesNotFailClosed(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = claimLostBeforeReserveHandler{}
+
+	rt := &countingRuntime{rt: fakeRuntime(t)}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (ErrClaimLost before Reserve must not fail closed)", err)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (ErrClaimLost before Reserve must not fail closed)")
+	}
+	if got := rt.calls.Load(); got != 0 {
+		t.Errorf("runtime calls = %d, want 0 (the runtime must never be called)", got)
 	}
 }
 

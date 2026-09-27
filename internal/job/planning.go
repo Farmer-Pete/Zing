@@ -359,16 +359,10 @@ func runClassify(ctx context.Context, t store.Ticket, d Deps, extra []prompt.Nam
 
 	su := store.SessionUpsert{Job: jobClassifyName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobClassify, Prompt: assembled}
-	rr, runErr := runJob(ctx, d, t, jobClassifyName, su, req)
-	sessionCommit := freshSessionRecord(rr)
-
-	if runErr != nil {
-		if c, ok, failErr := routeFailure(t, d, rr, runErr, n, sessionCommit, resolveIDs, response.EscalationOriginClassify); ok {
-			return c, failErr
-		}
-		return store.HandlerCommit{}, fmt.Errorf("job: classify: unrecognized runJob error: %w", runErr)
-	}
-	return classifySuccessCommit(t, d, rr, sessionCommit, resolveIDs)
+	return runAndRoute(ctx, d, t, jobClassifyName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginClassify,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return classifySuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs)
+		})
 }
 
 // classifySuccessCommit routes a classify run's parsed response (design
@@ -442,16 +436,10 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 
 	su := store.SessionUpsert{Job: jobPlanningName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobPlanning, Prompt: assembled}
-	rr, runErr := runJob(ctx, d, t, jobPlanningName, su, req)
-	sessionCommit := freshSessionRecord(rr)
-
-	if runErr != nil {
-		if c, ok, failErr := routeFailure(t, d, rr, runErr, 0, sessionCommit, resolveIDs, response.EscalationOriginPlanningFirst); ok {
-			return c, failErr
-		}
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: unrecognized runJob error: %w", runErr)
-	}
-	return planningSuccessCommit(ctx, t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningFirst)
+	return runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst)
+		})
 }
 
 // runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
@@ -478,16 +466,11 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: assembled}
-	rr, runErr := runJob(ctx, d, t, jobPlanningName, su, req)
-	sessionCommit := resumeSessionRecord(sess.ID, rr)
-
-	if runErr != nil {
-		if c, ok, failErr := routeFailure(t, d, rr, runErr, priorInvalid, sessionCommit, resolveIDs, response.EscalationOriginPlanningResume); ok {
-			return c, failErr
-		}
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: unrecognized runJob error: %w", runErr)
-	}
-	return planningSuccessCommit(ctx, t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginPlanningResume)
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume)
+		})
 }
 
 // planningSuccessCommit routes a planning run's parsed response (design
@@ -998,16 +981,10 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 
 	su := store.SessionUpsert{Job: jobPlanreviewName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
-	rr, runErr := runJob(ctx, d, t, jobPlanreviewName, su, req)
-	sessionCommit := freshSessionRecord(rr)
-
-	if runErr != nil {
-		if c, ok, failErr := routeFailure(t, d, rr, runErr, n, sessionCommit, resolveIDs, response.EscalationOriginPlanreview); ok {
-			return c, failErr
-		}
-		return store.HandlerCommit{}, fmt.Errorf("job: planreview: unrecognized runJob error: %w", runErr)
-	}
-	return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, sessionCommit, resolveIDs)
+	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
+		})
 }
 
 // planReviewSuccessCommit routes a planreview run's parsed response (design
@@ -1539,6 +1516,107 @@ func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int6
 }
 
 // ---- shared failure and escalation commit builders ------------------------
+
+// runAndRoute is the one seam every runJob call passes through on its way to
+// a commit (design F025): runClassify, runPlanningFirst, runPlanningResume,
+// and runPlanReview differ only in the request they build and the success
+// builder they route a clean run through, so this owns their identical
+// tail. sessionRecord builds the Session field from the runResult runJob
+// hands back (freshSessionRecord for a fresh call, a closure over
+// resumeSessionRecord for a resume); success is the caller's own outcome
+// router (classifySuccessCommit, planningSuccessCommit, or
+// planReviewSuccessCommit), already bound to whatever else it needs.
+//
+// runJob's Reserve is the one write that can leave a run with a NULL
+// outcome if nothing downstream ever terminalizes it (design D13): a
+// runtime failure is already terminalized by routeFailure's own exec- and
+// invalid-output branches, but a success builder's own post-run failure --
+// a store read, a filesystem open, a json.Marshal -- used to escape as a
+// plain error the dispatcher's error path could only release, never
+// terminalize, orphaning the run forever. This seam catches every error
+// that surfaces once Reserve has already run -- routeFailure's own
+// "unrecognized" fallback and success's own error alike -- and funnels it
+// through postRunFailure whenever a run was actually reserved
+// (rr.Reserved.RunID != 0). When nothing was reserved (routeFailure already
+// returns every pre-reserve case unchanged, and an unrecognized pre-reserve
+// error does too), this returns the plain error unchanged, so the
+// dispatcher's own releaseClaim path still runs and clears the claim.
+func runAndRoute(
+	ctx context.Context, d Deps, t store.Ticket, jobName string,
+	su store.SessionUpsert, req runtime.RunRequest, priorInvalid int,
+	sessionRecord func(runResult) *store.SessionUpsert,
+	resolveIDs []int64, origin response.EscalationOrigin,
+	success func(rr runResult) (store.HandlerCommit, error),
+) (store.HandlerCommit, error) {
+	rr, runErr := runJob(ctx, d, t, jobName, su, req)
+	sessionCommit := sessionRecord(rr)
+
+	if runErr != nil {
+		if c, ok, failErr := routeFailure(t, d, rr, runErr, priorInvalid, sessionCommit, resolveIDs, origin); ok {
+			return c, failErr
+		}
+		wrapped := fmt.Errorf("job: %s: unrecognized runJob error: %w", jobName, runErr)
+		if rr.Reserved.RunID != 0 {
+			return postRunFailure(t, d, rr, sessionCommit, resolveIDs, origin, wrapped), nil
+		}
+		return store.HandlerCommit{}, wrapped
+	}
+
+	// errNothingToDoClaimNotFalse is nothingToDoCommit's own defensive
+	// sentinel, not a post-run infrastructure failure: response.Validate
+	// already guarantees a real runtime's response can never trip it, so it
+	// only ever fires against a test's scripted runtime standing in for a
+	// compromised or buggy agent process, and it must keep surfacing loud (a
+	// bare error, no commit) rather than get smoothed into an owner-facing
+	// escalation the same as a store or filesystem failure would.
+	commit, err := success(rr)
+	if err != nil && rr.Reserved.RunID != 0 && !errors.Is(err, errNothingToDoClaimNotFalse) {
+		return postRunFailure(t, d, rr, sessionCommit, resolveIDs, origin, err), nil
+	}
+	return commit, err
+}
+
+// postRunFailedWhy is postRunFailure's own fixed Why text (design F025):
+// unlike every other escalation this file writes, the run itself succeeded --
+// what failed is Zing's own post-run bookkeeping, the same sentence
+// regardless of which step's success builder hit it.
+const postRunFailedWhy = "the agent's turn completed, but Zing could not store or check its result"
+
+// postRunFailedWhatFor renders postRunFailure's own short, owner-facing What
+// sentence naming the failing step (design F025): only classify,
+// planning_first, planning_resume, and planreview ever reach postRunFailure,
+// since those are the only origins the four runAndRoute callers thread
+// through.
+func postRunFailedWhatFor(origin response.EscalationOrigin) string {
+	switch origin {
+	case response.EscalationOriginClassify:
+		return "classifying the ticket"
+	case response.EscalationOriginPlanningFirst, response.EscalationOriginPlanningResume:
+		return "storing or checking the plan"
+	case response.EscalationOriginPlanreview:
+		return "storing the plan review"
+	default:
+		return "storing or checking the agent's result"
+	}
+}
+
+// postRunFailure is runAndRoute's own terminalizing commit for any error
+// surfacing once runJob has already reserved a run (design F025, section
+// 6.8): the run terminalizes as an error, the session records the same way
+// every other terminalizing commit does, and an escalation carries the new
+// post_run_failed code, err's own text as Tried, and origin exactly as
+// runAndRoute threaded it through -- the producing step's own origin, not a
+// new one invented here.
+func postRunFailure(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin, err error) store.HandlerCommit {
+	slog.Error("post-run failure", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "job", string(origin), "err", err)
+
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodePostRunFailed), postRunFailedWhatFor(origin), postRunFailedWhy, err.Error(), origin)
+	c.Runs = terminalRuns(rr, string(response.OutcomeError))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	return c
+}
 
 // routeFailure builds the commit for every runJob failure classify, the
 // planning first turn, and its resume all handle alike (design section 5.4,

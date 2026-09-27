@@ -433,6 +433,19 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		if errors.Is(err, job.ErrNoAction) {
 			return d.releaseClaimNoStop(ctx, ticket.ID, expires, "claim released, no action")
 		}
+		// store.ErrClaimLost from a handler that never reached runJob's
+		// Reserve (design section 4.6 step 7, section 6.8): the lease this
+		// tick claimed was already gone before anything ran, so nothing was
+		// reserved and no run needs reconciling. This is the same kind of
+		// non-runtime-desync condition ErrNoAction is (job.ErrNoAction,
+		// above): log and move on, never fail closed. A post-Reserve lease
+		// loss (rt.Run already started or finished under a stale lease) is a
+		// different case entirely and still falls through to the generic
+		// releaseClaim below, which fails closed exactly as before.
+		if errors.Is(err, store.ErrClaimLost) {
+			slog.Warn("claim lost before reserve; nothing ran", "ticket_id", ticket.ID, "state", ticket.State)
+			return nil
+		}
 		slog.Error("handler error", "ticket_id", ticket.ID, "state", ticket.State, "err", err)
 		return d.releaseClaim(ctx, ticket.ID, expires)
 	}

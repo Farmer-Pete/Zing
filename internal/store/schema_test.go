@@ -300,10 +300,11 @@ func escalationPayloadJSON(code, origin string) []byte {
 		`{"code":%q,"what":"w","why":"y","tried":"t","options":["retry"],"origin":%q}`, code, origin))
 }
 
-// TestValidate_EscalationCodeAndOrigin proves every one of the thirteen
-// EscalationCode values and the eleven EscalationOrigin values validates
-// against the committed escalation schema, and an unknown value of either
-// fails (design section 6.7, task 4c).
+// TestValidate_EscalationCodeAndOrigin proves every one of the fourteen
+// EscalationCode values (thirteen plus F025's post_run_failed) and the
+// eleven EscalationOrigin values validates against the committed escalation
+// schema, and an unknown value of either fails (design section 6.7, task
+// 4c).
 func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -313,8 +314,8 @@ func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	}
 
 	codes := response.EscalationCode("").Values()
-	if len(codes) != 13 {
-		t.Fatalf("len(EscalationCode values) = %d, want 13", len(codes))
+	if len(codes) != 14 {
+		t.Fatalf("len(EscalationCode values) = %d, want 14", len(codes))
 	}
 	for _, code := range codes {
 		t.Run("code "+code, func(t *testing.T) {

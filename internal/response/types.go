@@ -323,7 +323,7 @@ type AnswerPayload struct {
 }
 
 type EscalationPayload struct {
-	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed"`
+	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed"`
 	What      string   `json:"what"    jsonschema:"minLength=1"`
 	Why       string   `json:"why"     jsonschema:"minLength=1"`
 	Tried     string   `json:"tried"`

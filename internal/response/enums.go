@@ -246,10 +246,10 @@ func (ErrorCode) Values() []string {
 
 // EscalationCode is the closed set an escalation payload's code may carry
 // (design section 6.7): the eight already stored, plus split_unsupported,
-// nothing_to_do_with_true_claims, runtime_exec_failed, response_invalid, and
-// seal_failed. EscalationPayload.Code itself stays a plain string (matching
-// its jsonschema enum tag); these constants let Go code name a code instead
-// of writing the literal.
+// nothing_to_do_with_true_claims, runtime_exec_failed, response_invalid,
+// seal_failed, and post_run_failed. EscalationPayload.Code itself stays a
+// plain string (matching its jsonschema enum tag); these constants let Go
+// code name a code instead of writing the literal.
 type EscalationCode string
 
 const (
@@ -266,6 +266,12 @@ const (
 	EscalationCodeRuntimeExecFailed         EscalationCode = "runtime_exec_failed"
 	EscalationCodeResponseInvalid           EscalationCode = "response_invalid"
 	EscalationCodeSealFailed                EscalationCode = "seal_failed"
+	// EscalationCodePostRunFailed is design F025's own code (section 6.8): a
+	// success builder's own store, filesystem, or marshal failure after
+	// runJob's Reserve already wrote a run -- the agent's turn completed, but
+	// Zing could not store or check its result. job.postRunFailure is its one
+	// writer.
+	EscalationCodePostRunFailed EscalationCode = "post_run_failed"
 )
 
 // Values returns every valid EscalationCode.
@@ -275,7 +281,7 @@ func (EscalationCode) Values() []string {
 		string(EscalationCodeUsageHold), string(EscalationCodePlanGap), string(EscalationCodeCannotRun),
 		string(EscalationCodeEnvironment), string(EscalationCodeOther), string(EscalationCodeSplitUnsupported),
 		string(EscalationCodeNothingToDoWithTrueClaims), string(EscalationCodeRuntimeExecFailed),
-		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed),
+		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed), string(EscalationCodePostRunFailed),
 	}
 }
 
