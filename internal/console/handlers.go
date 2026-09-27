@@ -12,13 +12,13 @@ import (
 // has nothing to flag.
 const contentTypeHTML = "text/html; charset=utf-8"
 
-// handleIndex serves the shell: the palette, the #nav/#main/#rail regions
-// rendered once for the shell's default signals (view=inbox, open=0,
-// project=0), the #stream-ctl bridge, and the script tag (design section
-// 6.3, 7.1). The shell's own data-init on #stream-ctl calls GET /stream
-// immediately after, whose first frame patches the same three regions
-// again -- the same view-building code path this handler already used, so
-// the two never drift.
+// handleIndex serves the shell: the palette, the #nav/#main/#rail/#alerts
+// regions rendered once for the shell's default signals (view=inbox,
+// open=0, project=0), the #stream-ctl bridge, and the script tag (design
+// section 6.3, 7.1, 6a). The shell's own data-init on #stream-ctl calls GET
+// /stream immediately after, whose first frame patches the same four
+// regions again -- the same view-building code path this handler already
+// used, so the two never drift.
 func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 	nav, err := c.navComponent(r.Context())
 	if err != nil {
@@ -42,11 +42,14 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
+	// alertsComponent takes no navigation signals and cannot fail (design
+	// section 6a): it renders the same ring read regardless of view.
+	alerts := c.alertsComponent()
 
 	// Rendered into a buffer first, not straight to w, so a render failure
 	// still reports 500 rather than sending a 200 with a half-written body.
 	var buf bytes.Buffer
-	if err := templates.Shell(nav, main, rail).Render(r.Context(), &buf); err != nil {
+	if err := templates.Shell(nav, main, rail, alerts).Render(r.Context(), &buf); err != nil {
 		slog.Error("console: render shell", "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return

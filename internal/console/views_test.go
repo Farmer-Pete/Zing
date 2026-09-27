@@ -18,7 +18,7 @@ var otherProject = store.Project{
 }
 
 // mainFrame opens one /stream connection for (view, open, project), reads
-// its three initial frames, and returns just the #main one: the seam every
+// its four initial frames, and returns just the #main one: the seam every
 // test in this file reads a view's rendered content through (design
 // section 11, "views": "real store").
 func mainFrame(t *testing.T, base, view string, open, project int64) string {
@@ -26,7 +26,7 @@ func mainFrame(t *testing.T, base, view string, open, project int64) string {
 	resp, r, cancel := openStream(t, base, view, open, project)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, main, _ := readInitialFrames(t, r)
+	_, main, _, _ := readInitialFrames(t, r)
 	return main
 }
 

@@ -2,15 +2,31 @@ package console_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"zing/internal/console"
 )
+
+// errSinkWrite is the fixed error failingWriter.Write always returns, so a
+// test can assert on it with errors.Is instead of matching a string.
+var errSinkWrite = errors.New("boom: sink write failed")
+
+// failingWriter is an io.Writer whose Write always fails, letting a test
+// force Handler.Handle's sink.Handle call into its error branch without
+// reaching into slog.TextHandler's own internals.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errSinkWrite
+}
 
 // newTestHandler builds a console.Handler over a fresh buffer, seeded at
 // info, and returns both so a test can assert on the sink's own text output
@@ -20,7 +36,18 @@ func newTestHandler(t *testing.T) (*console.Handler, *bytes.Buffer, *slog.LevelV
 	var buf bytes.Buffer
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
-	return console.NewHandler(&buf, lv), &buf, lv
+	return console.NewHandler(&buf, lv, nil), &buf, lv
+}
+
+// newTestHandlerWithOnWarn is newTestHandler plus an onWarn callback, for
+// the tests below that assert onWarn fires exactly on a WARN-or-above
+// record (design section 6a).
+func newTestHandlerWithOnWarn(t *testing.T, onWarn func()) (*console.Handler, *bytes.Buffer, *slog.LevelVar) {
+	t.Helper()
+	var buf bytes.Buffer
+	lv := new(slog.LevelVar)
+	lv.Set(slog.LevelInfo)
+	return console.NewHandler(&buf, lv, onWarn), &buf, lv
 }
 
 func TestLevelVarSetChangesLevelLive(t *testing.T) {
@@ -234,5 +261,215 @@ func TestToggleDebug_ConcurrentTogglesLandOnDeterministicNetResult(t *testing.T)
 
 	if h.IsDebug(ticketID) {
 		t.Errorf("IsDebug(%d) = true after %d concurrent ToggleDebug calls, want false (an even count must net back to the starting state)", ticketID, goroutines)
+	}
+}
+
+// TestWarnings_OnlyWarnAndAboveNewestFirstCapped proves Handler.Warnings
+// (design section 6a, D8): it returns only WARN-and-above entries, newest
+// first, and honors the limit even though more qualifying entries exist in
+// the ring.
+func TestWarnings_OnlyWarnAndAboveNewestFirstCapped(t *testing.T) {
+	h, _, lv := newTestHandler(t)
+	lv.Set(slog.LevelDebug)
+	logger := slog.New(h)
+
+	logger.Debug("debug line, never a warning")
+	logger.Info("info line, never a warning")
+	logger.Warn("first warning")
+	logger.Error("first error")
+	logger.Warn("second warning")
+
+	got := h.Warnings(10)
+	want := []string{"second warning", "first error", "first warning"}
+	if len(got) != len(want) {
+		t.Fatalf("Warnings(10) returned %d entries, want %d: %v", len(got), len(want), got)
+	}
+	for i, msg := range want {
+		if got[i].Message != msg {
+			t.Errorf("Warnings(10)[%d].Message = %q, want %q (newest first)", i, got[i].Message, msg)
+		}
+		if got[i].Level < slog.LevelWarn {
+			t.Errorf("Warnings(10)[%d].Level = %v, want >= WARN", i, got[i].Level)
+		}
+	}
+
+	// limit honored even though 3 qualifying entries exist.
+	capped := h.Warnings(2)
+	if len(capped) != 2 {
+		t.Fatalf("Warnings(2) returned %d entries, want 2", len(capped))
+	}
+	if capped[0].Message != "second warning" || capped[1].Message != "first error" {
+		t.Errorf("Warnings(2) = %v, want the two newest, newest first", capped)
+	}
+}
+
+// TestWarnings_ReturnsAFreshCopy proves the returned slice is never the
+// ring's own guarded slice (design section 6a: "never the guarded slice"):
+// mutating what Warnings returns must not corrupt a later call.
+func TestWarnings_ReturnsAFreshCopy(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	slog.New(h).Warn("the only warning")
+
+	got := h.Warnings(10)
+	if len(got) != 1 {
+		t.Fatalf("Warnings(10) = %v, want exactly one entry", got)
+	}
+	got[0].Message = "corrupted by the caller"
+
+	again := h.Warnings(10)
+	if len(again) != 1 || again[0].Message != "the only warning" {
+		t.Errorf("Warnings(10) after mutating a prior result = %v, want the original entry untouched", again)
+	}
+}
+
+// TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing proves each returned
+// LogEntry's TicketID does not alias the ring's own pointee (design section
+// 6a: "a fresh copy ... may retain or mutate freely", which a shared int64
+// pointee would violate even though the returned slice and struct are
+// otherwise fresh): mutating a snapshot's *TicketID must not be visible in a
+// later snapshot.
+func TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	slog.New(h).Warn("first warning", "ticket_id", int64(1))
+
+	got := h.Warnings(10)
+	if len(got) != 1 || got[0].TicketID == nil {
+		t.Fatalf("Warnings(10) = %v, want one entry with a non-nil TicketID", got)
+	}
+	*got[0].TicketID = 999
+
+	again := h.Warnings(10)
+	if len(again) != 1 || again[0].TicketID == nil || *again[0].TicketID != 1 {
+		t.Errorf("Warnings(10) after mutating a prior result's *TicketID = %v, want TicketID still 1 (the ring's own pointee must be untouched)", again)
+	}
+}
+
+// TestTail_ReturnsOwnIDPointersNotAliasingTheRing is
+// TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing for Tail (byRunID):
+// the same aliasing bug affects both snapshot methods, since both, before
+// the fix, appended the ring's own LogEntry value, id pointers included.
+func TestTail_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	h, _, lv := newTestHandler(t)
+	lv.Set(slog.LevelDebug)
+	slog.New(h).Debug("a run-scoped line", "run_id", int64(5), "ticket_id", int64(1))
+
+	got := h.Tail(5)
+	if len(got) != 1 || got[0].TicketID == nil {
+		t.Fatalf("Tail(5) = %v, want one entry with a non-nil TicketID", got)
+	}
+	*got[0].TicketID = 999
+
+	again := h.Tail(5)
+	if len(again) != 1 || again[0].TicketID == nil || *again[0].TicketID != 1 {
+		t.Errorf("Tail(5) after mutating a prior result's *TicketID = %v, want TicketID still 1 (the ring's own pointee must be untouched)", again)
+	}
+}
+
+// TestOnWarn_FiresOnWarnAndAboveNotBelow proves onWarn (design section 6a):
+// it fires exactly once per WARN-or-above record and never for INFO or
+// DEBUG.
+func TestOnWarn_FiresOnWarnAndAboveNotBelow(t *testing.T) {
+	var mu sync.Mutex
+	var fired int
+	onWarn := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		fired++
+	}
+	h, _, lv := newTestHandlerWithOnWarn(t, onWarn)
+	lv.Set(slog.LevelDebug)
+	logger := slog.New(h)
+
+	logger.Debug("debug never fires onWarn")
+	logger.Info("info never fires onWarn")
+	logger.Warn("warn fires onWarn")
+	logger.Error("error fires onWarn")
+
+	mu.Lock()
+	got := fired
+	mu.Unlock()
+	if got != 2 {
+		t.Errorf("onWarn fired %d times after one WARN and one ERROR (plus one DEBUG and one INFO), want exactly 2", got)
+	}
+}
+
+// TestHandle_SinkErrorStillRingsAndFiresOnWarn proves a sink write failure
+// does not skip the ring add or the onWarn call: before the fix, Handle
+// returned as soon as h.sink.Handle errored, so a WARN whose sink write
+// failed vanished from the alerts view along with the record it should
+// still have logged everywhere else. Handle must still return the wrapped
+// sink error, but only after the ring and onWarn have both run.
+func TestHandle_SinkErrorStillRingsAndFiresOnWarn(t *testing.T) {
+	var mu sync.Mutex
+	var fired int
+	onWarn := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		fired++
+	}
+
+	lv := new(slog.LevelVar)
+	lv.Set(slog.LevelDebug) // pass=true, so Handle attempts the sink write that fails
+	h := console.NewHandler(failingWriter{}, lv, onWarn)
+
+	r := slog.NewRecord(time.Now(), slog.LevelWarn, "a warning whose sink write fails", 0)
+	err := h.Handle(context.Background(), r)
+
+	if err == nil {
+		t.Fatal("Handle returned nil, want the wrapped sink error")
+	}
+	if !errors.Is(err, errSinkWrite) {
+		t.Errorf("Handle error = %v, want it to wrap errSinkWrite", err)
+	}
+
+	got := h.Warnings(10)
+	if len(got) != 1 || got[0].Message != "a warning whose sink write fails" {
+		t.Fatalf("Warnings(10) = %v, want the WARN entry despite the sink error", got)
+	}
+
+	mu.Lock()
+	firedCount := fired
+	mu.Unlock()
+	if firedCount != 1 {
+		t.Errorf("onWarn fired %d times, want exactly 1 despite the sink error", firedCount)
+	}
+}
+
+// TestHandle_WarnAlwaysRingsAndFiresOnWarnAtAnyLevelVar proves the level-
+// independence contract (design section 6a, the fixed bug): a WARN logged
+// while LevelVar is set to error still lands in Warnings and still fires
+// onWarn, even though the text sink omits it because it never clears the
+// level-or-debug gate.
+func TestHandle_WarnAlwaysRingsAndFiresOnWarnAtAnyLevelVar(t *testing.T) {
+	var mu sync.Mutex
+	var fired int
+	onWarn := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		fired++
+	}
+
+	var buf bytes.Buffer
+	lv := new(slog.LevelVar)
+	lv.Set(slog.LevelError) // above warn: the sink's own gate would drop a WARN
+	h := console.NewHandler(&buf, lv, onWarn)
+	logger := slog.New(h)
+
+	logger.Warn("a warning under LevelVar=error")
+
+	if buf.Len() != 0 {
+		t.Errorf("sink = %q, want empty: the text sink still honors levelVar (WARN < ERROR)", buf.String())
+	}
+
+	got := h.Warnings(10)
+	if len(got) != 1 || got[0].Message != "a warning under LevelVar=error" {
+		t.Errorf("Warnings(10) = %v, want the WARN entry despite LevelVar=error", got)
+	}
+
+	mu.Lock()
+	firedCount := fired
+	mu.Unlock()
+	if firedCount != 1 {
+		t.Errorf("onWarn fired %d times, want exactly 1 despite LevelVar=error", firedCount)
 	}
 }

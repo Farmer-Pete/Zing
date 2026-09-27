@@ -119,7 +119,7 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, _, rail := readInitialFrames(t, r)
+	_, _, rail, _ := readInitialFrames(t, r)
 
 	// Phase: queued and planning are before "building" (done), building
 	// itself is now with the waiting pill, reviewing/judging/shipping/done
@@ -186,7 +186,7 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, _, rail := readInitialFrames(t, r)
+	_, _, rail, _ := readInitialFrames(t, r)
 
 	for _, want := range []string{
 		"<dt>Model</dt><dd>-</dd>",
@@ -287,7 +287,7 @@ func TestBuildLogRail_TiesKeepRunAppendOrder(t *testing.T) {
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
-	_, _, rail := readInitialFrames(t, r)
+	_, _, rail, _ := readInitialFrames(t, r)
 
 	for i := range tiedInstants {
 		run0Msg := fmt.Sprintf("run0-line-%d", i)

@@ -127,7 +127,14 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
-	logHandler, err := installLogHandler(ctx, st)
+	// Built before the log handler (design section 6a), so its Publish
+	// method can be wired in as onWarn: a fresh WARN-or-above record then
+	// wakes every open console stream, the same wake-up path a store change
+	// already uses, so the alerts view (internal/console/log.go's Warnings,
+	// patchRegions' #alerts patch) needs no signal of its own.
+	b := bus.New()
+
+	logHandler, err := installLogHandler(ctx, st, b)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -157,7 +164,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		}
 	}
 
-	bindings, err := ensureBindings(ctx, st, cfg.Projects)
+	bindings, err := ensureBindings(ctx, st, cfg.Projects, cfg.User)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -181,8 +188,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		_ = st.Close()
 		return err
 	}
-
-	b := bus.New()
 
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
@@ -478,9 +483,21 @@ func drainAndShutdown(
 // always runs them first, so this is defensive, not an expected path)
 // defaults to info and is logged once, rather than failing serve over a bad
 // setting.
-func installLogHandler(ctx context.Context, st *store.Store) (*console.Handler, error) {
+//
+// b.Publish is wired in as onWarn (design section 6a): a fresh WARN-or-above
+// record wakes every open console /stream so the #alerts region patches
+// live, the same bus every store-changing handler already publishes to.
+//
+// This is a bounded amplification, accepted rather than gated by source
+// package: a single WARN anywhere in the process wakes every open /stream,
+// and a per-tab patch-failure slog.Warn re-renders all four regions of
+// every other healthy stream. Each cycle still terminates, since a failing
+// stream exits after one frame, so it cannot compound across warnings. For
+// a single-user loopback/tailnet console this fan-out is fine; it would
+// need reconsidering before this handler served multiple concurrent users.
+func installLogHandler(ctx context.Context, st *store.Store, b *bus.Broker) (*console.Handler, error) {
 	lv := new(slog.LevelVar)
-	h := console.NewHandler(os.Stderr, lv)
+	h := console.NewHandler(os.Stderr, lv, b.Publish)
 	slog.SetDefault(slog.New(h))
 
 	stored, ok, err := st.GetSetting(ctx, "log_level")
@@ -542,8 +559,12 @@ func dispatchMaxParallel(n int) int {
 
 // ensureBindings ensures a store project for every configured project and
 // returns the dispatch.Binding each one needs for intake (design section
-// 6.10 step 3).
-func ensureBindings(ctx context.Context, st *store.Store, projects []config.Project) ([]zdispatch.Binding, error) {
+// 6.10 step 3). user is the configured user Zing acts for (cfg.User), set
+// on every Binding.User so intake can name it in the pickup comment; it is
+// cfg.User, not a project's own intake assignee, since the assignee is only
+// a filter and the person Zing represents is the configured user (plan
+// section 6).
+func ensureBindings(ctx context.Context, st *store.Store, projects []config.Project, user string) ([]zdispatch.Binding, error) {
 	bindings := make([]zdispatch.Binding, 0, len(projects))
 	for i := range projects {
 		p := &projects[i]
@@ -561,6 +582,7 @@ func ensureBindings(ctx context.Context, st *store.Store, projects []config.Proj
 			StoreProjectID: id,
 			TrackerProject: p.Name,
 			Rule:           tracker.IntakeRule{Assignee: p.Intake.AssignedTo},
+			User:           user,
 		})
 	}
 	return bindings, nil

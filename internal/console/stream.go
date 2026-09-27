@@ -66,9 +66,10 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// patchRegions renders and patches #nav, #main, and #rail for one frame,
-// always all three (design section 6.3: "#rail ... is always patched, so
-// leaving a thread clears the old rail"). It returns false -- ending the
+// patchRegions renders and patches #nav, #main, #rail, and #alerts for one
+// frame, always all four (design section 6.3: "#rail ... is always
+// patched, so leaving a thread clears the old rail"; design section 6a,
+// D8: "#alerts ... patched on every frame"). It returns false -- ending the
 // stream -- on a store read failure or on any PatchElementTempl error (a
 // render error or a write error alike, folded together by the SDK, most
 // often meaning the client has gone away). Every PatchElementTempl error is
@@ -77,6 +78,12 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // client-disconnect write error, so this was the only place that could
 // still tell the two apart, and silently ending on a genuine render error
 // left it undiagnosable.
+//
+// #alerts never logs at warn itself (its own render path only reads the
+// ring; it never calls slog.Warn), so patching it cannot re-trigger onWarn
+// and cascade into another wake. A patch failure here ends the stream, like
+// every other region's, rather than looping (design section 6a, "risk:
+// alerts onWarn re-entrancy").
 func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
 	nav, err := c.navComponent(ctx)
 	if err != nil {
@@ -105,6 +112,11 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 	}
 	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
 		slog.Warn("console: stream: patch rail", "view", sig.View, "open", sig.Open, "err", patchErr)
+		return false
+	}
+
+	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
+		slog.Warn("console: stream: patch alerts", "view", sig.View, "open", sig.Open, "err", patchErr)
 		return false
 	}
 	return true
