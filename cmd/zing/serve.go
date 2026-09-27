@@ -157,7 +157,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		}
 	}
 
-	bindings, err := ensureBindings(ctx, st, cfg.Projects)
+	bindings, err := ensureBindings(ctx, st, cfg.Projects, cfg.User)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -542,8 +542,12 @@ func dispatchMaxParallel(n int) int {
 
 // ensureBindings ensures a store project for every configured project and
 // returns the dispatch.Binding each one needs for intake (design section
-// 6.10 step 3).
-func ensureBindings(ctx context.Context, st *store.Store, projects []config.Project) ([]zdispatch.Binding, error) {
+// 6.10 step 3). user is the configured user Zing acts for (cfg.User), set
+// on every Binding.User so intake can name it in the pickup comment; it is
+// cfg.User, not a project's own intake assignee, since the assignee is only
+// a filter and the person Zing represents is the configured user (plan
+// section 6).
+func ensureBindings(ctx context.Context, st *store.Store, projects []config.Project, user string) ([]zdispatch.Binding, error) {
 	bindings := make([]zdispatch.Binding, 0, len(projects))
 	for i := range projects {
 		p := &projects[i]
@@ -561,6 +565,7 @@ func ensureBindings(ctx context.Context, st *store.Store, projects []config.Proj
 			StoreProjectID: id,
 			TrackerProject: p.Name,
 			Rule:           tracker.IntakeRule{Assignee: p.Intake.AssignedTo},
+			User:           user,
 		})
 	}
 	return bindings, nil

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -986,7 +987,160 @@ func TestRun_NotifyDrainReturnsPromptly(t *testing.T) {
 	}
 }
 
+// --- pickup comment wiring (plan section 6, 8) ------------------------------
+
+// newTwoTicketFixture returns a *commentingFixture over an in-memory
+// fixture with two tickets ("fake#1", "fake#2"), since the checked-in
+// fixtures/tickets.toml carries only one and these tests need two new
+// tickets in one intake.
+func newTwoTicketFixture(t *testing.T) *commentingFixture {
+	t.Helper()
+	fsys := fstest.MapFS{"tickets.toml": &fstest.MapFile{Data: []byte(`project = "zing"
+
+[[ticket]]
+ref = "fake#1"
+title = "one"
+body = "body one"
+
+[[ticket]]
+ref = "fake#2"
+title = "two"
+body = "body two"
+`)}}
+	fx, err := tracker.NewFixture(fsys, "tickets.toml")
+	if err != nil {
+		t.Fatalf("tracker.NewFixture: %v", err)
+	}
+	return &commentingFixture{Fixture: fx}
+}
+
+// TestTick_IntakePostsPickupCommentForEachNewTicket proves intake posts the
+// pickup comment for each newly inserted ticket, naming the binding's User
+// (plan section 6, 8): one tick over two new tickets records exactly two
+// pickup comments, and a second tick over the same, now-deduped, tickets
+// leaves the recorded count at two (the earlier two remain; no new ones).
+func TestTick_IntakePostsPickupCommentForEachNewTicket(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const testBindingUser = "peter"
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+
+	rec := newTwoTicketFixture(t)
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	got := rec.recorded()
+	if len(got) != 2 {
+		t.Fatalf("after first Tick: %d pickup comments, want 2", len(got))
+	}
+	want := tracker.PickupComment(testBindingUser)
+	for _, c := range got {
+		if c.body != want {
+			t.Errorf("pickup comment body = %q, want %q", c.body, want)
+		}
+		if c.project != testProject.Name {
+			t.Errorf("pickup comment project = %q, want %q", c.project, testProject.Name)
+		}
+	}
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if got = rec.recorded(); len(got) != 2 {
+		t.Errorf("after second Tick (dedup): %d pickup comments, want still 2 (no new posts)", len(got))
+	}
+}
+
+// TestTick_IntakePickupCommentFailureIsBestEffort proves a Comment failure
+// is best-effort (plan section 6): Tick still returns nil, both ticket rows
+// remain inserted, the later ticket's comment is still attempted, and a
+// later tick over the same, now-deduped, tickets adds no further calls (no
+// retry, no double-post).
+func TestTick_IntakePickupCommentFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+
+	rec := newTwoTicketFixture(t)
+	rec.failFirst = true
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a pickup comment failure is best-effort)", err)
+	}
+
+	tickets, err := s.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("ListAllTickets: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("tickets inserted = %d, want 2 (both rows remain despite the comment failure)", len(tickets))
+	}
+
+	got := rec.recorded()
+	if len(got) != 1 {
+		t.Fatalf("recorded pickup comments = %d, want 1 (the first call failed, the second still attempted and recorded)", len(got))
+	}
+	if got[0].ref != "fake#2" {
+		t.Errorf("recorded comment ref = %q, want fake#2 (the later ticket's comment, since the first failed)", got[0].ref)
+	}
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if got = rec.recorded(); len(got) != 1 {
+		t.Errorf("recorded pickup comments after second Tick = %d, want still 1 (no retry, no double-post)", len(got))
+	}
+}
+
 // --- test doubles ----------------------------------------------------------
+
+// commentingFixture is a recording Tracker test double for the pickup
+// comment wiring (plan section 6, 8): it embeds a *tracker.Fixture for
+// Intake, Fetch, FileTicket, and Collaborators, and overrides Comment to
+// record every call under a mutex. failFirst, when set, makes exactly the
+// first Comment call return an error and every later call succeed and
+// record normally, so a test can exercise the best-effort failure contract
+// without losing coverage of the ticket after it.
+type commentingFixture struct {
+	*tracker.Fixture
+
+	mu        sync.Mutex
+	comments  []recordedComment
+	failFirst bool
+	failed    bool
+}
+
+var _ tracker.Tracker = (*commentingFixture)(nil)
+
+// recordedComment is one recorded commentingFixture.Comment call.
+type recordedComment struct {
+	project, ref, body string
+}
+
+func (c *commentingFixture) Comment(_ context.Context, project, ref, body string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failFirst && !c.failed {
+		c.failed = true
+		return errors.New("boom: pickup comment failed")
+	}
+	c.comments = append(c.comments, recordedComment{project: project, ref: ref, body: body})
+	return nil
+}
+
+// recorded returns a fresh copy of every Comment call recorded so far.
+func (c *commentingFixture) recorded() []recordedComment {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]recordedComment(nil), c.comments...)
+}
 
 // cancelingHandler is a job.Handler test double that cancels a captured
 // context.CancelFunc from inside Run, simulating the tick context becoming

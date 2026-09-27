@@ -66,6 +66,11 @@ type Binding struct {
 	StoreProjectID int64
 	TrackerProject string
 	Rule           tracker.IntakeRule
+	// User is the configured user Zing acts for (cfg.User), named User
+	// rather than Owner to stay distinct from Config.Owner, this process's
+	// claim identity. intake names it in the pickup comment it posts for
+	// every newly inserted ticket.
+	User string
 }
 
 // Config is the dispatcher's run-time tuning (design section 6.8).
@@ -267,10 +272,19 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 			if ok {
 				continue
 			}
-			if _, err := d.store.InsertTicket(ctx, store.Ticket{
+			newID, err := d.store.InsertTicket(ctx, store.Ticket{
 				ProjectID: b.StoreProjectID, TrackerRef: tk.Ref, Title: tk.Title, Body: tk.Body, State: stateQueued,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("dispatch: intake insert %s: %w", tk.Ref, err)
+			}
+			// The pickup comment is best-effort: it never fails the tick,
+			// never rolls back the row just inserted, and is never retried.
+			// The store is the source of truth; the tracker is a mirror, so
+			// a lagging mirror is acceptable (design section 6.8 step 3,
+			// plan section 6). The comment body is never logged.
+			if cErr := d.tracker.Comment(ctx, b.TrackerProject, tk.Ref, tracker.PickupComment(b.User)); cErr != nil {
+				slog.Warn("pickup comment failed", "ticket_id", newID, "project", b.TrackerProject, "ref", tk.Ref, "err", cErr)
 			}
 		}
 	}
