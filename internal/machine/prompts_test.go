@@ -28,17 +28,17 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   "prompts/planning-feature.md",
-			sha256: "b60306b3d973a61c36734749c7e5fda7bad75125d25f5c2e0d165c1131c1b6fc",
+			sha256: "fa7c4e234296affb0efbce560bb0557524d22413fa9d2d37043c4d271ed33698",
 		},
 		{
 			name:   "planning-bug",
 			path:   "prompts/planning-bug.md",
-			sha256: "771b5a0e2194969ac66ebea40acfad9c102de8207bef5d2f63ced1567a25cb1b",
+			sha256: "541217a029c67cd28c06c956c8829e9455e034d2bbda50077d5cd7ca5d8f78c2",
 		},
 		{
 			name:   "planreview",
 			path:   "prompts/planreview.md",
-			sha256: "dfcb9f616c3520bca65330d4b8db6abf85c1476bc0afd1a765f868ae5d68eb9b",
+			sha256: "c0cc39368632ea2ffa0f4672e8c576d7d044b26a4cae9c43d7fc81c1c2320d7f",
 		},
 	}
 

@@ -415,6 +415,18 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
 		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)
 	}
+	// Project names must be unique: serve keys the tracker's repo map by name
+	// (cmd/zing's productionTracker), so two projects sharing a name would
+	// silently collide and send one project's intake and comments to the
+	// other's repository.
+	seenProjectNames := make(map[string]bool, len(cfg.Projects))
+	for i := range cfg.Projects {
+		name := cfg.Projects[i].Name
+		if seenProjectNames[name] {
+			return fmt.Errorf("zing.toml: duplicate project name %q: each project's name must be unique", name)
+		}
+		seenProjectNames[name] = true
+	}
 	return nil
 }
 

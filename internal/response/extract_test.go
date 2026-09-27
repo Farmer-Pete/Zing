@@ -1,6 +1,10 @@
 package response
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestExtractAll_ZeroRoots(t *testing.T) {
 	t.Parallel()
@@ -70,5 +74,29 @@ func TestExtractAll_HostileJobAttributeStillCounts(t *testing.T) {
 	got := ExtractAll(doc)
 	if len(got) != 1 || got[0] != doc {
 		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, doc)
+	}
+}
+
+// TestExtractAll_ManyUnclosedStartsIsBoundedAndFast proves the candidate cap
+// (maxRootCandidates): an output packed with unclosed "<zing" starts, each of
+// which would otherwise make wellFormedRootExtent scan to EOF, returns no
+// roots quickly rather than doing O(n^2) work (PR #23 review). The caller
+// then reports its ordinary no-zing-element failure.
+func TestExtractAll_ManyUnclosedStartsIsBoundedAndFast(t *testing.T) {
+	t.Parallel()
+
+	// Far more unclosed starts than the cap, so an uncapped scan would parse
+	// every one of them to EOF.
+	hostile := strings.Repeat("<zing >\n", 20000)
+
+	done := make(chan []string, 1)
+	go func() { done <- ExtractAll(hostile) }()
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Fatalf("ExtractAll returned %d roots, want 0 (no well-formed document)", len(got))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ExtractAll did not return within 5s; the candidate scan is not bounded")
 	}
 }

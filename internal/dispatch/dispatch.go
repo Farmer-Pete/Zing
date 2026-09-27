@@ -534,7 +534,12 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 	}
 
 	body := tracker.NothingToDoComment(b.User, e.Notes)
-	commentCtx, cancel := postHandlerContext(ctx)
+	// Unlike the store writes above (which detach with WithoutCancel so they
+	// still land after a cancel), this comment is best-effort and the commit
+	// has already succeeded, so it derives from ctx and is cancelled by a
+	// shutdown -- still bounded by postHandlerWriteTimeout, but never able to
+	// keep Run alive past the drain deadline on a blocked tracker.
+	commentCtx, cancel := context.WithTimeout(ctx, postHandlerWriteTimeout)
 	defer cancel()
 	if err := d.tracker.Comment(commentCtx, b.TrackerProject, e.Ref, body); err != nil {
 		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)

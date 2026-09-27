@@ -1636,7 +1636,7 @@ func routeFailure(
 	case errors.Is(runErr, runtime.ErrCanceled):
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
-		return budgetEscalationCommit(t, d), true, nil
+		return budgetEscalationCommit(t, d, resolveIDs), true, nil
 	case errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
 		return store.HandlerCommit{}, true, runErr
 	}
@@ -1724,8 +1724,13 @@ func escalationCommit(t store.Ticket, d Deps, runID, sessionID *int64, code, wha
 // budgetEscalationCommit is ErrBudget's commit (design section 6.8): no run
 // was ever reserved (runJob's budget check, step 4, runs before Reserve), so
 // RunID and SessionID are both nil.
-func budgetEscalationCommit(t store.Ticket, d Deps) store.HandlerCommit {
-	return escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+func budgetEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+	// Resolve the answered round that triggered this run atomically with the
+	// escalation, exactly as the sibling exec/error escalations do; otherwise
+	// budget exhaustion leaves that gate or planning round open forever.
+	c.ResolveQuestions = resolveIDs
+	return c
 }
 
 // capResumesEscalation is the resumes_exhausted escalation entry steps 1(c)

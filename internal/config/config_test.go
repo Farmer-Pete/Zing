@@ -374,6 +374,21 @@ lint = "golangci-lint run"
 			want: "zing.toml: projects[0].tracker: must be github",
 		},
 		{
+			name: "duplicate project name",
+			body: minimalValidTOML + `
+[[projects]]
+name = "zing"
+repo = "git@github.com:x/other.git"
+path = "/home/peter/other"
+tracker = "github"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`,
+			want: `zing.toml: duplicate project name "zing": each project's name must be unique`,
+		},
+		{
 			name: "bad console.port too high",
 			body: minimalValidTOML + "\n[console]\nport = 99999\n",
 			want: "zing.toml: console.port: must be 1 to 65535",

@@ -14,8 +14,12 @@ Severity: blocker means the plan cannot be built as written; major means
 it will produce the wrong thing; minor means it will produce a worse
 thing; nit is a small fix. Mark the lens each finding came from.
 
-Done when every lens has been applied to every part of the plan and each
-finding has a path, a severity, and a fix.
+A sound plan is a valid outcome. If nothing needs to change, return ok with
+no findings; do not manufacture a finding to have something to report.
+
+Done when every lens has been applied to every part of the plan. When the
+plan needs changes, each finding has a path, a severity, and a fix;
+otherwise there are no findings.
 
 ## In a plan
 Ask, in this order:

@@ -327,17 +327,39 @@ func TestClaude_ErrStart(t *testing.T) {
 	}
 }
 
+// waitForFakeChild blocks until the fake CLI at dir has recorded its argv,
+// which proves exec.CommandContext actually started the child. A test arms
+// its cancel timer only after this returns: otherwise a slow Start() under
+// parallel load could observe an already-cancelled context, and Claude.run
+// maps every cmd.Start() failure to ErrStart -- not the ErrCanceled/ErrTimeout
+// the process-lifecycle tests assert. Called from the test goroutine so its
+// t.Fatalf is legal.
+func waitForFakeChild(t *testing.T, dir string) {
+	t.Helper()
+	argv := filepath.Join(dir, "argv")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(argv); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("fake child did not record its argv at %s within 5s", argv)
+}
+
 func TestClaude_ErrTimeout(t *testing.T) {
 	t.Parallel()
 	requireUnix(t)
 
 	dir := t.TempDir()
-	req := newFakeRequest(dir, "sleep", "FAKE_CLAUDE_SLEEP_SECONDS=5")
+	// A long-sleeping child so the job deadline, not the child exiting on its
+	// own, ends the run. The deadline is armed generously (2s): the child
+	// records its argv in milliseconds, so even under heavy parallel load
+	// Start() completes well before it, and cmd.Start() never sees an
+	// already-expired context (which Claude.run would map to ErrStart).
+	req := newFakeRequest(dir, "sleep", "FAKE_CLAUDE_SLEEP_SECONDS=30")
 
-	// The job deadline killing a real child process is inherent to what
-	// this test proves; there is no channel to wait on instead of the
-	// clock.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	c := NewClaude(fakeClaudeScript)
@@ -361,23 +383,32 @@ func TestClaude_ErrCanceled(t *testing.T) {
 	req := newFakeRequest(dir, "sleep", "FAKE_CLAUDE_SLEEP_SECONDS=5")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Simulates a dispatcher shutdown arriving mid-run; there is no signal
-	// short of real wall-clock time to wait on before cancelling a process
-	// that is deliberately still running.
+	defer cancel()
+
+	type outcome struct {
+		res RunResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	c := NewClaude(fakeClaudeScript)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
+		res, err := c.Run(ctx, req)
+		done <- outcome{res, err}
 	}()
 
-	c := NewClaude(fakeClaudeScript)
-	res, err := c.Run(ctx, req)
-	if !errors.Is(err, ErrCanceled) {
-		t.Fatalf("err = %v, want ErrCanceled", err)
+	// Cancel only once the child is actually up, simulating a dispatcher
+	// shutdown mid-run without racing a slow Start().
+	waitForFakeChild(t, dir)
+	cancel()
+
+	got := <-done
+	if !errors.Is(got.err, ErrCanceled) {
+		t.Fatalf("err = %v, want ErrCanceled", got.err)
 	}
-	if res.ExitCode != -1 {
-		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	if got.res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", got.res.ExitCode)
 	}
-	if res.SessionID == "" {
+	if got.res.SessionID == "" {
 		t.Error("SessionID is empty, want the generated uuid")
 	}
 }

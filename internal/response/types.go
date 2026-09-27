@@ -62,7 +62,7 @@ type Claim struct {
 type Scenario struct {
 	ID    string       `xml:"id,attr"              json:"id"              jsonschema:"pattern=^s[0-9]+$"`
 	Kind  ScenarioKind `xml:"kind,attr"            json:"kind"`
-	Check string       `xml:"check,attr,omitempty" json:"check_cmd"       doc:"optional: one command whose exit code decides it"`
+	Check string       `xml:"check,attr,omitempty" json:"check_cmd"       doc:"one command whose exit code decides it"`
 	Given string       `xml:"given"                json:"given"           jsonschema:"minLength=1" doc:"the starting state"`
 	When  string       `xml:"when"                 json:"when"            jsonschema:"minLength=1" doc:"the action"`
 	Then  string       `xml:"then"                 json:"then"            jsonschema:"minLength=1" doc:"what a stranger would observe, from outside the code"`

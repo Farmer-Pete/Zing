@@ -2429,3 +2429,39 @@ func TestPlanningHandler_Budget_ExhaustedBeforeReviewTickEscalatesWallClock(t *t
 	}
 	assertWallClockEscalation(t, commit)
 }
+
+// TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound
+// proves budget exhaustion does not strand the round that triggered the run:
+// the wall_clock escalation resolves the same answered question ids the
+// resume itself would have (design section 6.7, 6.8; PR #23 review).
+func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := answeredRoundReadyForResume(t, s, ticketID)
+
+	answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByState(answered): %v", err)
+	}
+	if len(answered) == 0 {
+		t.Fatal("no answered question to resolve; the resume fixture changed")
+	}
+	wantIDs := make(map[int64]bool, len(answered))
+	for i := range answered {
+		wantIDs[answered[i].ID] = true
+	}
+
+	commit, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (resume, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, commit)
+	if len(commit.ResolveQuestions) != len(wantIDs) {
+		t.Fatalf("commit.ResolveQuestions = %v, want the %d answered question id(s) %v", commit.ResolveQuestions, len(wantIDs), wantIDs)
+	}
+	for _, id := range commit.ResolveQuestions {
+		if !wantIDs[id] {
+			t.Errorf("commit.ResolveQuestions has %d, not among the answered round %v", id, wantIDs)
+		}
+	}
+}

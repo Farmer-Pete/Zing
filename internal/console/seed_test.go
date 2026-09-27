@@ -44,6 +44,39 @@ func TestSeedDemo_SeedsOneProjectAndTicketWithEveryArtifactAndQuestionKind(t *te
 	assertSeedDemoQuestions(ctx, t, s, ticketID)
 }
 
+// TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued proves the seeded ticket
+// ends in planning, waiting on its gate, rather than queued: a queued demo
+// ticket would be a live dispatch candidate that `zing serve --seed-demo`
+// picks up and advances into real planning, overwriting the fixture (design
+// section 6.6, 6.15; PR #23 review).
+func TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	tickets, err := s.TicketsByProject(ctx, projects[0].ID)
+	if err != nil {
+		t.Fatalf("TicketsByProject: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want exactly 1", len(tickets))
+	}
+	tk := tickets[0]
+	if tk.State != "planning" {
+		t.Errorf("seeded ticket state = %q, want planning (a queued ticket would be dispatched)", tk.State)
+	}
+	if tk.WaitingOn == nil || *tk.WaitingOn != string(response.QuestionKindGate) {
+		t.Errorf("seeded ticket waiting_on = %v, want %q", tk.WaitingOn, response.QuestionKindGate)
+	}
+}
+
 // demoTicketID asserts exactly one project and one ticket exist and returns
 // the ticket's id, failing the test otherwise.
 func demoTicketID(ctx context.Context, t *testing.T, s *store.Store) int64 {

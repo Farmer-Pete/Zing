@@ -8,8 +8,9 @@ the next step.
 1. Verify. Split the ticket into claims. For each claim record whether it
    is about the code or about an environment, and check every code claim
    against the repository. Cite the path you read. Done when every code
-   claim has a verdict and a path. If every code claim is false, return
-   nothing_to_do.
+   claim has a verdict and a path. If the ticket has at least one code
+   claim and every code claim is false, return nothing_to_do, naming at
+   least one verified code claim.
 
 2. Size. Decide whether this is one change or several that can each be
    built and verified alone. Several means return children: two or more

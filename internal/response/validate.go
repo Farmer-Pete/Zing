@@ -60,7 +60,7 @@ func Validate(doc *Document, ctx ValidateContext) []*PathError {
 	root := shapeOf(t)
 	val := reflect.ValueOf(doc.Response).Elem()
 
-	present, err := presenceSet(doc.Elem, root)
+	present, err := presenceSet(doc.Elem, root, false)
 	if err != nil {
 		// doc.Elem already decoded successfully once (Parse produced it),
 		// so a re-walk failure here is not expected; treat it as "nothing
@@ -375,7 +375,14 @@ func formatBound(f float64) string {
 // (design section 6.4). Presence still needs to descend into each item,
 // because a required scalar field nested inside a repeated element can be
 // missing from one item without being missing from the others.
-func presenceSet(elem []byte, root *node) (map[string]bool, error) {
+//
+// recordSliceSelf is the one difference between the two callers. Validate's
+// Layer 1 passes false: a required field lives on a child of a repeated
+// element, never on the repeated element itself, so recording that element's
+// own path would only add noise. ResolvesInPlan passes true, because a
+// plan-review finding may legitimately point at "plan/delivery/tasks/task[0]"
+// itself and must resolve.
+func presenceSet(elem []byte, root *node, recordSliceSelf bool) (map[string]bool, error) {
 	dec := xml.NewDecoder(bytes.NewReader(elem))
 	set := make(map[string]bool)
 
@@ -389,7 +396,7 @@ func presenceSet(elem []byte, root *node) (map[string]bool, error) {
 	}
 
 	recordAttrs(set, "", root, start.Attr)
-	if err := walkContent(dec, "", root, set); err != nil && !errors.Is(err, io.EOF) {
+	if err := walkContent(dec, "", root, set, recordSliceSelf); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	return set, nil
@@ -398,7 +405,7 @@ func presenceSet(elem []byte, root *node) (map[string]bool, error) {
 // walkContent reads tokens until n's own end element, recording presence
 // for every attribute and scalar element among n's children, indexing a
 // repeated child's nested paths as it goes.
-func walkContent(dec *xml.Decoder, path string, n *node, set map[string]bool) error {
+func walkContent(dec *xml.Decoder, path string, n *node, set map[string]bool, recordSliceSelf bool) error {
 	counts := map[string]int{}
 	for {
 		tok, err := dec.Token()
@@ -407,7 +414,7 @@ func walkContent(dec *xml.Decoder, path string, n *node, set map[string]bool) er
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if err := walkStart(dec, path, n, t, counts, set); err != nil {
+			if err := walkStart(dec, path, n, t, counts, set, recordSliceSelf); err != nil {
 				return err
 			}
 		case xml.EndElement:
@@ -416,7 +423,7 @@ func walkContent(dec *xml.Decoder, path string, n *node, set map[string]bool) er
 	}
 }
 
-func walkStart(dec *xml.Decoder, path string, n *node, t xml.StartElement, counts map[string]int, set map[string]bool) error {
+func walkStart(dec *xml.Decoder, path string, n *node, t xml.StartElement, counts map[string]int, set map[string]bool, recordSliceSelf bool) error {
 	child := matchChild(n, t.Name.Local)
 	if child == nil {
 		return dec.Skip()
@@ -427,6 +434,9 @@ func walkStart(dec *xml.Decoder, path string, n *node, t xml.StartElement, count
 		i := counts[child.Name]
 		counts[child.Name]++
 		childPath = joinPath(path, indexedName(child.Name, i))
+		if recordSliceSelf {
+			set[childPath] = true
+		}
 	} else {
 		childPath = joinPath(path, child.Name)
 		set[childPath] = true
@@ -436,7 +446,7 @@ func walkStart(dec *xml.Decoder, path string, n *node, t xml.StartElement, count
 	if !hasElementChildren(child) {
 		return dec.Skip()
 	}
-	return walkContent(dec, childPath, child, set)
+	return walkContent(dec, childPath, child, set, recordSliceSelf)
 }
 
 // matchChild returns n's element or wrapper child named localName, the

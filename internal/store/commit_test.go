@@ -2237,6 +2237,49 @@ func TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt(t *testing.
 	}
 }
 
+// TestCommitHandlerResult_EscalationRejectsForeignRunID proves escalateTx
+// refuses a RunID that belongs to another ticket: the foreign key alone only
+// proves the run exists, so without this check the escalation and its linked
+// question would route through the other ticket's session and job (design
+// section 4.5, 6.7; PR #23 review).
+func TestCommitHandlerResult_EscalationRejectsForeignRunID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	_, otherTicketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, otherTicketID, testStatePlanning)
+	otherSess := insertSession(t, s, otherTicketID, testStatePlanning)
+	foreignRunID := insertRun(t, s, otherSess)
+
+	_, ticketID := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			RunID: &foreignRunID, Body: "response_invalid: run from another ticket",
+			Payload: escalationTestPayload(response.EscalationCodeResponseInvalid, response.EscalationOriginPlanningResume),
+		},
+	})
+	if err == nil {
+		t.Fatal("CommitHandlerResult with a foreign RunID: err = nil, want an ownership error")
+	}
+	if !strings.Contains(err.Error(), "does not belong to ticket") {
+		t.Errorf("err = %v, want it to name the ownership violation", err)
+	}
+
+	// The whole transaction rolled back: no escalation or question landed on
+	// the target ticket.
+	msgs, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("messages on the target ticket = %d, want 0 (the commit rolled back)", len(msgs))
+	}
+}
+
 // TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys proves
 // two escalations committed one after another on the same ticket allocate
 // Q1 then Q2 (design section 6.7): the allocation counts every "question"

@@ -749,6 +749,21 @@ func fillQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64, payload 
 // retry/back-to-planning/abandon choice. Both payloads are validated by
 // insertMessageTx against their committed schemas.
 func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ec EscalationCommit) error {
+	// A non-nil RunID must name a run on one of this ticket's own sessions,
+	// the same scoping every Artifact.RunID passes: the foreign key alone only
+	// proves the run exists, so without this a RunID from another ticket would
+	// link the escalation (and its question) through that ticket's session and
+	// job (design section 4.5, 6.7).
+	if ec.RunID != nil {
+		owned, err := runOwnedByTicketTx(ctx, tx, ticketID, *ec.RunID)
+		if err != nil {
+			return fmt.Errorf("escalation: %w", err)
+		}
+		if !owned {
+			return fmt.Errorf("escalation: run %d does not belong to ticket %d", *ec.RunID, ticketID)
+		}
+	}
+
 	payload, err := json.Marshal(ec.Payload)
 	if err != nil {
 		return fmt.Errorf("escalation: marshal payload: %w", err)

@@ -165,6 +165,17 @@ const (
 // (owner, expires) pair Claim set.
 const demoRunLease = time.Hour
 
+// demoTicketState and demoGateReason land the seeded ticket in planning,
+// waiting on its gate, once its run is terminalized. A "queued" demo ticket
+// would be a live dispatch candidate, so `zing serve --seed-demo` would claim
+// it and advance it into real planning, destroying the seeded gate fixture
+// (design section 6.6, 6.15). waiting_on = gate (response.QuestionKindGate)
+// makes it non-dispatchable, exactly as a real posted gate does.
+const (
+	demoTicketState = "planning"
+	demoGateReason  = "seeded demo: the plan is posted, waiting on the owner's gate"
+)
+
 // SeedDemo seeds one demo project and one demo ticket carrying one session
 // and run (Task 11), a stored plan artifact (a small valid response.Plan
 // with a mermaid block in its Shape) and a scenario artifact set both
@@ -255,9 +266,13 @@ func seedDemoRun(ctx context.Context, s *store.Store, ticketID int64) (int64, er
 	}
 
 	outcome, exitCode, agentSeconds := "ready", 0, 12
+	gate := string(response.QuestionKindGate)
 	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
 		TicketID: ticketID, Owner: demoRunOwner, Expires: expires,
-		Runs: []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Runs:    []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Next:    demoTicketState,
+		Reason:  demoGateReason,
+		Waiting: &gate,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("terminalize run: %w", err)

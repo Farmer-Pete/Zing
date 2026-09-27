@@ -39,12 +39,13 @@ var planShape = shapeOf(reflect.TypeFor[Plan]())
 // (types.go's own doc tag on Finding.Location) -- names an element or
 // attribute that planXML, the stored plan re-rendered back to XML, actually
 // carries. It walks planXML with Plan's reflected shape, the same presence
-// pass Validate's Layer 1 runs over a whole response document
-// (validate.go's presenceSet), so a finding invented against a plan the
-// model never saw, or a hallucinated path, is dropped rather than
-// re-entering planning as if it were real (design section 6.5, plan review
-// task). A location outside the "plan" root (or the malformed empty
-// string) never resolves.
+// walk Validate's Layer 1 uses (validate.go's presenceSet), but with
+// recordSliceSelf set so a repeated element's own indexed path
+// (plan/delivery/tasks/task[0]) resolves too, not only its children. A
+// finding invented against a plan the model never saw, or a hallucinated
+// path, is dropped rather than re-entering planning as if it were real
+// (design section 6.5, plan review task). A location outside the "plan" root
+// (or the malformed empty string) never resolves.
 func ResolvesInPlan(planXML []byte, location string) bool {
 	if location == "plan" {
 		return true
@@ -53,7 +54,9 @@ func ResolvesInPlan(planXML []byte, location string) bool {
 	if !ok {
 		return false
 	}
-	set, err := presenceSet(planXML, planShape)
+	// recordSliceSelf is true here (unlike Validate's Layer 1): a finding may
+	// point at a repeated element itself, such as plan/delivery/tasks/task[0].
+	set, err := presenceSet(planXML, planShape, true)
 	if err != nil {
 		return false
 	}

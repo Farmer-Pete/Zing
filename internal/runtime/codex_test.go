@@ -275,13 +275,21 @@ func TestCodex_OutputDirRemovedAfterCancel(t *testing.T) {
 	req := newFakeCodexRequest(dir, "sleep", "FAKE_CODEX_SLEEP_SECONDS=5")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	c := NewCodex(fakeCodexScript)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
+		_, err := c.Run(ctx, req)
+		done <- err
 	}()
 
-	c := NewCodex(fakeCodexScript)
-	if _, err := c.Run(ctx, req); !errors.Is(err, ErrCanceled) {
+	// Cancel only once the child is up, so a slow Start() cannot turn this
+	// into an ErrStart instead of the cancel this test drives.
+	waitForFakeChild(t, dir)
+	cancel()
+
+	if err := <-done; !errors.Is(err, ErrCanceled) {
 		t.Fatalf("err = %v, want ErrCanceled", err)
 	}
 
@@ -418,9 +426,13 @@ func TestCodex_ErrTimeout(t *testing.T) {
 	requireUnix(t)
 
 	dir := t.TempDir()
-	req := newFakeCodexRequest(dir, "sleep", "FAKE_CODEX_SLEEP_SECONDS=5")
+	// A long-sleeping child so the deadline, not the child exiting on its own,
+	// ends the run; the deadline is armed generously (2s) so a slow Start()
+	// under load never sees an already-expired context (Codex.run would map
+	// that to ErrStart, not ErrTimeout).
+	req := newFakeCodexRequest(dir, "sleep", "FAKE_CODEX_SLEEP_SECONDS=30")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	start := time.Now()
@@ -434,10 +446,10 @@ func TestCodex_ErrTimeout(t *testing.T) {
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
 	}
-	// The grandchild sleep must die with the rest of the process group, not
-	// linger until its own 5s sleep would otherwise end.
-	if elapsed > 3*time.Second {
-		t.Errorf("Run took %v, want well under 5s (grandchild killed via the process group)", elapsed)
+	// The grandchild sleep must die with the rest of the process group at the
+	// deadline, not linger until its own 30s sleep would otherwise end.
+	if elapsed > 10*time.Second {
+		t.Errorf("Run took %v, want it killed near the ~2s deadline (grandchild killed via the process group)", elapsed)
 	}
 }
 
@@ -449,18 +461,30 @@ func TestCodex_ErrCanceled(t *testing.T) {
 	req := newFakeCodexRequest(dir, "sleep", "FAKE_CODEX_SLEEP_SECONDS=5")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type outcome struct {
+		res RunResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	c := NewCodex(fakeCodexScript)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
+		res, err := c.Run(ctx, req)
+		done <- outcome{res, err}
 	}()
 
-	c := NewCodex(fakeCodexScript)
-	res, err := c.Run(ctx, req)
-	if !errors.Is(err, ErrCanceled) {
-		t.Fatalf("err = %v, want ErrCanceled", err)
+	// Cancel only once the child is actually up, so a slow Start() cannot make
+	// this return ErrStart instead of the ErrCanceled asserted here.
+	waitForFakeChild(t, dir)
+	cancel()
+
+	got := <-done
+	if !errors.Is(got.err, ErrCanceled) {
+		t.Fatalf("err = %v, want ErrCanceled", got.err)
 	}
-	if res.ExitCode != -1 {
-		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	if got.res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", got.res.ExitCode)
 	}
 }
 

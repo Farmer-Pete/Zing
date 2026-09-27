@@ -7,17 +7,21 @@ import (
 	"testing"
 )
 
-// TestRun_NeverReturnsABareError locks the closed Run contract errors.go
+// TestRun_NeverReturnsABareError guards the closed Run contract errors.go
 // declares (design section 4.1, F026): Run returns nil or exactly one of
 // ErrStart, ErrTimeout, ErrCanceled, ErrOutputTooLarge, *ExecError, or
-// *InvalidOutputError, never a bare fmt.Errorf. It walks claude.go and
-// codex.go's AST and fails if a return statement inside Run itself, or
-// inside the run helper Run forwards its result from unchanged, hands back
-// a fmt.Errorf call directly. A helper Run/run calls (claudeArgv,
-// newSessionUUID, codexOutputDir, readCapped, claudeToolLists) may still
-// wrap internally: Run and run themselves must translate that error into a
-// typed one before returning it, exactly as this test's grep companion (see
-// F026's spec) confirms by hand.
+// *InvalidOutputError, never a bare fmt.Errorf or errors.New. It walks
+// claude.go and codex.go's AST and fails when a return statement inside Run
+// itself, or the run helper Run forwards its result from, hands back a
+// direct fmt.Errorf(...) or errors.New(...) call in a result position.
+//
+// It is a syntactic guard, not a proof: it sees only a constructor call
+// written directly in the return, not an error routed through a local
+// variable, and it stops at nested func literals (a closure returns from
+// itself, not from Run). A helper Run/run calls (claudeArgv, newSessionUUID,
+// codexOutputDir, readCapped, claudeToolLists) may still wrap internally; Run
+// and run must translate that into a typed error before returning it, as
+// this test's grep companion (see F026's spec) confirms by hand.
 func TestRun_NeverReturnsABareError(t *testing.T) {
 	t.Parallel()
 
@@ -31,7 +35,8 @@ func TestRun_NeverReturnsABareError(t *testing.T) {
 
 // checkNoBareErrorfReturn parses filename (relative to this package) and
 // fails t for every return statement, inside a method named Run or run,
-// whose result list includes a direct fmt.Errorf(...) call.
+// whose result list includes a direct fmt.Errorf(...) or errors.New(...)
+// call.
 func checkNoBareErrorfReturn(t *testing.T, filename string) {
 	t.Helper()
 
@@ -70,9 +75,14 @@ func checkNoBareErrorfReturn(t *testing.T, filename string) {
 					continue
 				}
 				pkgIdent, ok := sel.X.(*ast.Ident)
-				if ok && pkgIdent.Name == "fmt" && sel.Sel.Name == "Errorf" {
-					t.Errorf("%s: %s.%s returns a bare fmt.Errorf at %s",
-						filename, recvTypeName(fn), fn.Name.Name, fset.Position(ret.Pos()))
+				if !ok {
+					continue
+				}
+				bareFmt := pkgIdent.Name == "fmt" && sel.Sel.Name == "Errorf"
+				bareErrors := pkgIdent.Name == "errors" && sel.Sel.Name == "New"
+				if bareFmt || bareErrors {
+					t.Errorf("%s: %s.%s returns a bare %s.%s at %s",
+						filename, recvTypeName(fn), fn.Name.Name, pkgIdent.Name, sel.Sel.Name, fset.Position(ret.Pos()))
 				}
 			}
 			return true

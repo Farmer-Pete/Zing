@@ -36,7 +36,7 @@ output was not one <zing> document
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
   <scenarios>
-    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, optional: one command whose exit code decides it -->
+    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
       <given>...</given> <!-- string, the starting state -->
       <when>...</when> <!-- string, the action -->
       <then>...</then> <!-- string, what a stranger would observe, from outside the code -->
