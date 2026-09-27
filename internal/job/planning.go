@@ -1,23 +1,31 @@
 // planning.go is the real "planning" state handler (design section 5, 6.1,
-// 6.2, 6.3, 6.4, 6.7): classify a kindless ticket, open the planning
-// interview once a kind is set, and resume it once the owner (or a round's
-// own answers) has something new to say. It replaces the skeleton's fake,
-// fixture-driven planningHandler (skeleton.go carried it through task 5);
-// the other five skeleton handlers (queued, building, reviewing, judging,
-// shipping) are untouched.
+// 6.2, 6.3, 6.4, 6.5, 6.7): classify a kindless ticket, open the planning
+// interview once a kind is set, resume it once the owner (or a round's own
+// answers) has something new to say, store a valid ready cohort, and review
+// that cohort on its own tick, looping floor findings back into planning
+// under max_loops. It replaces the skeleton's fake, fixture-driven
+// planningHandler (skeleton.go carried it through task 5); the other five
+// skeleton handlers (queued, building, reviewing, judging, shipping) are
+// untouched.
 //
-// This task (6) builds entry-decision steps 1(c), 1(d), 2, 3, 4, and 8 of
-// section 5.1: a gate round (1a), an escalation round (1b), a planreview
-// round (1e), and steps 5-7 (live validation errors, the ready -> review
-// tick, and floor-finding resumes) are each left as a TODO(task 7) returning
-// ErrNoAction, so the dispatcher releases the claim rather than looping.
-// The "ready" outcome is a temporary shortcut straight to building; task 7
-// replaces it with the real cohort store and review tick.
+// Task 6 built entry-decision steps 1(c), 1(d), 2, 3, 4, and 8 of section
+// 5.1. Task 7a built step 5 (live validation errors) and the ready cohort
+// store, behind a TEMPORARY shortcut straight to building. This task, 7b,
+// removes that shortcut -- a valid ready now stores the cohort and leaves
+// the ticket in planning, not waiting -- and builds steps 6 and 7 (the
+// review tick and the floor loop) and entry step 1(e) (an answered
+// planreview round). A clean review's own shortcut straight to building
+// (skipping section 6.6's gate) is now the TEMPORARY one; task 7c replaces
+// it. A gate round (1a) and an escalation round (1b) are still left as a
+// TODO(task 7) returning ErrNoAction, so the dispatcher releases the claim
+// rather than looping.
 package job
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -46,14 +54,21 @@ const (
 	msgTypeUpdate = "update"
 	authorSystem  = "system"
 
-	// reasonPlanReadyShortcut is deliberately not named reasonPlanReady (the
-	// skeleton's own reason string, now removed): the text names itself a
-	// shortcut so a reader (and TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding)
-	// can find it and remove it once task 7 lands the real cohort store and
-	// review tick.
-	reasonPlanReadyShortcut = "plan ready (task 6 shortcut; task 7 stores the cohort and reviews it)"
+	// reasonPlanReviewCleanShortcut is a TEMPORARY shortcut (design section
+	// 6.5, task 7b): a plan review with no at-or-below-floor findings goes
+	// straight to building rather than posting the section 6.6 gate. The
+	// text names itself a shortcut so a reader (and
+	// TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding)
+	// can find it and remove it once task 7c posts the gate instead.
+	//
+	// TODO(task 7c): post the gate (design section 6.6) instead of this
+	// shortcut.
+	reasonPlanReviewCleanShortcut = "plan review clean (task 7b shortcut; task 7c posts the gate)"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
+
+	loopsExhaustedWhat = "raise machine.toml's planreview max_loops, or abandon"
+	loopsExhaustedWhy  = "the plan review has delivered the maximum number of floor-finding cycles machine.toml allows"
 
 	runtimeExecFailedWhat = "the runtime could not complete this run"
 	runtimeExecFailedWhy  = "the process failed to start, timed out, exceeded the output cap, or exited with no parseable result"
@@ -76,9 +91,10 @@ const (
 	// one worked example of each, the same JSON shape json.Marshal(resp.Plan),
 	// json.Marshal(resp.Claims), and json.Marshal(one Scenario) already
 	// produce.
-	artifactTypePlan     = "plan"
-	artifactTypeClaims   = "claims"
-	artifactTypeScenario = "scenario"
+	artifactTypePlan       = "plan"
+	artifactTypeClaims     = "claims"
+	artifactTypeScenario   = "scenario"
+	artifactTypePlanreview = "planreview"
 
 	// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix are
 	// the "update" marker bodies section 5.3 pairs through LiveMarker: a
@@ -147,10 +163,12 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if commit, handled, resumeErr := maybeResumeValidationErrors(ctx, t, d, sess); handled {
 			return commit, resumeErr
 		}
-		// TODO(task 7): steps 6-7 of section 5.1 land here: a stored ready
-		// cohort with no planreview artifact starts the review tick, and a
-		// live "planreview vN pending" marker resumes with the fenced
-		// findings (or escalates loops_exhausted at the cap).
+		if commit, handled, resumeErr := maybeReviewTick(ctx, t, d); handled {
+			return commit, resumeErr
+		}
+		if commit, handled, resumeErr := maybeResumeFloorFindings(ctx, t, d, sess); handled {
+			return commit, resumeErr
+		}
 		return store.HandlerCommit{}, ErrNoAction
 	}
 	return store.HandlerCommit{}, ErrNoAction
@@ -184,8 +202,11 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 		}
 		return runClassify(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
 	case round.Job == jobPlanreviewName:
-		// TODO(task 7): resolve a planreview round (design section 6.5).
-		return store.HandlerCommit{}, ErrNoAction
+		rendered, err := renderRoundAnswers(round)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		return runPlanReview(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
 	default:
 		return store.HandlerCommit{}, ErrNoAction
 	}
@@ -438,9 +459,12 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 // errors pending" marker (design section 5.3), leaving the ticket in
 // planning, not waiting, storing nothing. Success stores the plan, claims,
 // and one artifact per scenario, all under the reserved run (the cohort
-// key), terminalizes the run, and only then applies task 6's TEMPORARY
-// shortcut straight to building (task 7c replaces the shortcut with the
-// review tick).
+// key), terminalizes the run, and leaves the ticket in planning, not
+// waiting: the review tick (entry step 6, maybeReviewTick) picks up the new
+// cohort on the next tick. Task 6's shortcut straight to building is gone
+// (task 7b); the pinned
+// TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning
+// proves it.
 func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.ReadyResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	c := baseCommit(t, d)
 	c.Runs = terminalRuns(rr, string(response.OutcomeReady))
@@ -474,8 +498,6 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
 	}
 	c.Artifacts = artifacts
-	c.Next = stateBuilding
-	c.Reason = reasonPlanReadyShortcut
 
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
 	if err != nil {
@@ -666,6 +688,339 @@ func maybeResumeValidationErrors(ctx context.Context, t store.Ticket, d Deps, se
 		Body: validationErrorsDeliveredPrefix + " run " + rid,
 	})
 	return commit, true, nil
+}
+
+// ---- 6.5 plan review tick and the floor loop ------------------------------
+
+// planreviewArtifactPayload is the stored shape of a "planreview" artifact
+// (internal/store/schemas/artifacts/planreview.json): an object carrying
+// only the surviving findings, never the FindingsResponse's own Head (job,
+// outcome), which that schema's additionalProperties:false would reject.
+type planreviewArtifactPayload struct {
+	Findings []response.Finding `json:"findings"`
+}
+
+// planreviewPendingMarker and planreviewDeliveredMarker are section 5.3's
+// version-scoped marker pair: no run id, unlike the validation-errors
+// markers, because a review's own version already identifies which cohort a
+// pending or delivered cycle belongs to.
+func planreviewPendingMarker(version int) string {
+	return fmt.Sprintf("planreview v%d pending", version)
+}
+
+func planreviewDeliveredMarker(version int) string {
+	return fmt.Sprintf("planreview v%d delivered", version)
+}
+
+// maybeReviewTick is section 5.1 step 6: a stored cohort with no planreview
+// artifact yet at its exact version starts the review tick fresh. handled is
+// false when there is no cohort yet, or its planreview artifact already
+// exists, so the caller falls through to step 7.
+func maybeReviewTick(ctx context.Context, t store.Ticket, d Deps) (commit store.HandlerCommit, handled bool, err error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, false, nil
+	}
+	_, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if exists {
+		return store.HandlerCommit{}, false, nil
+	}
+	commit, err = runPlanReview(ctx, t, d, nil, nil)
+	return commit, true, err
+}
+
+// maybeResumeFloorFindings is section 5.1 step 7: a planreview artifact at
+// the current cohort's version carrying at-or-below-floor findings, with a
+// live "planreview vN pending" marker (no later "delivered" marker for that
+// same version), resumes planning with those findings fenced (design
+// section 6.3, 6.4) under machine.toml's max_loops, counting only delivered
+// cycles (CountDeliveredReviews); at the cap it escalates loops_exhausted
+// instead. handled is false when there is no cohort, no planreview artifact
+// at its version, or no live pending marker for it, so the caller falls
+// through to ErrNoAction.
+func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (commit store.HandlerCommit, handled bool, err error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, false, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	pending, delivered := planreviewPendingMarker(cohort.PlanVersion), planreviewDeliveredMarker(cohort.PlanVersion)
+	_, live, err := d.Store.LiveMarker(ctx, t.ID, pending, delivered)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: live marker: %w", err)
+	}
+	if !live {
+		return store.HandlerCommit{}, false, nil
+	}
+
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
+	for _, f := range payload.Findings {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow = append(atOrBelow, f)
+		}
+	}
+
+	n, err := d.Store.CountDeliveredReviews(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
+	}
+	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
+		c := escalationCommit(t, d, nil, nil,
+			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		return c, true, nil
+	}
+
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0)
+	if err != nil {
+		return commit, true, err
+	}
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
+	})
+	return commit, true, nil
+}
+
+// runPlanReview is plan section 6.5's review tick (entry steps 6 and 1(e)):
+// requires a stored cohort, the D14 pre-check (planreview, nil session --
+// every review tick opens a fresh session, so the chain walks by job alone,
+// unlike planning's own session-scoped check), the planreview.md prompt with
+// each configured lens's "## In a plan" section appended, the ticket, the
+// cohort's scenarios, and the stored plan re-rendered to XML, all fenced
+// (D15), plus extra (an answered round's rendered answers, or the D14
+// invalid-retry input) when present. extra and resolveIDs carry a resolved
+// round's inputs exactly as runClassify's do.
+func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: current cohort: %w", err)
+	}
+	if !ok || cohort.RunID == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: ticket %d has no plan cohort to review", t.ID)
+	}
+
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPlanreviewName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: consecutive invalid outputs: %w", err)
+	}
+	inputs := append([]prompt.NamedInput{}, extra...)
+	if n == 1 {
+		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
+	}
+
+	jobCfg := d.Machine.Jobs[jobPlanreviewName]
+	promptText, err := readAsset(jobCfg.Prompt.Single)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+	lensSections, err := lensSectionsFor(jobCfg.Lenses)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	planArtifact, ok, err := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: get plan artifact: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: ticket %d has a cohort but no plan artifact", t.ID)
+	}
+	var plan response.Plan
+	if unmarshalErr := json.Unmarshal(planArtifact.Payload, &plan); unmarshalErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: unmarshal plan artifact: %w", unmarshalErr)
+	}
+	planXML, err := planXMLFor(plan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	scenarioArtifacts, err := d.Store.ScenariosForRun(ctx, t.ID, *cohort.RunID, false)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: scenarios for run: %w", err)
+	}
+	scenariosRendered, err := renderScenariosForReview(scenarioArtifacts)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	schemas, err := renderSchemas(response.JobPlanreview, response.OutcomeOk)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+
+	in := prompt.ForPlanReview(promptText, lensSections, t.Title+"\n\n"+t.Body, scenariosRendered, planXML, inputs)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{Job: jobPlanreviewName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
+	rr, runErr := runJob(ctx, d, t, jobPlanreviewName, su, req)
+	sessionCommit := freshSessionRecord(rr)
+
+	if runErr != nil {
+		if c, ok, failErr := routeFailure(t, d, rr, runErr, n, sessionCommit, resolveIDs, response.EscalationOriginPlanreview); ok {
+			return c, failErr
+		}
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: unrecognized runJob error: %w", runErr)
+	}
+	return planReviewSuccessCommit(t, d, rr, cohort, planXML, sessionCommit, resolveIDs)
+}
+
+// planReviewSuccessCommit routes a planreview run's parsed response (design
+// section 6.8): the universal question and error outcomes are shared with
+// classify and planning's own success routing; ok is the review's own
+// outcome, planReviewOkCommit's job.
+func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	switch resp := rr.Res.Response.(type) {
+	case *response.QuestionResponse:
+		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
+	case *response.FindingsResponse:
+		return planReviewOkCommit(t, d, rr, resp, cohort, planXML, sessionCommit, resolveIDs)
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// planReviewOkCommit is design section 6.5's "on ok": drop every finding
+// whose Location does not resolve as an element path in planXML
+// (response.ResolvesInPlan), store the rest as a "planreview" artifact at
+// the cohort's exact version, and split the survivors at the configured
+// floor (severity.Rank() <= d.Floor.Rank() is at-or-below). No finding
+// at-or-below the floor takes the TEMPORARY clean shortcut straight to
+// building (task 7c replaces it with the section 6.6 gate); otherwise this
+// writes the "planreview vN pending" marker and leaves the ticket in
+// planning, not waiting, for entry step 7 to pick up.
+func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	kept := make([]response.Finding, 0, len(resp.Findings))
+	dropped := 0
+	for _, f := range resp.Findings {
+		if !response.ResolvesInPlan([]byte(planXML), f.Location) {
+			dropped++
+			continue
+		}
+		kept = append(kept, f)
+	}
+
+	var atOrBelow, above int
+	for _, f := range kept {
+		if f.Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow++
+		} else {
+			above++
+		}
+	}
+	slog.Info("floor split", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "floor", string(d.Floor),
+		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped)
+
+	payload, err := json.Marshal(planreviewArtifactPayload{Findings: kept})
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: marshal findings: %w", err)
+	}
+
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	c.Artifacts = []store.Artifact{{
+		Type: artifactTypePlanreview, Version: cohort.PlanVersion, RunID: &rr.Reserved.RunID, Payload: payload,
+	}}
+
+	if atOrBelow == 0 {
+		c.Next = stateBuilding
+		c.Reason = reasonPlanReviewCleanShortcut
+		return c, nil
+	}
+
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: planreviewPendingMarker(cohort.PlanVersion),
+	}}
+	return c, nil
+}
+
+// lensSectionsFor reads each of lenses' prompt files (machine.Jobs["planreview"].Lenses
+// order, the same embed.FS path machine.go's own validatePaths checks:
+// "prompts/lenses/<lens>.md") and returns each file's own "## In a plan"
+// section (prompt.PlanLensSection), the piece prompt.ForPlanReview appends
+// to the planreview prompt (design section 6.5).
+func lensSectionsFor(lenses []string) ([]string, error) {
+	out := make([]string, len(lenses))
+	for i, lens := range lenses {
+		text, err := readAsset("prompts/lenses/" + lens + ".md")
+		if err != nil {
+			return nil, err
+		}
+		section, sectionErr := prompt.PlanLensSection(text)
+		if sectionErr != nil {
+			return nil, fmt.Errorf("job: planreview: lens %s: %w", lens, sectionErr)
+		}
+		out[i] = section
+	}
+	return out, nil
+}
+
+// planXMLFor renders plan back to its XML form for the plan-review prompt
+// (design section 6.5): internal/response has no dedicated renderer for
+// response.Plan (it only ever decodes one, in Parse), so this uses
+// encoding/xml's own marshaller against Plan's wire tags directly, with a
+// "plan" start element standing in for the XMLName a decoded document
+// carries.
+func planXMLFor(plan response.Plan) (string, error) {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	if err := enc.EncodeElement(plan, xml.StartElement{Name: xml.Name{Local: "plan"}}); err != nil {
+		return "", fmt.Errorf("encode plan xml: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// renderScenariosForReview renders artifacts (ScenariosForRun's own
+// insertion order) one per line as "<id> [<kind>] given: ... when: ...
+// then: ..." (design section 6.5), the cohort text prompt.ForPlanReview
+// fences into the review prompt.
+func renderScenariosForReview(artifacts []store.Artifact) (string, error) {
+	lines := make([]string, len(artifacts))
+	for i, a := range artifacts {
+		var sc response.Scenario
+		if err := json.Unmarshal(a.Payload, &sc); err != nil {
+			return "", fmt.Errorf("unmarshal scenario artifact %d: %w", i, err)
+		}
+		lines[i] = fmt.Sprintf("%s [%s] given: %s when: %s then: %s", sc.ID, sc.Kind, sc.Given, sc.When, sc.Then)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// renderFindings renders findings one per line -- lens, severity, location,
+// text, then fix -- the shape entry step 7 fences behind prompt.Findings
+// when it resumes planning with the at-or-below-floor survivors (design
+// section 6.3, 6.4).
+func renderFindings(findings []response.Finding) string {
+	lines := make([]string, len(findings))
+	for i, f := range findings {
+		lines[i] = fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ---- shared failure and escalation commit builders ------------------------

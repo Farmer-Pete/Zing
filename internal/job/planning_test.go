@@ -89,17 +89,27 @@ func claimWithRuntimes(t *testing.T, s *store.Store, rt runtime.Runtime, ticketI
 	if err != nil || !claimed {
 		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
 	}
-	set, err := runtime.NewSet(map[string]runtime.Runtime{"claude": rt, testRuntimeCodex: rt, testRuntimeFake: rt})
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: rt, testRuntimeCodex: rt, testRuntimeFake: rt})
 	if err != nil {
 		t.Fatalf("runtime.NewSet: %v", err)
 	}
 	return job.Deps{
-		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget,
+		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
 		Owner: owner, Expires: expires,
 		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, model string) (store.Reserved, error) {
 			return s.Reserve(ctx, tid, owner, expires, su, model)
 		},
 	}
+}
+
+// claimWithFloor is claim, with Deps.Floor overridden to floor: the
+// review-tick tests that must vary the configured floor across all four
+// severities (design section 6.5, task 7b).
+func claimWithFloor(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, floor response.Severity) job.Deps {
+	t.Helper()
+	deps := claim(t, s, rt, ticketID)
+	deps.Floor = floor
+	return deps
 }
 
 // questionResult builds a scriptedStep whose Response is a minimal
@@ -164,7 +174,7 @@ func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planning (classify) Run: %v", err)
 	}
-	if commit.SetKind == nil || (*commit.SetKind != "bug" && *commit.SetKind != "feature") {
+	if commit.SetKind == nil || (*commit.SetKind != "bug" && *commit.SetKind != testKindFeature) {
 		t.Fatalf("commit.SetKind = %v, want bug or feature", commit.SetKind)
 	}
 	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != *commit.SetKind {
@@ -336,11 +346,12 @@ func (r *recordingRuntime) Run(ctx context.Context, req runtime.RunRequest) (run
 	return r.rt.Run(ctx, req)
 }
 
-// TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding
-// pins task 6's TEMPORARY shortcut by name: a ready outcome on resume goes
-// straight to building, with a Reason naming itself a shortcut, rather
-// than section 6.5's real cohort store and review tick (task 7).
-func TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding(t *testing.T) {
+// TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning
+// proves task 7b removed task 6's TEMPORARY shortcut: a ready outcome on
+// resume stores the cohort and carries no transition at all, leaving the
+// ticket in planning, not waiting, for the review tick (entry step 6) to
+// pick up on the next tick, rather than jumping straight to building.
+func TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -354,11 +365,17 @@ func TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding(t *te
 	if err != nil {
 		t.Fatalf("planning resume Run: %v", err)
 	}
-	if commit.Next != testStateBuilding {
-		t.Errorf("commit.Next = %q, want building", commit.Next)
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (task 7b removed the shortcut)", commit.Next)
 	}
-	if !strings.Contains(commit.Reason, "shortcut") {
-		t.Errorf("commit.Reason = %q, want it to name itself a temporary shortcut", commit.Reason)
+	if len(commit.Artifacts) == 0 {
+		t.Fatal("commit.Artifacts is empty, want the stored cohort")
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	final := getTicket(t, s, ticketID)
+	if final.State != testStatePlanning || final.WaitingOn != nil {
+		t.Errorf("final ticket = (state=%q, waiting_on=%v), want (planning, nil): the review tick picks up the cohort next tick", final.State, final.WaitingOn)
 	}
 }
 
@@ -396,7 +413,7 @@ func TestPlanningHandler_Classify_AnsweredQuestionRoundRerunsClassifyFresh(t *te
 	if err != nil {
 		t.Fatalf("second planning Run: %v", err)
 	}
-	if secondCommit.SetKind == nil || *secondCommit.SetKind != "feature" {
+	if secondCommit.SetKind == nil || *secondCommit.SetKind != testKindFeature {
 		t.Fatalf("second commit.SetKind = %v, want feature", secondCommit.SetKind)
 	}
 	if len(secondCommit.ResolveQuestions) != 1 || secondCommit.ResolveQuestions[0] != open[0].ID {
@@ -442,7 +459,7 @@ func TestPlanningHandler_Classify_D14_SecondConsecutiveInvalidEscalates(t *testi
 	if firstCommit.Waiting != nil {
 		t.Errorf("first invalid commit.Waiting = %v, want nil", *firstCommit.Waiting)
 	}
-	if len(firstCommit.Messages) != 1 || firstCommit.Messages[0].Type != "update" {
+	if len(firstCommit.Messages) != 1 || firstCommit.Messages[0].Type != testMsgTypeUpdate {
 		t.Fatalf("first invalid commit.Messages = %+v, want one update marker", firstCommit.Messages)
 	}
 	apply(t, s, getTicket(t, s, ticketID), firstCommit)
@@ -829,16 +846,17 @@ func readyStep(resp response.Response, sessionID string) scriptedStep {
 	return scriptedStep{res: runtime.RunResult{Response: resp, SessionID: sessionID, ExitCode: 0, AgentTime: time.Second}}
 }
 
-// TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts proves
-// section 6.5's success path against the real fixture cohort
+// TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning
+// proves section 6.5's success path against the real fixture cohort
 // (fixtures/scripts/planning/2.xml, two scenarios): exactly one plan
 // artifact (version 1), one claims artifact (version 1), and one scenario
 // artifact per Scenario, every one carrying the reserved run's id; the
-// stored plan payload round-trips to the fixture's own plan; and only after
-// the cohort is stored does the pinned shortcut
-// (TestPlanningHandler_Resume_ReadyOutcomeIsATemporaryShortcutToBuilding)
-// fire.
-func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts(t *testing.T) {
+// stored plan payload round-trips to the fixture's own plan; and the
+// ticket stays in planning, not waiting (task 7b removed the shortcut
+// pinned by
+// TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning),
+// so the review tick can pick up the new cohort on the next tick.
+func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -924,8 +942,8 @@ func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts(t *test
 	}
 
 	final := getTicket(t, s, ticketID)
-	if final.State != testStateBuilding {
-		t.Errorf("final ticket state = %q, want building (task 6's temporary shortcut)", final.State)
+	if final.State != testStatePlanning || final.WaitingOn != nil {
+		t.Errorf("final ticket = (state=%q, waiting_on=%v), want (planning, nil): task 7b removed the shortcut", final.State, final.WaitingOn)
 	}
 }
 
@@ -933,13 +951,13 @@ func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenShortcuts(t *test
 // proves a revised plan on the same ticket: a second ready call stores plan
 // version 2 and a new scenario cohort under a new run id, while the first
 // cohort's rows (a different run id, plan version 1) sit untouched. The
-// first ready's commit is applied with Next and Reason stripped -- a
-// test-only stand-in for the review tick a later task adds, which is what
-// would ordinarily keep the ticket in planning between two ready turns
-// instead of task 6's shortcut to building. The second ready arrives
-// through the ordinary answered-round resume path (design section 5.1 step
-// 1(c), 6.4): a question tied to the first run's session, answered exactly
-// as AnsweredRounds expects, whether or not a real model turn asked it.
+// first ready's commit carries no transition (task 7b removed the
+// shortcut), so it is applied unchanged and the ticket stays in planning
+// between the two ready turns, exactly as a real review tick would leave
+// it. The second ready arrives through the ordinary answered-round resume
+// path (design section 5.1 step 1(c), 6.4): a question tied to the first
+// run's session, answered exactly as AnsweredRounds expects, whether or not
+// a real model turn asked it.
 func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
@@ -956,11 +974,10 @@ func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched
 		t.Fatalf("first commit.Artifacts = %d, want 4 (plan, claims, 2 scenarios)", len(firstCommit.Artifacts))
 	}
 	firstRunID := firstCommit.Runs[0].ID
-
-	stripped := firstCommit
-	stripped.Next = ""
-	stripped.Reason = ""
-	apply(t, s, getTicket(t, s, ticketID), stripped)
+	if firstCommit.Next != "" {
+		t.Fatalf("firstCommit.Next = %q, want empty (task 7b removed the shortcut)", firstCommit.Next)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
 
 	payload, err := json.Marshal(response.QuestionPayload{
 		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
@@ -1061,7 +1078,7 @@ func TestPlanningHandler_Ready_ClaimThroughOutwardSymlinkFailsAndPends(t *testin
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: testRefFake1, Title: "Add a hello endpoint", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
@@ -1223,4 +1240,582 @@ func TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDe
 	if !errors.Is(err, job.ErrNoAction) {
 		t.Fatalf("third tick: err = %v, want job.ErrNoAction (no second resume)", err)
 	}
+}
+
+// ---- 6.5 plan review tick and the floor loop (task 7b) ---------------------
+
+// seedFeatureTicketInPlanning inserts a ticket with kind already set to
+// "feature" and advances it into planning, bypassing a real classify turn:
+// the review-tick tests below need a kinded ticket sitting in planning with
+// a stored cohort (seedCohort), not another proof that classify sets kind
+// (already TestPlanningHandler_Classify_StoresKindAndSessionExternalID's
+// job).
+func seedFeatureTicketInPlanning(t *testing.T, s *store.Store) int64 {
+	t.Helper()
+	proj := testProject
+	proj.LocalPath = testProjectDir(t)
+	projectID, err := s.EnsureProject(t.Context(), proj)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	kind := testKindFeature
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle,
+		Kind: &kind, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
+	return ticketID
+}
+
+// seedCohort stores a plan version-1 cohort (one plan artifact, one
+// scenario artifact per entry in scenarios) directly through the store,
+// with the producing planning session already open (external_id set) so
+// the entry decision's SessionOpen branch (steps 4-7) is reachable without
+// driving a real ready turn: the review-tick tests below need a stored
+// cohort, not another proof that readyCommit stores one (already
+// TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning's
+// job).
+func seedCohort(t *testing.T, s *store.Store, ticketID int64, plan response.Plan, scenarios []response.Scenario) (planVersion int, runID int64) {
+	t.Helper()
+	owner := "seed-cohort-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedCohort: claim: claimed=%v err=%v", claimed, err)
+	}
+	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, "claude-x")
+	if err != nil {
+		t.Fatalf("seedCohort: reserve: %v", err)
+	}
+
+	normalizePlanArraysForTest(&plan)
+	planPayload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("seedCohort: marshal plan: %v", err)
+	}
+	artifacts := make([]store.Artifact, 0, 1+len(scenarios))
+	artifacts = append(artifacts, store.Artifact{Type: testArtifactTypePlan, RunID: &rsv.RunID, Payload: planPayload})
+	for _, sc := range scenarios {
+		scPayload, marshalErr := json.Marshal(sc)
+		if marshalErr != nil {
+			t.Fatalf("seedCohort: marshal scenario: %v", marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{Type: testArtifactTypeScenario, RunID: &rsv.RunID, Payload: scPayload})
+	}
+
+	extID := fmt.Sprintf("seed-sess-%d", rsv.SessionID)
+	outcome, exitCode, agentSeconds := "ready", 0, 1
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session:   &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &extID},
+		Runs:      []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Artifacts: artifacts,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedCohort: CommitHandlerResult: applied=%v err=%v", applied, err)
+	}
+
+	cohort, ok, err := s.CurrentCohort(t.Context(), ticketID)
+	if err != nil || !ok || cohort.RunID == nil {
+		t.Fatalf("seedCohort: CurrentCohort: %+v, ok=%v, %v", cohort, ok, err)
+	}
+	return cohort.PlanVersion, *cohort.RunID
+}
+
+// normalizePlanArraysForTest is planning.go's own unexported
+// normalizePlanArrays, mirrored here (job_test is an external test package,
+// so it cannot call the unexported one job.readyCommit already applies):
+// the artifacts/plan.json schema requires "changes", "types", "migrations",
+// and "deletions" as arrays, never null, so seedCohort's direct marshal
+// needs the same nil-to-empty-slice normalization a real ready turn's own
+// readyArtifacts already gets.
+func normalizePlanArraysForTest(p *response.Plan) {
+	if p.Design.Changes == nil {
+		p.Design.Changes = []response.Change{}
+	}
+	if p.Design.Types == nil {
+		p.Design.Types = []response.TypeDef{}
+	}
+	for i := range p.Design.Types {
+		if p.Design.Types[i].Transitions == nil {
+			p.Design.Types[i].Transitions = []response.Transition{}
+		}
+	}
+	if p.Design.Migrations.Items == nil {
+		p.Design.Migrations.Items = []response.Migration{}
+	}
+	if p.Delivery.Deletions.Items == nil {
+		p.Delivery.Deletions.Items = []response.Fence{}
+	}
+}
+
+// finding builds one response.Finding, lens fixed at LensCorrectness (no
+// test below varies it) and severity, location, text, and fix all named
+// explicitly, the shape a planreview "ok" outcome carries.
+func finding(sev response.Severity, location, text, fix string) response.Finding {
+	return response.Finding{Lens: response.LensCorrectness, Severity: sev, Location: location, Text: text, Fix: fix}
+}
+
+// findingsResponse builds a *response.FindingsResponse naming job planreview
+// and outcome ok, the shape a scriptedRuntime step hands back in place of a
+// real Codex turn.
+func findingsResponse(findings ...response.Finding) *response.FindingsResponse {
+	return &response.FindingsResponse{Job: response.JobPlanreview, Outcome: response.OutcomeOk, Findings: findings}
+}
+
+// insertUpdateMarker inserts an "update" message with body directly, for
+// tests that seed a marker's state without driving the turn that would
+// ordinarily write it (design section 5.3).
+func insertUpdateMarker(t *testing.T, s *store.Store, ticketID int64, body string) {
+	t.Helper()
+	if _, err := s.InsertMessage(t.Context(), store.Message{TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: body}); err != nil {
+		t.Fatalf("insertUpdateMarker(%q): %v", body, err)
+	}
+}
+
+// seedPlanreviewArtifact inserts a "planreview" artifact at exactly version,
+// under runID, carrying findings, directly through the store: the shape a
+// real review tick's own commit stores (design section 6.5).
+func seedPlanreviewArtifact(t *testing.T, s *store.Store, ticketID int64, version int, runID int64, findings ...response.Finding) {
+	t.Helper()
+	payload, err := json.Marshal(struct {
+		Findings []response.Finding `json:"findings"`
+	}{Findings: findings})
+	if err != nil {
+		t.Fatalf("seedPlanreviewArtifact: marshal payload: %v", err)
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testArtifactTypePlanreview, Version: version, Payload: payload,
+	}); err != nil {
+		t.Fatalf("seedPlanreviewArtifact: InsertArtifact: %v", err)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs
+// proves entry step 6 and section 6.5's prompt assembly: a stored cohort
+// with no planreview artifact yet starts the review tick, the resulting
+// "planreview" artifact lands at the exact cohort version carrying the
+// reserved run's id, the session id is recorded, and the assembled prompt
+// fences the ticket, the scenarios, and the plan (all three, captured
+// through a recordingRuntime) -- with only the lens files' own "## In a
+// plan" sections appended, never an "## In code" line.
+func TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Review the plan on its own tick."), validScenarios(2, "review"))
+
+	f := finding(response.SeverityMinor, "plan/design/shape", "the shape does not say who owns the demo", "name the owner")
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(f), "review-sess-1")}}
+	rec := &recordingRuntime{rt: rt}
+
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %d entries, want 1", len(commit.Artifacts))
+	}
+	a := commit.Artifacts[0]
+	if a.Type != testArtifactTypePlanreview || a.Version != planVersion {
+		t.Errorf("commit.Artifacts[0] = (type=%q, version=%d), want (planreview, %d)", a.Type, a.Version, planVersion)
+	}
+	if len(commit.Runs) != 1 || a.RunID == nil || *a.RunID != commit.Runs[0].ID {
+		t.Errorf("artifact run_id = %v, want the terminalized run's own id %+v", a.RunID, commit.Runs)
+	}
+	if commit.Session == nil || commit.Session.ExternalID == nil || *commit.Session.ExternalID != "review-sess-1" {
+		t.Fatalf("commit.Session = %+v, want a fresh session with external id review-sess-1", commit.Session)
+	}
+
+	if rec.lastReq.Prompt == "" {
+		t.Fatal("recordingRuntime saw an empty review prompt")
+	}
+	prompt := rec.lastReq.Prompt
+	if !strings.Contains(prompt, "<<<UNTRUSTED ") || !strings.Contains(prompt, "<<<END ") {
+		t.Errorf("review prompt does not carry the fence markers:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, testTicketTitle) {
+		t.Errorf("review prompt does not carry the ticket:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "review scenario 1 starts from a fresh store") {
+		t.Errorf("review prompt does not carry the cohort's scenarios:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "<overview>") || !strings.Contains(prompt, "Review the plan on its own tick.") {
+		t.Errorf("review prompt does not carry the plan rendered back to XML:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "## In a plan") {
+		t.Errorf("review prompt is missing a lens's \"## In a plan\" section:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "## In code") {
+		t.Errorf("review prompt carries an \"## In code\" section, want only \"## In a plan\":\n%s", prompt)
+	}
+
+	_ = runID
+}
+
+// TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings proves
+// section 6.5's drop rule: a finding whose Location does not resolve as an
+// element path in the stored plan (response.ResolvesInPlan) is dropped from
+// the stored artifact, while a finding at a real path survives.
+func TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Drop unresolved findings."), validScenarios(2, "drop"))
+
+	resolvable := finding(response.SeverityMajor, "plan/design/shape", "a real problem", "fix it")
+	unresolved := finding(response.SeverityMajor, "plan/design/does-not-exist", "a hallucinated location", "fix it")
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(resolvable, unresolved), "drop-sess")}}
+
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %d entries, want 1", len(commit.Artifacts))
+	}
+	if commit.Artifacts[0].Version != planVersion {
+		t.Errorf("commit.Artifacts[0].Version = %d, want %d", commit.Artifacts[0].Version, planVersion)
+	}
+
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(commit.Artifacts[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal stored planreview payload: %v", err)
+	}
+	if len(payload.Findings) != 1 || payload.Findings[0].Location != "plan/design/shape" {
+		t.Errorf("stored findings = %+v, want exactly the one resolvable finding", payload.Findings)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors
+// proves section 6.5's floor split for every review.floor value: the same
+// four findings (one per severity) split differently depending on the
+// configured floor. Since the at-or-below survivors are what entry step 7
+// fences into the next resume (prompt.Findings), this drives one more tick
+// after the review lands and inspects that resumed prompt.
+func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *testing.T) {
+	const blockerText, majorText, minorText, nitText = "blocker text", "major text", "minor text", "nit text"
+	findings := []response.Finding{
+		finding(response.SeverityBlocker, "plan/design/shape", blockerText, "fix"),
+		finding(response.SeverityMajor, "plan/design/shape", majorText, "fix"),
+		finding(response.SeverityMinor, "plan/design/shape", minorText, "fix"),
+		finding(response.SeverityNit, "plan/design/shape", nitText, "fix"),
+	}
+
+	cases := []struct {
+		floor     response.Severity
+		wantIn    []string
+		wantNotIn []string
+	}{
+		{response.SeverityBlocker, []string{blockerText, majorText, minorText, nitText}, nil},
+		{response.SeverityMajor, []string{majorText, minorText, nitText}, []string{blockerText}},
+		{response.SeverityMinor, []string{minorText, nitText}, []string{blockerText, majorText}},
+		{response.SeverityNit, []string{nitText}, []string{blockerText, majorText, minorText}},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.floor), func(t *testing.T) {
+			s := newJobTestStore(t)
+			ticketID := seedFeatureTicketInPlanning(t, s)
+			seedCohort(t, s, ticketID, validPlan("Floor split."), validScenarios(2, "floor"))
+
+			reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(findings...), "floor-sess")}}
+			firstCommit, err := runPlanning(t, s, claimWithFloor(t, s, reviewRT, ticketID, tc.floor), ticketID)
+			if err != nil {
+				t.Fatalf("review tick Run: %v", err)
+			}
+			apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+			resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "floor-resume-sess")}}
+			rec := &recordingRuntime{rt: resumeRT}
+			if _, err := runPlanning(t, s, claimWithFloor(t, s, rec, ticketID, tc.floor), ticketID); err != nil {
+				t.Fatalf("floor resume Run: %v", err)
+			}
+
+			for _, want := range tc.wantIn {
+				if !strings.Contains(rec.lastReq.Prompt, want) {
+					t.Errorf("floor %s: resume prompt missing %q:\n%s", tc.floor, want, rec.lastReq.Prompt)
+				}
+			}
+			for _, notWant := range tc.wantNotIn {
+				if strings.Contains(rec.lastReq.Prompt, notWant) {
+					t.Errorf("floor %s: resume prompt unexpectedly contains %q:\n%s", tc.floor, notWant, rec.lastReq.Prompt)
+				}
+			}
+		})
+	}
+}
+
+// TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding
+// pins task 7b's TEMPORARY shortcut by name: a clean review (no
+// at-or-below-floor findings) goes straight to building, with a Reason
+// naming itself a shortcut, rather than section 6.6's real gate (task 7c).
+func TestPlanningHandler_ReviewTick_CleanFloorIsATemporaryShortcutToBuilding(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("Clean review shortcut."), validScenarios(2, "clean"))
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(), "clean-sess")}}
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if commit.Next != testStateBuilding {
+		t.Errorf("commit.Next = %q, want building", commit.Next)
+	}
+	if !strings.Contains(commit.Reason, "shortcut") {
+		t.Errorf("commit.Reason = %q, want it to name itself a temporary shortcut", commit.Reason)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenStop
+// proves entry steps 6 and 7 across ticks (design section 5.1, 5.3): floor
+// findings write "planreview vN pending" and leave the ticket in planning,
+// not waiting; the next tick resumes planning with the findings fenced and
+// writes "planreview vN delivered" in that same commit; a following tick
+// does not resume again (no live pending marker left).
+func TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenStop(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Floor loop."), validScenarios(2, "loop"))
+
+	f := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(f), "loop-sess-1")}}
+
+	firstCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	wantPending := fmt.Sprintf("planreview v%d pending", planVersion)
+	if len(firstCommit.Messages) != 1 || firstCommit.Messages[0].Body != wantPending {
+		t.Fatalf("firstCommit.Messages = %+v, want one %q marker", firstCommit.Messages, wantPending)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	after := getTicket(t, s, ticketID)
+	if after.State != testStatePlanning || after.WaitingOn != nil {
+		t.Fatalf("after the review tick: ticket = (state=%q, waiting_on=%v), want (planning, nil)", after.State, after.WaitingOn)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "loop-resume-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	secondCommit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("floor resume Run: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "needs a name") {
+		t.Errorf("resume prompt does not carry the floor finding:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "<<<UNTRUSTED ") {
+		t.Errorf("resume prompt does not fence the findings:\n%s", rec.lastReq.Prompt)
+	}
+	wantDelivered := fmt.Sprintf("planreview v%d delivered", planVersion)
+	var delivered int
+	for _, m := range secondCommit.Messages {
+		if m.Body == wantDelivered {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("secondCommit.Messages = %+v, want exactly one %q marker", secondCommit.Messages, wantDelivered)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+
+	_, err = runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("third tick: err = %v, want job.ErrNoAction (no second resume)", err)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted proves the
+// section 5.1 step 7 cap: CountDeliveredReviews already at machine.toml's
+// planreview max_loops (2), with a live pending marker and at-or-below
+// findings, escalates loops_exhausted with a nil RunID (design section 6.7)
+// rather than resuming a third time.
+func TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Max loops."), validScenarios(2, "maxloops"))
+
+	// Two earlier loops' own delivered markers (different versions: this
+	// cohort's own pending marker below is version-scoped, so these do not
+	// interfere with its liveness), bringing CountDeliveredReviews to
+	// machine.toml's own max_loops (2) before this tick even runs.
+	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
+	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
+
+	f := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, f)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
+
+	commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want loops_exhausted")
+	}
+	if commit.Escalation.RunID != nil {
+		t.Errorf("commit.Escalation.RunID = %v, want nil (no run caused this, the cap did)", commit.Escalation.RunID)
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != "loops_exhausted" || payload.Origin != "cap_loops" {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (loops_exhausted, cap_loops)", payload.Code, payload.Origin)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_QuestionAndD14RetryDoNotConsumeLoopAllowance
+// proves that a planreview universal question, once answered, re-runs the
+// review fresh with the answers and resolves the round (entry step 1(e)),
+// and that neither it nor a D14 invalid retry ever writes a "delivered"
+// marker, so CountDeliveredReviews stays at 0 throughout -- the loop
+// allowance (design section 5.1 step 7) is untouched by either.
+func TestPlanningHandler_ReviewTick_QuestionAndD14RetryDoNotConsumeLoopAllowance(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("Question then D14 then ok."), validScenarios(2, "consume"))
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanreview, "pr-sess-1")}}
+	rec := &recordingRuntime{rt: rt}
+
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Fatalf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	n, err := s.CountDeliveredReviews(t.Context(), ticketID)
+	if err != nil || n != 0 {
+		t.Fatalf("CountDeliveredReviews after a planreview question = %d, %v, want 0", n, err)
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+	}
+	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"}); answerErr != nil {
+		t.Fatalf("AnswerQuestion: %v", answerErr)
+	}
+
+	rt.steps = append(rt.steps, invalidResult("no zing element in final message", "pr-sess-2"))
+	invalidCommit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planreview re-run Run: %v", err)
+	}
+	if len(invalidCommit.ResolveQuestions) != 1 || invalidCommit.ResolveQuestions[0] != open[0].ID {
+		t.Errorf("invalidCommit.ResolveQuestions = %v, want [%d]", invalidCommit.ResolveQuestions, open[0].ID)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "Option A") {
+		t.Errorf("planreview re-run prompt does not carry the answer's option text:\n%s", rec.lastReq.Prompt)
+	}
+	apply(t, s, getTicket(t, s, ticketID), invalidCommit)
+
+	n, err = s.CountDeliveredReviews(t.Context(), ticketID)
+	if err != nil || n != 0 {
+		t.Fatalf("CountDeliveredReviews after a planreview D14 retry = %d, %v, want 0", n, err)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_D14_SecondConsecutiveInvalidEscalates
+// proves D14's two-strike rule for the review tick: the first invalid
+// output only writes the marker and leaves the ticket not waiting; the
+// second consecutive invalid output (the review re-runs fresh, since every
+// review tick opens a fresh session) escalates response_invalid in that
+// same commit, with Origin planreview.
+func TestPlanningHandler_ReviewTick_D14_SecondConsecutiveInvalidEscalates(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("D14 planreview."), validScenarios(2, "d14"))
+
+	const reason = "no zing element in final message"
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{
+		invalidResult(reason, "pr-d14-1"),
+		invalidResult(reason, "pr-d14-2"),
+	}}
+
+	firstCommit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("first review tick Run: %v", err)
+	}
+	if firstCommit.Escalation != nil {
+		t.Fatalf("first invalid commit.Escalation = %+v, want nil (first strike)", firstCommit.Escalation)
+	}
+	if len(firstCommit.Messages) != 1 || firstCommit.Messages[0].Type != testMsgTypeUpdate {
+		t.Fatalf("first invalid commit.Messages = %+v, want one update marker", firstCommit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	after := getTicket(t, s, ticketID)
+	if after.WaitingOn != nil {
+		t.Fatalf("after first invalid: ticket.WaitingOn = %v, want nil", after.WaitingOn)
+	}
+
+	secondCommit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("second review tick Run: %v", err)
+	}
+	if secondCommit.Escalation == nil {
+		t.Fatal("second invalid commit.Escalation is nil, want response_invalid")
+	}
+	var payload response.EscalationPayload
+	if err := json.Unmarshal(mustEscalationPayload(t, secondCommit), &payload); err != nil {
+		t.Fatalf("unmarshal escalation payload: %v", err)
+	}
+	if payload.Code != "response_invalid" || payload.Origin != testArtifactTypePlanreview {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (response_invalid, planreview)", payload.Code, payload.Origin)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+}
+
+// TestPlanningHandler_ReviewTick_D14_InvalidThenValidThenInvalidDoesNotEscalate
+// proves the chain resets on a valid terminalized run (design D14): an
+// invalid review output, then a valid (question) output, then, once that
+// question is answered and the review re-runs fresh, a second invalid
+// output -- which must NOT escalate, since the valid run in between reset
+// the consecutive count to zero.
+func TestPlanningHandler_ReviewTick_D14_InvalidThenValidThenInvalidDoesNotEscalate(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("D14 reset."), validScenarios(2, "d14reset"))
+
+	const reason = "no zing element in final message"
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{
+		invalidResult(reason, "pr-reset-1"),
+		questionResult(response.JobPlanreview, "pr-reset-2"),
+		invalidResult(reason, "pr-reset-3"),
+	}}
+
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // invalid, n=0
+
+	questionCommit := mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID) // valid question, resets chain
+	if questionCommit.Waiting == nil || *questionCommit.Waiting != testWaitingQuestions {
+		t.Fatalf("question commit.Waiting = %v, want questions", questionCommit.Waiting)
+	}
+	apply(t, s, getTicket(t, s, ticketID), questionCommit)
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+	}
+	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"}); answerErr != nil {
+		t.Fatalf("AnswerQuestion: %v", answerErr)
+	}
+
+	thirdCommit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID) // fresh review, then invalid
+	if err != nil {
+		t.Fatalf("third planning Run: %v", err)
+	}
+	if thirdCommit.Escalation != nil {
+		t.Errorf("third invalid commit.Escalation = %+v, want nil (the valid run in between reset the chain)", thirdCommit.Escalation)
+	}
+	apply(t, s, getTicket(t, s, ticketID), thirdCommit)
 }

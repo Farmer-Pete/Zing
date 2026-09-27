@@ -4,7 +4,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	zing "zing"
@@ -28,22 +27,16 @@ func readAsset(t *testing.T, path string) string {
 	return string(b)
 }
 
-// planLensSection extracts one lens file's "## In a plan" section: the
-// piece ForPlanReview's caller (a later task's job layer) appends to the
-// planreview prompt, not the whole file, which may also carry an
-// "## In code" section for Package 8's review job.
+// planLensSection is PlanLensSection (jobs.go, task 7b moved the
+// implementation there so internal/job's review tick can call it too),
+// failing the test instead of returning an error.
 func planLensSection(t *testing.T, text string) string {
 	t.Helper()
-	const marker = "## In a plan"
-	start := strings.Index(text, marker)
-	if start < 0 {
-		t.Fatalf("lens file has no %q section", marker)
+	s, err := PlanLensSection(text)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rest := text[start:]
-	if next := strings.Index(rest[len(marker):], "\n## "); next >= 0 {
-		rest = rest[:len(marker)+next]
-	}
-	return strings.TrimRight(rest, "\n")
+	return s
 }
 
 // schemasFor renders the schema block for each outcome, in the order

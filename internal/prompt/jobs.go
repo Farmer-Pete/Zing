@@ -1,6 +1,9 @@
 package prompt
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ResumeHeader replaces the prompt file on a planning resume turn: there
 // is no fresh job prompt to load, only this fixed instruction to continue
@@ -71,6 +74,25 @@ func ForPlanReview(jobPrompt string, lensSections []string, ticket, scenarios, p
 	inputs = append(inputs, extra...)
 
 	return Input{JobPrompt: strings.Join(blocks, "\n\n"), Inputs: inputs}
+}
+
+// PlanLensSection extracts one lens file's "## In a plan" section (design
+// section 6.5): the piece ForPlanReview's caller (internal/job's review
+// tick) appends to the planreview prompt, not the whole lens file, which may
+// also carry an "## In code" section for Package 8's review job. Moved here
+// from golden_test.go's own copy (TASK 3), which now delegates to this one
+// instead of keeping a duplicate.
+func PlanLensSection(text string) (string, error) {
+	const marker = "## In a plan"
+	start := strings.Index(text, marker)
+	if start < 0 {
+		return "", fmt.Errorf("prompt: lens file has no %q section", marker)
+	}
+	rest := text[start:]
+	if next := strings.Index(rest[len(marker):], "\n## "); next >= 0 {
+		rest = rest[:len(marker)+next]
+	}
+	return strings.TrimRight(rest, "\n"), nil
 }
 
 // Answer returns the "answer" labeled input for one resumed question: the

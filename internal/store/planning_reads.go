@@ -562,6 +562,25 @@ func (s *Store) HasEscalation(ctx context.Context, ticketID int64, origin string
 	return true, nil
 }
 
+// PlanReviewAt returns the "planreview" artifact stored at exactly version
+// on ticketID (design section 4.5, 5.1 steps 6 and 7): ok is false, with no
+// error, when no planreview artifact exists at that exact version yet --
+// entry step 6's "no planreview artifact at cohort.PlanVersion" test, and
+// step 7's read of the artifact whose findings a live pending marker names.
+func (s *Store) PlanReviewAt(ctx context.Context, ticketID int64, version int) (Artifact, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+artifactColumns+` FROM artifacts WHERE ticket_id = ? AND type = 'planreview' AND version = ?`,
+		ticketID, version)
+	a, err := scanArtifact(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Artifact{}, false, nil
+		}
+		return Artifact{}, false, fmt.Errorf("planreview at version %d for ticket %d: %w", version, ticketID, err)
+	}
+	return a, true, nil
+}
+
 // LiveMarker returns the newest "update" message whose body starts with
 // pending, provided no "update" message whose body starts with delivered
 // carries a greater id (design section 5.1 steps 5 and 7): ok is false when

@@ -12,6 +12,7 @@ import (
 	"zing/fixtures"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 )
@@ -32,15 +33,21 @@ const (
 	testMsgTypeQuestion  = "question"
 	testWaitingQuestions = "questions"
 	testAuthorZing       = "zing"
+	testRuntimeClaude    = "claude"
 	testRuntimeFake      = "fake"
 	testRuntimeCodex     = "codex"
 
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
 
-	testArtifactTypePlan     = "plan"
-	testArtifactTypeClaims   = "claims"
-	testArtifactTypeScenario = "scenario"
+	testArtifactTypePlan       = "plan"
+	testArtifactTypeClaims     = "claims"
+	testArtifactTypeScenario   = "scenario"
+	testArtifactTypePlanreview = "planreview"
+
+	testMsgTypeUpdate = "update"
+	testKindFeature   = "feature"
+	testTicketTitle   = "Add a hello endpoint"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -102,7 +109,7 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	ticketID, err := s.InsertTicket(ctx, store.Ticket{
-		ProjectID: projectID, TrackerRef: testRefFake1, Title: "Add a hello endpoint", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
@@ -138,6 +145,13 @@ var testModels = map[string]string{
 
 const testBudget = 240 * time.Minute
 
+// testFloor is job.Deps.Floor's value in every claim() this package builds:
+// zing.toml's own default review.floor ("minor", internal/config's
+// applyConfigDefaults), so the review-tick tests (planning_test.go, task
+// 7b) exercise the same floor a real deployment would, unless a test
+// overrides it (claimWithFloor).
+const testFloor = response.SeverityMinor
+
 // claim claims ticketID for a fresh owner and a lease truncated to second
 // precision (SQLite's TEXT timestamp round-trips at second precision), so
 // the returned expires compares equal to what a later GetTicket reads
@@ -163,12 +177,12 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 		t.Fatal("Claim: got false, want true")
 	}
 
-	set, err := runtime.NewSet(map[string]runtime.Runtime{"claude": rt, testRuntimeCodex: rt, testRuntimeFake: rt})
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: rt, testRuntimeCodex: rt, testRuntimeFake: rt})
 	if err != nil {
 		t.Fatalf("runtime.NewSet: %v", err)
 	}
 	return job.Deps{
-		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget,
+		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
 		Owner: owner, Expires: expires,
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, model)
@@ -219,15 +233,19 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 // skeleton handlers, in pipeline order, against a real temp store and the
 // real checked-in fixture scripts, applying each returned commit and
 // reclaiming between states exactly as the dispatcher will (design section
-// 6.8). Planning now takes three handler calls (design section 5.1): a
-// kindless ticket classifies first (fixtures/scripts/classify/1.xml, no
-// transition, no state message), the first turn posts the one fixture
+// 6.8). Planning now takes four handler calls (design section 5.1, task
+// 7b): a kindless ticket classifies first (fixtures/scripts/classify/1.xml,
+// no transition, no state message), the first turn posts the one fixture
 // question and waits, this test answers it through store.AnswerQuestion
-// exactly as the console's POST /answer would, and only then does the
-// resume run. It asserts the ticket reaches done and that a state message
-// was written on every one of the six transitions (design section 6.3,
-// 7.1) -- planning's own classify and first-entry calls write no state
-// message, since neither carries a Next.
+// exactly as the console's POST /answer would, the resume stores the ready
+// cohort (fixtures/scripts/planning/2.xml) and stays in planning (task 7b
+// removed the old shortcut), and the review tick
+// (fixtures/scripts/planreview/1.xml, zero findings) takes the TEMPORARY
+// clean shortcut to building. It asserts the ticket reaches done and that a
+// state message was written on every one of the six transitions (design
+// section 6.3, 7.1) -- planning's own classify, first-entry, and ready
+// calls write no state message, since none of them carries a Next; only the
+// review tick's clean shortcut does.
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
@@ -285,8 +303,15 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 		t.Fatalf("after answering: ticket waiting_on = %v, want nil (wait cleared)", answered.WaitingOn)
 	}
 
-	// planning resume -> building, then the remaining code-only states.
-	order := []string{testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging, testStateShipping}
+	// planning resume (stores the cohort, stays in planning) and the review
+	// tick (clean, the temporary shortcut to building) take two more handler
+	// calls, reusing rt so the review tick's own runtime.For("codex") lookup
+	// resolves to the same Fake, registered under all three runtime names
+	// (claim's own doc comment).
+	advancePlanningWithAnAnswer(t, s, rt, ticketID)
+
+	// the remaining code-only states.
+	order := []string{testStateBuilding, testStateReviewing, testStateJudging, testStateShipping}
 	for _, state := range order {
 		ticket = getTicket(t, s, ticketID)
 		if ticket.State != state {
@@ -489,7 +514,7 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 		}
 
 		if state == testStatePlanning {
-			advancePlanningWithAnAnswer(t, s, ticketID)
+			advancePlanningWithAnAnswer(t, s, fakeRuntime(t), ticketID)
 			continue
 		}
 
@@ -504,23 +529,25 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 
 // advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
 // handler-call loop: classify (kind unset, stays planning), the first turn
-// (posts questions, waits), and the resume (transitions to building) is
-// three calls; the headroom catches a stuck handler instead of hanging the
-// test.
+// (posts questions, waits), the resume (stores the ready cohort, stays
+// planning, task 7b removed its shortcut), and the review tick (clean,
+// task 7b's own temporary shortcut to building) is four calls; the headroom
+// catches a stuck handler instead of hanging the test.
 const advancePlanningMaxCalls = 6
 
 // advancePlanningWithAnAnswer drives the real planning handler through as
 // many calls as it now takes to reach building (design section 5.1):
 // classify runs first on a kindless ticket and sets kind but carries no
-// transition, so this loops the handler -- sharing one runtime.Fake
-// throughout, since a resume must reuse the fake session an earlier call
-// minted -- until either the ticket leaves planning or it waits on
-// "questions", in which case it answers the batch through
-// store.AnswerQuestion exactly as the console's POST /answer would, and
-// keeps looping.
-func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, ticketID int64) {
+// transition, so this loops the handler -- sharing one runtime.Runtime
+// throughout, since a resume (and, once the cohort is stored, the review
+// tick) must reuse the session an earlier call minted -- until either the
+// ticket leaves planning or it waits on "questions", in which case it
+// answers the batch through store.AnswerQuestion exactly as the console's
+// POST /answer would, and keeps looping. rt is the caller's own runtime, not
+// a fresh one this helper mints, so a caller that already drove classify or
+// the first turn against a particular runtime.Fake can keep using it here.
+func advancePlanningWithAnAnswer(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
-	rt := fakeRuntime(t)
 	reg := job.Registry()
 
 	for range advancePlanningMaxCalls {
