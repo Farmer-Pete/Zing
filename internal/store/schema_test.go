@@ -379,3 +379,44 @@ func TestValidate_EscalationSessionIDOptional(t *testing.T) {
 		t.Errorf("validate(session_id=42): %v, want nil", err)
 	}
 }
+
+// TestFileDecisionSchemaIsNarrow proves the file artifact's decision enum
+// holds only accept and reject (section 4.1): FileArtifact.Decision's own
+// type narrows the four-value Decision enum tag on Package 3's field, which
+// generated a six-entry enum by appending instead of narrowing.
+func TestFileDecisionSchemaIsNarrow(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	filePayload := func(decision string) string {
+		return `{"path":"a.go","action":"create","reason":"r","trust_root":false,"style_guide":false,"task_n":1,"decision":"` + decision + `"}`
+	}
+
+	tests := []struct {
+		name     string
+		decision string
+		wantOK   bool
+	}{
+		{"accept validates", "accept", true},
+		{"reject validates", "reject", true},
+		{"drop is refused", "drop", false},
+		{"discuss is refused", "discuss", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := schemas.validate(testTableArtifacts, "file", []byte(filePayload(tt.decision)))
+			if tt.wantOK && err != nil {
+				t.Errorf("validate(decision=%s) = %v, want nil", tt.decision, err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Errorf("validate(decision=%s) = nil, want error", tt.decision)
+			}
+		})
+	}
+}

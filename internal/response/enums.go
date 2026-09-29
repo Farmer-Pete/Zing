@@ -399,6 +399,22 @@ func (Decision) Values() []string {
 	return []string{string(DecisionAccept), string(DecisionReject), string(DecisionDrop), string(DecisionDiscuss)}
 }
 
+// PerimeterDecision is the owner's call on one undeclared path. It is its
+// own type because Decision has four values and a jsonschema enum tag on a
+// Decision field adds to them instead of narrowing them (found in the build
+// of task 3: the generated enum held six entries).
+type PerimeterDecision string
+
+const (
+	PerimeterAccept PerimeterDecision = "accept"
+	PerimeterReject PerimeterDecision = "reject"
+)
+
+// Values returns accept and reject, in that order.
+func (PerimeterDecision) Values() []string {
+	return []string{string(PerimeterAccept), string(PerimeterReject)}
+}
+
 // Result is a scenario verdict's pass/fail result.
 type Result string
 

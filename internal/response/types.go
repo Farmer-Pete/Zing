@@ -349,11 +349,11 @@ type StatePayload struct {
 
 type FileArtifact struct {
 	FileChange
-	TrustRoot   bool      `json:"trust_root"`
-	StyleGuide  bool      `json:"style_guide"`
-	TaskN       int       `json:"task_n"                jsonschema:"minimum=0,maximum=12" doc:"0 for a fix run"`
-	Description string    `json:"description,omitempty" doc:"the perimeter run's sentence"`
-	Decision    *Decision `json:"decision,omitempty"    jsonschema:"enum=accept,enum=reject"`
+	TrustRoot   bool               `json:"trust_root"`
+	StyleGuide  bool               `json:"style_guide"`
+	TaskN       int                `json:"task_n"                jsonschema:"minimum=0,maximum=12" doc:"0 for a fix run"`
+	Description string             `json:"description,omitempty" doc:"the perimeter run's sentence"`
+	Decision    *PerimeterDecision `json:"decision,omitempty"`
 }
 
 type TaskArtifact struct {
