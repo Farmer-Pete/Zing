@@ -444,8 +444,13 @@ const buildOkXML = `<zing job="build" outcome="ok">
 
 const testJobBuild = "build"
 
+// testBuildLabel is the label these sandbox tests reserve their one
+// scripted build turn under (skeleton.go's own former buildLabel, now
+// building.go's real per-task label).
+const testBuildLabel = "1"
+
 // testBuildScriptKey is the Fake runtime's own script key for job "build",
-// label buildLabel, turn 1 (runtime/fake.go's scriptKey), reused across
+// label testBuildLabel, turn 1 (runtime/fake.go's scriptKey), reused across
 // every sandbox test below that needs a scripted build turn.
 const testBuildScriptKey = "build/1/1.xml"
 
@@ -506,7 +511,7 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
 	rr, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -539,7 +544,7 @@ func TestRunJobErrSandboxWhenRequired(t *testing.T) {
 	deps.Reserve = rec.Reserve
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
 	if !errors.Is(err, ErrSandbox) {
 		t.Fatalf("err = %v, want ErrSandbox", err)
 	}
@@ -565,7 +570,7 @@ func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sandbox.Off(), false)
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -593,7 +598,7 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}

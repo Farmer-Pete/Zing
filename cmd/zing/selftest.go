@@ -26,9 +26,11 @@ import (
 	"zing/internal/bus"
 	"zing/internal/console"
 	zdispatch "zing/internal/dispatch"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/lens"
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
@@ -36,6 +38,28 @@ import (
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
+
+// selftestGitHub is a never-called orchestrator.GitHub, enough to satisfy
+// orchestrator.New's required parameter (PKG8-PLAN.md section 10): the
+// building state machine's own tests never push or open a pull request, so
+// every method here is unreachable in this suite.
+type selftestGitHub struct{}
+
+func (selftestGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (prURL string, number int, err error) {
+	return "", 0, errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
+	return "", 0, false, errors.New("selftestGitHub: not implemented")
+}
 
 // runSelftest proves the foundation on an empty machine: it migrates a fresh
 // temporary database and checks it. It prints "selftest: OK" and returns 0
@@ -343,23 +367,41 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	// dir must carry "cmd/zing/main.go": the planning handler's ready entry
-	// point (design section 6.5) opens the project for real through
-	// os.OpenRoot and checks the fixture cohort's one code claim
-	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60") against
-	// it.
-	if mkErr := os.MkdirAll(filepath.Join(dir, "cmd", "zing"), 0o755); mkErr != nil {
-		return fmt.Errorf("mkdir cmd/zing: %w", mkErr)
+	// The project path is a real, signed gitfixture repository (PKG8-PLAN.md
+	// section 9.4, 10): building's EnsureWorktree, ChangedPaths, CommitTask,
+	// and SignedStatus all run real git against it. The planning handler's
+	// ready entry point (design section 6.5) opens the same directory
+	// through os.OpenRoot and checks the fixture cohort's one code claim
+	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60"), so that
+	// path is committed here too, on top of gitfixture's own initial commit,
+	// and never shows up as an extra once building starts.
+	projDir := filepath.Join(dir, "project")
+	if mkErr := os.MkdirAll(projDir, 0o755); mkErr != nil {
+		return fmt.Errorf("mkdir project dir: %w", mkErr)
 	}
-	if wErr := os.WriteFile(filepath.Join(dir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
-		return fmt.Errorf("write cmd/zing/main.go: %w", wErr)
+	if fixErr := gitfixture.NewSigningRepo(ctx, projDir); fixErr != nil {
+		return fmt.Errorf("build gitfixture repo: %w", fixErr)
+	}
+	if addErr := gitfixture.AddFile(ctx, projDir, filepath.Join("cmd", "zing", "main.go"), []byte("package main\n")); addErr != nil {
+		return fmt.Errorf("add cmd/zing/main.go to gitfixture repo: %w", addErr)
 	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
-		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: dir, Tracker: "github",
+		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: projDir, Tracker: "github",
 	})
 	if err != nil {
 		return err
+	}
+
+	orch, err := orchestrator.New(
+		orchestrator.Project{Owner: "zing-fixture", Repo: "zing-fixture", LocalPath: projDir, DefaultBranch: "main"},
+		selftestGitHub{}, orchestrator.NewRunner(), nil)
+	if err != nil {
+		return fmt.Errorf("build orchestrator: %w", err)
+	}
+	repoGit, err := orch.GitCommonDir(ctx)
+	if err != nil {
+		return fmt.Errorf("git common dir: %w", err)
 	}
 
 	b := bus.New()
@@ -374,6 +416,12 @@ func selftestResumeE2E(ctx context.Context) error {
 			// run unwrapped instead of refusing (design D5, section 10).
 			Sandbox: sandbox.Off(), RequireSandbox: false,
 			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			// Projects carries what the real building handler needs for
+			// this one project (PKG8-PLAN.md section 4.3): the fixture
+			// project's own test and lint commands (section 9.4).
+			Projects: map[int64]job.Project{
+				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+			},
 		}, rts)
 	if err != nil {
 		return err

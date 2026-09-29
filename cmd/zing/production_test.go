@@ -15,6 +15,7 @@ import (
 	"zing/fixtures"
 	"zing/internal/config"
 	zdispatch "zing/internal/dispatch"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/machine"
 	"zing/internal/orchestrator"
@@ -375,13 +376,17 @@ func TestProductionBuildNeedsSandbox(t *testing.T) {
 		t.Fatalf("machine.Load: %v", err)
 	}
 
-	repoDir := newTestGitRepo(t)
-	// The fixture ready cohort's one code claim cites cmd/zing/main.go:60.
-	if mkErr := os.MkdirAll(filepath.Join(repoDir, "cmd", testServeProjectName), 0o755); mkErr != nil {
-		t.Fatalf("mkdir: %v", mkErr)
+	// A real, signed gitfixture repository (PKG8-PLAN.md section 9.4, 10),
+	// not the bare newTestGitRepo other tests in this package use: the real
+	// building handler's own EnsureWorktree needs a commit to branch off of.
+	// The fixture ready cohort's one code claim cites cmd/zing/main.go:60,
+	// committed here on top of gitfixture's own initial commit.
+	repoDir := t.TempDir()
+	if fixErr := gitfixture.NewSigningRepo(t.Context(), repoDir); fixErr != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", fixErr)
 	}
-	if writeErr := os.WriteFile(filepath.Join(repoDir, "cmd", testServeProjectName, "main.go"), []byte("package main\n"), 0o600); writeErr != nil {
-		t.Fatalf("write main.go: %v", writeErr)
+	if addErr := gitfixture.AddFile(t.Context(), repoDir, filepath.Join("cmd", testServeProjectName, "main.go"), []byte("package main\n")); addErr != nil {
+		t.Fatalf("gitfixture.AddFile: %v", addErr)
 	}
 
 	projectID, err := st.EnsureProject(t.Context(), store.Project{
@@ -427,6 +432,18 @@ func TestProductionBuildNeedsSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtime.NewSet: %v", err)
 	}
+	// gitfixture.NewSigningRepo always inits its repo on branch "main".
+	const gitfixtureDefaultBranch = "main"
+	orch, err := orchestrator.New(
+		orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: repoDir, DefaultBranch: gitfixtureDefaultBranch},
+		selftestGitHub{}, orchestrator.NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	repoGit, err := orch.GitCommonDir(t.Context())
+	if err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
 	deps := job.Deps{
 		Store: st, Runtimes: set, Machine: m, Models: productionTestModels,
 		Budget: time.Hour, Floor: response.SeverityMinor, Owner: owner, Expires: expires,
@@ -435,6 +452,9 @@ func TestProductionBuildNeedsSandbox(t *testing.T) {
 		},
 		Sandbox: sandbox.Off(), RequireSandbox: serveRequireSandbox,
 		Commands: neverCalledCommandRunner{t: t},
+		Projects: map[int64]job.Project{
+			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+		},
 	}
 
 	commit, err := job.Registry()["building"].Run(t.Context(), ticket, deps)

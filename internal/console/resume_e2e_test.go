@@ -15,11 +15,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -32,13 +32,37 @@ import (
 	"zing/fixtures"
 	"zing/internal/bus"
 	zdispatch "zing/internal/dispatch"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	zruntime "zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
+
+// resumeE2EGitHub is a never-called orchestrator.GitHub, enough to satisfy
+// orchestrator.New's required parameter: this e2e never pushes or opens a
+// pull request.
+type resumeE2EGitHub struct{}
+
+func (resumeE2EGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("resumeE2EGitHub: not implemented")
+}
+
+func (resumeE2EGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("resumeE2EGitHub: not implemented")
+}
+
+func (resumeE2EGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (url string, number int, err error) {
+	return "", 0, errors.New("resumeE2EGitHub: not implemented")
+}
+
+func (resumeE2EGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
+	return "", 0, false, errors.New("resumeE2EGitHub: not implemented")
+}
 
 // resumeE2EMaxTicks and resumeE2EOwner mirror cmd/zing/selftest.go's own
 // e2eMaxTicks and e2eOwner: enough bounded ticks for intake plus one
@@ -103,17 +127,20 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("tracker.NewFixture: %v", err)
 	}
 
-	// The project's LocalPath must be a real directory carrying
-	// "cmd/zing/main.go": the planning handler's ready entry point (design
-	// section 6.5) opens it for real through os.OpenRoot and checks the
-	// fixture cohort's one code claim (fixtures/scripts/planning/2.xml cites
-	// "cmd/zing/main.go:60") against it.
+	// The project's LocalPath is a real, signed gitfixture repository
+	// (PKG8-PLAN.md section 9.4, 10): the real building handler's own
+	// EnsureWorktree, ChangedPaths, CommitTask, and SignedStatus all run
+	// real git against it. The planning handler's ready entry point (design
+	// section 6.5) opens the same directory through os.OpenRoot and checks
+	// the fixture cohort's one code claim (fixtures/scripts/planning/2.xml
+	// cites "cmd/zing/main.go:60"), committed here on top of gitfixture's
+	// own initial commit.
 	projectDir := t.TempDir()
-	if mkErr := os.MkdirAll(filepath.Join(projectDir, "cmd", "zing"), 0o755); mkErr != nil {
-		t.Fatalf("mkdir cmd/zing: %v", mkErr)
+	if fixErr := gitfixture.NewSigningRepo(ctx, projectDir); fixErr != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", fixErr)
 	}
-	if wErr := os.WriteFile(filepath.Join(projectDir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
-		t.Fatalf("write cmd/zing/main.go: %v", wErr)
+	if addErr := gitfixture.AddFile(ctx, projectDir, filepath.Join("cmd", "zing", "main.go"), []byte("package main\n")); addErr != nil {
+		t.Fatalf("gitfixture.AddFile: %v", addErr)
 	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
@@ -123,12 +150,30 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
+	orch, err := orchestrator.New(
+		orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: projectDir, DefaultBranch: "main"},
+		resumeE2EGitHub{}, orchestrator.NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	repoGit, err := orch.GitCommonDir(ctx)
+	if err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
 		[]zdispatch.Binding{{StoreProjectID: projectID, TrackerProject: testAuthorZing}},
 		zdispatch.Config{
 			Interval: time.Millisecond, MaxParallel: 2, Owner: resumeE2EOwner,
 			Models: resumeE2EModels, Budget: resumeE2EBudget,
+			// This e2e drives the fake runtime, never a real sandboxed
+			// process (design D5, section 10).
+			Sandbox: sandbox.Off(), RequireSandbox: false,
+			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			Projects: map[int64]job.Project{
+				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+			},
 		}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)

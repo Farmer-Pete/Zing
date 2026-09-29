@@ -82,6 +82,30 @@ func NewSigningRepo(ctx context.Context, dir string) error {
 	return nil
 }
 
+// AddFile writes relPath (with content) under dir and commits it, signed,
+// on top of whatever NewSigningRepo already committed there: a caller that
+// needs the fixture repo to carry one more path already at HEAD (so a
+// ready cohort's code claim can cite it, or so building's own perimeter
+// check never sees it as an undeclared change) calls this once, after
+// NewSigningRepo, using the same repo-local signing config. relPath's
+// parent directories are created as needed.
+func AddFile(ctx context.Context, dir, relPath string, content []byte) error {
+	full := filepath.Join(dir, relPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return fmt.Errorf("gitfixture: mkdir for %s: %w", relPath, err)
+	}
+	if err := os.WriteFile(full, content, 0o600); err != nil {
+		return fmt.Errorf("gitfixture: write %s: %w", relPath, err)
+	}
+	if err := runGit(ctx, dir, "add", relPath); err != nil {
+		return err
+	}
+	if err := runGit(ctx, dir, "commit", "-q", "-S", "-m", "add "+relPath); err != nil {
+		return err
+	}
+	return nil
+}
+
 // runGit runs one git command against dir with the location-redirecting
 // environment variables scrubbed, so it can never be sent at a
 // repository other than dir.

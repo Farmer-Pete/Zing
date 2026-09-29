@@ -1242,11 +1242,11 @@ func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning(t
 	if unmarshalErr := json.Unmarshal(planPayload, &roundTripped); unmarshalErr != nil {
 		t.Fatalf("unmarshal stored plan payload: %v", unmarshalErr)
 	}
-	const wantObjective = "Add a hello endpoint so a caller can get a plain-text greeting back over HTTP."
+	const wantObjective = "Add a greet package with a fixed hello message, delivered as three small build tasks, so a later ticket can wire it into the HTTP server."
 	if roundTripped.Overview.Objective != wantObjective {
 		t.Errorf("stored plan objective = %q, want %q", roundTripped.Overview.Objective, wantObjective)
 	}
-	if len(roundTripped.Delivery.Tasks) != 1 || roundTripped.Review.TrustRoot != "none" {
+	if len(roundTripped.Delivery.Tasks) != 3 || roundTripped.Review.TrustRoot != "none" {
 		t.Errorf("stored plan = %+v, does not round-trip the fixture's own plan", roundTripped)
 	}
 

@@ -138,8 +138,11 @@ type Handler interface {
 	Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error)
 }
 
-// Registry returns the six skeleton handlers (design section 6.5), keyed by
-// the pipeline state each drives. done is terminal and carries no handler.
+// Registry returns the six pipeline-state handlers (design section 6.5),
+// keyed by the state each drives: queued, reviewing, judging, and shipping
+// are still the skeleton's code-only transitions; planning (task 6) and
+// building (task 9) are the real handlers. done is terminal and carries no
+// handler.
 func Registry() map[string]Handler {
 	return map[string]Handler{
 		stateQueued:    queuedHandler{},

@@ -16,41 +16,46 @@
   </scenarios>
   <plan>
     <overview>
-      <objective>Add a hello endpoint so a caller can get a plain-text greeting back over HTTP.</objective>
-      <context>cmd/zing/main.go builds the HTTP server and its routes in newMux; this adds one more GET route beside the existing index handler.</context>
-      <problem>Nothing today answers a plain greeting request, so there is no minimal route that shows the server responding with dynamic text.</problem>
+      <objective>Add a greet package with a fixed hello message, delivered as three small build tasks, so a later ticket can wire it into the HTTP server.</objective>
+      <context>cmd/zing/main.go builds the HTTP server and its routes in newMux; this ticket delivers the greeting itself as a standalone package and a fixture marker file, ahead of the route that will call it.</context>
+      <problem>Nothing today provides a fixed greeting a route handler could call, so there is no minimal, tested unit to build the eventual /hello route on top of.</problem>
       <goals>
-        <goal>GET /hello returns 200 with the text "hello, world" when the process is running</goal>
+        <goal>A greet package exposes a Greet function that returns the fixed text "hello, world"</goal>
+        <goal>The build produces one signed commit per task, in order</goal>
       </goals>
       <nongoals>
-        <nongoal>Accepting a name parameter or personalizing the greeting is out of scope; this is a fixed-text route, not a templated one</nongoal>
+        <nongoal>Accepting a name parameter or personalizing the greeting is out of scope; this delivers a fixed-text helper, not a templated one</nongoal>
+        <nongoal>Wiring the greet package into newMux is a later ticket; this one stops at the package and its test</nongoal>
       </nongoals>
     </overview>
     <design>
-      <demo cmd="go run ./cmd/zing serve &amp; curl -sf localhost:8080/hello">Starting the server and curling /hello prints "hello, world" with a 200 status, showing the route is live end to end.</demo>
-      <shape>newMux gains one more route, `GET /hello`, registered beside the existing `GET /{$}` route. Its handler writes a 200 status and a fixed "hello, world" body; it needs no dependencies, so it stays a package-level function like index.</shape>
+      <demo cmd="test -f hello.txt">Once task 1 lands, the project's own test command finds hello.txt on disk, the smallest slice that shows the build loop writing a real file through to a signed commit.</demo>
+      <shape>Three files, each its own task and its own commit: hello.txt, a fixture marker file the project's test command checks for; greet.go, a package-level Greet function returning the fixed text; and greet_test.go, the test that pins its return value.</shape>
       <migrations none="true"></migrations>
     </design>
     <delivery>
       <files>
-        <file path="cmd/zing/main.go" action="modify">register the /hello route in newMux and add its handler</file>
-        <file path="cmd/zing/main_test.go" action="modify">add TestHello covering GET and the POST 405 case</file>
+        <file path="hello.txt" action="create">a fixture marker file task 1 writes so the project's test command has something to find</file>
+        <file path="greet.go" action="create">the greet package and its Greet function, task 2</file>
+        <file path="greet_test.go" action="create">the test for Greet, task 3</file>
       </files>
       <deletions none="true"></deletions>
       <tests>
-        <test name="TestHello" seam="newMux" kind="integration" mocks="">GET /hello returns 200 and body "hello, world"; POST /hello returns 405</test>
+        <test name="TestGreet" seam="greet.Greet" kind="unit" mocks="">Greet() returns the fixed text "hello, world"</test>
       </tests>
       <tasks>
-        <task n="1" test="TestHello" demo="true">Add the /hello handler and register it in newMux so the demo command above returns 200.</task>
+        <task n="1" test="TestGreet" demo="true">Add the greeting file hello.txt so the project's test command, `test -f hello.txt`, has something to find.</task>
+        <task n="2" test="TestGreet" demo="false">Add the greet package with a Greet function that returns the fixed text "hello, world".</task>
+        <task n="3" test="TestGreet" demo="false">Add greet_test.go, covering Greet's fixed return value.</task>
       </tasks>
     </delivery>
     <review>
       <trust_root>none</trust_root>
       <alternatives>
-        <alternative>Reuse the index handler for /hello too: rejected, since a plain-text greeting route should not depend on the same path or body as the human-facing page.</alternative>
+        <alternative>Deliver all three files in one task: rejected, since the build loop commits one task at a time, and this plan exists to exercise that loop across more than a single task.</alternative>
       </alternatives>
       <risks>
-        <risk>A caller expecting a JSON body instead of plain text would need to parse it differently; call this out in the PR description.</risk>
+        <risk>None of these files is wired into the running server yet; a later ticket connects Greet to the /hello route.</risk>
       </risks>
     </review>
   </plan>
