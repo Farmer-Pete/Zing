@@ -1,1 +1,3 @@
-Stub prompt. Package 7 fills this from the Zing Design Document section 22.
+The builder changed a file the plan did not declare. Read the hunk and say
+in one sentence why the builder touched it. State what the change does,
+not whether it should have happened.
