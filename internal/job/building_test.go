@@ -10,8 +10,10 @@
 package job_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,7 +85,7 @@ func buildWorktreeFor(t *testing.T, deps job.Deps, ticket store.Ticket) (job.Pro
 	if !ok {
 		t.Fatalf("buildWorktreeFor: no git-backed project wired for ticket %d", ticket.ID)
 	}
-	wt, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -392,6 +394,50 @@ func TestBuildLandStagesOnlyChangedPaths(t *testing.T) {
 	}
 	if len(changes) != 1 || changes[0].Path != helloTxt {
 		t.Errorf("commit changes = %+v, want exactly [hello.txt]", changes)
+	}
+}
+
+// ---- worktree ensured logging ------------------------------------------------
+
+// TestBuildEnsuresWorktreeOncePerTick proves task 9a's third fix: the
+// "worktree ensured" event (design section 11) fires exactly once per
+// handler invocation, and its created field tells a tick that actually
+// created the worktree apart from a later tick that only reopens it (RUN
+// creates it; the following CHECK+LAND tick must report created=false).
+func TestBuildEnsuresWorktreeOncePerTick(t *testing.T) {
+	s, rt, ticketID := buildTicketInBuilding(t)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, rt, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: creates the worktree
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps = claimForBuild(t, s, rt, ticketID)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	if _, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps); err != nil { // CHECK + LAND
+		t.Fatalf("CHECK/LAND: %v", err)
+	}
+
+	var ensured []string
+	for line := range strings.SplitSeq(strings.TrimRight(logBuf.String(), "\n"), "\n") {
+		if strings.Contains(line, "worktree ensured") {
+			ensured = append(ensured, line)
+		}
+	}
+	if len(ensured) != 1 {
+		t.Fatalf("worktree ensured log lines = %d (%v), want exactly one per tick", len(ensured), ensured)
+	}
+	if !strings.Contains(ensured[0], "created=false") {
+		t.Errorf("worktree ensured log = %q, want created=false (the worktree already existed from the RUN tick)", ensured[0])
 	}
 }
 

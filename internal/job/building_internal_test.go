@@ -12,9 +12,10 @@ import (
 	"zing/internal/response"
 )
 
-// TestUnitTitle proves the commit-subject rule (design section 4.3): "Task
-// <n>: " plus the first line of the task text with leading "#", "*", "-",
-// and spaces trimmed, cut to 72 runes.
+// TestUnitTitle proves the six-step commit-subject rule (design section
+// 4.3): trim a leading marker, cut at an early sentence end, prefix "Task
+// <n>: ", cut a long subject at a word boundary rather than mid-word, trim
+// trailing punctuation, and fix a stray unbalanced backtick.
 func TestUnitTitle(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -41,11 +42,37 @@ func TestUnitTitle(t *testing.T) {
 			want:  "Task 3: Add greet_test.go",
 		},
 		{
-			name:  "cuts the whole subject to 72 runes",
+			name:  "falls back to the bare subject when the cut window holds no space past the prefix",
 			taskN: 4,
 			text:  strings.Repeat("x", 100),
-			// "Task 4: " is 8 runes; 72-8 = 64 runes of the task text survive.
-			want: "Task 4: " + strings.Repeat("x", 64),
+			// The subject has no space past "Task 4: " itself within the
+			// first 72 runes, so the cut lands on the prefix's own trailing
+			// space and step 5 trims the rest away.
+			want: "Task 4",
+		},
+		{
+			name:  "the worked example (design section 4.3)",
+			taskN: 1,
+			text:  "Add the greeting file hello.txt so the project's test command, `test -f hello.txt`, passes.",
+			want:  "Task 1: Add the greeting file hello.txt so the project's test command",
+		},
+		{
+			name:  "keeps the text before an early sentence end",
+			taskN: 5,
+			text:  "Add hello.txt. Then wire it into main so the server responds on port 8080 with the greeting",
+			want:  "Task 5: Add hello.txt",
+		},
+		{
+			name:  "falls back to the bare subject for an empty first line",
+			taskN: 6,
+			text:  "",
+			want:  "Task 6",
+		},
+		{
+			name:  "removes an odd trailing backtick the cut leaves unbalanced",
+			taskN: 7,
+			text:  "Enable the `feature flag without a matching close and then keep going with filler words here",
+			want:  "Task 7: Enable the feature flag without a matching close and then keep",
 		},
 	}
 	for _, tc := range cases {

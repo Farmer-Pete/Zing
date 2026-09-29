@@ -1186,9 +1186,12 @@ func TestEnsureWorktree(t *testing.T) {
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
 
-		wt, err := o.EnsureWorktree(ctx, 200, "ensure")
+		wt, created, err := o.EnsureWorktree(ctx, 200, "ensure")
 		if err != nil {
 			t.Fatalf("EnsureWorktree: %v", err)
+		}
+		if !created {
+			t.Error("created = false, want true (a fresh worktree)")
 		}
 
 		wantDir := filepath.Join(repo, ".zing", "wt", "200")
@@ -1214,9 +1217,12 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Fatalf("PrepareWorktree: %v", err)
 		}
 
-		wt, err := o.EnsureWorktree(ctx, 201, "a-different-slug-now")
+		wt, created, err := o.EnsureWorktree(ctx, 201, "a-different-slug-now")
 		if err != nil {
 			t.Fatalf("EnsureWorktree: %v", err)
+		}
+		if created {
+			t.Error("created = true, want false (the worktree was already present)")
 		}
 		if wt.Dir() != first.Dir() {
 			t.Errorf("Dir() = %q, want %q", wt.Dir(), first.Dir())
@@ -1236,7 +1242,7 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 
-		if _, err := o.EnsureWorktree(ctx, 202, "foreign"); err == nil {
+		if _, _, err := o.EnsureWorktree(ctx, 202, "foreign"); err == nil {
 			t.Fatal("EnsureWorktree: expected an error for a directory git does not recognize as a worktree, got nil")
 		}
 	})
@@ -1265,9 +1271,12 @@ func TestEnsureWorktreeReattachesAfterDeletion(t *testing.T) {
 		t.Fatalf("RemoveAll(%s): %v", wt.Dir(), removeErr)
 	}
 
-	reattached, err := o.EnsureWorktree(ctx, 210, "reattach")
+	reattached, created, err := o.EnsureWorktree(ctx, 210, "reattach")
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true (the directory was removed by hand and this call recreated it)")
 	}
 	if reattached.Branch() != wt.Branch() {
 		t.Errorf("Branch() = %q, want the original %q", reattached.Branch(), wt.Branch())
@@ -1290,7 +1299,7 @@ func TestEnsureWorktreeTwoBranchesErrors(t *testing.T) {
 	runGit(ctx, t, repo, "branch", "zing/220-first", mainBranch)
 	runGit(ctx, t, repo, "branch", "zing/220-second", mainBranch)
 
-	if _, err := o.EnsureWorktree(ctx, 220, "whatever"); err == nil {
+	if _, _, err := o.EnsureWorktree(ctx, 220, "whatever"); err == nil {
 		t.Fatal("EnsureWorktree: expected an error when two local branches match the ticket, got nil")
 	}
 }
@@ -1368,7 +1377,7 @@ func TestSigningProgramCheck(t *testing.T) {
 			}
 			o := newTestOrchestrator(t, repo, execRunner{})
 
-			_, err := o.EnsureWorktree(ctx, 300, "signing")
+			_, _, err := o.EnsureWorktree(ctx, 300, "signing")
 			if c.wantErr && err == nil {
 				t.Fatalf("EnsureWorktree: expected an error for %s=%q, got nil", c.key, c.value)
 			}
@@ -1396,7 +1405,7 @@ func TestSigningProgramCheck(t *testing.T) {
 		runGit(ctx, t, repo, "config", gpgProgramKey, "zing-signer")
 
 		o := newTestOrchestrator(t, repo, execRunner{})
-		if _, err := o.EnsureWorktree(ctx, 301, "path-into-repo"); err == nil {
+		if _, _, err := o.EnsureWorktree(ctx, 301, "path-into-repo"); err == nil {
 			t.Fatal("EnsureWorktree: expected an error for a bare name PATH resolves into the repository, got nil")
 		}
 	})
@@ -1420,7 +1429,7 @@ func TestSigningProgramCheck(t *testing.T) {
 		runGit(ctx, t, repo, "config", gpgProgramKey, link)
 
 		o := newTestOrchestrator(t, repo, execRunner{})
-		if _, err := o.EnsureWorktree(ctx, 302, "symlink-into-repo"); err == nil {
+		if _, _, err := o.EnsureWorktree(ctx, 302, "symlink-into-repo"); err == nil {
 			t.Fatal("EnsureWorktree: expected an error for a symlink resolving into the repository, got nil")
 		}
 	})
@@ -1449,7 +1458,7 @@ func TestSigningProgramCheck(t *testing.T) {
 		runGit(ctx, t, repo, "config", gpgProgramKey, programPath)
 
 		o := newTestOrchestrator(t, repo, execRunner{})
-		if _, err := o.EnsureWorktree(ctx, 303, "home-projects"); err == nil {
+		if _, _, err := o.EnsureWorktree(ctx, 303, "home-projects"); err == nil {
 			t.Fatal("EnsureWorktree: expected an error for a program inside HOME/.claude/projects, got nil")
 		}
 	})
@@ -1479,7 +1488,7 @@ func TestSigningCheckCoversBuildWritableRoots(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if _, err := o.EnsureWorktree(ctx, 304, "build-writable-root"); err == nil {
+	if _, _, err := o.EnsureWorktree(ctx, 304, "build-writable-root"); err == nil {
 		t.Fatal("EnsureWorktree: expected an error for a program inside a BuildWritableRoots entry, got nil")
 	}
 }
@@ -1618,7 +1627,7 @@ func TestWorktreeConfigIsReadInWorktree(t *testing.T) {
 	runGit(ctx, t, repo, "config", "extensions.worktreeConfig", "true")
 	runGit(ctx, t, wt.Dir(), "config", "--worktree", "gpg.program", "node signer.js")
 
-	if _, err := o.EnsureWorktree(ctx, 500, "worktreecfg"); err == nil {
+	if _, _, err := o.EnsureWorktree(ctx, 500, "worktreecfg"); err == nil {
 		t.Fatal("EnsureWorktree: expected an error for a config.worktree-only signing program that fails the grammar, got nil")
 	}
 }

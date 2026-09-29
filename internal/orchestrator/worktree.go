@@ -791,17 +791,24 @@ func (o *Orchestrator) branchExists(ctx context.Context, branch string) (bool, e
 // signing-program check (readWorktreeGitConfig) run again on every call, so
 // a driver or a signing program the owner configures mid-build is overridden
 // or refused from the next tick on.
-func (o *Orchestrator) EnsureWorktree(ctx context.Context, ticketID int64, slug string) (Worktree, error) {
+//
+// created is true when this call made the directory: a fresh worktree
+// (table row 1) or a reattachment after the directory was removed by hand
+// (table row 2). It is false when the directory was already there and this
+// call only reopened it (table rows 4-5), and meaningless (false) on error.
+func (o *Orchestrator) EnsureWorktree(ctx context.Context, ticketID int64, slug string) (wt Worktree, created bool, err error) {
 	dir := filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
 
 	_, statErr := os.Stat(dir)
 	switch {
 	case statErr == nil:
-		return o.ensureWorktreePresent(ctx, ticketID, dir)
+		wt, err = o.ensureWorktreePresent(ctx, ticketID, dir)
+		return wt, false, err
 	case errors.Is(statErr, os.ErrNotExist):
-		return o.ensureWorktreeAbsent(ctx, ticketID, slug, dir)
+		wt, err = o.ensureWorktreeAbsent(ctx, ticketID, slug, dir)
+		return wt, err == nil, err
 	default:
-		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: stat %s: %w", dir, statErr)
+		return Worktree{}, false, fmt.Errorf("orchestrator: ensure worktree: stat %s: %w", dir, statErr)
 	}
 }
 

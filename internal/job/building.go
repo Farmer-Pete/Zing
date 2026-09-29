@@ -171,10 +171,11 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, ErrConfig
 	}
 
-	wt, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
 	if err != nil {
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
 	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
@@ -185,7 +186,6 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: branch commits: %w", err)
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", len(shas) == 0)
 
 	recorded := recordedShas(reports)
 	if !isPrefixOf(recorded, shas) {
@@ -373,10 +373,8 @@ func tasksNumberedOneToN(tasks []response.Task) bool {
 	return true
 }
 
-// unitFor finds tasks' entry numbered taskN and builds its unit (design
-// section 4.3's commit subject rule): "Task <n>: " plus the first line of
-// the task text with leading "#", "*", "-", and spaces trimmed, cut to 72
-// runes.
+// unitFor finds tasks' entry numbered taskN and builds its unit, its
+// commit subject built by unitTitle (design section 4.3's six-step rule).
 func unitFor(tasks []response.Task, taskN int) (unit, bool) {
 	for _, tk := range tasks {
 		if tk.N == taskN {
@@ -386,10 +384,95 @@ func unitFor(tasks []response.Task, taskN int) (unit, bool) {
 	return unit{}, false
 }
 
+// subjectSentenceRunes is step 2's own window (design section 4.3): a
+// sentence end within the task text's first 60 runes ends the subject
+// there, before "Task <n>: " is even prefixed.
+const subjectSentenceRunes = 60
+
+// subjectMaxRunes is step 4's own cap (design section 4.3): a subject
+// longer than this is cut at the last space at or before this many runes,
+// never mid-word.
+const subjectMaxRunes = 72
+
+// subjectTrimCutset is step 5's own trailing set: spaces, then any of the
+// listed punctuation and a backtick, trimmed together in one pass since
+// strings.TrimRight already removes a trailing run of mixed cutset
+// characters, not just one.
+const subjectTrimCutset = " ,;:.-(`"
+
+// unitTitle builds one build unit's commit subject from its task text, the
+// six-step rule of design section 4.3: trim a leading marker, cut at an
+// early sentence end, prefix "Task <n>: ", cut a long subject at a word
+// boundary rather than mid-word, trim trailing punctuation, and fix a
+// stray unbalanced backtick the cut can leave behind. Step 6's fallback
+// ("Task <n>" alone) falls out of steps 3-5 on its own: an empty or
+// all-punctuation first line collapses to exactly that string, with
+// nothing left to special-case.
 func unitTitle(taskN int, taskText string) string {
 	first, _, _ := strings.Cut(taskText, "\n")
 	first = strings.TrimLeft(first, "#*- ")
-	return cutRunes(fmt.Sprintf("Task %d: %s", taskN, first), 72)
+	if before, ok := cutAtSentenceEnd(first, subjectSentenceRunes); ok {
+		first = before
+	}
+
+	subject := fmt.Sprintf("Task %d: %s", taskN, first)
+	subject = cutAtLastSpace(subject, subjectMaxRunes)
+	subject = strings.TrimRight(subject, subjectTrimCutset)
+	return fixOddBacktick(subject)
+}
+
+// cutAtSentenceEnd returns the text before a sentence end (". " or a final
+// ".") within s's first limit runes, and whether one was found (design
+// section 4.3 step 2).
+func cutAtSentenceEnd(s string, limit int) (string, bool) {
+	r := []rune(s)
+	if limit > len(r) {
+		limit = len(r)
+	}
+	for i := range limit {
+		if r[i] != '.' {
+			continue
+		}
+		if i+1 < len(r) && r[i+1] == ' ' {
+			return string(r[:i]), true
+		}
+		if i == len(r)-1 {
+			return string(r[:i]), true
+		}
+	}
+	return s, false
+}
+
+// cutAtLastSpace cuts s at the last space at or before rune n, when s is
+// longer than n runes (design section 4.3 step 4): a subject never splits
+// a word. With no space in that span, it falls back to a hard cut at n.
+func cutAtLastSpace(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	last := -1
+	for i, ch := range r[:n] {
+		if ch == ' ' {
+			last = i
+		}
+	}
+	if last == -1 {
+		return string(r[:n])
+	}
+	return string(r[:last])
+}
+
+// fixOddBacktick removes the last backtick in s when s holds an odd number
+// of them (design section 4.3 step 5): a cut that lands inside a fenced
+// span leaves one unbalanced backtick behind, the exact defect version 1
+// of this rule produced and the M1 validation caught.
+func fixOddBacktick(s string) string {
+	if strings.Count(s, "`")%2 == 0 {
+		return s
+	}
+	i := strings.LastIndex(s, "`")
+	return s[:i] + s[i+1:]
 }
 
 func cutRunes(s string, n int) string {
@@ -629,19 +712,23 @@ func buildSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 
 // runCheckCommand runs one CHECK command re-run (design section 6.4 step
 // 1), logging "command re-run" (design section 11) regardless of outcome.
-// A timeout reports exit -1 with timedOut true and no error; any other
-// CommandRunner failure (ErrSandbox, a wrapped context.Canceled, or
-// anything else) is returned unclassified for the caller to route.
-func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, kind, shellCmd string) (exit int, timedOut bool, err error) {
+// rid is the unit's newest ok run when one is already known (CHECK); it is
+// nil during step 0.5's adoption commands, run before the adopted commit's
+// own run is identified (design section 6.1 step 5's checks 1-2 precede
+// check 4, which is the first to name a run). A timeout reports exit -1
+// with timedOut true and no error; any other CommandRunner failure
+// (ErrSandbox, a wrapped context.Canceled, or anything else) is returned
+// unclassified for the caller to route.
+func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64, kind, shellCmd string) (exit int, timedOut bool, err error) {
 	started := time.Now()
 	exit, runErr := d.Commands.Run(ctx, wt.Dir(), proj.RepoGit, shellCmd, checkCommandTimeout)
 	seconds := int(time.Since(started).Seconds())
 	switch {
 	case runErr == nil:
-		slog.Info("command re-run", "ticket_id", t.ID, "command", kind, "exit_code", exit, "seconds", seconds, "timed_out", false)
+		slog.Info("command re-run", "ticket_id", t.ID, "run_id", int64OrZero(rid), "command", kind, "exit_code", exit, "seconds", seconds, "timed_out", false)
 		return exit, false, nil
 	case errors.Is(runErr, ErrCommandTimeout):
-		slog.Info("command re-run", "ticket_id", t.ID, "command", kind, "exit_code", -1, "seconds", seconds, "timed_out", true)
+		slog.Info("command re-run", "ticket_id", t.ID, "run_id", int64OrZero(rid), "command", kind, "exit_code", -1, "seconds", seconds, "timed_out", true)
 		return -1, true, nil
 	default:
 		return exit, false, runErr
@@ -670,11 +757,11 @@ func commandInfraEscalation(t store.Ticket, d Deps, err error) (store.HandlerCom
 // "claims ok" marker write). rid is the unit's newest ok run; report is
 // that run's own build_report row.
 func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, taskN int, rid int64, report store.BuildReportRow, firstCheck bool) (store.HandlerCommit, error) {
-	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, "test", proj.TestCmd)
+	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, &rid, "test", proj.TestCmd)
 	if err != nil {
 		return commandInfraEscalation(t, d, err)
 	}
-	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, "lint", proj.LintCmd)
+	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, &rid, "lint", proj.LintCmd)
 	if err != nil {
 		return commandInfraEscalation(t, d, err)
 	}
@@ -815,11 +902,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), unverifiableCommitWhat, unverifiableCommitWhy, check)
 	}
 
-	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, "test", proj.TestCmd)
+	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "test", proj.TestCmd)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: test command: %w", err)
 	}
-	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, "lint", proj.LintCmd)
+	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "lint", proj.LintCmd)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: lint command: %w", err)
 	}
