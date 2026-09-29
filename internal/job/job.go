@@ -59,10 +59,11 @@ type Deps struct {
 
 // ReserveFunc reserves the next run for ticketID under the caller's claim
 // and returns it (design section 4.4, 4.5): su creates or resumes a session,
-// model is the run's exact model id. It returns store.ErrClaimLost,
+// seed carries the run's exact model id and, for a build or perimeter task
+// unit, its task number. It returns store.ErrClaimLost,
 // unwrapped-but-wrappable, when the claim this call was reserved under has
 // already moved on.
-type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error)
+type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error)
 
 // The typed job-level errors (design section 4.4). runJob (runjob.go) wires
 // ErrBudget into its budget check and ErrConfig into the job/runtime/model
@@ -124,7 +125,7 @@ func Validate(m *machine.Machine, reg map[string]Handler) error {
 var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
 	statePlanning:  {statePlanning, stateBuilding, stateDone, stateAbandoned},
-	stateBuilding:  {stateReviewing},
+	stateBuilding:  {stateReviewing, stateAbandoned},
 	stateReviewing: {stateJudging},
 	stateJudging:   {stateShipping},
 	stateShipping:  {stateDone},
@@ -141,7 +142,7 @@ var legalWaiting = map[string]bool{
 // commit shape rules (design section 6.5): c.TicketID must name the ticket
 // it was built against, the commit must do something (it is never wholly
 // empty: at least one of Next, Waiting, Messages, Runs, ResolveQuestions,
-// Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or
+// Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or
 // TrackerEffect must be set), when Next is set it names a legal successor of
 // t.State and carries a non-empty Reason, and it does not also set a
 // non-error Waiting; any set Waiting is one of the eight closed-set flags.
@@ -151,9 +152,9 @@ func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 	}
 	if c.Next == "" && c.Waiting == nil && len(c.Messages) == 0 && len(c.Runs) == 0 &&
 		len(c.ResolveQuestions) == 0 && c.Session == nil &&
-		c.SetKind == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
+		c.SetKind == nil && c.SetBranch == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
 		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

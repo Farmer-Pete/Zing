@@ -54,6 +54,7 @@ const (
 
 	testMsgTypeEscalation = "escalation"
 	testOutcomeError      = "error"
+	testModelClaudeX      = "claude-x"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -177,8 +178,8 @@ func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, ex
 	return job.Deps{
 		Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t),
 		Models: testModels, Budget: testBudget, Owner: owner, Expires: expires,
-		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
 	}
 }
@@ -1616,7 +1617,7 @@ const testPlanPayload = `{
 type sealMismatchHandler struct{}
 
 func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -1725,7 +1726,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	if err != nil || !claimed {
 		t.Fatalf("seedGateReadyTicket: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("seedGateReadyTicket: reserve: %v", err)
 	}
@@ -1964,7 +1965,7 @@ func TestTick_ErrNoActionReleasesClaimWithoutStopping(t *testing.T) {
 type cancelingReserveHandler struct{}
 
 func (cancelingReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x"); err != nil {
+	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{}, runtime.ErrCanceled
@@ -2039,7 +2040,7 @@ func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
 type postRunFailureHandler struct{}
 
 func (postRunFailureHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -2141,7 +2142,7 @@ func (claimLostBeforeReserveHandler) Run(ctx context.Context, t store.Ticket, d 
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err == nil {
 		return store.HandlerCommit{}, errors.New("Reserve unexpectedly succeeded after the lease was stolen")
 	}

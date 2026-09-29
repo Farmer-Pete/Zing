@@ -50,6 +50,7 @@ const (
 	testKindBug       = "bug"
 	testKindFeature   = "feature"
 	testTicketTitle   = "Add a hello endpoint"
+	testModelClaudeX  = "claude-x"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -186,8 +187,8 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 	return job.Deps{
 		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
 		Owner: owner, Expires: expires,
-		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
 	}
 }

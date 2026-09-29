@@ -392,8 +392,8 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).
-		Reserve: func(reserveCtx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return d.store.Reserve(reserveCtx, ticketID, d.cfg.Owner, expires, su, model)
+		Reserve: func(reserveCtx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return d.store.Reserve(reserveCtx, ticketID, d.cfg.Owner, expires, su, seed)
 		},
 	}
 

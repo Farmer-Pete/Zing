@@ -159,6 +159,10 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 			if !validItemRef(payload, in.Item.Ref) {
 				return DraftResult{}, conflict("missing item")
 			}
+			if payload.Kind == response.QuestionKindPerimeter &&
+				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionReject {
+				return DraftResult{}, conflict("a perimeter item takes accept or reject")
+			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
 		default:
 			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)

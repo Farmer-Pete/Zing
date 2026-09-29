@@ -73,6 +73,10 @@ type HandlerCommit struct {
 	// NULL or already that same value; any other current value is a
 	// conflict.
 	SetKind *string
+	// SetBranch sets tickets.branch when it is currently NULL or already
+	// that same value; any other current value is a conflict. Applied after
+	// SetKind.
+	SetBranch *string
 	// Artifacts is inserted after Runs and SetKind: TicketID is forced to
 	// this commit's ticket, a non-nil RunID must belong to it, and
 	// Version == 0 becomes one past that (ticket, type)'s current maximum.
@@ -247,6 +251,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 
 	if c.SetKind != nil {
 		if err = setKindTx(ctx, tx, c.TicketID, *c.SetKind); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.SetBranch != nil {
+		if err = setBranchTx(ctx, tx, c.TicketID, *c.SetBranch); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -595,6 +605,42 @@ func setKindTx(ctx context.Context, tx *sql.Tx, ticketID int64, kind string) err
 		haveStr = have.String
 	}
 	return fmt.Errorf("kind conflict: have %s, want %s", haveStr, kind)
+}
+
+// setBranchTx sets tickets.branch to branch when it is currently NULL or
+// already that same value, mirroring setKindTx's same-to-same and conflict
+// handling (design section 4.2): UPDATE tickets SET branch=? WHERE id=? AND
+// (branch IS NULL OR branch=?); zero rows affected reads the live value to
+// tell a true conflict from a driver that reports zero rows on a no-op
+// write.
+func setBranchTx(ctx context.Context, tx *sql.Tx, ticketID int64, branch string) error {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tickets SET branch = ? WHERE id = ? AND (branch IS NULL OR branch = ?)`,
+		branch, ticketID, branch,
+	)
+	if err != nil {
+		return fmt.Errorf("set branch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set branch: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	var have sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT branch FROM tickets WHERE id = ?`, ticketID).Scan(&have); err != nil {
+		return fmt.Errorf("read branch for conflict: %w", err)
+	}
+	if have.Valid && have.String == branch {
+		return nil // same-to-same: the driver reported zero rows for a no-op write
+	}
+	haveStr := "null"
+	if have.Valid {
+		haveStr = have.String
+	}
+	return fmt.Errorf("branch conflict: have %s, want %s", haveStr, branch)
 }
 
 // insertArtifactTx is InsertArtifact (store.go), tx-scoped: it validates

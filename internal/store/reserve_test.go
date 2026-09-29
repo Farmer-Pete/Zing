@@ -27,7 +27,7 @@ func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 	owner, expires := reserveInput(t, s, ticketID)
 
-	first, err := s.Reserve(ctx, ticketID, owner, expires, SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	first, err := s.Reserve(ctx, ticketID, owner, expires, SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("first Reserve: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
 	}
 
 	second, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{ID: &first.SessionID}, "claude-x")
+		SessionUpsert{ID: &first.SessionID}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("second Reserve: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestReserve_WrongOwnerReturnsErrClaimLostAndWritesNothing(t *testing.T) {
 	_, expires := reserveInput(t, s, ticketID)
 
 	_, err := s.Reserve(ctx, ticketID, testOwnerOther, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if !errors.Is(err, ErrClaimLost) {
 		t.Fatalf("Reserve with the wrong owner: err = %v, want ErrClaimLost", err)
 	}
@@ -89,7 +89,7 @@ func TestReserve_WrongExpiryReturnsErrClaimLost(t *testing.T) {
 
 	staleExpires := expires.Add(-time.Minute)
 	_, err := s.Reserve(ctx, ticketID, owner, staleExpires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if !errors.Is(err, ErrClaimLost) {
 		t.Fatalf("Reserve with a stale expires: err = %v, want ErrClaimLost", err)
 	}
@@ -111,7 +111,7 @@ func TestReserve_NilSessionIDCreatesSessionWithNullExternalID(t *testing.T) {
 	owner, expires := reserveInput(t, s, ticketID)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestReserve_SessionIDForAnotherTicketErrors(t *testing.T) {
 
 	owner, expires := reserveInput(t, s, ticketB)
 
-	_, err := s.Reserve(ctx, ticketB, owner, expires, SessionUpsert{ID: &sessionOnA}, "claude-x")
+	_, err := s.Reserve(ctx, ticketB, owner, expires, SessionUpsert{ID: &sessionOnA}, RunSeed{Model: testModelClaudeX})
 	if err == nil {
 		t.Fatal("Reserve with another ticket's session id: want an error, got nil")
 	}
@@ -170,7 +170,7 @@ func TestReserve_InsertsRunWithNullOutcomeExitCodeAndSetModel(t *testing.T) {
 	owner, expires := reserveInput(t, s, ticketID)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-opus-4-8")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelOpus48})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -194,7 +194,168 @@ func TestReserve_InsertsRunWithNullOutcomeExitCodeAndSetModel(t *testing.T) {
 	if run.AgentSeconds != nil {
 		t.Errorf("run.AgentSeconds = %v, want nil", run.AgentSeconds)
 	}
-	if run.Model == nil || *run.Model != "claude-opus-4-8" {
+	if run.Model == nil || *run.Model != testModelOpus48 {
 		t.Errorf("run.Model = %v, want claude-opus-4-8", run.Model)
+	}
+}
+
+// sessionResumes reads sessions.resumes directly: the column Reserve now
+// writes through when su.ID != nil && su.BumpResumes (design section 4.2),
+// and CommitHandlerResult's upsertSessionTx still writes through for a
+// commit that reserved nothing.
+func sessionResumes(t *testing.T, s *Store, sessionID int64) int {
+	t.Helper()
+	var resumes int
+	if err := s.db.QueryRowContext(t.Context(), `SELECT resumes FROM sessions WHERE id = ?`, sessionID).Scan(&resumes); err != nil {
+		t.Fatalf("read resumes for session %d: %v", sessionID, err)
+	}
+	return resumes
+}
+
+// TestReserveWritesTaskN proves RunSeed.TaskN lands on the reserved run's
+// own task_n column (design section 4.2): nil for every job but a build or
+// perimeter task unit, and the exact task number when one is given.
+func TestReserveWritesTaskN(t *testing.T) {
+	s := newTestStore(t)
+
+	t.Run("nil for a non-build job", func(t *testing.T) {
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.TaskN != nil {
+			t.Errorf("run.TaskN = %v, want nil", run.TaskN)
+		}
+	})
+
+	t.Run("set for a build task unit", func(t *testing.T) {
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "2")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		n := 2
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX, TaskN: &n})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.TaskN == nil || *run.TaskN != 2 {
+			t.Errorf("run.TaskN = %v, want 2", run.TaskN)
+		}
+	})
+}
+
+// TestReserveChargesResume proves Reserve itself charges a resume (design
+// section 4.2): a first turn (su.ID nil) never bumps resumes, and a
+// reserved resume (su.ID set, BumpResumes true) raises it by exactly one.
+func TestReserveChargesResume(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+	if got := sessionResumes(t, s, first.SessionID); got != 0 {
+		t.Errorf("resumes after a first turn = %d, want 0", got)
+	}
+
+	if _, err = s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: true}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("resume Reserve: %v", err)
+	}
+	if got := sessionResumes(t, s, first.SessionID); got != 1 {
+		t.Errorf("resumes after a reserved resume = %d, want 1", got)
+	}
+}
+
+// TestInterruptedResumeStaysCharged proves the point of moving the charge
+// to Reserve (design section 4.2): once a resume is reserved, its charge
+// survives even when no terminalizing commit ever runs -- here simulated by
+// ExpireClaims's reconcile, the same path a crash or a shutdown takes
+// (design section 14).
+func TestInterruptedResumeStaysCharged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+	if _, err = s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: true}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("resume Reserve: %v", err)
+	}
+
+	if _, err := s.ExpireClaims(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+
+	if got := sessionResumes(t, s, first.SessionID); got != 1 {
+		t.Errorf("resumes after an interrupted resume = %d, want 1 (still charged)", got)
+	}
+}
+
+// TestCommittedResumeChargedOnce proves the charge lands exactly once when
+// the resume does complete and terminalize normally (design section 4.2):
+// Reserve charges it, and resumeSessionRecord no longer sets BumpResumes on
+// the terminalizing commit, so CommitHandlerResult does not charge it
+// again.
+func TestCommittedResumeChargedOnce(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+	resumed, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: true}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("resume Reserve: %v", err)
+	}
+
+	outcome := "ready"
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs:    []Run{{ID: resumed.RunID, Outcome: &outcome}},
+		Session: &SessionUpsert{ID: &first.SessionID}, // resumeSessionRecord's own shape: no BumpResumes
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	if got := sessionResumes(t, s, first.SessionID); got != 1 {
+		t.Errorf("resumes after reserve then commit = %d, want 1 (charged exactly once)", got)
 	}
 }

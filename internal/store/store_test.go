@@ -26,6 +26,9 @@ const (
 	testRefBGo         = "b.go"
 	testRuntimeFake    = "fake"
 	testExternalID1    = "ext-1"
+	testJobBuild       = "build"
+	testModelClaudeX   = "claude-x"
+	testModelOpus48    = "claude-opus-4-8"
 )
 
 var wantTables = []string{

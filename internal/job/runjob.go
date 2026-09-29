@@ -36,10 +36,12 @@ type runResult struct {
 // returned a run id, the call is logged ("runJob end") with that id
 // regardless of how rt.Run comes back, so a caller can always terminalize
 // it; the prompt and the raw output are never logged (design section 9,
-// 10).
+// 10). taskN becomes RunSeed.TaskN on the reserved run: &n for a build or
+// perimeter task unit, nil for every other job, including a fix unit.
+// Planning's four callers pass nil.
 func runJob(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
-	su store.SessionUpsert, req runtime.RunRequest,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int,
 ) (runResult, error) {
 	jobCfg, ok := d.Machine.Jobs[jobName]
 	if !ok {
@@ -78,7 +80,7 @@ func runJob(
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	rsv, err := d.Reserve(runCtx, t.ID, su, req.Model)
+	rsv, err := d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN})
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, err)
 	}

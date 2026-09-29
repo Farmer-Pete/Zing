@@ -144,7 +144,7 @@ func seedClaimedTicket(t *testing.T, st *store.Store) (ticketID int64, expires t
 func reserveRun(t *testing.T, st *store.Store, ticketID int64, expires time.Time, job string) int64 {
 	t.Helper()
 	rsv, err := st.Reserve(t.Context(), ticketID, scenariosTestOwner, expires,
-		store.SessionUpsert{Job: job, Runtime: "fake"}, "fake-model")
+		store.SessionUpsert{Job: job, Runtime: "fake"}, store.RunSeed{Model: "fake-model"})
 	if err != nil {
 		t.Fatalf("Reserve(%s): %v", job, err)
 	}

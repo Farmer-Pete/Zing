@@ -98,8 +98,8 @@ func claimWithRuntimes(t *testing.T, s *store.Store, rt runtime.Runtime, ticketI
 	return job.Deps{
 		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
 		Owner: owner, Expires: expires,
-		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return s.Reserve(ctx, tid, owner, expires, su, model)
+		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return s.Reserve(ctx, tid, owner, expires, su, seed)
 		},
 	}
 }
@@ -331,10 +331,11 @@ func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 // ---- resume: fenced answers, resumes bumped, round resolved ---------------
 
 // TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer
-// proves section 6.4: an answered round resumes the open session
-// (BumpResumes true, ResolveQuestions the round's question ids), and the
-// resumed prompt fences the owner's answer text behind the untrusted-input
-// markers (design D15, section 4.2).
+// proves section 6.4: an answered round resumes the open session (its
+// resumes total goes up by one, charged by Reserve at runJob time -- design
+// section 4.2, ResolveQuestions the round's question ids), and the resumed
+// prompt fences the owner's answer text behind the untrusted-input markers
+// (design D15, section 4.2).
 func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *testing.T) {
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
@@ -355,6 +356,11 @@ func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *t
 		t.Fatalf("AnswerQuestion: %+v, %v", answerRes, err)
 	}
 
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
 	// A recording wrapper around the same Fake so the session it minted for
 	// the first turn is the one the resume call reuses.
 	rec := &recordingRuntime{rt: rt}
@@ -363,8 +369,26 @@ func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *t
 	if err != nil {
 		t.Fatalf("planning resume Run: %v", err)
 	}
-	if commit.Session == nil || commit.Session.ID == nil || !commit.Session.BumpResumes {
-		t.Fatalf("commit.Session = %+v, want an existing session id with BumpResumes true", commit.Session)
+	// BumpResumes is charged by Reserve now, not by the terminal commit
+	// (design section 4.2), so the resume is proved by the commit's session
+	// id matching the already-open session, and by that session's resumes
+	// total having gone up by one in the store already (Reserve's own
+	// transaction, independent of whether this commit is ever applied).
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d", commit.Session, openSess.ID)
+	}
+	sessions, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	gotResumes := -1
+	for _, sess := range sessions {
+		if sess.ID == openSess.ID {
+			gotResumes = sess.Resumes
+		}
+	}
+	if gotResumes != 1 {
+		t.Errorf("session %d resumes = %d, want 1", openSess.ID, gotResumes)
 	}
 	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != open[0].ID {
 		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, open[0].ID)
@@ -1661,7 +1685,7 @@ func seedCohort(t *testing.T, s *store.Store, ticketID int64, plan response.Plan
 	if err != nil || !claimed {
 		t.Fatalf("seedCohort: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, "claude-x")
+	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("seedCohort: reserve: %v", err)
 	}
@@ -2336,7 +2360,7 @@ func claimWithBudget(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 	t.Helper()
 	deps := claimWithRuntimes(t, s, rt, ticketID)
 	deps.Budget = 0
-	deps.Reserve = func(context.Context, int64, store.SessionUpsert, string) (store.Reserved, error) {
+	deps.Reserve = func(context.Context, int64, store.SessionUpsert, store.RunSeed) (store.Reserved, error) {
 		t.Fatal("Reserve was called, want the exhausted budget to refuse the call first")
 		return store.Reserved{}, nil
 	}

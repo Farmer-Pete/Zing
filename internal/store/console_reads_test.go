@@ -577,7 +577,7 @@ func TestSessionsForTicket_OrderedByIDAndScoped(t *testing.T) {
 	_, ticketB := seedQueuedTicket(t, s, "2")
 
 	first := insertSession(t, s, ticketA, testStatePlanning)
-	second := insertSession(t, s, ticketA, "build")
+	second := insertSession(t, s, ticketA, testJobBuild)
 	insertSession(t, s, ticketB, testStatePlanning) // a different ticket; must not appear
 
 	got, err := s.SessionsForTicket(t.Context(), ticketA)
@@ -595,7 +595,7 @@ func TestRunsForTicket_OrderedByIDAndScoped(t *testing.T) {
 	_, ticketB := seedQueuedTicket(t, s, "2")
 
 	sessA1 := insertSession(t, s, ticketA, testStatePlanning)
-	sessA2 := insertSession(t, s, ticketA, "build")
+	sessA2 := insertSession(t, s, ticketA, testJobBuild)
 	sessB := insertSession(t, s, ticketB, testStatePlanning)
 
 	runA1 := insertQuestionRun(t, s, sessA1)

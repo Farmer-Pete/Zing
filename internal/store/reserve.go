@@ -23,6 +23,13 @@ type Reserved struct {
 	Turn             int
 }
 
+// RunSeed is what Reserve writes on the placeholder run row (design section
+// 4.2).
+type RunSeed struct {
+	Model string
+	TaskN *int // runs.task_n; nil for every job except build and perimeter task units
+}
+
 // Reserve is the one pre-commit write a handler may make under its claim
 // (design D13, section 4.5). One transaction: (1) fence on the exact lease
 // the caller holds -- no row means the lease has already moved on, and
@@ -30,12 +37,18 @@ type Reserved struct {
 // a new session with external_id NULL (SessionUpsert fills it in on a later
 // commit, once the runtime call returns one); a non-nil su.ID must already
 // belong to ticketID, checked with the same verifySessionForTicket
-// CommitHandlerResult's resume path uses; (3) the session's next turn, one
-// past its highest so far, or 0 for a session with none yet; (4) a run row
-// for that turn with outcome, exit_code, and agent_seconds all NULL, the
-// placeholder a later CommitHandlerResult, or ExpireClaims's reconcile on a
-// crash or a shutdown, terminalizes.
-func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expires time.Time, su SessionUpsert, model string) (Reserved, error) {
+// CommitHandlerResult's resume path uses; (3) a resume is charged here, when
+// su.ID != nil and su.BumpResumes: UPDATE sessions SET resumes = resumes + 1
+// WHERE id = ?, so a resume that is later interrupted still costs its
+// charge (design section 4.2). resumeSessionRecord no longer sets
+// BumpResumes on the terminalizing commit, so the charge lands exactly
+// once; CommitHandlerResult keeps honoring the flag for a commit that
+// reserved nothing. (4) the session's next turn, one past its highest so
+// far, or 0 for a session with none yet; (5) a run row for that turn with
+// outcome, exit_code, and agent_seconds all NULL, the placeholder a later
+// CommitHandlerResult, or ExpireClaims's reconcile on a crash or a
+// shutdown, terminalizes.
+func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expires time.Time, su SessionUpsert, seed RunSeed) (Reserved, error) {
 	expires = truncateExpires(expires)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -61,6 +74,11 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 			return Reserved{}, fmt.Errorf("reserve: %w", err)
 		}
 		sessionID = *su.ID
+		if su.BumpResumes {
+			if _, err = tx.ExecContext(ctx, `UPDATE sessions SET resumes = resumes + 1 WHERE id = ?`, sessionID); err != nil {
+				return Reserved{}, fmt.Errorf("reserve: bump session resumes: %w", err)
+			}
+		}
 	} else {
 		var sessRes sql.Result
 		sessRes, err = tx.ExecContext(ctx,
@@ -84,8 +102,8 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 
 	var runRes sql.Result
 	runRes, err = tx.ExecContext(ctx,
-		`INSERT INTO runs (session_id, turn, model, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, NULL, NULL, NULL)`,
-		sessionID, turn, model)
+		`INSERT INTO runs (session_id, turn, model, task_n, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
+		sessionID, turn, seed.Model, seed.TaskN)
 	if err != nil {
 		return Reserved{}, fmt.Errorf("reserve: insert run: %w", err)
 	}

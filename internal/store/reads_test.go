@@ -305,7 +305,7 @@ func TestOpenSession_ReturnsNewestForTicketAndJob(t *testing.T) {
 
 	insertSession(t, s, ticketID, testStatePlanning)
 	newest := insertSession(t, s, ticketID, testStatePlanning)
-	insertSession(t, s, ticketID, "build") // a different job; must not be returned
+	insertSession(t, s, ticketID, testJobBuild) // a different job; must not be returned
 
 	got, ok, err := s.OpenSession(ctx, ticketID, testStatePlanning)
 	if err != nil {

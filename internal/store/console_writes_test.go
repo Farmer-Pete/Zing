@@ -147,7 +147,9 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
-	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindPerimeter, nil, items)
+	// review, not perimeter: this test exercises drop, which a perimeter
+	// item no longer accepts (design section 4.2).
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
 
 	res1, err := s.SaveDraft(t.Context(), DraftInput{
 		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept},
@@ -191,6 +193,47 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 	got = draftPayloadOf(t, s, res1.MessageID)
 	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionDrop || got.Items[testRefBGo] != response.DecisionReject {
 		t.Fatalf("items after replace one = %v, want {a.go: drop, b.go: reject}", got.Items)
+	}
+}
+
+// TestSaveDraftPerimeterDecision proves the section 4.2 rule: a perimeter
+// item takes accept or reject; accept and reject save, drop and discuss
+// return the conflict "a perimeter item takes accept or reject".
+func TestSaveDraftPerimeterDecision(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
+
+	tests := []struct {
+		name     string
+		key      string
+		decision response.Decision
+		wantErr  string
+	}{
+		{"accept saves", "Q1", response.DecisionAccept, ""},
+		{"reject saves", "Q2", response.DecisionReject, ""},
+		{"drop is refused", "Q3", response.DecisionDrop, "a perimeter item takes accept or reject"},
+		{"discuss is refused", "Q4", response.DecisionDiscuss, "a perimeter item takes accept or reject"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindPerimeter, nil, items)
+			_, err := s.SaveDraft(t.Context(), DraftInput{
+				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SaveDraft(decision=%s): %v, want nil", tc.decision, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("SaveDraft(decision=%s): err = nil, want a ConflictError", tc.decision)
+			}
+			if got := conflictReason(t, err); got != tc.wantErr {
+				t.Errorf("conflict reason = %q, want %q", got, tc.wantErr)
+			}
+		})
 	}
 }
 

@@ -296,7 +296,7 @@ func seedRun(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 
 	reserved, err := s.Reserve(t.Context(), ticketID, owner, expires,
-		store.SessionUpsert{Job: testPlanningLiteral, Runtime: testRuntimeFake}, "test-model")
+		store.SessionUpsert{Job: testPlanningLiteral, Runtime: testRuntimeFake}, store.RunSeed{Model: "test-model"})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}

@@ -260,7 +260,7 @@ func seedDemoRun(ctx context.Context, s *store.Store, ticketID int64) (int64, er
 	}
 
 	reserved, err := s.Reserve(ctx, ticketID, demoRunOwner, expires,
-		store.SessionUpsert{Job: "planning", Runtime: "fake"}, demoRunModel)
+		store.SessionUpsert{Job: "planning", Runtime: "fake"}, store.RunSeed{Model: demoRunModel})
 	if err != nil {
 		return 0, fmt.Errorf("reserve run: %w", err)
 	}

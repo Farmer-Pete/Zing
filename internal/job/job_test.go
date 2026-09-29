@@ -186,6 +186,20 @@ func TestValidateCommit_AcceptsACommitCarryingOnlyANewPlanningField(t *testing.T
 	}
 }
 
+// TestValidateCommitCountsSetBranch proves the emptiness check (design
+// section 4.2) grew to cover SetBranch too: a commit that sets only
+// SetBranch is not the wholly empty case ValidateCommit rejects.
+func TestValidateCommitCountsSetBranch(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	branch := "zing/1"
+
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetBranch: &branch}); err != nil {
+		t.Errorf("ValidateCommit(SetBranch only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 
@@ -228,6 +242,21 @@ func TestValidateCommit_AcceptsPlanningToDone(t *testing.T) {
 	commit := store.HandlerCommit{Next: testStateDone, Reason: "nothing to do"}
 	if err := job.ValidateCommit(ticket, commit); err != nil {
 		t.Errorf("ValidateCommit(planning -> done): %v, want nil", err)
+	}
+}
+
+// TestValidateCommit_AcceptsBuildingToAbandoned proves the legal-edge table
+// grew a second building edge (design section 4.2, task 4): a building
+// escalation's abandon choice may transition building straight to
+// abandoned, alongside the existing building -> reviewing edge a landed
+// unit uses.
+func TestValidateCommit_AcceptsBuildingToAbandoned(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{State: testStateBuilding}
+	commit := store.HandlerCommit{Next: testStateAbandoned, Reason: "owner abandoned the build"}
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(building -> abandoned): %v, want nil", err)
 	}
 }
 

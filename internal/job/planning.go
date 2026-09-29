@@ -362,7 +362,7 @@ func runClassify(ctx context.Context, t store.Ticket, d Deps, extra []prompt.Nam
 	return runAndRoute(ctx, d, t, jobClassifyName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginClassify,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return classifySuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs)
-		})
+		}, nil)
 }
 
 // classifySuccessCommit routes a classify run's parsed response (design
@@ -439,7 +439,7 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	return runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst)
-		})
+		}, nil)
 }
 
 // runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
@@ -470,7 +470,7 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume)
-		})
+		}, nil)
 }
 
 // planningSuccessCommit routes a planning run's parsed response (design
@@ -984,7 +984,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
-		})
+		}, nil)
 }
 
 // planReviewSuccessCommit routes a planreview run's parsed response (design
@@ -1541,14 +1541,18 @@ func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int6
 // returns every pre-reserve case unchanged, and an unrecognized pre-reserve
 // error does too), this returns the plain error unchanged, so the
 // dispatcher's own releaseClaim path still runs and clears the claim.
+// taskN is threaded straight through to runJob, and from there into
+// RunSeed.TaskN: &n for a build or perimeter task unit, nil otherwise.
+// Planning's four callers pass nil.
 func runAndRoute(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
 	su store.SessionUpsert, req runtime.RunRequest, priorInvalid int,
 	sessionRecord func(runResult) *store.SessionUpsert,
 	resolveIDs []int64, origin response.EscalationOrigin,
 	success func(rr runResult) (store.HandlerCommit, error),
+	taskN *int, //nolint:unparam // planning's four callers pass nil; the building handler (task 9) passes &n
 ) (store.HandlerCommit, error) {
-	rr, runErr := runJob(ctx, d, t, jobName, su, req)
+	rr, runErr := runJob(ctx, d, t, jobName, su, req, taskN)
 	sessionCommit := sessionRecord(rr)
 
 	if runErr != nil {
@@ -1692,13 +1696,14 @@ func freshSessionRecord(rr runResult) *store.SessionUpsert {
 }
 
 // resumeSessionRecord is the Session field a resume's terminalizing commit
-// always carries (design section 6.4): BumpResumes is set whether or not
-// this attempt succeeded, since a resume attempt is spent either way;
+// always carries (design section 4.2, 6.4): BumpResumes is no longer set
+// here -- Reserve already charged this resume when it reserved the run, so
+// setting it again at the terminalizing commit would charge it twice;
 // ExternalID is filled in only when the runtime returned one (it is already
 // set on an ordinary resume, and upsertSessionTx's own "WHERE external_id IS
 // NULL" guard makes re-sending it a no-op).
 func resumeSessionRecord(sessionID int64, rr runResult) *store.SessionUpsert {
-	su := &store.SessionUpsert{ID: &sessionID, BumpResumes: true}
+	su := &store.SessionUpsert{ID: &sessionID}
 	if rr.Res.SessionID != "" {
 		ext := rr.Res.SessionID
 		su.ExternalID = &ext

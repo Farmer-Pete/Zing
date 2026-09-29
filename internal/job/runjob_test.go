@@ -119,8 +119,8 @@ func claimRunJobTicket(t *testing.T, s *store.Store, ticketID int64) (owner stri
 // wires into Deps.Reserve: store.Reserve fenced on the caller's own
 // (owner, expires).
 func realReserve(s *store.Store, owner string, expires time.Time) ReserveFunc {
-	return func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-		return s.Reserve(ctx, ticketID, owner, expires, su, model)
+	return func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+		return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 	}
 }
 
@@ -133,7 +133,7 @@ func seedAgentSeconds(t *testing.T, s *store.Store, ticketID int64, seconds int)
 	ctx := t.Context()
 	owner, expires := claimRunJobTicket(t, s, ticketID)
 
-	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, "claude-x")
+	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, store.RunSeed{Model: "claude-x"})
 	if err != nil {
 		t.Fatalf("seedAgentSeconds: Reserve: %v", err)
 	}
@@ -158,12 +158,12 @@ type recordingReserve struct {
 	calls int
 }
 
-func (r *recordingReserve) Reserve(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
+func (r *recordingReserve) Reserve(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 	r.calls++
 	if r.fn == nil {
 		return store.Reserved{}, errors.New("recordingReserve: unexpectedly called with no ReserveFunc wired")
 	}
-	return r.fn(ctx, ticketID, su, model)
+	return r.fn(ctx, ticketID, su, seed)
 }
 
 // countingRuntime wraps a runtime.Runtime, counts every Run call, and
@@ -205,7 +205,7 @@ func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{})
+	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{}, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -236,7 +236,7 @@ func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify})
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -265,7 +265,7 @@ func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify})
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -298,7 +298,7 @@ func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
 		Budget: 10 * time.Second, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify})
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
 	if !errors.Is(err, ErrBudget) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrBudget)", err)
 	}
@@ -343,7 +343,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify})
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil)
 	if !errors.Is(err, store.ErrClaimLost) {
 		t.Fatalf("err = %v, want errors.Is(err, store.ErrClaimLost)", err)
 	}
@@ -374,7 +374,7 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 
 	before := time.Now()
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify})
+		runtime.RunRequest{Job: response.JobClassify}, nil)
 	after := time.Now()
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
@@ -417,5 +417,42 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 
 	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeBug {
 		t.Errorf("Res.Response outcome = %v, want %v (the Fake's scripted bug turn)", rr.Res.Response, response.OutcomeBug)
+	}
+}
+
+// TestRunJobSeedsTaskN proves runJob copies its own taskN parameter into
+// RunSeed.TaskN (design section 6.3): a non-nil taskN lands on the reserved
+// run's own task_n column, and a nil one (planning's own four callers)
+// leaves it NULL.
+func TestRunJobSeedsTaskN(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	fake := runtime.NewFake(scripts)
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+	}
+
+	n := 3
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, &n)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	run, ok, err := s.FirstRun(t.Context(), rr.Reserved.SessionID)
+	if err != nil || !ok {
+		t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+	}
+	if run.TaskN == nil || *run.TaskN != 3 {
+		t.Errorf("run.TaskN = %v, want 3", run.TaskN)
 	}
 }

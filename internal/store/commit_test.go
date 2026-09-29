@@ -1211,7 +1211,7 @@ func TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched(t *te
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-opus-4-8")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelOpus48})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -1237,7 +1237,7 @@ func TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched(t *te
 	if outcome != testOutcomeBug || exitCode != 0 || agentSeconds != 5 {
 		t.Errorf("run = (outcome %s, exit %d, seconds %d), want (bug, 0, 5)", outcome, exitCode, agentSeconds)
 	}
-	if model != "claude-opus-4-8" {
+	if model != testModelOpus48 {
 		t.Errorf("run.model = %q, want unchanged claude-opus-4-8 (Reserve set it; an update must never touch it)", model)
 	}
 }
@@ -1256,7 +1256,7 @@ func TestCommitHandlerResult_RunUpdateRejectsRunFromAnotherTicketsSession(t *tes
 
 	ownerA, expiresA := claimForCommit(t, s, ticketA)
 	reserved, err := s.Reserve(ctx, ticketA, ownerA, expiresA,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -1296,7 +1296,7 @@ func TestCommitHandlerResult_AttachRunToMsgsAttachesUpdatedRunID(t *testing.T) {
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -1370,7 +1370,7 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero(t *testing.T
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -1410,7 +1410,7 @@ func TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID(t *testing.T) {
 	priorRunID := insertQuestionRun(t, s, priorSess)
 
 	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
-		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -1599,6 +1599,110 @@ func TestCommitHandlerResult_SetKindRejectsUnknownValueBeforeSQL(t *testing.T) {
 	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
 		t.Errorf("messages after a rejected commit = %d, want 0 (rolled back)", n)
 	}
+}
+
+// --- CommitHandlerResult: SetBranch -----------------------------------------
+
+// TestCommitSetBranch proves SetBranch mirrors SetKind exactly (design
+// section 4.2): NULL to a branch succeeds, that same branch again succeeds
+// (same-to-same, whether or not the driver reports it as zero rows
+// affected), and a different branch is a conflict naming both values.
+func TestCommitSetBranch(t *testing.T) {
+	const zingBranch1, zingBranch2 = "zing/1", "zing/2"
+
+	t.Run("null to a branch succeeds", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			SetBranch: new(zingBranch1),
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Branch == nil || *got.Branch != zingBranch1 {
+			t.Errorf("ticket.Branch = %v, want zing/1", got.Branch)
+		}
+	})
+
+	t.Run("same value succeeds", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+
+		owner1, expires1 := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner1, Expires: expires1, SetBranch: new(zingBranch1),
+		}); err != nil {
+			t.Fatalf("seed SetBranch(zing/1): %v", err)
+		}
+
+		owner2, expires2 := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner2, Expires: expires2, SetBranch: new(zingBranch1),
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult(zing/1 -> zing/1): %v, want nil", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Branch == nil || *got.Branch != zingBranch1 {
+			t.Errorf("ticket.Branch = %v, want unchanged zing/1", got.Branch)
+		}
+	})
+
+	t.Run("a different value conflicts", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+
+		owner1, expires1 := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner1, Expires: expires1, SetBranch: new(zingBranch1),
+		}); err != nil {
+			t.Fatalf("seed SetBranch(zing/1): %v", err)
+		}
+
+		owner2, expires2 := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner2, Expires: expires2, SetBranch: new(zingBranch2),
+		})
+		wantErr := "branch conflict: have zing/1, want zing/2"
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("err = %v, want containing %q", err, wantErr)
+		}
+		if applied {
+			t.Error("applied = true, want false")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Branch == nil || *got.Branch != zingBranch1 {
+			t.Errorf("ticket.Branch after a rejected conflicting SetBranch = %v, want unchanged zing/1", got.Branch)
+		}
+	})
 }
 
 // --- CommitHandlerResult: Artifacts -----------------------------------------
