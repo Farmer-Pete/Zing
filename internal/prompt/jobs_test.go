@@ -186,3 +186,130 @@ func TestInjection_PlanningResumeValidationArrivesFenced(t *testing.T) {
 
 	assertFenced(t, got, "validation", errMsg)
 }
+
+// buildJobPrompt is a minimal build-shaped job prompt carrying the five
+// placeholders ForBuild must fill (plan section 9.1, section 12.1),
+// standing in for prompts/build.md so these tests do not depend on its
+// exact prose.
+const buildJobPrompt = "Task {n} of {total}: {task title}\n\n" +
+	"Project commands: test `{test_cmd}`, lint `{lint_cmd}`."
+
+func testBuildTask() BuildTask {
+	return BuildTask{N: 1, Total: 3, Title: "Add the ping handler", Text: "Add a ping handler.", Test: "TestPing"}
+}
+
+// TestForBuildMissingPlaceholder pins the fixed error a job prompt
+// missing one of the five placeholders returns (plan section 9.1): here
+// the prompt lacks {lint_cmd}.
+func TestForBuildMissingPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	jobPrompt := "Task {n} of {total}: {task title}\n\nProject commands: test `{test_cmd}`."
+	_, err := ForBuild(jobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	if err == nil {
+		t.Fatal("ForBuild returned no error for a prompt missing {lint_cmd}")
+	}
+	want := "prompt: build prompt lacks placeholder {lint_cmd}"
+	if err.Error() != want {
+		t.Errorf("ForBuild error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestForBuildPlanIsRaw pins the plan row of the fencing table: the
+// stored plan XML arrives raw, never fenced.
+func TestForBuildPlanIsRaw(t *testing.T) {
+	t.Parallel()
+
+	planXML := "<plan><objective>Add a ping handler.</objective></plan>"
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", planXML, nil, nil)
+	if err != nil {
+		t.Fatalf("ForBuild: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertRaw(t, got, "plan", planXML)
+}
+
+// TestForBuildTicketIsFenced pins the ticket row of the fencing table.
+func TestForBuildTicketIsFenced(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	if err != nil {
+		t.Fatalf("ForBuild: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "ticket", "ticket body")
+}
+
+// TestForBuildOmitsEmptyAccepted pins "omitted when none": no accepted
+// paths means no "accepted:" block at all, not an empty one.
+func TestForBuildOmitsEmptyAccepted(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	if err != nil {
+		t.Fatalf("ForBuild: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if strings.Contains(got, "accepted:") {
+		t.Errorf("ForBuild with no accepted paths still rendered an accepted block:\n%s", got)
+	}
+}
+
+// TestForFixReplacesTaskLine pins the fix line substitution: "Task {n} of
+// {total}: {task title}" becomes "Fix run: <commit subject>".
+func TestForFixReplacesTaskLine(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForFix(buildJobPrompt, "Fix review findings", "findings", "finding text",
+		"go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	if err != nil {
+		t.Fatalf("ForFix: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if !strings.Contains(got, "Fix run: Fix review findings") {
+		t.Errorf("ForFix did not replace the task line with the fix subject:\n%s", got)
+	}
+	if strings.Contains(got, "Task {n} of {total}") || strings.Contains(got, "{task title}") {
+		t.Errorf("ForFix left the build task line in place:\n%s", got)
+	}
+}
+
+// TestForFixTextIsFenced pins the fix input row: the fix text arrives
+// fenced under its kind's label, in place of the raw task input.
+func TestForFixTextIsFenced(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForFix(buildJobPrompt, "Fix review findings", "findings", "finding text",
+		"go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	if err != nil {
+		t.Fatalf("ForFix: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "findings", "finding text")
+}
+
+// TestForPerimeterFencesPathAndHunk pins the perimeter job's Input: both
+// the path and the hunk arrive fenced.
+func TestForPerimeterFencesPathAndHunk(t *testing.T) {
+	t.Parallel()
+
+	path := "internal/foo/bar.go"
+	hunk := "@@ -1,2 +1,3 @@\n+added line"
+	in := ForPerimeter("PROMPT", path, hunk, nil)
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "path", path)
+	assertFenced(t, got, "hunk", hunk)
+}

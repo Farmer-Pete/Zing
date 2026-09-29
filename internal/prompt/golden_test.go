@@ -135,6 +135,78 @@ func goldenCases() []goldenCase {
 				return in
 			},
 		},
+		{
+			name: "build-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/build.md")
+				task := BuildTask{
+					N: 1, Total: 3,
+					Title: "Add the ping handler",
+					Text:  "Add a GET /ping handler that returns 200 and the body \"pong\".",
+					Test:  "TestPingHandlerReturnsPong",
+				}
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
+				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
+				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
+				if err != nil {
+					t.Fatalf("ForBuild: %v", err)
+				}
+				in.Schemas = schemasFor(t, response.JobBuild,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one answer, one claims block, and one invalid
+			// reason (plan section 6.3's resume inputs table).
+			name: "build-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForBuildResume([]NamedInput{
+					Answer("Q1 Which status code on a degraded dependency? -> a (503): keep it simple."),
+					{Label: "claims", Text: "internal/health/ping.go: declared but not written", Untrusted: true},
+					Invalid("output was not one <zing> document"),
+				})
+				in.Schemas = schemasFor(t, response.JobBuild,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			name: "build-fix",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/build.md")
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
+				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				findings := "problem: internal/health/ping.go returns 500 on success."
+				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
+					"go test ./...", "make lint", ticket, plan, nil, nil)
+				if err != nil {
+					t.Fatalf("ForFix: %v", err)
+				}
+				in.Schemas = schemasFor(t, response.JobBuild,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			name: "perimeter",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/perimeter.md")
+				path := "internal/health/status.go"
+				hunk := "@@ -0,0 +1,3 @@\n+package health\n+\n+const statusOK = \"ok\"\n"
+				in := ForPerimeter(jobPrompt, path, hunk, nil)
+				in.Schemas = schemasFor(t, response.JobPerimeter,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
 	}
 }
 
