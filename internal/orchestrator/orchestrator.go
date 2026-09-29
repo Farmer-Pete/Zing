@@ -24,6 +24,15 @@ type Project struct {
 	Repo          string // "Zing"; non-empty
 	LocalPath     string // absolute path to the main checkout; must be absolute
 	DefaultBranch string // "main"; non-empty
+	// BuildWritableRoots names every path a sandboxed build run can write
+	// outside the worktree itself (PKG8-PLAN.md section 15, task 8): the
+	// sandbox cache root and the login's mds cache folder. Each entry must
+	// be absolute; checkSigningPrograms' own disallowed-roots list
+	// (worktree.go) always includes these alongside o.proj.LocalPath and
+	// the Claude Code transcripts folder, so a git signing program that
+	// resolves into a build's own writable cache is refused exactly like
+	// one resolving into the worktree.
+	BuildWritableRoots []string
 }
 
 // Runner runs an external command in a working directory. Run returns
@@ -236,6 +245,11 @@ func validateProject(proj Project) error {
 		return errors.New("orchestrator: project default branch must not be empty")
 	case !filepath.IsAbs(proj.LocalPath):
 		return fmt.Errorf("orchestrator: project local path must be absolute: %q", proj.LocalPath)
+	}
+	for _, root := range proj.BuildWritableRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("orchestrator: project build writable root must be absolute: %q", root)
+		}
 	}
 	return nil
 }

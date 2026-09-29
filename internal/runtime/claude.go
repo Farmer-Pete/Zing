@@ -261,6 +261,40 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.WaitDelay = 5 * time.Second
 }
 
+// killProcessGroup sends SIGKILL to cmd's whole process group, once Wait has
+// already returned, on every path -- success and failure alike (design
+// section 5.5): configureProcessGroup's own cmd.Cancel only reaches the
+// group on ctx cancellation, so a descendant the CLI forked (a build task's
+// own shell, say) that outlives a clean exit would otherwise survive Run
+// returning. ESRCH (no such process: the group is already gone) is not
+// logged; any other failure to signal it is, since it means a descendant may
+// still be running past the point Run's caller believes the run is over.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Warn("kill process group", "pid", cmd.Process.Pid, "error", err)
+	}
+}
+
+// commandNameArgs resolves the name and args exec.CommandContext should
+// start (design section 4.4): with no ExecPrefix, the resolved binary and
+// argv unchanged; with one, ExecPrefix[0] as name and ExecPrefix[1:] plus
+// the resolved binary plus argv as args, so the sandbox's own
+// "sandbox-exec -D ... -p <profile>" prefix wraps the real claude
+// invocation without argv itself ever changing shape.
+func (c Claude) commandNameArgs(req RunRequest, argv []string) (name string, args []string) {
+	if len(req.ExecPrefix) == 0 {
+		return c.resolveBin(), argv
+	}
+	args = make([]string, 0, len(req.ExecPrefix)-1+1+len(argv))
+	args = append(args, req.ExecPrefix[1:]...)
+	args = append(args, c.resolveBin())
+	args = append(args, argv...)
+	return req.ExecPrefix[0], args
+}
+
 // classifyProcessOutcome applies the shared priority order both runtimes use
 // once a process has exited (design section 4.1): ctx.Err() explains the
 // exit before anything else, because after a kill a process's own exit
@@ -333,7 +367,8 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 // wait for it, and classify however it ended (design section 4.1). It
 // never logs; Run does that once, for every path, after this returns.
 func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID string, start time.Time) (RunResult, error) {
-	cmd := exec.CommandContext(ctx, c.resolveBin(), argv...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, never from raw external input
+	name, args := c.commandNameArgs(req, argv)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
 	cmd.Env = agentEnv(req)
 	cmd.Stdin = strings.NewReader(req.Prompt)
@@ -351,6 +386,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	}
 
 	waitErr := cmd.Wait()
+	killProcessGroup(cmd)
 
 	res := RunResult{
 		AgentTime:    time.Since(start),

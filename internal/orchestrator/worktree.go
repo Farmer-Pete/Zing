@@ -558,17 +558,20 @@ func (o *Orchestrator) gitConfigGet(ctx context.Context, dir, key string) (value
 }
 
 // signingProgramDisallowedRoots returns the absolute roots a git signing
-// program must not resolve inside (PKG8-PLAN.md section 7.2, this task's
-// slice of it): every worktree Zing can write, under o.proj.LocalPath, and
-// the owner's Claude Code project transcripts, which a build run's own
-// session can write. A later task adds the sandbox cache root and the mds
-// folder to this list.
+// program must not resolve inside (PKG8-PLAN.md section 7.2, 15): every
+// worktree Zing can write, under o.proj.LocalPath, the owner's Claude Code
+// project transcripts, which a build run's own session can write, and (task
+// 8) every one of o.proj.BuildWritableRoots -- the sandbox cache root and
+// the mds folder, the two locations a sandboxed build run can also write.
 func (o *Orchestrator) signingProgramDisallowedRoots() ([]string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: resolve home directory: %w", err)
 	}
-	return []string{o.proj.LocalPath, filepath.Join(home, ".claude", "projects")}, nil
+	roots := make([]string, 0, 2+len(o.proj.BuildWritableRoots))
+	roots = append(roots, o.proj.LocalPath, filepath.Join(home, ".claude", "projects"))
+	roots = append(roots, o.proj.BuildWritableRoots...)
+	return roots, nil
 }
 
 // validateSigningProgramValue checks value, the config value read for key,

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -176,7 +177,7 @@ func TestNew(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: unexpected error: %v", err)
 		}
-		if o.proj != valid {
+		if !reflect.DeepEqual(o.proj, valid) {
 			t.Errorf("proj = %+v, want %+v", o.proj, valid)
 		}
 	})
@@ -1452,6 +1453,47 @@ func TestSigningProgramCheck(t *testing.T) {
 			t.Fatal("EnsureWorktree: expected an error for a program inside HOME/.claude/projects, got nil")
 		}
 	})
+}
+
+// TestSigningCheckCoversBuildWritableRoots proves checkSigningPrograms
+// refuses a signing program inside any of Project.BuildWritableRoots (task
+// 8): the sandbox cache root and the mds folder, the two locations a
+// sandboxed build run can also write (design section 15), on top of
+// LocalPath and the Claude Code transcripts folder it already covered.
+func TestSigningCheckCoversBuildWritableRoots(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+
+	writableRoot := t.TempDir()
+	programPath := filepath.Join(writableRoot, "signer")
+	writeTestFile(t, programPath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(programPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", programPath, err)
+	}
+	runGit(ctx, t, repo, "config", gpgProgramKey, programPath)
+
+	log := slog.New(slog.DiscardHandler)
+	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: mainBranch, BuildWritableRoots: []string{writableRoot}}
+	o, err := New(proj, fakeGitHub{}, execRunner{}, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := o.EnsureWorktree(ctx, 304, "build-writable-root"); err == nil {
+		t.Fatal("EnsureWorktree: expected an error for a program inside a BuildWritableRoots entry, got nil")
+	}
+}
+
+// TestNewRejectsRelativeWritableRoot proves New validates every
+// BuildWritableRoots entry is absolute, the same rule it already applies to
+// LocalPath (task 8).
+func TestNewRejectsRelativeWritableRoot(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: mainBranch, BuildWritableRoots: []string{"relative/cache"}}
+
+	if _, err := New(proj, fakeGitHub{}, execRunner{}, log); err == nil {
+		t.Fatal("New with a relative BuildWritableRoots entry: want an error, got nil")
+	}
 }
 
 // -----------------------------------------------------------------------

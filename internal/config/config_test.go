@@ -241,6 +241,66 @@ func TestLoad_AllowedHostsParsesAndDefaultsEmpty(t *testing.T) {
 	}
 }
 
+// TestSandboxReadPaths proves the sandbox.read_paths key (design section
+// 5.4): absent defaults empty, a valid absolute path list round-trips, and
+// a relative or quote-carrying entry is rejected with the exact error text.
+func TestSandboxReadPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Sandbox.ReadPaths) != 0 {
+			t.Errorf("Sandbox.ReadPaths = %v, want empty by default", cfg.Sandbox.ReadPaths)
+		}
+	})
+
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		const body = minimalValidTOML + "\n[sandbox]\nread_paths = [\"/opt/homebrew/bin\", \"/Users/peter/.local/share/mise\"]\n"
+		cfg, err := Load(writeTOML(t, body))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := []string{"/opt/homebrew/bin", "/Users/peter/.local/share/mise"}
+		if !reflect.DeepEqual(cfg.Sandbox.ReadPaths, want) {
+			t.Errorf("Sandbox.ReadPaths = %v, want %v", cfg.Sandbox.ReadPaths, want)
+		}
+	})
+
+	t.Run("relative", func(t *testing.T) {
+		t.Parallel()
+		const body = minimalValidTOML + "\n[sandbox]\nread_paths = [\"relative/path\"]\n"
+		_, err := Load(writeTOML(t, body))
+		if err == nil {
+			t.Fatal("Load with a relative read_paths entry: want an error, got nil")
+		}
+		want := "zing.toml: sandbox.read_paths[0] must be an absolute path without quotes or backslashes"
+		if err.Error() != want {
+			t.Errorf("Load() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("quoted", func(t *testing.T) {
+		t.Parallel()
+		const body = minimalValidTOML + `
+[sandbox]
+read_paths = ["/opt/bad\"path"]
+`
+		_, err := Load(writeTOML(t, body))
+		if err == nil {
+			t.Fatal("Load with a quote-carrying read_paths entry: want an error, got nil")
+		}
+		want := "zing.toml: sandbox.read_paths[0] must be an absolute path without quotes or backslashes"
+		if err.Error() != want {
+			t.Errorf("Load() = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 func TestLoad_IntakeAssignedToDefaultsWhenExplicitlyEmpty(t *testing.T) {
 	t.Parallel()
 

@@ -544,6 +544,64 @@ func TestClaude_StderrMetadata(t *testing.T) {
 	}
 }
 
+// ---- ExecPrefix and process-group cleanup (design section 4.4, 5.5) -------
+
+// TestClaudeArgvWithExecPrefix proves commandNameArgs' own contract: name =
+// ExecPrefix[0], args = ExecPrefix[1:] + resolveBin() + argv. "env
+// PREFIX_MARKER=1 <fake_claude.sh> <argv...>" is a real prefix a sandbox
+// could plausibly build, using only a POSIX-standard binary: env sets
+// PREFIX_MARKER in the child's own environment before exec'ing the fake
+// script with the rest of ExecPrefix's contract intact -- the fake script
+// still records the normal argv unchanged.
+func TestClaudeArgvWithExecPrefix(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	req.ExecPrefix = []string{"env", "PREFIX_MARKER=1"}
+	c := NewClaude(fakeClaudeScript)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	want := wantArgv("--session-id", res.SessionID)
+	if !slices.Equal(argv, want) {
+		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
+	}
+
+	env := readRecordedEnv(t, dir)
+	if v, ok := env["PREFIX_MARKER"]; !ok || v != "1" {
+		t.Errorf("PREFIX_MARKER = %q, ok=%v, want \"1\" (proves env ran ahead of the fake script)", v, ok)
+	}
+}
+
+// TestClaudeKillsGroupAfterExit proves Run kills the whole process group
+// after Wait returns even on a clean exit (design section 5.5): the fake
+// CLI's fork_delay_write mode forks a grandchild, in the same process group,
+// that would touch a canary file two seconds later; Run must reap the group
+// before that ever happens, not only on cancellation.
+func TestClaudeKillsGroupAfterExit(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	canary := filepath.Join(t.TempDir(), "canary")
+	req := newFakeRequest(dir, "fork_delay_write", "FAKE_CLAUDE_CANARY="+canary)
+
+	c := NewClaude(fakeClaudeScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(canary); err == nil {
+		t.Error("the canary file exists: the forked grandchild survived Run and wrote it")
+	}
+}
+
 // TestClaude_DecodeErrorIsInvalidOutput covers F026: a clean exit whose
 // stdout is not valid JSON must return *InvalidOutputError (design section
 // 4.1's closed Run contract), not a bare wrapped error, so routeFailure

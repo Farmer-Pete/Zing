@@ -3,8 +3,11 @@ package job
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -417,6 +421,194 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 
 	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeBug {
 		t.Errorf("Res.Response outcome = %v, want %v (the Fake's scripted bug turn)", rr.Res.Response, response.OutcomeBug)
+	}
+}
+
+// ---- the sandbox step (design section 5.5, task 8) -------------------
+
+// buildOkXML is a build/ok document (the same shape as the checked-in
+// fixtures/scripts/build/1/1.xml), reused here as the Fake's one scripted
+// build turn.
+const buildOkXML = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>cmd/zing/main.go</path>
+    </files_changed>
+    <test_exit>0</test_exit>
+    <lint_exit>0</lint_exit>
+  </claims>
+  <report>ok</report>
+  <notes></notes>
+</zing>
+`
+
+const testJobBuild = "build"
+
+// testBuildScriptKey is the Fake runtime's own script key for job "build",
+// label buildLabel, turn 1 (runtime/fake.go's scriptKey), reused across
+// every sandbox test below that needs a scripted build turn.
+const testBuildScriptKey = "build/1/1.xml"
+
+// testSandboxProfile is a minimal, always-loadable seatbelt profile (no
+// rule beyond the two placeholders every real profile carries): these tests
+// are about runJob's own wrapping logic, not about proving the checked-in
+// sandbox/build.sb profile loads (internal/sandbox's own suite does that).
+var testSandboxProfile = []byte("(version 1)\n(allow default)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+
+// loadTestSandboxOrSkip loads testSandboxProfile for real, through
+// sandbox.Load: every Sandbox field is unexported in internal/sandbox, so
+// this package cannot fabricate an "available" Sandbox any other way. It
+// skips, rather than fails, when this machine cannot load one at all
+// (design section 5.4's own four reasons) -- non-macOS CI, most notably.
+func loadTestSandboxOrSkip(t *testing.T) sandbox.Sandbox {
+	t.Helper()
+	sb := sandbox.Load(testSandboxProfile, t.TempDir(), nil, 7420)
+	if !sb.Available() {
+		t.Skipf("sandbox unavailable on this machine: %s", sb.Reason())
+	}
+	return sb
+}
+
+// buildSandboxDeps builds a Deps for the sandbox tests below: every
+// machine.toml model alias resolves to testModelExact (the "build" job's
+// model is "sonnet"; the exact id does not matter, since rt is a Fake or a
+// counting wrapper around one), and Projects carries one entry, keyed by
+// projectID, so applySandbox's own d.Projects[t.ProjectID] lookup resolves.
+func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectID int64, owner string, expires time.Time, sb sandbox.Sandbox, requireSandbox bool) Deps {
+	t.Helper()
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: rt, testRuntimeCodex: rt, runtimeFake: rt})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	return Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
+		Models: map[string]string{"sonnet": testModelExact, "opus": testModelExact, "fable": testModelExact, "codex": testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{projectID: {RepoGit: "/tmp/zing-git"}},
+		Sandbox:        sb,
+		RequireSandbox: requireSandbox,
+	}
+}
+
+// TestRunJobWrapsWhenAvailable proves the sandbox step wraps a sandboxed
+// job's request with the sandbox's own ExecPrefix and Env when the sandbox
+// is available, regardless of RequireSandbox.
+func TestRunJobWrapsWhenAvailable(t *testing.T) {
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	rr, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if counting.calls != 1 {
+		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
+	}
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != "sandbox-exec" {
+		t.Fatalf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
+	}
+	if !slices.ContainsFunc(counting.lastReq.Env, func(kv string) bool { return strings.HasPrefix(kv, "TMPDIR=") }) {
+		t.Errorf("Env = %v, want a TMPDIR entry", counting.lastReq.Env)
+	}
+	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeOk {
+		t.Errorf("outcome = %v, want ok", rr.Res.Response)
+	}
+}
+
+// TestRunJobErrSandboxWhenRequired proves an unavailable, required sandbox
+// returns ErrSandbox with nothing reserved and the runtime never called
+// (design section 5.5).
+func TestRunJobErrSandboxWhenRequired(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sandbox.Off(), true)
+	rec := &recordingReserve{fn: deps.Reserve}
+	deps.Reserve = rec.Reserve
+
+	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+	if !errors.Is(err, ErrSandbox) {
+		t.Fatalf("err = %v, want ErrSandbox", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0", counting.calls)
+	}
+}
+
+// TestRunJobUnwrappedWhenNotRequired proves an unavailable sandbox with
+// RequireSandbox false runs the job unwrapped (design D5: suites on the
+// fake runtime), rather than failing.
+func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sandbox.Off(), false)
+
+	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if counting.calls != 1 {
+		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
+	}
+	if len(counting.lastReq.ExecPrefix) != 0 {
+		t.Errorf("ExecPrefix = %v, want empty (unwrapped)", counting.lastReq.ExecPrefix)
+	}
+}
+
+// TestRunJobRemovesRunDir proves the sandbox run directory Reserve's own
+// wrapping step creates is removed once runJob returns (its deferred
+// cleanup, design section 5.5).
+func TestRunJobRemovesRunDir(t *testing.T) {
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	var runDir string
+	for _, kv := range counting.lastReq.ExecPrefix {
+		if after, ok := strings.CutPrefix(kv, "RUN_DIR="); ok {
+			runDir = after
+		}
+	}
+	if runDir == "" {
+		t.Fatalf("no RUN_DIR=... entry found in ExecPrefix %v", counting.lastReq.ExecPrefix)
+	}
+	if _, err := os.Stat(runDir); !os.IsNotExist(err) {
+		t.Errorf("run dir %s still exists after runJob returned (stat err = %v)", runDir, err)
 	}
 }
 

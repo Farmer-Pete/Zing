@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -25,8 +27,10 @@ import (
 	"zing/internal/job"
 	"zing/internal/machine"
 	"zing/internal/notify"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
@@ -216,6 +220,29 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 
+	// The seatbelt sandbox every build and perimeter run is wrapped in
+	// (design section 5.5, 10, task 8): loaded once, here, and shared by
+	// every sandboxed job through job.Deps.Sandbox. serve always sets
+	// RequireSandbox true (serveRequireSandbox, N9): an unavailable sandbox
+	// never runs a real build unwrapped, it fails every sandboxed tick
+	// closed instead (routeFailure's own ErrSandbox case).
+	sb, err := serveSandbox(cfg, dbPath) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	gh, err := orchestrator.NewGitHub(cfg.GitHubToken)
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: %w", err)
+	}
+	projects, err := buildJobProjects(ctx, cfg.Projects, bindings, gh, sb)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
 	// draining flag first, and only cancels dispCtx as the timeout
@@ -230,8 +257,12 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Models: map[string]string{
 			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
 		},
-		Budget: time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
-		Floor:  floor,
+		Budget:         time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+		Floor:          floor,
+		Projects:       projects,
+		Sandbox:        sb,
+		RequireSandbox: serveRequireSandbox,
+		Commands:       job.NewCommandRunner(sb, serveRequireSandbox),
 	}, rts)
 	if err != nil {
 		_ = st.Close()
@@ -307,6 +338,94 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	}
 
 	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+}
+
+// serveRequireSandbox is always true in serve (design N9, section 10): a
+// real build run must refuse to start when the sandbox did not load, no
+// config key overrides it. selftest's own RequireSandbox is false
+// (cmd/zing/selftest.go), never this constant.
+const serveRequireSandbox = true
+
+// serveSandbox loads the seatbelt profile every build and perimeter run is
+// wrapped in (design section 5.1, 5.5, 10): the checked-in, embedded
+// sandbox/build.sb, cfg.Sandbox.ReadPaths, and cfg.Console.Port. Load never
+// errors -- a failure is recorded as unavailable, with one of section 5.4's
+// four reasons -- so the only error this can return is reading the embedded
+// profile itself, which would mean the binary was built without it.
+func serveSandbox(cfg *config.Config, dbPath string) (sandbox.Sandbox, error) {
+	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+	if err != nil {
+		return sandbox.Sandbox{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
+	sb := sandbox.Load(profile, filepath.Dir(dbPath), cfg.Sandbox.ReadPaths, cfg.Console.Port)
+	if sb.Available() {
+		slog.Info("sandbox loaded")
+	} else {
+		slog.Error("sandbox unavailable", "reason", sb.Reason())
+	}
+	return sb, nil
+}
+
+// buildJobProjects builds one orchestrator.Orchestrator per configured
+// project and returns job.Project keyed by its store project id (design
+// section 10): owner and repo split from projects[i].repo, LocalPath from
+// the project's own configured path, gh shared by every one of them, and
+// BuildWritableRoots from the sandbox's own cache root and mds folder when
+// it is available (task 8, design section 15). bindings supplies the store
+// project id for each configured project name (ensureBindings, above).
+func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh orchestrator.GitHub, sb sandbox.Sandbox) (map[int64]job.Project, error) {
+	storeProjectID := make(map[string]int64, len(bindings))
+	for _, b := range bindings {
+		storeProjectID[b.TrackerProject] = b.StoreProjectID
+	}
+	writableRoots := sandboxBuildWritableRoots(sb)
+
+	out := make(map[int64]job.Project, len(projects))
+	for i := range projects {
+		p := &projects[i]
+		id, ok := storeProjectID[p.Name]
+		if !ok {
+			return nil, fmt.Errorf("serve: project %s: no store binding", p.Name)
+		}
+		owner, repo, err := splitOwnerRepo(p.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("serve: project %s: %w", p.Name, err)
+		}
+		defaultBranch := cmp.Or(p.DefaultBranch, "main")
+
+		orch, err := orchestrator.New(orchestrator.Project{
+			Owner: owner, Repo: repo, LocalPath: p.Path, DefaultBranch: defaultBranch,
+			BuildWritableRoots: writableRoots,
+		}, gh, orchestrator.NewRunner(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("serve: project %s: build orchestrator: %w", p.Name, err)
+		}
+		repoGit, err := orch.GitCommonDir(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("serve: project %s: git common dir: %w", p.Name, err)
+		}
+		out[id] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint}
+	}
+	return out, nil
+}
+
+// sandboxBuildWritableRoots returns the two extra roots a sandboxed build
+// run can write (design section 15): the sandbox's own cache root and the
+// login's mds folder, read off Sandbox.ParamsFor -- the only way to reach
+// those two host-only fields, since Sandbox carries no exported getter of
+// its own. The other three ParamsFor arguments (worktree, repoGit, runDir)
+// are irrelevant here and left empty. nil when the sandbox is unavailable:
+// its host fields were never resolved, and Params fields would come back
+// empty, which orchestrator.New would then refuse as a relative path.
+func sandboxBuildWritableRoots(sb sandbox.Sandbox) []string {
+	if !sb.Available() {
+		return nil
+	}
+	p, err := sb.ParamsFor("", "", "")
+	if err != nil {
+		return nil
+	}
+	return []string{p.CacheRoot, p.MDSCache}
 }
 
 // productionRuntimes builds the runtime.Set serve wires the dispatcher with:

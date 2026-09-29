@@ -38,6 +38,7 @@ timeout_minutes = 45
 max_resumes = 3
 worktree = "sparse"
 outcomes = ["ok"]
+sandbox = "build"
 
 [jobs.perimeter]
 model = "sonnet"
@@ -46,6 +47,7 @@ tools = ["read"]
 prompt = "prompts/perimeter.md"
 timeout_minutes = 3
 outcomes = ["ok"]
+sandbox = "build"
 
 [jobs.review]
 model = "sonnet"

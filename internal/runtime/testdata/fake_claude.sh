@@ -57,6 +57,22 @@ signal_kill)
   kill -TERM "$$"
   sleep 5
   ;;
+fork_delay_write)
+  # Forks a grandchild, in this same process group, that would write the
+  # canary file two seconds from now, then exits immediately with a clean
+  # result. The grandchild's own stdout/stderr are redirected to /dev/null
+  # rather than left inherited: Go's os/exec Wait already waits for its own
+  # stdout/stderr pipes to reach EOF, so an inherited copy of that pipe's
+  # write end would make Wait block on the grandchild itself, defeating the
+  # very race this test means to prove (Run's kill runs after Wait returns,
+  # not instead of it). TestClaudeKillsGroupAfterExit proves that kill reaps
+  # this grandchild before it ever runs.
+  canary="${FAKE_CLAUDE_CANARY:?FAKE_CLAUDE_CANARY not set}"
+  ( sleep 2; touch "$canary" ) >/dev/null 2>&1 &
+  disown
+  printf '%s' "$default_result"
+  exit 0
+  ;;
 *)
   echo "fake_claude: unknown FAKE_CLAUDE_MODE $mode" >&2
   exit 9

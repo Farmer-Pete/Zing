@@ -17,6 +17,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
@@ -95,6 +96,16 @@ type Config struct {
 	Models      map[string]string // alias -> exact model id (config.Models)
 	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
 	Floor       response.Severity // config.Review.Floor, parsed
+	// Projects, Sandbox, RequireSandbox, and Commands are PKG8-PLAN.md
+	// section 10's own additions, copied straight into every job.Deps
+	// runAndCommit builds: Projects carries what building needs to know
+	// about each store project; Sandbox and RequireSandbox gate every
+	// sandboxed job's run (design section 5.5); Commands runs a build
+	// unit's test and lint re-runs.
+	Projects       map[int64]job.Project
+	Sandbox        sandbox.Sandbox
+	RequireSandbox bool
+	Commands       job.CommandRunner
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -389,6 +400,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires,
+		Projects: d.cfg.Projects, Sandbox: d.cfg.Sandbox, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

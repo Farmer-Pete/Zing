@@ -31,6 +31,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/schemagen"
 	"zing/internal/store"
 	"zing/internal/tracker"
@@ -97,6 +98,10 @@ func selftest() error {
 	}
 
 	if err := checkResponseExamples(response.ExampleFS); err != nil {
+		return err
+	}
+
+	if err := checkSandboxProfile(dir); err != nil {
 		return err
 	}
 
@@ -363,6 +368,12 @@ func selftestResumeE2E(ctx context.Context) error {
 		zdispatch.Config{
 			Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner,
 			Models: e2eModels, Budget: e2eBudget, Floor: e2eFloor,
+			// selftest drives the fake runtime, never a real sandboxed
+			// process: sandbox.Off() is always unavailable, and
+			// RequireSandbox false lets a sandboxed job (build, perimeter)
+			// run unwrapped instead of refusing (design D5, section 10).
+			Sandbox: sandbox.Off(), RequireSandbox: false,
+			Commands: job.NewCommandRunner(sandbox.Off(), false),
 		}, rts)
 	if err != nil {
 		return err
@@ -841,6 +852,35 @@ func verifySelftestCohortSealed(ctx context.Context, st *store.Store, ticketID i
 	}
 	return nil
 }
+
+// checkSandboxProfile proves the checked-in seatbelt profile actually loads
+// on this machine (design section 10, task 8): on macOS it runs sandbox.Load
+// for real, against dataDir, and fails with the sandbox's own reason when
+// it did not load, since an operator running selftest on their own laptop
+// should learn now, not at the first real build tick, that a real build run
+// would refuse to start (N9). selftest's own dispatcher never uses this
+// sandbox -- it always runs sandbox.Off() (below) -- so this is a canary
+// check, not a dependency of the e2e suite that follows it. It is a no-op
+// off darwin, where the sandbox is always unavailable by definition.
+func checkSandboxProfile(dataDir string) error {
+	if goruntime.GOOS != "darwin" {
+		return nil
+	}
+	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+	if err != nil {
+		return fmt.Errorf("read embedded sandbox profile: %w", err)
+	}
+	sb := sandbox.Load(profile, dataDir, nil, e2eSandboxCheckPort)
+	if !sb.Available() {
+		return fmt.Errorf("selftest: sandbox profile did not load: %s", sb.Reason())
+	}
+	return nil
+}
+
+// e2eSandboxCheckPort is an arbitrary, valid port checkSandboxProfile's own
+// Load call renders into the profile's console-deny rule: it is never
+// dialed, so any value in 1-65535 would do.
+const e2eSandboxCheckPort = 7420
 
 // checkResponseTemplates renders every registered (job, outcome) pair's
 // annotated template, failing on the first error (design section 6.10):

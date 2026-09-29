@@ -1,0 +1,40 @@
+(version 1)
+(allow default)
+
+; Reads in home are denied by default, then allowed by name.
+(deny file-read-data (subpath (param "HOME")))
+(allow file-read-data
+  (subpath (param "WORKTREE"))
+  (subpath (param "REPO_GIT"))
+  (subpath (string-append (param "HOME") "/.claude"))
+  (literal (string-append (param "HOME") "/.claude.json"))
+  (subpath (string-append (param "HOME") "/Library/Keychains"))
+  (subpath (param "CACHE_ROOT")))
+;;READ_PATHS;;
+
+; The console has no login. A build must not read it or answer through it.
+;;CONSOLE_DENY;;
+
+; No system service may act for a build outside the sandbox.
+(deny appleevent-send)
+(deny mach-lookup)
+(allow mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.trustd.agent"))
+
+; The Zing data directory holds the sealed scenarios.
+(deny file-read* file-write* (subpath (param "DATA_DIR")))
+(allow file-read* process-exec (literal (param "ZING_BIN")))
+
+; Writes are denied everywhere, then allowed by name.
+(deny file-write* (subpath "/"))
+(allow file-write*
+  (subpath (param "WORKTREE"))
+  (subpath (param "TRANSCRIPTS"))
+  (subpath (param "MDS_CACHE"))
+  (subpath (param "RUN_DIR"))
+  (subpath (param "CACHE_SHARED"))
+  (subpath "/dev"))
+(deny file-write* (literal (string-append (param "WORKTREE") "/.git")))

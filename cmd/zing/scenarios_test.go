@@ -123,7 +123,7 @@ func seedClaimedTicket(t *testing.T, st *store.Store) (ticketID int64, expires t
 	owner := scenariosTestOwner
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
-		Name: "scenarios-test-project", RepoURL: "https://example.com/x", LocalPath: t.TempDir(), Tracker: "github",
+		Name: "scenarios-test-project", RepoURL: "https://example.com/x", LocalPath: t.TempDir(), Tracker: testServeTracker,
 	})
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)

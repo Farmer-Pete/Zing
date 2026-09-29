@@ -14,6 +14,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -434,6 +435,44 @@ func TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking(t *testing
 	}
 }
 
+// TestSkeletonBuildGoesThroughRunJob proves buildingHandler now calls
+// runJob rather than the runtime directly (task 8): with the sandbox
+// required and unavailable, the handler must escalate sandbox_unavailable
+// exactly as any other sandboxed job would (design section 5.5), and the
+// runtime is never called. Before this task buildingHandler bypassed runJob
+// entirely, so no sandbox gate ever applied to a build tick.
+func TestSkeletonBuildGoesThroughRunJob(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning)
+
+	ticket := getTicket(t, s, ticketID)
+	rt := fakeRuntime(t)
+	deps := claim(t, s, rt, ticketID)
+	deps.Sandbox = sandbox.Off()
+	deps.RequireSandbox = true
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("building Run: %v", err)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (an escalation, not a transition)", commit.Next)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Fatalf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a sandbox_unavailable escalation")
+	}
+	if commit.Escalation.Payload.Code != "sandbox_unavailable" {
+		t.Errorf("escalation code = %q, want sandbox_unavailable", commit.Escalation.Payload.Code)
+	}
+	if commit.Escalation.RunID != nil {
+		t.Errorf("escalation RunID = %v, want nil (nothing was reserved)", *commit.Escalation.RunID)
+	}
+}
+
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
 // queuedHandler's commit shape (design section 6.5).
 func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
@@ -485,14 +524,30 @@ func TestBuildingHandler_OkTransitionsToReviewing(t *testing.T) {
 	if commit.Next != testStateReviewing || commit.Reason != "build done" {
 		t.Errorf("commit = (Next=%q, Reason=%q), want (reviewing, build done)", commit.Next, commit.Reason)
 	}
-	if commit.Session == nil || commit.Session.Job != "build" {
-		t.Fatalf("commit.Session = %+v, want a fresh build session", commit.Session)
+	// buildingHandler now runs through runJob (task 8), so commit.Session
+	// comes from freshSessionRecord: it carries the reserved session's own
+	// ID and the runtime's external session id, not Job or Runtime (those
+	// were already fixed by Reserve, under the same session row, before the
+	// runtime ever ran).
+	if commit.Session == nil || commit.Session.ID == nil || commit.Session.ExternalID == nil {
+		t.Fatalf("commit.Session = %+v, want a fresh session record (ID and ExternalID set)", commit.Session)
 	}
 	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != "ok" {
 		t.Errorf("commit.Runs = %+v, want exactly one turn-0 run with outcome ok", commit.Runs)
 	}
 
 	apply(t, s, ticket, commit)
+
+	// The session Reserve actually created carries job="build" and
+	// runtime="claude" (machine.toml's own build job), the fact
+	// commit.Session's own fields no longer restate directly.
+	session, _, err := s.LatestSession(t.Context(), ticketID, "build", deps.Machine.Jobs["build"].MaxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if session.Job != "build" || session.Runtime != "claude" {
+		t.Errorf("session = (Job=%q, Runtime=%q), want (build, claude)", session.Job, session.Runtime)
+	}
 
 	final := getTicket(t, s, ticketID)
 	if final.State != testStateReviewing {

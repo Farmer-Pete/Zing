@@ -1646,6 +1646,8 @@ func routeFailure(
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil
+	case errors.Is(runErr, ErrSandbox):
+		return sandboxEscalationCommit(t, d, resolveIDs, origin, d.Sandbox.Reason()), true, nil
 	case errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
 		return store.HandlerCommit{}, true, runErr
 	}
@@ -1739,6 +1741,22 @@ func budgetEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64) store.Ha
 	// Resolve the answered round that triggered this run atomically with the
 	// escalation, exactly as the sibling exec/error escalations do; otherwise
 	// budget exhaustion leaves that gate or planning round open forever.
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// sandboxUnavailableWhat is the sandbox_unavailable escalation's own fixed
+// What text (design section 5.5, 6.4): reason is the sandbox's own Reason(),
+// carried as Why, so the owner sees exactly which of the four closed reasons
+// (section 5.4) is blocking every build and perimeter tick.
+const sandboxUnavailableWhat = "the build sandbox did not load"
+
+// sandboxEscalationCommit is ErrSandbox's commit (design section 5.5): no
+// run was ever reserved (runJob's sandbox step runs before Reserve), so
+// RunID and SessionID are both nil, exactly like budgetEscalationCommit's
+// own pre-reserve shape.
+func sandboxEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64, origin response.EscalationOrigin, reason string) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeSandboxUnavailable), sandboxUnavailableWhat, reason, "", origin)
 	c.ResolveQuestions = resolveIDs
 	return c
 }

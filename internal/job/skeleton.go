@@ -138,45 +138,49 @@ func (shippingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Han
 
 // ---- building: fresh fake run, no resume ---------------------------------
 
-// buildingHandler runs the fake once (job build, label "1", fake turn 1),
-// reads Header().Outcome, and on ok returns a commit that inserts a fresh
-// session and its turn-0 run and transitions to reviewing (design section
-// 6.6).
+// buildingHandler runs the fake once through runJob (job "build", label
+// "1", fake turn 1; PKG8-PLAN.md task 8), so every building tick passes the
+// section 5.5 sandbox rule the same way a real build run will: unlike every
+// other skeleton handler, it now reads its Header().Outcome from a
+// runResult rather than calling the runtime directly, and terminalizes the
+// reserved run with terminalRuns and freshSessionRecord (planning.go, task
+// 6). On ok it transitions to reviewing (design section 6.6); task 9
+// replaces this handler with the real building state machine.
 type buildingHandler struct{}
 
 // buildLabel is the task number the skeleton's one scripted build task
 // carries (fixtures/scripts/build/1/1.xml).
 const buildLabel = "1"
 
+// buildSessionRuntime is the runtime name runJob resolves the build job's
+// session under (machine.toml's own jobs.build.runtime): "claude" in
+// production, and in every test suite here, whatever runtime.Runtime a
+// Deps.Runtimes registers under that name -- a real claude runtime, or the
+// same *runtime.Fake every other machine.toml name in the suite resolves to
+// (claim's own doc comment, skeleton_test.go).
+const buildSessionRuntime = "claude"
+
 func (buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	rt, err := d.Runtimes.For(d.Machine.Jobs[string(response.JobBuild)].Runtime)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve runtime: %w", err)
+	su := store.SessionUpsert{Job: string(response.JobBuild), Runtime: buildSessionRuntime}
+	req := runtime.RunRequest{Job: response.JobBuild, Label: buildLabel}
+	rr, runErr := runJob(ctx, d, t, string(response.JobBuild), su, req, nil)
+	if runErr != nil {
+		if c, ok, failErr := routeFailure(t, d, rr, runErr, 0, freshSessionRecord(rr), nil, response.EscalationOriginBuild); ok {
+			return c, failErr
+		}
+		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", runErr)
 	}
 
-	res, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobBuild, Label: buildLabel})
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: run: %w", err)
-	}
-
-	switch res.Response.Header().Outcome {
+	switch rr.Res.Response.Header().Outcome {
 	case response.OutcomeOk:
 		c := baseCommit(t, d)
-		externalID := res.SessionID
-		c.Session = &store.SessionUpsert{Job: string(response.JobBuild), Runtime: runtimeFake, ExternalID: &externalID}
-		c.Runs = []store.Run{{Turn: 0, Outcome: outcomePtr(response.OutcomeOk)}}
+		c.Session = freshSessionRecord(rr)
+		c.Runs = terminalRuns(rr, string(response.OutcomeOk))
 		c.Next, c.Reason = stateReviewing, reasonBuildDone
 		return c, nil
 	case response.OutcomeError:
-		return escalateCommit(t, d, res.Response)
+		return escalateCommit(t, d, rr.Res.Response)
 	default:
-		return store.HandlerCommit{}, fmt.Errorf("job: building: outcome %s is not handled", res.Response.Header().Outcome)
+		return store.HandlerCommit{}, fmt.Errorf("job: building: outcome %s is not handled", rr.Res.Response.Header().Outcome)
 	}
-}
-
-// outcomePtr returns a *string holding o's string value, the shape
-// store.Run.Outcome takes.
-func outcomePtr(o response.Outcome) *string {
-	s := string(o)
-	return &s
 }

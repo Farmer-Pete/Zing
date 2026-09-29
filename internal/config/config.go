@@ -30,7 +30,15 @@ type Config struct {
 	Budget      Budget    `toml:"budget"`
 	Review      Review    `toml:"review"`
 	Merge       Merge     `toml:"merge"`
+	Sandbox     Sandbox   `toml:"sandbox"`
 	Projects    []Project `toml:"projects"`
+}
+
+// Sandbox is the [sandbox] table (PKG8-PLAN.md section 5.4): ReadPaths
+// extends the seatbelt profile's own home-read allow list, for a toolchain
+// installed under home.
+type Sandbox struct {
+	ReadPaths []string `toml:"read_paths"`
 }
 
 type Console struct {
@@ -404,6 +412,9 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if err := checkAllowedHosts(cfg.Console.AllowedHosts); err != nil {
 		return err
 	}
+	if err := checkSandboxReadPaths(cfg.Sandbox.ReadPaths); err != nil {
+		return err
+	}
 	if md.IsDefined("budget", "usage_hold_percent") &&
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
@@ -497,6 +508,20 @@ func checkAllowedHosts(hosts []string) error {
 	for i, h := range hosts {
 		if strings.Contains(h, ":") {
 			return fmt.Errorf("zing.toml: console.allowed_hosts[%d]: must not include a port", i)
+		}
+	}
+	return nil
+}
+
+// checkSandboxReadPaths rejects a sandbox.read_paths entry that is not
+// absolute, or that carries a '"', '\', or a newline (design section 5.4):
+// each entry is substituted straight into the seatbelt profile as an
+// "(allow file-read-data (subpath "<path>"))" line, so the same safety rule
+// the sandbox package's own params enforce applies here too.
+func checkSandboxReadPaths(paths []string) error {
+	for i, p := range paths {
+		if !filepath.IsAbs(p) || strings.ContainsAny(p, "\"\\\n") {
+			return fmt.Errorf("zing.toml: sandbox.read_paths[%d] must be an absolute path without quotes or backslashes", i)
 		}
 	}
 	return nil

@@ -1,0 +1,328 @@
+// Package sandbox builds and applies the seatbelt profile every build and
+// perimeter run is wrapped in on macOS (PKG8-PLAN.md section 5): the profile
+// text in sandbox/build.sb is trust root, and this package fills in its
+// per-run parameters, proves it loads, and renders the command prefix and
+// environment a sandboxed process runs under. Load never returns an error: a
+// failure is recorded on the returned Sandbox as unavailable, with a reason,
+// so a caller decides for itself whether an unavailable sandbox is fatal
+// (design D5, D9): a real build run refuses to start (job.ErrSandbox); a
+// suite on the fake runtime runs unwrapped.
+package sandbox
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+)
+
+// proveTimeout bounds the proof run Load makes: a plain /usr/bin/true
+// should exit instantly, but Load must never hang the caller on it.
+const proveTimeout = 10 * time.Second
+
+// The four closed reason strings Reason() returns for an unavailable
+// Sandbox built by Load (section 5.4's own table). Off's own reason is not
+// one of these four: it names why the sandbox was never attempted at all,
+// not why an attempt failed.
+const (
+	reasonNotMacOS             = "not macOS"
+	reasonSandboxExecNotFound  = "sandbox-exec not found"
+	reasonUserCacheDirNotFound = "user cache directory not found"
+	reasonProfileRejected      = "profile rejected"
+	reasonOff                  = "off"
+)
+
+// Params fills one profile's per-run "-D NAME=value" values (section 5.2).
+// Every field must be absolute and free of '"', '\', and a newline; Prefix
+// checks this before it ever builds an argv.
+type Params struct {
+	Home, Worktree, RepoGit, DataDir, ZingBin             string
+	CacheRoot, CacheShared, RunDir, Transcripts, MDSCache string
+}
+
+// Host holds what is the same for every run on this machine (section 5.2):
+// resolved once, at Load, and reused by every later ParamsFor call.
+type Host struct {
+	Home, DataDir, ZingBin, CacheRoot, CacheShared, MDSCache string
+}
+
+// Sandbox is a loaded (or deliberately unavailable) seatbelt profile: its
+// rendered text, the host values every run on this machine shares, and
+// whether it is safe to wrap a real run in.
+type Sandbox struct {
+	renderedProfile string
+	host            Host
+	available       bool
+	reason          string
+}
+
+// Off returns a Sandbox that is never available, for a suite that drives the
+// fake runtime and must never attempt sandbox-exec at all (design D5). serve
+// never uses it (N9): a real build run fails closed instead.
+func Off() Sandbox {
+	return Sandbox{reason: reasonOff}
+}
+
+// Available reports whether s loaded and proved itself.
+func (s Sandbox) Available() bool { return s.available }
+
+// Reason reports why s is unavailable, "" when it is available.
+func (s Sandbox) Reason() string { return s.reason }
+
+// cacheDirPerm is the mode every directory this package creates under the
+// user's cache root is created and kept at (section 5.2): private to the
+// owner, since a sandboxed build's own cache lives here.
+const cacheDirPerm = 0o700
+
+// Load resolves the host values, renders profile with readPaths and
+// consolePort, and proves the result loads by running sandbox-exec against
+// a throwaway run directory (section 5.4). It never returns an error: any
+// failure is recorded on the returned Sandbox, unavailable, with one of the
+// four closed reasons.
+func Load(profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox {
+	if runtime.GOOS != "darwin" {
+		return Sandbox{reason: reasonNotMacOS}
+	}
+	if _, err := exec.LookPath("sandbox-exec"); err != nil {
+		return Sandbox{reason: reasonSandboxExecNotFound}
+	}
+
+	host, err := resolveHost(dataDir)
+	if err != nil {
+		return Sandbox{reason: reasonUserCacheDirNotFound}
+	}
+
+	rendered, err := renderProfile(profile, readPaths, consolePort)
+	if err != nil {
+		return Sandbox{host: host, reason: reasonProfileRejected}
+	}
+	sb := Sandbox{host: host, renderedProfile: rendered}
+
+	if !sb.proves() {
+		return Sandbox{host: host, renderedProfile: rendered, reason: reasonProfileRejected}
+	}
+	sb.available = true
+	return sb
+}
+
+// resolveHost resolves every Host field section 5.2's table names: the
+// user's home and this binary's own path, both with symlinks resolved; the
+// data directory, taken as given; the cache root and its "shared"
+// subdirectory, created 0700; and the per-user cache folder's "mds" child,
+// found through getconf (host_darwin.go) and symlink-resolved when it
+// already exists.
+func resolveHost(dataDir string) (Host, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Host{}, fmt.Errorf("sandbox: resolve home directory: %w", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(home); evalErr == nil {
+		home = resolved
+	}
+
+	zingBin, err := os.Executable()
+	if err != nil {
+		return Host{}, fmt.Errorf("sandbox: resolve zing binary: %w", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(zingBin); evalErr == nil {
+		zingBin = resolved
+	}
+
+	userCacheDir, err := darwinUserCacheDir()
+	if err != nil || userCacheDir == "" {
+		return Host{}, fmt.Errorf("sandbox: darwin user cache dir: %w", err)
+	}
+	mdsCache := filepath.Join(userCacheDir, "mds")
+	if resolved, evalErr := filepath.EvalSymlinks(mdsCache); evalErr == nil {
+		mdsCache = resolved
+	}
+
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return Host{}, fmt.Errorf("sandbox: resolve user cache dir: %w", err)
+	}
+	cacheRoot = filepath.Join(cacheRoot, "zing", "sandbox")
+	cacheShared := filepath.Join(cacheRoot, "shared")
+	if err := os.MkdirAll(cacheShared, cacheDirPerm); err != nil {
+		return Host{}, fmt.Errorf("sandbox: create cache shared dir: %w", err)
+	}
+	if err := os.Chmod(cacheRoot, cacheDirPerm); err != nil {
+		return Host{}, fmt.Errorf("sandbox: chmod cache root: %w", err)
+	}
+	if err := os.Chmod(cacheShared, cacheDirPerm); err != nil {
+		return Host{}, fmt.Errorf("sandbox: chmod cache shared dir: %w", err)
+	}
+
+	return Host{
+		Home: home, DataDir: dataDir, ZingBin: zingBin,
+		CacheRoot: cacheRoot, CacheShared: cacheShared, MDSCache: mdsCache,
+	}, nil
+}
+
+// proves runs the section 5.4 proof command: sandbox-exec, every param
+// filled (WORKTREE, REPO_GIT, and TRANSCRIPTS all pointed at one fresh run
+// directory, since the proof only needs the profile to load, not a
+// fine-grained boundary), the rendered profile, and /usr/bin/true.
+func (s Sandbox) proves() bool {
+	runDir, cleanup, err := s.NewRunDir()
+	if err != nil {
+		return false
+	}
+	defer cleanup()
+
+	p := Params{
+		Home: s.host.Home, Worktree: runDir, RepoGit: runDir, DataDir: s.host.DataDir, ZingBin: s.host.ZingBin,
+		CacheRoot: s.host.CacheRoot, CacheShared: s.host.CacheShared, RunDir: runDir,
+		Transcripts: runDir, MDSCache: s.host.MDSCache,
+	}
+	argv, err := s.Prefix(p)
+	if err != nil {
+		return false
+	}
+	argv = append(argv, "/usr/bin/true")
+
+	ctx, cancel := context.WithTimeout(context.Background(), proveTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is built by Prefix from validated host and run-dir paths, never from model-influenced input
+	return cmd.Run() == nil
+}
+
+// runIDBytes is the number of random bytes NewRunDir reads to build a run
+// id: 8 bytes hex-encode to the 16 lowercase hex characters section 5.2
+// specifies.
+const runIDBytes = 8
+
+// NewRunDir creates <CACHE_ROOT>/run/<id>, with "tmp" and "claude-tmp"
+// inside, all mode 0700, id sixteen lowercase hex characters from
+// crypto/rand (section 5.2). cleanup removes the whole directory and is
+// safe to call twice (os.RemoveAll on an already-removed path is a no-op).
+func (s Sandbox) NewRunDir() (dir string, cleanup func(), err error) {
+	var b [runIDBytes]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", nil, fmt.Errorf("sandbox: generate run id: %w", err)
+	}
+	id := hex.EncodeToString(b[:])
+
+	dir = filepath.Join(s.host.CacheRoot, "run", id)
+	for _, sub := range []string{"", "tmp", "claude-tmp"} {
+		p := filepath.Join(dir, sub)
+		if err := os.MkdirAll(p, cacheDirPerm); err != nil {
+			return "", nil, fmt.Errorf("sandbox: create run dir %s: %w", p, err)
+		}
+		if err := os.Chmod(p, cacheDirPerm); err != nil {
+			return "", nil, fmt.Errorf("sandbox: chmod run dir %s: %w", p, err)
+		}
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	return dir, cleanup, nil
+}
+
+// ParamsFor fills the per-run values: the host's own fields, plus worktree,
+// repoGit, and runDir as given, plus Transcripts, derived from worktree
+// (section 5.2's worked example).
+func (s Sandbox) ParamsFor(worktree, repoGit, runDir string) (Params, error) {
+	return Params{
+		Home:        s.host.Home,
+		Worktree:    worktree,
+		RepoGit:     repoGit,
+		DataDir:     s.host.DataDir,
+		ZingBin:     s.host.ZingBin,
+		CacheRoot:   s.host.CacheRoot,
+		CacheShared: s.host.CacheShared,
+		RunDir:      runDir,
+		Transcripts: transcriptsDir(s.host.Home, worktree),
+		MDSCache:    s.host.MDSCache,
+	}, nil
+}
+
+// transcriptsDir builds TRANSCRIPTS (section 5.2's worked example): worktree
+// with every byte outside [A-Za-z0-9] replaced by '-', under
+// "<home>/.claude/projects".
+func transcriptsDir(home, worktree string) string {
+	return filepath.Join(home, ".claude", "projects", encodeTranscriptDir(worktree))
+}
+
+func encodeTranscriptDir(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// paramOrder is section 5.2's table order, the order Prefix emits -D flags
+// in and the order Load's proof and every Prefix caller shares.
+var paramOrder = []string{"HOME", "WORKTREE", "REPO_GIT", "DATA_DIR", "ZING_BIN", "CACHE_ROOT", "CACHE_SHARED", "RUN_DIR", "MDS_CACHE", "TRANSCRIPTS"}
+
+// paramValues returns p's fields in paramOrder.
+func paramValues(p Params) []string {
+	return []string{p.Home, p.Worktree, p.RepoGit, p.DataDir, p.ZingBin, p.CacheRoot, p.CacheShared, p.RunDir, p.MDSCache, p.Transcripts}
+}
+
+// checkParamValue enforces section 5.2's safety rule: every param value must
+// be absolute and must not contain '"', '\', or a newline.
+func checkParamValue(name, value string) error {
+	if !filepath.IsAbs(value) || strings.ContainsAny(value, "\"\\\n") {
+		return fmt.Errorf("sandbox: param %s has an unsafe value", name)
+	}
+	return nil
+}
+
+// Prefix returns the command prefix: sandbox-exec -D HOME=<..> -D
+// WORKTREE=<..> ... -p <profile>, with the -D flags in paramOrder (section
+// 5.4). It validates every param value first (checkParamValue), in that
+// same order, so the first unsafe value's own name is what the error names.
+func (s Sandbox) Prefix(p Params) ([]string, error) {
+	values := paramValues(p)
+	argv := make([]string, 0, 2+2*len(paramOrder)+2)
+	argv = append(argv, "sandbox-exec")
+	for i, name := range paramOrder {
+		if err := checkParamValue(name, values[i]); err != nil {
+			return nil, err
+		}
+		argv = append(argv, "-D", name+"="+values[i])
+	}
+	argv = append(argv, "-p", s.renderedProfile)
+	return argv, nil
+}
+
+// envOrder is section 5.3's table order.
+var envOrder = []string{
+	"TMPDIR", "CLAUDE_CODE_TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE",
+	"GOLANGCI_LINT_CACHE", "XDG_CACHE_HOME", "GIT_CONFIG_GLOBAL", "ZING_SANDBOXED", "PATH",
+}
+
+// Env returns section 5.3's variables as NAME=value, in envOrder.
+// parentPath is appended after this binary's own directory in PATH.
+func (s Sandbox) Env(p Params, parentPath string) []string {
+	values := []string{
+		filepath.Join(p.RunDir, "tmp"),
+		filepath.Join(p.RunDir, "claude-tmp"),
+		filepath.Join(p.CacheShared, "gopath"),
+		filepath.Join(p.CacheShared, "go-build"),
+		filepath.Join(p.CacheShared, "go-mod"),
+		filepath.Join(p.CacheShared, "golangci-lint"),
+		filepath.Join(p.CacheShared, "xdg"),
+		"/dev/null",
+		"1",
+		filepath.Dir(p.ZingBin) + ":" + parentPath,
+	}
+	env := make([]string, len(envOrder))
+	for i, name := range envOrder {
+		env[i] = name + "=" + values[i]
+	}
+	return env
+}
