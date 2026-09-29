@@ -2,7 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "task_n": {
-      "type": "integer"
+      "type": "integer",
+      "maximum": 12,
+      "minimum": 0
     },
     "files_changed": {
       "items": {
@@ -17,8 +19,61 @@
     "lint_exit": {
       "type": "integer"
     },
+    "extras": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ]
+      },
+      "type": "array"
+    },
+    "fences": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "existed_because": {
+            "type": "string",
+            "pattern": "existed because"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "symbol",
+          "existed_because"
+        ]
+      },
+      "type": "array"
+    },
     "report": {
       "type": "string"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
     }
   },
   "additionalProperties": false,
@@ -28,6 +83,9 @@
     "files_changed",
     "test_exit",
     "lint_exit",
-    "report"
+    "extras",
+    "fences",
+    "report",
+    "title"
   ]
 }

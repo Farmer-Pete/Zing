@@ -46,6 +46,86 @@ func CheckBuildClaims(c BuildClaims, o BuildObservation) []*PathError {
 	return errs
 }
 
+// CheckCommandsPassed checks the two command exits Zing itself observed by
+// re-running them (design section 6.4 step 5, paired with step 1's
+// testExit/lintExit), independent of anything the response claims: a
+// build that truthfully claims a failing command still fails CHECK.
+func CheckCommandsPassed(testExit, lintExit int) []*PathError {
+	var errs []*PathError
+	if testExit != 0 {
+		errs = append(errs, &PathError{
+			Path: "claims/test_exit",
+			Msg:  fmt.Sprintf("observed %d, want 0", testExit),
+		})
+	}
+	if lintExit != 0 {
+		errs = append(errs, &PathError{
+			Path: "claims/lint_exit",
+			Msg:  fmt.Sprintf("observed %d, want 0", lintExit),
+		})
+	}
+	return errs
+}
+
+// BuildTree is what Zing observed in the worktree after a build run
+// (design section 4.1): every changed path, the subset git reports
+// Deleted, and the subset outside the declared-plus-accepted perimeter
+// (orchestrator.Perimeter's own output, injected here so this package
+// stays free of the orchestrator's own git dependency).
+type BuildTree struct {
+	Changed []string // every changed path, sorted
+	Deleted []string // the subset with git status Deleted
+	Extras  []string // the subset outside declared + accepted
+}
+
+// CheckBuildTree checks a build response against what Zing actually
+// observed in the worktree, t (design section 4.1), in this order:
+//  1. every tree extra has a matching extra element
+//  2. every extra element names a real tree extra
+//  3. every deleted path has a fence naming that path
+//
+// A fence may name a path that still exists: it covers a removed
+// function, flag, or behavior inside a file the task modified, not
+// necessarily a deleted file.
+func CheckBuildTree(r *BuildResponse, t BuildTree) []*PathError {
+	var errs []*PathError
+
+	declaredExtra := make(map[string]bool, len(r.Extras))
+	for _, e := range r.Extras {
+		declaredExtra[e.Path] = true
+	}
+	for _, p := range t.Extras {
+		if !declaredExtra[p] {
+			errs = append(errs, &PathError{Path: "extra", Msg: "missing for undeclared path " + p})
+		}
+	}
+
+	treeExtra := make(map[string]bool, len(t.Extras))
+	for _, p := range t.Extras {
+		treeExtra[p] = true
+	}
+	for i, e := range r.Extras {
+		if !treeExtra[e.Path] {
+			errs = append(errs, &PathError{
+				Path: indexedName("extra", i) + "/path",
+				Msg:  e.Path + " is declared or unchanged",
+			})
+		}
+	}
+
+	fenced := make(map[string]bool, len(r.Fences))
+	for _, f := range r.Fences {
+		fenced[f.Path] = true
+	}
+	for _, p := range t.Deleted {
+		if !fenced[p] {
+			errs = append(errs, &PathError{Path: "fence", Msg: "missing for deleted path " + p})
+		}
+	}
+
+	return errs
+}
+
 // sortedUnique returns items deduplicated and sorted, the display form
 // CheckBuildClaims uses for a files_changed mismatch.
 func sortedUnique(items []string) []string {

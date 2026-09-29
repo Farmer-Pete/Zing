@@ -3,10 +3,12 @@
     <files_changed>
       <path>cmd/zing/main.go</path>
       <path>cmd/zing/main_test.go</path>
+      <path>cmd/zing/routes.go</path>
     </files_changed>
     <test_exit>0</test_exit>
     <lint_exit>0</lint_exit>
   </claims>
+  <extra path="cmd/zing/routes.go">newMux grew past one screen, so the route table moved to its own file; the plan did not declare it</extra>
   <report>Added the /healthz handler and registered it in newMux; TestHealthz covers both the 200 and the 405 cases.</report>
   <notes></notes>
 </zing>

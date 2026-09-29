@@ -21,6 +21,25 @@
     },
     "style_guide": {
       "type": "boolean"
+    },
+    "task_n": {
+      "type": "integer",
+      "maximum": 12,
+      "minimum": 0
+    },
+    "description": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "reject",
+        "drop",
+        "discuss",
+        "accept",
+        "reject"
+      ]
     }
   },
   "additionalProperties": false,
@@ -30,6 +49,7 @@
     "action",
     "reason",
     "trust_root",
-    "style_guide"
+    "style_guide",
+    "task_n"
   ]
 }

@@ -868,3 +868,103 @@ func planXMLWithBadFence() string {
 		`</review>` +
 		`</plan>`
 }
+
+// planXMLWithTasks is planXML with its <tasks> block replaced by tasksXML,
+// so TestReadyTaskNumbering can exercise more than the one task planXML's
+// own fixture carries.
+func planXMLWithTasks(tasksXML string) string {
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create">why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks>` + tasksXML + `</tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+// readyXMLWithTasks wraps planXMLWithTasks in the header, claims, and
+// scenarios every ready document needs, so a Validate call sees a document
+// whose only interesting content is its tasks.
+func readyXMLWithTasks(tasksXML string) string {
+	return `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLWithTasks(tasksXML) +
+		`</zing>`
+}
+
+// TestReadyTaskNumbering proves layer2Ready's task numbering rule (design
+// section 4.1): plan/delivery/tasks/task[i]/n must equal i+1, so a
+// duplicate, a gap, and a wrong order are each caught as "want <i+1>" at
+// the offending task's own index, and an in-order document draws no such
+// error.
+func TestReadyTaskNumbering(t *testing.T) {
+	t.Parallel()
+
+	t.Run("in order", func(t *testing.T) {
+		t.Parallel()
+		tasksXML := `<task n="1" test="t1" demo="true">do it</task>` +
+			`<task n="2" test="t1" demo="false">then this</task>`
+		doc := mustParse(t, readyXMLWithTasks(tasksXML))
+		errs := Validate(doc, ValidateContext{})
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "want ") {
+				t.Errorf("Validate = %v, want no task numbering error", dumpErrs(errs))
+			}
+		}
+	})
+
+	t.Run("a duplicate", func(t *testing.T) {
+		t.Parallel()
+		tasksXML := `<task n="1" test="t1" demo="true">do it</task>` +
+			`<task n="1" test="t1" demo="false">then this</task>`
+		doc := mustParse(t, readyXMLWithTasks(tasksXML))
+		errs := Validate(doc, ValidateContext{})
+		if !containsErr(errs, wantTaskTwoNumber) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), wantTaskTwoNumber)
+		}
+	})
+
+	t.Run("a gap", func(t *testing.T) {
+		t.Parallel()
+		tasksXML := `<task n="1" test="t1" demo="true">do it</task>` +
+			`<task n="3" test="t1" demo="false">then this</task>`
+		doc := mustParse(t, readyXMLWithTasks(tasksXML))
+		errs := Validate(doc, ValidateContext{})
+		if !containsErr(errs, wantTaskTwoNumber) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), wantTaskTwoNumber)
+		}
+	})
+
+	t.Run("out of order", func(t *testing.T) {
+		t.Parallel()
+		tasksXML := `<task n="2" test="t1" demo="true">do it</task>` +
+			`<task n="1" test="t1" demo="false">then this</task>`
+		doc := mustParse(t, readyXMLWithTasks(tasksXML))
+		errs := Validate(doc, ValidateContext{})
+		for i, want := range []string{
+			"plan/delivery/tasks/task[0]/n: want 1",
+			wantTaskTwoNumber,
+		} {
+			if !containsErr(errs, want) {
+				t.Errorf("task %d: Validate = %v, want to contain %q", i, dumpErrs(errs), want)
+			}
+		}
+	})
+}

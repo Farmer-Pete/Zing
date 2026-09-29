@@ -130,9 +130,11 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 		return checkChildrenDAG(r.Children, present)
 	case *QuestionResponse:
 		return checkQuestionCardinality(r.Questions)
-	case *BuildResponse, *JudgeResponse:
-		// Layer 1 only; their observation-dependent checks belong to the
-		// orchestrator and the judge (Packages 8, 9).
+	case *BuildResponse:
+		return checkBuildShape(r, present)
+	case *JudgeResponse:
+		// Layer 1 only; its observation-dependent checks belong to the
+		// judge (Package 9).
 		return nil
 	default:
 		return nil
@@ -178,6 +180,7 @@ func layer2Ready(r *ReadyResponse, ctx ValidateContext, present map[string]bool)
 		return errs
 	}
 	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists, present)...)
+	errs = append(errs, checkTaskNumbering(r.Plan.Delivery.Tasks, present)...)
 
 	if present["plan/design/migrations"] {
 		m := r.Plan.Design.Migrations

@@ -6,6 +6,7 @@
     <test_exit>...</test_exit> <!-- int, the program re-runs the command -->
     <lint_exit>...</lint_exit> <!-- int, the program re-runs the command -->
   </claims>
+  <extra path="...">...</extra> <!-- ExtraClaim, optional, zero or more, one per changed path the plan does not declare; path: string -->
   <fence path="..." symbol="...">...</fence> <!-- Fence, optional, zero or more, one per deletion this task made; path: string; symbol: string -->
   <report>...</report> <!-- string, what was built, what was decided, markdown -->
   <notes>...</notes> <!-- string, anything the owner must know -->

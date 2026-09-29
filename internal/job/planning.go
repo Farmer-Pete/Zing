@@ -1583,10 +1583,11 @@ func runAndRoute(
 const postRunFailedWhy = "the agent's turn completed, but Zing could not store or check its result"
 
 // postRunFailedWhatFor renders postRunFailure's own short, owner-facing What
-// sentence naming the failing step (design F025): only classify,
-// planning_first, planning_resume, and planreview ever reach postRunFailure,
-// since those are the only origins the four runAndRoute callers thread
-// through.
+// sentence naming the failing step (design F025). classify, planning_first,
+// planning_resume, and planreview are the origins the four runAndRoute
+// callers thread through today; build, fix, and perimeter are handled here
+// ahead of their own callers (design section 4.1, Package 8), so
+// postRunFailure needs no change once those callers land.
 func postRunFailedWhatFor(origin response.EscalationOrigin) string {
 	switch origin {
 	case response.EscalationOriginClassify:
@@ -1595,6 +1596,10 @@ func postRunFailedWhatFor(origin response.EscalationOrigin) string {
 		return "storing or checking the plan"
 	case response.EscalationOriginPlanreview:
 		return "storing the plan review"
+	case response.EscalationOriginBuild, response.EscalationOriginFix:
+		return "storing or checking the build result"
+	case response.EscalationOriginPerimeter:
+		return "storing the perimeter description"
 	default:
 		return "storing or checking the agent's result"
 	}

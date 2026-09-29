@@ -263,3 +263,135 @@ func TestCheckQuestionCardinality_FiveOptionsNotFlaggedHere(t *testing.T) {
 		t.Fatalf("checkQuestionCardinality = %v, want no errors: maxItems=4 is Layer 1's own check", dumpErrs(errs))
 	}
 }
+
+// buildShapePresent returns a presence map marking every extra[i]/path
+// attribute and every fence[i]/path and fence[i]/symbol attribute present,
+// for nExtra extras and nFence fences -- the ordinary case these direct
+// checkBuildShape tests build (each literal already carries a real
+// attribute value, even an intentionally empty or multiline one).
+func buildShapePresent(nExtra, nFence int) map[string]bool {
+	m := make(map[string]bool, nExtra+2*nFence)
+	for i := range nExtra {
+		m[indexedName("extra", i)+"/path"] = true
+	}
+	for i := range nFence {
+		m[indexedName("fence", i)+"/path"] = true
+		m[indexedName("fence", i)+"/symbol"] = true
+	}
+	return m
+}
+
+func TestCheckBuildShape(t *testing.T) {
+	t.Parallel()
+
+	t.Run("extra not in files_changed", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA}},
+			Extras: []ExtraClaim{{Path: testFileB, Reason: testNeededIt}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 0))
+		want := "extra[0]/path: extra path is not in files_changed"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("duplicate extra", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA}},
+			Extras: []ExtraClaim{
+				{Path: testFileA, Reason: "first"},
+				{Path: testFileA, Reason: "second"},
+			},
+		}
+		errs := checkBuildShape(r, buildShapePresent(2, 0))
+		want := "extra[1]/path: duplicate extra a.go"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("duplicate fence", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Fences: []Fence{
+				{Path: testFileA, Symbol: testFenceSymbol, ExistedBecause: testFenceExisted},
+				{Path: testFileA, Symbol: testFenceSymbol, ExistedBecause: testFenceExisted},
+			},
+		}
+		errs := checkBuildShape(r, buildShapePresent(0, 2))
+		want := "fence[1]: duplicate fence a.go Old"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("an empty fence path", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Fences: []Fence{{Path: "", Symbol: testFenceSymbol, ExistedBecause: testFenceExisted}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(0, 1))
+		want := "fence[0]/path: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("an empty fence symbol", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Fences: []Fence{{Path: testFileA, Symbol: "", ExistedBecause: testFenceExisted}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(0, 1))
+		want := "fence[0]/symbol: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a multiline fence path, symbol, and text", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Fences: []Fence{{Path: testMultilinePath, Symbol: "Old\nSymbol", ExistedBecause: "existed because\nit was needed"}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(0, 1))
+		for _, want := range []string{
+			"fence[0]/path: must be a single line",
+			"fence[0]/symbol: must be a single line",
+			"fence[0]: must be a single line",
+		} {
+			if !containsErr(errs, want) {
+				t.Errorf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+			}
+		}
+	})
+
+	t.Run("a multiline extra path", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testMultilinePath}},
+			Extras: []ExtraClaim{{Path: testMultilinePath, Reason: testNeededIt}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 0))
+		want := "extra[0]/path: must be a single line"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a clean document", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA, testFileB}},
+			Extras: []ExtraClaim{{Path: testFileB, Reason: testNeededIt}},
+			Fences: []Fence{{Path: testFileA, Symbol: testFenceSymbol, ExistedBecause: testFenceExisted}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 1))
+		if len(errs) != 0 {
+			t.Fatalf("checkBuildShape = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}
