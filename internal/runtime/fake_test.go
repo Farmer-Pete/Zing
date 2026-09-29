@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -272,5 +274,225 @@ func TestFake_ConcurrentSessionsRace(t *testing.T) {
 			t.Fatalf("duplicate session id %s minted under concurrency", id)
 		}
 		seen[id] = true
+	}
+}
+
+// effectScriptKey and effectDeleteKey are the fixed (job, label, turn)
+// script and ".delete" keys the effect tests below share, so the string
+// appears once rather than at every call site.
+const (
+	effectScriptKey = "classify/1/1.xml"
+	effectDeleteKey = "classify/1/1.delete"
+)
+
+// TestFakeWritesTree pins the ".tree" sibling effect (design section 9.3):
+// every file under "<job>/<label>/<turn>.tree/" is written to the same
+// relative path under WorkDir, mode 0644, with parent directories created.
+func TestFakeWritesTree(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		effectScriptKey:                 &fstest.MapFile{Data: []byte(classifyBugXML)},
+		"classify/1/1.tree/hello.txt":   &fstest.MapFile{Data: []byte("hello")},
+		"classify/1/1.tree/sub/dir.txt": &fstest.MapFile{Data: []byte("nested")},
+	}
+	f := NewFake(fsys)
+	workDir := t.TempDir()
+
+	_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(workDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("read hello.txt: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("hello.txt = %q, want %q", got, "hello")
+	}
+	info, err := os.Stat(filepath.Join(workDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("stat hello.txt: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("hello.txt mode = %o, want %o", perm, 0o644)
+	}
+
+	got, err = os.ReadFile(filepath.Join(workDir, "sub", "dir.txt"))
+	if err != nil {
+		t.Fatalf("read sub/dir.txt (parent dir not created?): %v", err)
+	}
+	if string(got) != "nested" {
+		t.Errorf("sub/dir.txt = %q, want %q", got, "nested")
+	}
+}
+
+// TestFakeDeletes pins the ".delete" sibling effect: each non-empty line
+// is a relative path removed from WorkDir.
+func TestFakeDeletes(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+		effectDeleteKey: &fstest.MapFile{Data: []byte("gone.txt\n\n")},
+	}
+	f := NewFake(fsys)
+	workDir := t.TempDir()
+	writeRealFile(t, filepath.Join(workDir, "gone.txt"), "bye")
+	writeRealFile(t, filepath.Join(workDir, "kept.txt"), "stays")
+
+	_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gone.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("gone.txt stat error = %v, want ErrNotExist", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "kept.txt")); err != nil {
+		t.Errorf("kept.txt should still exist: %v", err)
+	}
+}
+
+// TestFakeSkipsEffectsWithoutWorkDir pins "with an empty WorkDir the
+// effects are skipped": a script with both siblings present must not
+// error, and must not be applied anywhere, when req.WorkDir is empty.
+func TestFakeSkipsEffectsWithoutWorkDir(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		effectScriptKey:               &fstest.MapFile{Data: []byte(classifyBugXML)},
+		"classify/1/1.tree/hello.txt": &fstest.MapFile{Data: []byte("hello")},
+		effectDeleteKey:               &fstest.MapFile{Data: []byte("hello.txt\n")},
+	}
+	f := NewFake(fsys)
+
+	if _, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1"}); err != nil {
+		t.Fatalf("Run with empty WorkDir: %v", err)
+	}
+}
+
+// writeRealFile writes a real file to path, creating parent directories,
+// failing the test on any error.
+func writeRealFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile %s: %v", path, err)
+	}
+}
+
+// TestFakeRejectsEscape pins the root-confined guarantee: a path that is
+// absolute, contains "..", or passes through a symlink leaving WorkDir
+// fails inside the standard library, and the fake wraps that failure as
+// "fake: unsafe effect path <p>". A tree entry's relative name always
+// comes from a valid fs.FS path (fs.WalkDir never yields "." or ".."
+// components), so an absolute path or a ".." component can only reach the
+// fake through a ".delete" line, which is arbitrary text; a symlink
+// escape, in contrast, is exercised for both effects, since either one
+// can be asked to cross a symlink already sitting inside WorkDir.
+func TestFakeRejectsEscape(t *testing.T) {
+	t.Parallel()
+
+	t.Run("write through a symlink leaving the worktree", func(t *testing.T) {
+		t.Parallel()
+
+		outside := t.TempDir()
+		workDir := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(workDir, "escape")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		fsys := fstest.MapFS{
+			effectScriptKey:                     &fstest.MapFile{Data: []byte(classifyBugXML)},
+			"classify/1/1.tree/escape/evil.txt": &fstest.MapFile{Data: []byte("pwned")},
+		}
+		f := NewFake(fsys)
+
+		_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+		assertUnsafeEffectError(t, err)
+
+		if _, statErr := os.Stat(filepath.Join(outside, "evil.txt")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("evil.txt escaped into %s", outside)
+		}
+	})
+
+	t.Run("delete an absolute path", func(t *testing.T) {
+		t.Parallel()
+
+		workDir := t.TempDir()
+		fsys := fstest.MapFS{
+			effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+			effectDeleteKey: &fstest.MapFile{Data: []byte("/etc/hosts\n")},
+		}
+		f := NewFake(fsys)
+
+		_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+		assertUnsafeEffectError(t, err)
+	})
+
+	t.Run("delete a path containing ..", func(t *testing.T) {
+		t.Parallel()
+
+		parent := t.TempDir()
+		workDir := filepath.Join(parent, "work")
+		if err := os.Mkdir(workDir, 0o755); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		writeRealFile(t, filepath.Join(parent, "escape.txt"), "still here")
+
+		fsys := fstest.MapFS{
+			effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+			effectDeleteKey: &fstest.MapFile{Data: []byte("../escape.txt\n")},
+		}
+		f := NewFake(fsys)
+
+		_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+		assertUnsafeEffectError(t, err)
+
+		if _, statErr := os.Stat(filepath.Join(parent, "escape.txt")); statErr != nil {
+			t.Errorf("escape.txt should still exist in the parent: %v", statErr)
+		}
+	})
+
+	t.Run("delete through a symlink leaving the worktree", func(t *testing.T) {
+		t.Parallel()
+
+		outside := t.TempDir()
+		writeRealFile(t, filepath.Join(outside, "victim.txt"), "keep me")
+		workDir := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(workDir, "escape")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		fsys := fstest.MapFS{
+			effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+			effectDeleteKey: &fstest.MapFile{Data: []byte("escape/victim.txt\n")},
+		}
+		f := NewFake(fsys)
+
+		_, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+		assertUnsafeEffectError(t, err)
+
+		if _, statErr := os.Stat(filepath.Join(outside, "victim.txt")); statErr != nil {
+			t.Errorf("victim.txt should still exist outside the worktree: %v", statErr)
+		}
+	})
+}
+
+// assertUnsafeEffectError fails unless err is non-nil and its message
+// begins with the fixed prefix the fake wraps every root-rejected effect
+// path in (design section 9.3).
+func assertUnsafeEffectError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("Run over an unsafe effect path returned no error")
+	}
+	const prefix = "fake: unsafe effect path "
+	if len(err.Error()) < len(prefix) || err.Error()[:len(prefix)] != prefix {
+		t.Errorf("Run error = %q, want prefix %q", err.Error(), prefix)
 	}
 }
