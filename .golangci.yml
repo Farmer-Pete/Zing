@@ -79,6 +79,7 @@ linters:
         - generic
         - github.com/a-h/templ.Component # the SDK's own render seam: PatchElementTempl and Render both take a templ.Component (design section 6.2, 6.10)
         - zing/internal/orchestrator.GitHub # the seam the e2e test fakes and the real ghClient implements (PKG5-PLAN.md section 8.5); NewGitHub's signature is fixed by the plan
+        - zing/internal/orchestrator.Runner # the seam every git-invoking test fakes and execRunner implements (PKG5-PLAN.md section 8.1); NewRunner's signature is fixed by PKG8-PLAN.md section 7.2
         - zing/internal/runtime.Runtime # runtime.Set.For's whole point is picking which Runtime a job gets by name (PKG7-PLAN.md section 4.1, D2); the concrete type varies by job and by production vs. selftest/e2e wiring
     revive:
       rules:

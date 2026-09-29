@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -24,6 +26,8 @@ const (
 	sharedMDPath    = "shared.md"
 	aGoPath         = "a.go"
 	starMDGlob      = "*.md"
+	docsExtraPath   = "docs/extra.md"
+	newFileGoPath   = "app/newfile.go"
 )
 
 // wantExtras fails the test unless got equals want exactly, element by
@@ -283,7 +287,7 @@ func TestChangedPaths(t *testing.T) {
 
 		// Added: a new file, staged.
 		writeTestFile(t, filepath.Join(wt.Dir(), "app", "newfile.go"), "package app\n")
-		runGit(ctx, t, wt.Dir(), "add", "app/newfile.go")
+		runGit(ctx, t, wt.Dir(), "add", newFileGoPath)
 
 		// Untracked: a new file, never staged.
 		writeTestFile(t, filepath.Join(wt.Dir(), "scratch.txt"), "scratch\n")
@@ -301,13 +305,13 @@ func TestChangedPaths(t *testing.T) {
 		if got := changeByPath(t, changes, readmePath).Code; got != Modified {
 			t.Errorf("README.md code = %v, want Modified", got)
 		}
-		if got := changeByPath(t, changes, "app/newfile.go").Code; got != Added {
+		if got := changeByPath(t, changes, newFileGoPath).Code; got != Added {
 			t.Errorf("app/newfile.go code = %v, want Added", got)
 		}
 		if got := changeByPath(t, changes, "scratch.txt").Code; got != Untracked {
 			t.Errorf("scratch.txt code = %v, want Untracked", got)
 		}
-		if got := changeByPath(t, changes, "docs/extra.md").Code; got != Deleted {
+		if got := changeByPath(t, changes, docsExtraPath).Code; got != Deleted {
 			t.Errorf("docs/extra.md code = %v, want Deleted", got)
 		}
 
@@ -398,9 +402,9 @@ func TestRevertPaths(t *testing.T) {
 		o, wt, ctx := preparePerimeterWorktree(t, 202)
 
 		writeTestFile(t, filepath.Join(wt.Dir(), "app", "newfile.go"), "package app\n")
-		runGit(ctx, t, wt.Dir(), "add", "app/newfile.go")
+		runGit(ctx, t, wt.Dir(), "add", newFileGoPath)
 
-		if err := o.RevertPaths(ctx, wt, []Change{{Path: "app/newfile.go", Code: Added}}); err != nil {
+		if err := o.RevertPaths(ctx, wt, []Change{{Path: newFileGoPath, Code: Added}}); err != nil {
 			t.Fatalf("RevertPaths: %v", err)
 		}
 
@@ -413,7 +417,7 @@ func TestRevertPaths(t *testing.T) {
 			t.Fatalf("ChangedPaths: %v", err)
 		}
 		for _, c := range changes {
-			if c.Path == "app/newfile.go" {
+			if c.Path == newFileGoPath {
 				t.Errorf("app/newfile.go is still reported changed: %+v", c)
 			}
 		}
@@ -523,4 +527,195 @@ func TestRevertPaths(t *testing.T) {
 			t.Errorf("expected app/main.go to survive untouched: %v", statErr)
 		}
 	})
+}
+
+// TestRevertPathsRunsNoHook proves RevertPaths' git calls carry the
+// hooks-disabling prefix: a repo-local post-checkout hook that writes a
+// marker file leaves no marker after a successful RevertPaths.
+func TestRevertPathsRunsNoHook(t *testing.T) {
+	o, wt, ctx := preparePerimeterWorktree(t, 209)
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	// Hooks are shared across every worktree of a repository, living in
+	// the main checkout's ".git/hooks", not the linked worktree's own
+	// ".git" pointer file.
+	repoDir := filepath.Dir(filepath.Dir(filepath.Dir(wt.Dir()))) // <repo>/.zing/wt/<id> -> <repo>
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "post-checkout")
+	writeTestFile(t, hookPath, "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(hookPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", hookPath, err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), readmePath), "# changed\n")
+	if err := o.RevertPaths(ctx, wt, []Change{{Path: readmePath, Code: Modified}}); err != nil {
+		t.Fatalf("RevertPaths: %v", err)
+	}
+
+	assertMarkerAbsent(t, marker)
+}
+
+// -----------------------------------------------------------------------
+// Real-git integration: Hunk, BranchCommits
+// -----------------------------------------------------------------------
+
+func TestHunk(t *testing.T) {
+	t.Run("modified", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 700)
+		writeTestFile(t, filepath.Join(wt.Dir(), readmePath), "# changed\n")
+
+		got, err := o.Hunk(ctx, wt, Change{Path: readmePath, Code: Modified})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !strings.Contains(got, "# changed") {
+			t.Errorf("Hunk = %q, want it to contain the new content", got)
+		}
+	})
+
+	t.Run("deleted", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 701)
+		if err := os.Remove(filepath.Join(wt.Dir(), "docs", "extra.md")); err != nil {
+			t.Fatalf("remove docs/extra.md: %v", err)
+		}
+
+		got, err := o.Hunk(ctx, wt, Change{Path: docsExtraPath, Code: Deleted})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !strings.Contains(got, "-# extra") {
+			t.Errorf("Hunk = %q, want it to show the removed content", got)
+		}
+	})
+
+	t.Run("added", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 702)
+		writeTestFile(t, filepath.Join(wt.Dir(), "app", "newfile.go"), "package app\n")
+		runGit(ctx, t, wt.Dir(), "add", newFileGoPath)
+
+		got, err := o.Hunk(ctx, wt, Change{Path: newFileGoPath, Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !strings.Contains(got, "package app") {
+			t.Errorf("Hunk = %q, want it to contain the new file's content", got)
+		}
+	})
+
+	t.Run("untracked", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 703)
+		writeTestFile(t, filepath.Join(wt.Dir(), "scratch.txt"), "scratch content\n")
+
+		got, err := o.Hunk(ctx, wt, Change{Path: "scratch.txt", Code: Untracked})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !strings.Contains(got, "scratch content") {
+			t.Errorf("Hunk = %q, want it to contain the untracked file's content", got)
+		}
+	})
+
+	t.Run("binary", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 704)
+		binPath := filepath.Join(wt.Dir(), "image.bin")
+		if err := os.WriteFile(binPath, []byte{0x00, 0x01, 0x02, 0x00, 0xFF}, 0o644); err != nil {
+			t.Fatalf("write %s: %v", binPath, err)
+		}
+		runGit(ctx, t, wt.Dir(), "add", "image.bin")
+
+		got, err := o.Hunk(ctx, wt, Change{Path: "image.bin", Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if got != "binary file" {
+			t.Errorf("Hunk = %q, want the literal %q", got, "binary file")
+		}
+	})
+
+	t.Run("a hunk larger than 64 KiB is cut", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 705)
+
+		var b strings.Builder
+		for i := range 20000 {
+			fmt.Fprintf(&b, "line %d\n", i)
+		}
+		writeTestFile(t, filepath.Join(wt.Dir(), "big.txt"), b.String())
+		runGit(ctx, t, wt.Dir(), "add", "big.txt")
+
+		got, err := o.Hunk(ctx, wt, Change{Path: "big.txt", Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !strings.HasSuffix(got, hunkCutSuffix) {
+			t.Errorf("Hunk does not end with the cut suffix %q, got suffix %q", hunkCutSuffix, got[max(0, len(got)-60):])
+		}
+		if len(got) != hunkMaxBytes+len(hunkCutSuffix) {
+			t.Errorf("len(Hunk) = %d, want %d", len(got), hunkMaxBytes+len(hunkCutSuffix))
+		}
+	})
+
+	t.Run("an unrecognized status is an error", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 706)
+		if _, err := o.Hunk(ctx, wt, Change{Path: "x", Code: Status(99)}); err == nil {
+			t.Fatal("Hunk: expected an error for an unrecognized status, got nil")
+		}
+	})
+}
+
+// configureMarkerTextconv writes a small script that touches marker before
+// cat-ing its one argument, and configures it as driver's textconv command,
+// so a test can prove Hunk's --no-textconv flag stops it from ever running.
+func configureMarkerTextconv(ctx context.Context, t *testing.T, repo, driver, marker string) {
+	t.Helper()
+	scriptPath := filepath.Join(repo, "textconv-"+driver+".sh")
+	writeTestFile(t, scriptPath, "#!/bin/sh\ntouch "+marker+"\ncat \"$1\"\n")
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", scriptPath, err)
+	}
+	runGit(ctx, t, repo, "config", "diff."+driver+".textconv", scriptPath)
+}
+
+// TestHunkIgnoresTextconv proves Hunk's --no-textconv flag: a
+// "diff.<driver>.textconv" configured for the changed path's extension,
+// with a command that writes a marker file, leaves no marker after Hunk.
+func TestHunkIgnoresTextconv(t *testing.T) {
+	o, wt, ctx := preparePerimeterWorktree(t, 707)
+
+	repoDir := filepath.Dir(filepath.Dir(filepath.Dir(wt.Dir())))
+	marker := filepath.Join(t.TempDir(), "marker")
+	configureMarkerTextconv(ctx, t, repoDir, "x", marker)
+	writeTestFile(t, filepath.Join(wt.Dir(), ".gitattributes"), "*.md diff=x\n")
+
+	writeTestFile(t, filepath.Join(wt.Dir(), "docs", "extra.md"), "# changed extra\n")
+
+	got, err := o.Hunk(ctx, wt, Change{Path: docsExtraPath, Code: Modified})
+	if err != nil {
+		t.Fatalf("Hunk: %v", err)
+	}
+	if got == "" {
+		t.Error("Hunk: expected a non-empty diff")
+	}
+	assertMarkerAbsent(t, marker)
+}
+
+// TestBranchCommitsOrder proves BranchCommits returns the ticket branch's
+// own commits, oldest first.
+func TestBranchCommitsOrder(t *testing.T) {
+	o, wt, ctx := preparePerimeterWorktree(t, 710)
+
+	names := []string{"one.txt", "two.txt", "three.txt"}
+	shas := make([]string, 0, len(names))
+	for i, name := range names {
+		writeTestFile(t, filepath.Join(wt.Dir(), name), fmt.Sprintf("content %d\n", i))
+		runGit(ctx, t, wt.Dir(), "add", name)
+		runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", fmt.Sprintf("commit %d", i))
+		shas = append(shas, strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD")))
+	}
+
+	got, err := o.BranchCommits(ctx, wt)
+	if err != nil {
+		t.Fatalf("BranchCommits: %v", err)
+	}
+	if !slices.Equal(got, shas) {
+		t.Errorf("BranchCommits = %v, want %v (oldest first)", got, shas)
+	}
 }

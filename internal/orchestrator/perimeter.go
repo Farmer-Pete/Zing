@@ -77,14 +77,22 @@ var conflictCodes = map[string]bool{
 }
 
 // ChangedPaths returns every path the worktree changed since HEAD: staged,
-// unstaged, and untracked. It runs "git -C <dir> -c status.renames=false
-// status --porcelain=v1 -z --untracked-files=all --no-renames" and parses the
+// unstaged, and untracked. It first calls revalidate (worktree.go): a wrong,
+// stale, or tampered worktree is never diffed. It runs "git -C <dir> -c
+// status.renames=false status --porcelain=v1 -z --untracked-files=all
+// --no-renames", with wt's own filter drivers overridden to empty (a probe
+// proved "git status" alone runs a configured driver), and parses the
 // NUL-separated records. With renames off, every record is a single path, so
 // a rename surfaces as a Deleted old path plus an Added or Untracked new
 // path, with no two-path record to parse. An unmerged/conflict code returns
 // an error naming the path. The result is sorted by path.
 func (o *Orchestrator) ChangedPaths(ctx context.Context, wt Worktree) ([]Change, error) {
-	out, err := o.run.Output(ctx, wt.dir, "git", "-c", "status.renames=false",
+	if err := o.revalidate(ctx, wt); err != nil {
+		return nil, fmt.Errorf("orchestrator: changed paths: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "-c", "status.renames=false",
 		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed paths: %w", err)
@@ -266,7 +274,7 @@ func (o *Orchestrator) RevertPaths(ctx context.Context, wt Worktree, changes []C
 
 	o.log.Info("reverting extra paths", "branch", wt.branch, "count", len(changes))
 
-	litRun := execRunner{extraEnv: literalPathspecEnv}
+	litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
 
 	if len(restoreBoth) > 0 {
 		if err := runPathspecCommand(ctx, litRun, wt.dir, restoreBoth, "restore", "--staged", "--worktree"); err != nil {
@@ -473,4 +481,87 @@ func PerimeterNotice(reverted []Extra) string {
 		"to the owner and say which file and why.\n")
 
 	return b.String()
+}
+
+// hunkMaxBytes is the size Hunk cuts a diff at (PKG8-PLAN.md section 7.3).
+const hunkMaxBytes = 64 * 1024
+
+// hunkCutSuffix is appended to a diff Hunk cuts at hunkMaxBytes, so a
+// reader (model or human) can tell a truncated hunk from a complete one.
+const hunkCutSuffix = "\n[hunk cut at 64 KiB]\n"
+
+// binaryDiffMarker is the line git prefixes a binary file's diff with, in
+// place of the diff itself.
+const binaryDiffMarker = "Binary files "
+
+// Hunk returns the unified diff of one changed path against HEAD, cut to
+// 64 KiB (PKG8-PLAN.md section 7.3). It first calls revalidate: a wrong,
+// stale, or tampered worktree is never diffed. The command depends on c's
+// status: a Modified, Deleted, or Added path is diffed against HEAD; an
+// Untracked path is diffed against /dev/null with --no-index, where git's
+// own exit code 1 (the paths differ, the expected case for a real file) is
+// success, not an error. Every diff runs with --no-ext-diff --no-textconv,
+// wt's own filter drivers overridden to empty, and GIT_LITERAL_PATHSPECS=1,
+// so c.Path is never read as pathspec magic and no configured diff driver,
+// external diff, or filter runs. A diff git reports as binary returns the
+// one line "binary file" in place of the (meaningless, and potentially
+// large) diff body.
+func (o *Orchestrator) Hunk(ctx context.Context, wt Worktree, c Change) (string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: hunk: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers, extraEnv: literalPathspecEnv}
+
+	var out string
+	switch c.Code {
+	case Modified, Deleted, Added:
+		got, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", c.Path)
+		if err != nil {
+			return "", fmt.Errorf("orchestrator: hunk: %s: %w", c.Path, err)
+		}
+		out = got
+	case Untracked:
+		got, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", os.DevNull, c.Path)
+		if err != nil && !isExitCode(err, 1) {
+			return "", fmt.Errorf("orchestrator: hunk: %s: %w", c.Path, err)
+		}
+		out = got
+	default:
+		return "", fmt.Errorf("orchestrator: hunk: %s: unrecognized status %v", c.Path, c.Code)
+	}
+
+	if strings.Contains(out, binaryDiffMarker) {
+		return "binary file", nil
+	}
+	if len(out) > hunkMaxBytes {
+		return out[:hunkMaxBytes] + hunkCutSuffix, nil
+	}
+	return out, nil
+}
+
+// BranchCommits returns the shas on the ticket branch that are not on the
+// default branch, oldest first: git rev-list --reverse <default>..HEAD. It
+// first calls revalidate: a wrong, stale, or tampered worktree is never
+// read.
+func (o *Orchestrator) BranchCommits(ctx context.Context, wt Worktree) ([]string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "rev-list", "--reverse", o.proj.DefaultBranch+"..HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
+	}
+
+	var shas []string
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		shas = append(shas, line)
+	}
+	return shas, nil
 }

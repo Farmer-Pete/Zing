@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -151,7 +152,7 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 	}
 	defer func() { _ = os.Remove(pathspecFile) }()
 
-	litRun := execRunner{extraEnv: literalPathspecEnv}
+	litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
 	addArgs := pathspecArgs([]string{"add"}, pathspecFile)
 	if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
 		return "", fmt.Errorf("orchestrator: commit task: stage approved paths: %w: %s", addErr, strings.TrimSpace(out))
@@ -318,4 +319,75 @@ func (o *Orchestrator) signedStatusFallback(ctx context.Context, dir, rev string
 		}
 	}
 	return false, false, nil
+}
+
+// SignedStatus is the exported form of signedStatus for one commit of wt:
+// it reports whether sha carries a valid signature, without the local-
+// verifiability distinction signedStatus itself makes (see signedStatus's
+// own doc for why "not locally verifiable" is not the same as "unsigned").
+func (o *Orchestrator) SignedStatus(ctx context.Context, wt Worktree, sha string) (signed bool, err error) {
+	signed, _, err = o.signedStatus(ctx, wt.dir, sha)
+	return signed, err
+}
+
+// commitStatusFromLetter maps one "git diff-tree --name-status" status
+// letter to Change's closed Status set (PKG8-PLAN.md section 7.3, the same
+// mapping statusFromXY applies to "git status" codes in perimeter.go): "A"
+// is Added; "M" and "T" (typechange) are Modified; "D" is Deleted. Any other
+// letter -- "C" (copy) and "R" (rename) cannot appear here, since CommitChanges
+// runs diff-tree with --no-renames -- is an error.
+func commitStatusFromLetter(letter string) (Status, error) {
+	switch letter {
+	case "A":
+		return Added, nil
+	case "M", "T":
+		return Modified, nil
+	case "D":
+		return Deleted, nil
+	default:
+		return 0, fmt.Errorf("unrecognized diff-tree status %q", letter)
+	}
+}
+
+// CommitChanges returns what one commit changed, sorted by path:
+//
+//	git diff-tree --no-commit-id --name-status -r --no-renames -z <sha>
+//
+// The -z form pairs a NUL-terminated status letter with a NUL-terminated
+// path, repeating; commitStatusFromLetter maps the letter to Change's
+// closed set. Any other status letter is an error, naming the path.
+func (o *Orchestrator) CommitChanges(ctx context.Context, wt Worktree, sha string) ([]Change, error) {
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "diff-tree", "--no-commit-id", "--name-status", "-r", "--no-renames", "-z", sha)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: commit changes: %w", err)
+	}
+
+	records := strings.Split(out, "\x00")
+	changes := make([]Change, 0, len(records)/2)
+	for i := 0; i+1 < len(records); i += 2 {
+		letter, path := records[i], records[i+1]
+		if letter == "" && path == "" {
+			continue
+		}
+		code, err := commitStatusFromLetter(letter)
+		if err != nil {
+			return nil, fmt.Errorf("orchestrator: commit changes: %s: %w", path, err)
+		}
+		changes = append(changes, Change{Path: path, Code: code})
+	}
+
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes, nil
+}
+
+// CommitSubject returns the first line of the commit message:
+// git show -s --format=%s <sha>.
+func (o *Orchestrator) CommitSubject(ctx context.Context, wt Worktree, sha string) (string, error) {
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "show", "-s", "--format=%s", sha)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit subject: %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }

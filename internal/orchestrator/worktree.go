@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +24,9 @@ import (
 // PrepareWorktree checks for it explicitly. Dir and Branch expose the
 // values.
 type Worktree struct {
-	dir    string // <local_path>/.zing/wt/<ticket_id>
-	branch string // zing/<ticket_id>-<slug>, or zing/<ticket_id> when slug is empty
+	dir     string   // <local_path>/.zing/wt/<ticket_id>
+	branch  string   // zing/<ticket_id>-<slug>, or zing/<ticket_id> when slug is empty
+	drivers []string // filter driver names this worktree's repository defines, sorted (PKG8-PLAN.md section 7.2); overridden to empty on every git call a method scoped to this Worktree makes
 }
 
 func (w Worktree) Dir() string    { return w.dir }
@@ -87,13 +89,21 @@ func sanitizeSlug(slug string) string {
 	return strings.Trim(collapsed, "-.")
 }
 
+// checkRefFormatArgs returns the hardened argv for checkRefFormat's call,
+// pulled out as its own pure function so a test can inspect it without
+// running git: hardenedGitArgs(nil, ...), since checkRefFormat reads no
+// repository -- there is no worktree, and so no filter driver, to override.
+func checkRefFormatArgs(name string) []string {
+	return hardenedGitArgs(nil, "check-ref-format", "refs/heads/"+name)
+}
+
 // checkRefFormat runs "git check-ref-format refs/heads/<name>" directly with
 // os/exec (branchName is the package's one pure-ish validator, with no
 // Runner of its own), using the caller's ctx like every other git-invoking
 // call in this package. It is git's own authority on ref-name rules,
 // catching anything the package's own pattern missed.
 func checkRefFormat(ctx context.Context, name string) error {
-	out, err := exec.CommandContext(ctx, "git", "check-ref-format", "refs/heads/"+name).CombinedOutput() //nolint:gosec // argv-only, no shell; name is git-syntax-checked by this very call
+	out, err := exec.CommandContext(ctx, "git", checkRefFormatArgs(name)...).CombinedOutput() //nolint:gosec // argv-only, no shell; name is git-syntax-checked by this very call
 	if err != nil {
 		return fmt.Errorf("git check-ref-format: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -102,15 +112,24 @@ func checkRefFormat(ctx context.Context, name string) error {
 
 // revalidate confirms wt refers to a real, current zing/ ticket branch: the
 // branch must match the zing/ form, must differ from the default branch,
-// and must equal the branch actually checked out in wt.Dir. It is defense
-// in depth on top of Worktree's unexported fields, run by every content-
-// mutating method (CommitTask, Push -- later tasks) before it touches git
-// state, so a wrong or stale worktree never commits or pushes.
-// RemoveWorktree does not call this: a half-removed worktree may no longer
-// have a checked-out HEAD to read, so it validates only the first two
-// conditions (see RemoveWorktree).
+// must equal the branch actually checked out in wt.Dir, and wt.Dir's ".git"
+// pointer file must still point at this repository's real, shared gitdir
+// (PKG8-PLAN.md section 7.2) -- catching an agent that rewrote it to point
+// somewhere else, which would otherwise redirect every later git call in
+// wt.Dir at a repository the orchestrator never prepared. It is defense in
+// depth on top of Worktree's unexported fields, run by every content-
+// mutating or content-reading method (ChangedPaths, RevertPaths, Hunk,
+// BranchCommits, CommitTask) before it touches git state, so a wrong,
+// stale, or tampered worktree never commits, reverts, diffs, or lists
+// commits. RemoveWorktree does not call this: a half-removed worktree may
+// no longer have a checked-out HEAD to read, so it validates only the
+// branch-shape condition (see RemoveWorktree).
 func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
 	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
+		return err
+	}
+
+	if err := o.checkGitPointer(ctx, wt); err != nil {
 		return err
 	}
 
@@ -123,6 +142,58 @@ func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
 		return fmt.Errorf("orchestrator: worktree %s has %q checked out, expected %q", wt.dir, head, wt.branch)
 	}
 	return nil
+}
+
+// checkGitPointer confirms wt.Dir/.git is a regular file whose trimmed
+// content is exactly "gitdir: <git-common-dir>/worktrees/<basename of
+// wt.Dir>" -- the pointer git itself writes for a linked worktree
+// (PKG8-PLAN.md section 7.2). A symlink, a directory, a missing file, or
+// content that names any other path all fail the same way: the sandbox
+// (a later task) denies writing this file, so a mismatch here means either
+// the write happened before the sandbox existed or something else is wrong,
+// and every later git call in this worktree is refused rather than trusted.
+func (o *Orchestrator) checkGitPointer(ctx context.Context, wt Worktree) error {
+	unexpected := fmt.Errorf("orchestrator: worktree %s has an unexpected .git pointer", wt.dir)
+
+	pointerPath := filepath.Join(wt.dir, ".git")
+	info, statErr := os.Lstat(pointerPath)
+	if statErr != nil || !info.Mode().IsRegular() {
+		return unexpected
+	}
+
+	raw, readErr := os.ReadFile(pointerPath)
+	if readErr != nil {
+		return unexpected
+	}
+
+	commonDir, err := o.GitCommonDir(ctx)
+	if err != nil {
+		return fmt.Errorf("orchestrator: worktree %s: %w", wt.dir, err)
+	}
+
+	want := "gitdir: " + filepath.Join(commonDir, "worktrees", filepath.Base(wt.dir))
+	if strings.TrimSpace(string(raw)) != want {
+		return unexpected
+	}
+	return nil
+}
+
+// GitCommonDir returns the repository's common git dir, absolute:
+// "git -C <local_path> rev-parse --path-format=absolute --git-common-dir".
+// Every linked worktree of a repository shares one common dir (the main
+// checkout's ".git" directory, or the bare repository itself), which is
+// where "worktrees/<id>" -- the real gitdir a linked worktree's own ".git"
+// pointer file names -- lives.
+func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
+	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
+	}
+	dir := strings.TrimSpace(out)
+	if dir == "" {
+		return "", errors.New("orchestrator: git common dir: empty result")
+	}
+	return dir, nil
 }
 
 // validateZingBranch is the branch-shape half of revalidate: the branch
@@ -229,6 +300,15 @@ func (o *Orchestrator) ensureWorktreeExclude(ctx context.Context) (err error) {
 	return nil
 }
 
+// sparseCheckoutSetArgs returns the hardened argv for runSparseCheckoutSet's
+// call, pulled out as its own pure function so a test can inspect it
+// without running git: hardenedGitArgs(drivers, ...), since "sparse-checkout
+// set" materializes files into the working tree and so can run a
+// configured smudge filter exactly as "git checkout" can.
+func sparseCheckoutSetArgs(drivers []string) []string {
+	return hardenedGitArgs(drivers, "sparse-checkout", "set", "--stdin")
+}
+
 // runSparseCheckoutSet runs "git sparse-checkout set --stdin" in dir,
 // feeding cone's entries to it one per line on stdin (PR review fix: option
 // injection). PrepareWorktree used to pass cone straight through as argv
@@ -236,14 +316,16 @@ func (o *Orchestrator) ensureWorktreeExclude(ctx context.Context) (err error) {
 // would be parsed by git as an option rather than a path. Feeding it through
 // stdin instead means git never sees cone's entries as argv at all -- every
 // argument here is a fixed literal, so there is nothing left for an entry to
-// inject into. This runs its own *exec.Cmd directly, mirroring execRunner
-// (the same GIT_DIR scrub via scrubGitLocationEnv), rather than going
-// through the Runner interface: Runner (orchestrator.go) is Run/Output with
-// no notion of stdin, and every other caller of it in this package is a fake
-// in a test, so widening it for this one call would ripple through every
-// test double for no other benefit.
-func runSparseCheckoutSet(ctx context.Context, dir string, cone []string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "sparse-checkout", "set", "--stdin")
+// inject into. drivers is the calling worktree's own filter drivers
+// (PKG8-PLAN.md section 7.2), overridden to empty so this checkout-shaped
+// command never runs one. This runs its own *exec.Cmd directly, mirroring
+// execRunner (the same GIT_DIR scrub via scrubGitLocationEnv), rather than
+// going through the Runner interface: Runner (orchestrator.go) is Run/Output
+// with no notion of stdin, and every other caller of it in this package is a
+// fake in a test, so widening it for this one call would ripple through
+// every test double for no other benefit.
+func runSparseCheckoutSet(ctx context.Context, dir string, cone, drivers []string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", sparseCheckoutSetArgs(drivers)...) //nolint:gosec // argv-only, no shell; drivers is repository-config-derived, never user input, and every element goes through hardenedGitArgs' fixed "-c filter.<name>.<key>=" template
 	cmd.Dir = dir
 	cmd.Env = scrubGitLocationEnv(os.Environ())
 	cmd.Stdin = strings.NewReader(strings.Join(cone, "\n") + "\n")
@@ -264,6 +346,17 @@ func runSparseCheckoutSet(ctx context.Context, dir string, cone []string) (strin
 // repository's default branch, but a project whose default branch itself
 // happens to be named "zing/..." would otherwise slip past that assumption
 // and hand the caller a Worktree pointing at the default branch.
+//
+// Creation is two-phase (PKG8-PLAN.md section 7.2): "git worktree add
+// --no-checkout" creates the directory and checks out nothing, and runs no
+// smudge filter; then FilterDrivers and the signing program check
+// (readWorktreeGitConfig) read the effective config inside the new
+// worktree, which may differ from the main checkout's own (a conditional
+// include or extensions.worktreeConfig can give one ticket worktree a
+// different driver or signing program); only then does sparse-checkout and
+// the final checkout run, with that driver set overridden. The signing
+// check runs before checkout, and so before any command that could
+// otherwise reach an unsafe signing program.
 func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug string, cone []string) (Worktree, error) {
 	branch, err := branchName(ctx, ticketID, slug)
 	if err != nil {
@@ -286,24 +379,34 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 
 	o.log.Info("preparing worktree", "ticket_id", ticketID, "branch", branch, "dir", dir)
 
+	// Phase 1: create the directory and branch, checking out nothing.
 	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "add", "--no-checkout", "-b", branch, dir, o.proj.DefaultBranch); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 
 	wt := Worktree{dir: dir, branch: branch}
 
+	// Phase 2: read the config that takes effect inside this worktree
+	// specifically, before any command that touches its content.
+	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
+		o.cleanupWorktree(ctx, wt)
+		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers}
+
 	if len(cone) > 0 {
-		if out, err := o.run.Run(ctx, dir, "git", "sparse-checkout", "init", "--cone"); err != nil {
+		if out, err := run.Run(ctx, dir, "git", "sparse-checkout", "init", "--cone"); err != nil {
 			o.cleanupWorktree(ctx, wt)
 			return Worktree{}, fmt.Errorf("orchestrator: git sparse-checkout init: %w: %s", err, strings.TrimSpace(out))
 		}
-		if out, err := runSparseCheckoutSet(ctx, dir, cone); err != nil {
+		if out, err := runSparseCheckoutSet(ctx, dir, cone, wt.drivers); err != nil {
 			o.cleanupWorktree(ctx, wt)
 			return Worktree{}, fmt.Errorf("orchestrator: git sparse-checkout set: %w: %s", err, strings.TrimSpace(out))
 		}
 	}
 
-	if out, err := o.run.Run(ctx, dir, "git", "checkout"); err != nil {
+	if out, err := run.Run(ctx, dir, "git", "checkout"); err != nil {
 		o.cleanupWorktree(ctx, wt)
 		return Worktree{}, fmt.Errorf("orchestrator: git checkout: %w: %s", err, strings.TrimSpace(out))
 	}
@@ -313,6 +416,209 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 	return wt, nil
 }
 
+// readWorktreeGitConfig reads wt.dir's effective filter drivers and checks
+// its git signing program config, both inside the worktree (so a
+// conditional include or extensions.worktreeConfig scoped to that worktree
+// is seen), and stores the discovered drivers on *wt. It is the config-read
+// half of the two-phase creation PrepareWorktree and reattachWorktree share,
+// and the check EnsureWorktree also repeats on every call for an
+// already-present worktree.
+func (o *Orchestrator) readWorktreeGitConfig(ctx context.Context, wt *Worktree) error {
+	drivers, err := o.FilterDrivers(ctx, wt.dir)
+	if err != nil {
+		return err
+	}
+	if err := o.checkSigningPrograms(ctx, wt.dir); err != nil {
+		return err
+	}
+	wt.drivers = drivers
+	return nil
+}
+
+// FilterDrivers returns the filter driver names git config defines for the
+// repository as seen from dir (the ticket worktree), from every config
+// level, sorted and deduplicated (PKG8-PLAN.md section 7.2):
+//
+//	git -C <dir> config --get-regexp '^filter\..*\.(clean|smudge|process)$'
+//
+// Exit code 1 (no match) is an empty list, not an error.
+func (o *Orchestrator) FilterDrivers(ctx context.Context, dir string) ([]string, error) {
+	out, err := o.run.Output(ctx, dir, "git", "config", "--get-regexp", filterDriverConfigPattern)
+	if err != nil {
+		if isExitCode(err, 1) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("orchestrator: filter drivers: %w", err)
+	}
+
+	seen := make(map[string]struct{})
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key := strings.Fields(line)[0]
+		parts := strings.Split(key, ".")
+		if len(parts) < 3 {
+			continue
+		}
+		name := strings.Join(parts[1:len(parts)-1], ".")
+		if name == "" {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// filterDriverConfigPattern matches a filter driver's clean, smudge, or
+// process command setting, whatever name the driver is given.
+const filterDriverConfigPattern = `^filter\..*\.(clean|smudge|process)$`
+
+// gitSigningProgramKeys are the four config keys section 7.2's grammar
+// governs as "a bare name or an absolute path, no argument". Each is read
+// with "git config --get" and, when set, checked by validateSigningProgram.
+var gitSigningProgramKeys = []string{
+	"gpg.program",
+	"gpg.openpgp.program",
+	"gpg.x509.program",
+	"gpg.ssh.program",
+}
+
+// gitDefaultKeyCommandKey is the one signing key section 7.2 gives a
+// different, single-value grammar: it must equal defaultKeyCommandAllowed
+// exactly, or be unset.
+const gitDefaultKeyCommandKey = "gpg.ssh.defaultKeyCommand"
+
+// defaultKeyCommandAllowed is the only value gitDefaultKeyCommandKey may
+// hold (PKG8-PLAN.md section 7.2): git runs it to list candidate SSH signing
+// keys, and "ssh-add -L" takes no argument of its own, so it cannot be made
+// to load or execute anything else.
+const defaultKeyCommandAllowed = "ssh-add -L"
+
+// signingProgramForbidden matches any character section 7.2's grammar
+// disallows in a signing program's one-word value: whitespace and every
+// shell-metacharacter-shaped character that a program invoked without a
+// shell (exec.Command never spawns one) does not need, but that this grammar
+// closes off anyway rather than reason about case by case.
+var signingProgramForbidden = regexp.MustCompile(`[ \t;|&$` + "`" + `"'()<>\\*?~]`)
+
+// checkSigningPrograms reads the five signing-program keys with
+// "git -C dir config --get <key>" and refuses (PKG8-PLAN.md section 7.2)
+// when a set value does not match its closed grammar, or -- for the four
+// program keys -- when it resolves to a path inside a root a build can
+// write. A key that is not set at all passes with nothing to check.
+func (o *Orchestrator) checkSigningPrograms(ctx context.Context, dir string) error {
+	roots, err := o.signingProgramDisallowedRoots()
+	if err != nil {
+		return err
+	}
+
+	for _, key := range gitSigningProgramKeys {
+		value, ok, readErr := o.gitConfigGet(ctx, dir, key)
+		if readErr != nil {
+			return fmt.Errorf("orchestrator: read git config %s: %w", key, readErr)
+		}
+		if !ok {
+			continue
+		}
+		if validateErr := validateSigningProgramValue(key, value, roots); validateErr != nil {
+			return validateErr
+		}
+	}
+
+	value, ok, err := o.gitConfigGet(ctx, dir, gitDefaultKeyCommandKey)
+	if err != nil {
+		return fmt.Errorf("orchestrator: read git config %s: %w", gitDefaultKeyCommandKey, err)
+	}
+	if ok && value != defaultKeyCommandAllowed {
+		return fmt.Errorf("orchestrator: git signing key %s is not an allowed value", gitDefaultKeyCommandKey)
+	}
+
+	return nil
+}
+
+// gitConfigGet reads one scalar git config key in dir, distinguishing "not
+// set" (git config --get exits 1) from a real error.
+func (o *Orchestrator) gitConfigGet(ctx context.Context, dir, key string) (value string, ok bool, err error) {
+	out, err := o.run.Output(ctx, dir, "git", "config", "--get", key)
+	if err != nil {
+		if isExitCode(err, 1) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(out), true, nil
+}
+
+// signingProgramDisallowedRoots returns the absolute roots a git signing
+// program must not resolve inside (PKG8-PLAN.md section 7.2, this task's
+// slice of it): every worktree Zing can write, under o.proj.LocalPath, and
+// the owner's Claude Code project transcripts, which a build run's own
+// session can write. A later task adds the sandbox cache root and the mds
+// folder to this list.
+func (o *Orchestrator) signingProgramDisallowedRoots() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: resolve home directory: %w", err)
+	}
+	return []string{o.proj.LocalPath, filepath.Join(home, ".claude", "projects")}, nil
+}
+
+// validateSigningProgramValue checks value, the config value read for key,
+// against section 7.2's closed grammar for the four program keys: exactly
+// one word, none of signingProgramForbidden's characters, and either a bare
+// name exec.LookPath resolves under the orchestrator's own PATH or an
+// absolute path -- a relative path (one containing a separator that is not
+// absolute) matches neither shape and is refused. The resolved path, after
+// filepath.EvalSymlinks, must lie outside every root in disallowedRoots.
+func validateSigningProgramValue(key, value string, disallowedRoots []string) error {
+	refused := fmt.Errorf("orchestrator: git signing key %s is not an allowed value", key)
+
+	if value == "" || signingProgramForbidden.MatchString(value) {
+		return refused
+	}
+
+	var resolved string
+	if filepath.IsAbs(value) {
+		resolved = value
+	} else {
+		if strings.ContainsRune(value, '/') {
+			return refused
+		}
+		looked, err := exec.LookPath(value)
+		if err != nil {
+			return refused
+		}
+		resolved = looked
+	}
+
+	realProgram, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		// A program that cannot be resolved on disk is refused rather than
+		// assumed safe: fail closed.
+		return refused
+	}
+
+	for _, root := range disallowedRoots {
+		realRoot, rootErr := filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			realRoot = filepath.Clean(root)
+		}
+		if realProgram == realRoot || strings.HasPrefix(realProgram, realRoot+string(filepath.Separator)) {
+			return refused
+		}
+	}
+
+	return nil
+}
+
 // cleanupWorktreeTimeout bounds the detached context cleanupWorktree runs
 // under, mirroring resetUnsignedCommitTimeout in commit.go: a cleanup that
 // can no longer inherit the caller's context must still complete in bounded
@@ -320,23 +626,38 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 const cleanupWorktreeTimeout = 30 * time.Second
 
 // cleanupWorktree force-removes a partially prepared worktree and deletes
-// its branch after a failure past "git worktree add". A cleanup failure is
-// logged, never returned, so the original failure is what the caller sees.
-// It runs under a detached context (context.WithoutCancel(ctx), bounded by
+// its branch after a failure past "git worktree add". Used by PrepareWorktree,
+// whose own "-b" created that branch, so undoing the branch too is correct.
+// A cleanup failure is logged, never returned, so the original failure is
+// what the caller sees.
+func (o *Orchestrator) cleanupWorktree(ctx context.Context, wt Worktree) {
+	o.cleanupWorktreeDir(ctx, wt)
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWorktreeTimeout)
+	defer cancel()
+	if out, err := o.run.Run(cleanupCtx, o.proj.LocalPath, "git", "branch", "-D", wt.branch); err != nil {
+		o.log.Warn("cleanup: delete branch failed", "branch", wt.branch, "err", err, "output", strings.TrimSpace(out))
+	}
+}
+
+// cleanupWorktreeDir force-removes a partially prepared or reattached
+// worktree directory, leaving its branch alone: reattachWorktree calls this
+// (not cleanupWorktree) after a failure past "git worktree add", since that
+// path's branch existed before the call and must survive a failed reattach
+// attempt (PKG8-PLAN.md section 7.2). A cleanup failure is logged, never
+// returned, so the original failure is what the caller sees. It runs under
+// a detached context (context.WithoutCancel(ctx), bounded by
 // cleanupWorktreeTimeout) rather than ctx itself (PR review fix, mirroring
 // commit.go's resetAfterUnsignedCommit): ctx is exactly the context whose
 // failure -- cancellation or a passed deadline -- is what triggered this
 // cleanup in the first place, so running the cleanup on that same ctx could
-// mean it never runs at all, leaking the worktree directory and its branch.
-func (o *Orchestrator) cleanupWorktree(ctx context.Context, wt Worktree) {
+// mean it never runs at all, leaking the worktree directory.
+func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWorktreeTimeout)
 	defer cancel()
 
 	if out, err := o.run.Run(cleanupCtx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); err != nil {
 		o.log.Warn("cleanup: remove worktree failed", "branch", wt.branch, "dir", wt.dir, "err", err, "output", strings.TrimSpace(out))
-	}
-	if out, err := o.run.Run(cleanupCtx, o.proj.LocalPath, "git", "branch", "-D", wt.branch); err != nil {
-		o.log.Warn("cleanup: delete branch failed", "branch", wt.branch, "err", err, "output", strings.TrimSpace(out))
 	}
 }
 
@@ -458,4 +779,161 @@ func (o *Orchestrator) branchExists(ctx context.Context, branch string) (bool, e
 		return false, fmt.Errorf("git branch --list: %w", err)
 	}
 	return strings.TrimSpace(out) != "", nil
+}
+
+// EnsureWorktree returns the ticket's worktree, creating it when absent. It
+// is safe to call on every tick (PKG8-PLAN.md section 7.1): the branch
+// comes from the worktree, not from slug, so a ticket title edited after the
+// first tick does not orphan the worktree, and the filter-driver read and
+// signing-program check (readWorktreeGitConfig) run again on every call, so
+// a driver or a signing program the owner configures mid-build is overridden
+// or refused from the next tick on.
+func (o *Orchestrator) EnsureWorktree(ctx context.Context, ticketID int64, slug string) (Worktree, error) {
+	dir := filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
+
+	_, statErr := os.Stat(dir)
+	switch {
+	case statErr == nil:
+		return o.ensureWorktreePresent(ctx, ticketID, dir)
+	case errors.Is(statErr, os.ErrNotExist):
+		return o.ensureWorktreeAbsent(ctx, ticketID, slug, dir)
+	default:
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: stat %s: %w", dir, statErr)
+	}
+}
+
+// ticketBranchPattern is the zing/ branch shape for one specific ticket:
+// the bare form or the ticket-slug form, and no other ticket's branch (a
+// plain zingBranchPattern match is not enough here, since EnsureWorktree
+// must tell ticket 1's branch apart from ticket 12's).
+func ticketBranchPattern(ticketID int64) *regexp.Regexp {
+	return regexp.MustCompile(`^zing/` + strconv.FormatInt(ticketID, 10) + `(-[a-z0-9._-]+)?$`)
+}
+
+// ensureWorktreeAbsent implements EnsureWorktree's first three table rows,
+// for a ticketID whose worktree directory does not exist: no matching local
+// branch prepares a fresh worktree; exactly one re-attaches to it, keeping
+// its commits; two or more is an error, since EnsureWorktree cannot tell
+// which one is the ticket's.
+func (o *Orchestrator) ensureWorktreeAbsent(ctx context.Context, ticketID int64, slug, dir string) (Worktree, error) {
+	branches, err := o.matchingZingBranches(ctx, ticketID)
+	if err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
+	}
+	switch len(branches) {
+	case 0:
+		return o.PrepareWorktree(ctx, ticketID, slug, nil)
+	case 1:
+		return o.reattachWorktree(ctx, dir, branches[0])
+	default:
+		return Worktree{}, fmt.Errorf("orchestrator: ticket %d has more than one zing branch", ticketID)
+	}
+}
+
+// matchingZingBranches returns every local branch matching ticketID's zing/
+// pattern -- the bare form or the ticket-slug form -- read with
+// "git branch --list "zing/<id>" "zing/<id>-*"" at the main checkout. Git's
+// own glob matching in "zing/<id>-*" is exact enough on its own not to also
+// match a different ticket's branch (e.g. "zing/12-*" does not match
+// "zing/123-abc"), but the result is still filtered through
+// ticketBranchPattern for the same defense in depth revalidate applies
+// elsewhere.
+func (o *Orchestrator) matchingZingBranches(ctx context.Context, ticketID int64) ([]string, error) {
+	id := strconv.FormatInt(ticketID, 10)
+	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "branch", "--list", "zing/"+id, "zing/"+id+"-*")
+	if err != nil {
+		return nil, fmt.Errorf("git branch --list: %w", err)
+	}
+
+	pattern := ticketBranchPattern(ticketID)
+	var branches []string
+	for raw := range strings.SplitSeq(out, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		// "git branch" marks the branch checked out in this worktree with
+		// "* " and one checked out in another linked worktree with "+ ".
+		if len(line) > 2 && (line[0] == '*' || line[0] == '+') && line[1] == ' ' {
+			line = strings.TrimSpace(line[2:])
+		}
+		if pattern.MatchString(line) {
+			branches = append(branches, line)
+		}
+	}
+	return branches, nil
+}
+
+// reattachWorktree re-registers dir as branch's worktree after the
+// directory was removed by hand, keeping the branch and its commits
+// (PKG8-PLAN.md section 7.1, row 2). A stale worktree registration is
+// cleared first (git's own "is not a working tree" error for an already-
+// absent one is success, the same rule RemoveWorktree uses), then the same
+// two-phase creation PrepareWorktree uses, with no "-b" so the existing
+// branch is kept rather than replaced. A failure past "git worktree add"
+// removes the directory this call created (cleanupWorktreeDir, not
+// cleanupWorktree: the branch existed before this call and must survive).
+func (o *Orchestrator) reattachWorktree(ctx context.Context, dir, branch string) (Worktree, error) {
+	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", dir); err != nil && !isNotAWorkingTreeErrorOutput(out) {
+		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: clear stale registration: %w: %s", err, strings.TrimSpace(out))
+	}
+
+	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "add", "--no-checkout", dir, branch); err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: git worktree add: %w: %s", err, strings.TrimSpace(out))
+	}
+
+	wt := Worktree{dir: dir, branch: branch}
+
+	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
+		o.cleanupWorktreeDir(ctx, wt)
+		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers}
+	if out, err := run.Run(ctx, dir, "git", "checkout"); err != nil {
+		o.cleanupWorktreeDir(ctx, wt)
+		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: git checkout: %w: %s", err, strings.TrimSpace(out))
+	}
+
+	if err := o.revalidate(ctx, wt); err != nil {
+		o.cleanupWorktreeDir(ctx, wt)
+		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: %w", err)
+	}
+
+	return wt, nil
+}
+
+// ensureWorktreePresent implements EnsureWorktree's last two table rows, for
+// a ticketID whose worktree directory already exists: it must be a live,
+// registered worktree (not a stale registration) checked out to a branch
+// matching ticketID's zing/ pattern, or EnsureWorktree refuses rather than
+// touch a directory it cannot confirm is this ticket's.
+func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64, dir string) (Worktree, error) {
+	refused := fmt.Errorf("orchestrator: worktree directory exists but is not ticket %d's worktree: %s", ticketID, dir)
+
+	present, err := o.worktreePresent(ctx, dir)
+	if err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
+	}
+	if !present {
+		return Worktree{}, refused
+	}
+
+	out, headErr := o.run.Output(ctx, dir, "git", "symbolic-ref", "--short", "HEAD")
+	if headErr != nil {
+		return Worktree{}, refused
+	}
+	branch := strings.TrimSpace(out)
+	if !ticketBranchPattern(ticketID).MatchString(branch) {
+		return Worktree{}, refused
+	}
+
+	wt := Worktree{dir: dir, branch: branch}
+	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
+		return Worktree{}, err
+	}
+	if err := o.revalidate(ctx, wt); err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
+	}
+	return wt, nil
 }

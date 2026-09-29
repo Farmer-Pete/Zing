@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,6 +19,14 @@ const (
 	mainBranch    = "main"
 	absLocalPath  = "/tmp/widgets"
 	branch7MySlug = "zing/7-my-slug"
+	gitName       = "git"
+	statusArg     = "status"
+	ownDriverName = "own"
+	gpgProgramKey = "gpg.program"
+	hooksPathArg  = "core.hooksPath=/dev/null"
+	fsmonitorArg  = "core.fsmonitor=false"
+	driverZebra   = "zebra"
+	driverAlpha   = "alpha"
 )
 
 // fakeGitHub is a no-op GitHub, enough to satisfy New's required parameter
@@ -345,7 +354,7 @@ func TestPrepareWorktree(t *testing.T) {
 			t.Errorf("Branch() = %q, want %q", wt.Branch(), branch7MySlug)
 		}
 
-		for _, rel := range []string{"README.md", "app/main.go", "docs/extra.md"} {
+		for _, rel := range []string{"README.md", "app/main.go", docsExtraPath} {
 			if _, err := os.Stat(filepath.Join(wt.Dir(), rel)); err != nil {
 				t.Errorf("expected %s to exist in a full checkout: %v", rel, err)
 			}
@@ -465,10 +474,15 @@ func TestPrepareWorktree(t *testing.T) {
 
 	t.Run("cleans up after a failure past worktree add", func(t *testing.T) {
 		repo := newTestRepo(t)
+		// The forced failure lands on the phase-2 config read
+		// (readWorktreeGitConfig's FilterDrivers call, "git config
+		// --get-regexp ..."), which runs after "git worktree add"
+		// succeeds and before checkout -- exactly the "failure past
+		// worktree add" this test is named for.
 		failing := failingRunner{
 			inner: execRunner{},
 			fail: func(args []string) bool {
-				return len(args) > 0 && args[0] == "checkout"
+				return len(args) > 0 && args[0] == "config"
 			},
 		}
 		o := newTestOrchestrator(t, repo, failing)
@@ -811,6 +825,10 @@ func (r cancelingFailingRunner) Run(ctx context.Context, dir, name string, args 
 }
 
 func (r cancelingFailingRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if r.fail(args) {
+		r.cancel()
+		return "", errors.New("forced failure")
+	}
 	return r.inner.Output(ctx, dir, name, args...)
 }
 
@@ -820,16 +838,18 @@ func (r cancelingFailingRunner) Output(ctx context.Context, dir, name string, ar
 // cancelled by the very failure that triggered cleanup (or one past its
 // deadline) would leave the worktree directory and branch leaked, since
 // cleanup could never run. ctx here is cancelled the instant the forced
-// "checkout" failure happens, before cleanupWorktree runs -- yet the
-// directory and branch still end up removed, since cleanupWorktree now runs
-// on a context.WithoutCancel(ctx) detached from ctx's cancellation.
+// phase-2 config-read failure happens (the same call TestPrepareWorktree's
+// "cleans up after a failure past worktree add" subtest forces), before
+// cleanupWorktree runs -- yet the directory and branch still end up
+// removed, since cleanupWorktree now runs on a context.WithoutCancel(ctx)
+// detached from ctx's cancellation.
 func TestPrepareWorktree_CleanupSurvivesCancelledContext(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	failing := cancelingFailingRunner{
 		inner: execRunner{},
 		fail: func(args []string) bool {
-			return len(args) > 0 && args[0] == "checkout"
+			return len(args) > 0 && args[0] == "config"
 		},
 		cancel: cancel,
 	}
@@ -953,4 +973,717 @@ func TestScrubGitLocationEnv(t *testing.T) {
 			t.Errorf("scrubGitLocationEnv dropped %q", want)
 		}
 	}
+}
+
+// -----------------------------------------------------------------------
+// hardenedGitArgs, execRunner's automatic hardening, NewRunner
+// -----------------------------------------------------------------------
+
+func TestHardenedGitArgs(t *testing.T) {
+	t.Run("no drivers", func(t *testing.T) {
+		got := hardenedGitArgs(nil, statusArg)
+		want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, statusArg}
+		if !slices.Equal(got, want) {
+			t.Errorf("hardenedGitArgs(nil, \"status\") = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("two drivers in sorted order", func(t *testing.T) {
+		got := hardenedGitArgs([]string{driverZebra, driverAlpha}, statusArg)
+		want := []string{
+			"-c", hooksPathArg, "-c", fsmonitorArg,
+			"-c", "filter.alpha.clean=", "-c", "filter.alpha.smudge=", "-c", "filter.alpha.process=", "-c", "filter.alpha.required=false",
+			"-c", "filter.zebra.clean=", "-c", "filter.zebra.smudge=", "-c", "filter.zebra.process=", "-c", "filter.zebra.required=false",
+			statusArg,
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("hardenedGitArgs(unsorted, \"status\") =\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("does not mutate the caller's drivers slice", func(t *testing.T) {
+		drivers := []string{driverZebra, driverAlpha}
+		_ = hardenedGitArgs(drivers, statusArg)
+		if drivers[0] != driverZebra || drivers[1] != driverAlpha {
+			t.Errorf("hardenedGitArgs mutated the caller's slice: %v", drivers)
+		}
+	})
+}
+
+// TestExecRunnerDisablesHooksAndFsmonitor proves execRunner.command applies
+// hardenedGitArgs to every "git" invocation -- so every git call any
+// execRunner makes, whatever the caller asked for, carries the hooks- and
+// fsmonitor-disabling prefix -- and leaves a non-git command's argv alone.
+func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
+	t.Run("a git call's argv starts with the two -c pairs", func(t *testing.T) {
+		cmd := execRunner{}.command(t.Context(), absLocalPath, gitName, statusArg, "--porcelain")
+		want := []string{gitName, "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
+		if !slices.Equal(cmd.Args, want) {
+			t.Errorf("cmd.Args = %q, want %q", cmd.Args, want)
+		}
+	})
+
+	t.Run("drivers add their own -c pairs after the hooks pair", func(t *testing.T) {
+		cmd := execRunner{drivers: []string{ownDriverName}}.command(t.Context(), absLocalPath, gitName, "add", "-A")
+		want := []string{
+			gitName, "-c", hooksPathArg, "-c", fsmonitorArg,
+			"-c", "filter.own.clean=", "-c", "filter.own.smudge=", "-c", "filter.own.process=", "-c", "filter.own.required=false",
+			"add", "-A",
+		}
+		if !slices.Equal(cmd.Args, want) {
+			t.Errorf("cmd.Args = %q, want %q", cmd.Args, want)
+		}
+	})
+
+	t.Run("a non-git command is unchanged", func(t *testing.T) {
+		cmd := execRunner{}.command(t.Context(), absLocalPath, "echo", "hi")
+		want := []string{"echo", "hi"}
+		if !slices.Equal(cmd.Args, want) {
+			t.Errorf("cmd.Args = %q, want %q", cmd.Args, want)
+		}
+	})
+}
+
+// TestNewRunner proves NewRunner returns the real Runner, with no filter
+// driver overrides of its own -- a caller scoping a runner to one Worktree
+// builds a fresh execRunner{drivers: wt's drivers} rather than relying on
+// this shared one to carry them.
+func TestNewRunner(t *testing.T) {
+	run, ok := NewRunner().(execRunner)
+	if !ok {
+		t.Fatalf("NewRunner() = %T, want execRunner", NewRunner())
+	}
+	if len(run.drivers) != 0 {
+		t.Errorf("NewRunner().drivers = %v, want empty", run.drivers)
+	}
+}
+
+// TestCheckRefFormatArgv proves checkRefFormat's argv (checkRefFormatArgs)
+// carries the hardening prefix, even though it reads no repository.
+func TestCheckRefFormatArgv(t *testing.T) {
+	got := checkRefFormatArgs(branch7MySlug)
+	want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "check-ref-format", "refs/heads/" + branch7MySlug}
+	if !slices.Equal(got, want) {
+		t.Errorf("checkRefFormatArgs(%q) = %q, want %q", branch7MySlug, got, want)
+	}
+}
+
+// TestSparseCheckoutArgv proves runSparseCheckoutSet's argv
+// (sparseCheckoutSetArgs) carries the hardening prefix, drivers included --
+// "sparse-checkout set" materializes files exactly as "git checkout" does,
+// so it needs the same driver override.
+func TestSparseCheckoutArgv(t *testing.T) {
+	t.Run("no drivers", func(t *testing.T) {
+		got := sparseCheckoutSetArgs(nil)
+		want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "sparse-checkout", "set", "--stdin"}
+		if !slices.Equal(got, want) {
+			t.Errorf("sparseCheckoutSetArgs(nil) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("with drivers", func(t *testing.T) {
+		got := sparseCheckoutSetArgs([]string{ownDriverName})
+		want := []string{
+			"-c", hooksPathArg, "-c", fsmonitorArg,
+			"-c", "filter.own.clean=", "-c", "filter.own.smudge=", "-c", "filter.own.process=", "-c", "filter.own.required=false",
+			"sparse-checkout", "set", "--stdin",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("sparseCheckoutSetArgs([\"own\"]) = %q, want %q", got, want)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------
+// FilterDrivers, GitCommonDir
+// -----------------------------------------------------------------------
+
+func TestFilterDrivers(t *testing.T) {
+	t.Run("none configured", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		got, err := o.FilterDrivers(t.Context(), repo)
+		if err != nil {
+			t.Fatalf("FilterDrivers: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("FilterDrivers = %v, want empty", got)
+		}
+	})
+
+	t.Run("two drivers, sorted", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "filter.zebra.clean", "zebra-clean")
+		runGit(ctx, t, repo, "config", "filter.alpha.smudge", "alpha-smudge")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		got, err := o.FilterDrivers(ctx, repo)
+		if err != nil {
+			t.Fatalf("FilterDrivers: %v", err)
+		}
+		want := []string{driverAlpha, driverZebra}
+		if !slices.Equal(got, want) {
+			t.Errorf("FilterDrivers = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("one driver defined at two config levels is reported once", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "extensions.worktreeConfig", "true")
+		runGit(ctx, t, repo, "config", "filter.own.clean", "own-clean")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 70, "worktreeconfig", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		runGit(ctx, t, wt.Dir(), "config", "--worktree", "filter.own.smudge", "own-smudge")
+
+		got, err := o.FilterDrivers(ctx, wt.Dir())
+		if err != nil {
+			t.Fatalf("FilterDrivers: %v", err)
+		}
+		want := []string{ownDriverName}
+		if !slices.Equal(got, want) {
+			t.Errorf("FilterDrivers = %v, want %v (deduplicated across config.worktree and repo-local config)", got, want)
+		}
+	})
+}
+
+func TestGitCommonDir(t *testing.T) {
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	got, err := o.GitCommonDir(t.Context())
+	if err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
+	want, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve want: %v", err)
+	}
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve got %q: %v", got, err)
+	}
+	if gotResolved != want {
+		t.Errorf("GitCommonDir = %q, want %q", gotResolved, want)
+	}
+}
+
+// -----------------------------------------------------------------------
+// EnsureWorktree
+// -----------------------------------------------------------------------
+
+func TestEnsureWorktree(t *testing.T) {
+	t.Run("absent creates a fresh worktree", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		wt, err := o.EnsureWorktree(ctx, 200, "ensure")
+		if err != nil {
+			t.Fatalf("EnsureWorktree: %v", err)
+		}
+
+		wantDir := filepath.Join(repo, ".zing", "wt", "200")
+		if wt.Dir() != wantDir {
+			t.Errorf("Dir() = %q, want %q", wt.Dir(), wantDir)
+		}
+		wantBranch := "zing/200-ensure"
+		if wt.Branch() != wantBranch {
+			t.Errorf("Branch() = %q, want %q", wt.Branch(), wantBranch)
+		}
+		if _, statErr := os.Stat(filepath.Join(wt.Dir(), "README.md")); statErr != nil {
+			t.Errorf("expected a full checkout: %v", statErr)
+		}
+	})
+
+	t.Run("present reopens with the branch read from the worktree, not slug", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		first, err := o.PrepareWorktree(ctx, 201, "original-slug", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		wt, err := o.EnsureWorktree(ctx, 201, "a-different-slug-now")
+		if err != nil {
+			t.Fatalf("EnsureWorktree: %v", err)
+		}
+		if wt.Dir() != first.Dir() {
+			t.Errorf("Dir() = %q, want %q", wt.Dir(), first.Dir())
+		}
+		if wt.Branch() != first.Branch() {
+			t.Errorf("Branch() = %q, want the original %q (branch comes from the worktree, not the new slug)", wt.Branch(), first.Branch())
+		}
+	})
+
+	t.Run("a foreign directory errors", func(t *testing.T) {
+		repo := newTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+		ctx := t.Context()
+
+		dir := filepath.Join(repo, ".zing", "wt", "202")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+
+		if _, err := o.EnsureWorktree(ctx, 202, "foreign"); err == nil {
+			t.Fatal("EnsureWorktree: expected an error for a directory git does not recognize as a worktree, got nil")
+		}
+	})
+}
+
+// TestEnsureWorktreeReattachesAfterDeletion proves EnsureWorktree's second
+// table row: a worktree directory removed by hand (not through git) is
+// re-attached to its existing branch, and the branch's landed commit
+// survives.
+func TestEnsureWorktreeReattachesAfterDeletion(t *testing.T) {
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	wt, err := o.PrepareWorktree(ctx, 210, "reattach", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), "landed.txt"), "already landed\n")
+	runGit(ctx, t, wt.Dir(), "add", "landed.txt")
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "a landed commit")
+	landedSHA := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	if removeErr := os.RemoveAll(wt.Dir()); removeErr != nil {
+		t.Fatalf("RemoveAll(%s): %v", wt.Dir(), removeErr)
+	}
+
+	reattached, err := o.EnsureWorktree(ctx, 210, "reattach")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if reattached.Branch() != wt.Branch() {
+		t.Errorf("Branch() = %q, want the original %q", reattached.Branch(), wt.Branch())
+	}
+	if _, statErr := os.Stat(filepath.Join(reattached.Dir(), "landed.txt")); statErr != nil {
+		t.Errorf("expected the landed commit's file to survive reattachment: %v", statErr)
+	}
+
+	gotSHA := strings.TrimSpace(runGit(ctx, t, reattached.Dir(), "rev-parse", "HEAD"))
+	if gotSHA != landedSHA {
+		t.Errorf("HEAD = %q after reattachment, want the original landed commit %q", gotSHA, landedSHA)
+	}
+}
+
+func TestEnsureWorktreeTwoBranchesErrors(t *testing.T) {
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	runGit(ctx, t, repo, "branch", "zing/220-first", mainBranch)
+	runGit(ctx, t, repo, "branch", "zing/220-second", mainBranch)
+
+	if _, err := o.EnsureWorktree(ctx, 220, "whatever"); err == nil {
+		t.Fatal("EnsureWorktree: expected an error when two local branches match the ticket, got nil")
+	}
+}
+
+// -----------------------------------------------------------------------
+// The git signing program check
+// -----------------------------------------------------------------------
+
+// TestSigningProgramCheck drives checkSigningPrograms's closed grammar
+// (PKG8-PLAN.md section 7.2) directly against a real repo's local config,
+// through EnsureWorktree so the check runs exactly as production calls it.
+func TestSigningProgramCheck(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr bool
+	}{
+		{name: "unset", key: "", wantErr: false},
+		{
+			name:  "a bare name PATH resolves outside any disallowed root",
+			key:   gpgProgramKey,
+			value: "ssh-keygen",
+		},
+		{
+			name:    "an absolute path outside is allowed",
+			key:     gpgProgramKey,
+			value:   "/usr/bin/true",
+			wantErr: false,
+		},
+		{
+			name:    "node signer.js has a space, forbidden",
+			key:     gpgProgramKey,
+			value:   "node signer.js",
+			wantErr: true,
+		},
+		{
+			name:    "sh -c ./sign.sh has a space, forbidden",
+			key:     gpgProgramKey,
+			value:   "sh -c ./sign.sh",
+			wantErr: true,
+		},
+		{
+			name:    "a quoted path is forbidden",
+			key:     gpgProgramKey,
+			value:   `"/usr/bin/true"`,
+			wantErr: true,
+		},
+		{
+			name:    "a relative path is refused",
+			key:     gpgProgramKey,
+			value:   "bin/sign",
+			wantErr: true,
+		},
+		{
+			name:    "defaultKeyCommand as ssh-add -L is allowed",
+			key:     "gpg.ssh.defaultKeyCommand",
+			value:   "ssh-add -L",
+			wantErr: false,
+		},
+		{
+			name:    "defaultKeyCommand with an extra argument is refused",
+			key:     "gpg.ssh.defaultKeyCommand",
+			value:   "ssh-add -L -f keys",
+			wantErr: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := newTestRepo(t)
+			ctx := t.Context()
+			if c.key != "" {
+				runGit(ctx, t, repo, "config", c.key, c.value)
+			}
+			o := newTestOrchestrator(t, repo, execRunner{})
+
+			_, err := o.EnsureWorktree(ctx, 300, "signing")
+			if c.wantErr && err == nil {
+				t.Fatalf("EnsureWorktree: expected an error for %s=%q, got nil", c.key, c.value)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("EnsureWorktree: unexpected error for %s=%q: %v", c.key, c.value, err)
+			}
+		})
+	}
+
+	t.Run("a bare name that PATH resolves into the repository is refused", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+
+		binDir := filepath.Join(repo, "bin")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", binDir, err)
+		}
+		scriptPath := filepath.Join(binDir, "zing-signer")
+		writeTestFile(t, scriptPath, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(scriptPath, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", scriptPath, err)
+		}
+
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		runGit(ctx, t, repo, "config", gpgProgramKey, "zing-signer")
+
+		o := newTestOrchestrator(t, repo, execRunner{})
+		if _, err := o.EnsureWorktree(ctx, 301, "path-into-repo"); err == nil {
+			t.Fatal("EnsureWorktree: expected an error for a bare name PATH resolves into the repository, got nil")
+		}
+	})
+
+	t.Run("a symlink that resolves into the repository is refused", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+
+		target := filepath.Join(repo, "real-signer")
+		writeTestFile(t, target, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(target, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", target, err)
+		}
+
+		outside := t.TempDir()
+		link := filepath.Join(outside, "signer-link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		runGit(ctx, t, repo, "config", gpgProgramKey, link)
+
+		o := newTestOrchestrator(t, repo, execRunner{})
+		if _, err := o.EnsureWorktree(ctx, 302, "symlink-into-repo"); err == nil {
+			t.Fatal("EnsureWorktree: expected an error for a symlink resolving into the repository, got nil")
+		}
+	})
+
+	// This subtest alone touches HOME (t.Setenv, restored automatically):
+	// signingProgramDisallowedRoots must read the real home directory to
+	// name <HOME>/.claude/projects, so proving that root is refused needs a
+	// controlled HOME rather than the developer's own.
+	t.Run("an absolute program inside HOME/.claude/projects is refused", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		projectsDir := filepath.Join(home, ".claude", "projects")
+		if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", projectsDir, err)
+		}
+		programPath := filepath.Join(projectsDir, "signer")
+		writeTestFile(t, programPath, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(programPath, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", programPath, err)
+		}
+
+		runGit(ctx, t, repo, "config", gpgProgramKey, programPath)
+
+		o := newTestOrchestrator(t, repo, execRunner{})
+		if _, err := o.EnsureWorktree(ctx, 303, "home-projects"); err == nil {
+			t.Fatal("EnsureWorktree: expected an error for a program inside HOME/.claude/projects, got nil")
+		}
+	})
+}
+
+// -----------------------------------------------------------------------
+// The filter-driver marker technique
+// -----------------------------------------------------------------------
+
+// configureMarkerFilterDriver configures name's clean and smudge commands to
+// touch marker before passing content through unchanged, entirely through
+// repo-local config, so a test can prove a hardened git call never invokes
+// it (marker stays absent) versus an unhardened one (marker appears).
+func configureMarkerFilterDriver(ctx context.Context, t *testing.T, repo, name, marker string) {
+	t.Helper()
+	cmd := fmt.Sprintf("touch %s && cat", marker)
+	runGit(ctx, t, repo, "config", "filter."+name+".clean", cmd)
+	runGit(ctx, t, repo, "config", "filter."+name+".smudge", cmd)
+}
+
+// assertMarkerAbsent fails the test if marker exists.
+func assertMarkerAbsent(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("expected the filter driver's marker to be absent at %s (the driver must never run), stat err = %v", marker, err)
+	}
+}
+
+// TestPrepareWorktreeRunsNoSmudgeFilter proves the checkout PrepareWorktree
+// runs at the end of both a full and a sparse creation carries wt's own
+// filter drivers overridden to empty, so a configured smudge filter -- run
+// naturally by an unhardened "git checkout" -- never executes.
+func TestPrepareWorktreeRunsNoSmudgeFilter(t *testing.T) {
+	setUpFilteredRepo := func(t *testing.T) (repo, marker string, ctx context.Context) {
+		t.Helper()
+		repo = newTestRepo(t)
+		ctx = t.Context()
+		marker = filepath.Join(t.TempDir(), "marker")
+
+		writeTestFile(t, filepath.Join(repo, "filtered", "tracked.txt"), "content\n")
+		runGit(ctx, t, repo, "add", "filtered/tracked.txt")
+		runGit(ctx, t, repo, "commit", "-q", "-m", "add tracked.txt, unfiltered")
+
+		configureMarkerFilterDriver(ctx, t, repo, "own", marker)
+		writeTestFile(t, filepath.Join(repo, ".gitattributes"), "*.txt filter=own\n")
+		runGit(ctx, t, repo, "add", ".gitattributes")
+		runGit(ctx, t, repo, "commit", "-q", "-m", "declare the filter for *.txt")
+
+		// Declaring the filter over an already-tracked *.txt path makes
+		// this plain, unhardened setup git itself re-run the clean filter
+		// against tracked.txt once .gitattributes takes effect -- nothing
+		// to do with PrepareWorktree. Clear that setup-time marker so what
+		// remains proves what PrepareWorktree itself did.
+		_ = os.Remove(marker)
+
+		return repo, marker, ctx
+	}
+
+	t.Run("full checkout", func(t *testing.T) {
+		repo, marker, ctx := setUpFilteredRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 400, "nosmudge", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(wt.Dir(), "filtered", "tracked.txt")); statErr != nil {
+			t.Errorf("expected tracked.txt to be checked out: %v", statErr)
+		}
+		assertMarkerAbsent(t, marker)
+	})
+
+	t.Run("sparse checkout", func(t *testing.T) {
+		repo, marker, ctx := setUpFilteredRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 401, "nosmudge-sparse", []string{"filtered"})
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(wt.Dir(), "filtered", "tracked.txt")); statErr != nil {
+			t.Errorf("expected tracked.txt inside the cone: %v", statErr)
+		}
+		assertMarkerAbsent(t, marker)
+	})
+}
+
+// TestWorktreeConfigIsReadInWorktree proves FilterDrivers and
+// checkSigningPrograms read config as it takes effect inside the ticket
+// worktree, not the main checkout: a filter driver defined only through an
+// "onbranch:zing/**" conditional include (which only matches from a
+// worktree checked out to a zing/ branch) and a signing program defined
+// only through config.worktree (which only exists for one specific linked
+// worktree) are both seen.
+func TestWorktreeConfigIsReadInWorktree(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 500, "worktreecfg", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	includePath := filepath.Join(t.TempDir(), "onbranch.gitconfig")
+	writeTestFile(t, includePath, "[filter \"onbranchdriver\"]\n\tclean = cat\n\tsmudge = cat\n")
+	runGit(ctx, t, repo, "config", "includeIf.onbranch:zing/**.path", includePath)
+
+	fromWorktree, err := o.FilterDrivers(ctx, wt.Dir())
+	if err != nil {
+		t.Fatalf("FilterDrivers(worktree): %v", err)
+	}
+	if !slices.Contains(fromWorktree, "onbranchdriver") {
+		t.Errorf("FilterDrivers(worktree) = %v, want it to include the includeIf-only driver %q", fromWorktree, "onbranchdriver")
+	}
+
+	fromMain, err := o.FilterDrivers(ctx, repo)
+	if err != nil {
+		t.Fatalf("FilterDrivers(main checkout): %v", err)
+	}
+	if slices.Contains(fromMain, "onbranchdriver") {
+		t.Errorf("FilterDrivers(main checkout) = %v, want it NOT to see the onbranch-only driver (main is on %q, not zing/**)", fromMain, mainBranch)
+	}
+
+	runGit(ctx, t, repo, "config", "extensions.worktreeConfig", "true")
+	runGit(ctx, t, wt.Dir(), "config", "--worktree", "gpg.program", "node signer.js")
+
+	if _, err := o.EnsureWorktree(ctx, 500, "worktreecfg"); err == nil {
+		t.Fatal("EnsureWorktree: expected an error for a config.worktree-only signing program that fails the grammar, got nil")
+	}
+}
+
+// TestFailedCheckRemovesNewWorktree proves that when the signing-program
+// check fails for a freshly created worktree, PrepareWorktree's cleanup
+// removes both the directory and the branch it just created.
+func TestFailedCheckRemovesNewWorktree(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	runGit(ctx, t, repo, "config", "gpg.program", "node signer.js")
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	_, err := o.PrepareWorktree(ctx, 600, "failed-check", nil)
+	if err == nil {
+		t.Fatal("PrepareWorktree: expected an error for a disallowed signing program, got nil")
+	}
+
+	dir := filepath.Join(repo, ".zing", "wt", "600")
+	if _, statErr := os.Stat(dir); statErr == nil {
+		t.Errorf("expected %s to be removed after the failed check", dir)
+	}
+	branches := runGit(ctx, t, repo, "branch", "--list", "zing/600-failed-check")
+	if strings.TrimSpace(branches) != "" {
+		t.Errorf("expected the freshly created branch to be deleted, branch --list said: %q", branches)
+	}
+}
+
+// TestRevalidateRejectsRewrittenGitPointer proves revalidate's new check: a
+// worktree whose ".git" pointer file no longer names this repository's real
+// gitdir is rejected on every later call.
+func TestRevalidateRejectsRewrittenGitPointer(t *testing.T) {
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	wt, err := o.PrepareWorktree(ctx, 610, "gitpointer", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	if err := o.revalidate(ctx, wt); err != nil {
+		t.Fatalf("revalidate: unexpected error for a freshly prepared worktree: %v", err)
+	}
+
+	pointerPath := filepath.Join(wt.Dir(), ".git")
+	if err := os.WriteFile(pointerPath, []byte("gitdir: /somewhere/else\n"), 0o644); err != nil {
+		t.Fatalf("rewrite .git pointer: %v", err)
+	}
+
+	if err := o.revalidate(ctx, wt); err == nil {
+		t.Fatal("revalidate: expected an error for a rewritten .git pointer, got nil")
+	}
+}
+
+// TestFilterDriverNeverRuns proves a configured filter driver whose command
+// is a worktree-reachable script never runs, across every content-touching
+// method that reads or changes a worktree: CommitTask, RevertPaths,
+// ChangedPaths, and Hunk.
+func TestFilterDriverNeverRuns(t *testing.T) {
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	configureMarkerFilterDriver(ctx, t, repo, "own", marker)
+	writeTestFile(t, filepath.Join(repo, ".gitattributes"), "*.txt filter=own\n")
+	runGit(ctx, t, repo, "add", ".gitattributes")
+	runGit(ctx, t, repo, "commit", "-q", "-m", "declare the filter for *.txt")
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	wt, err := o.PrepareWorktree(ctx, 620, "filterdriver", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	assertMarkerAbsent(t, marker)
+
+	const trackedFile = "tracked.txt"
+	writeTestFile(t, filepath.Join(wt.Dir(), trackedFile), "content one\n")
+
+	changed, err := o.ChangedPaths(ctx, wt)
+	if err != nil {
+		t.Fatalf("ChangedPaths: %v", err)
+	}
+	if len(changed) == 0 {
+		t.Fatal("ChangedPaths: expected at least one change")
+	}
+	assertMarkerAbsent(t, marker)
+
+	if _, commitErr := o.CommitTask(ctx, wt, []string{trackedFile}, CommitMessage{Title: testCommitTitle, FuncLines: []string{testFuncLine}}); commitErr != nil {
+		t.Fatalf("CommitTask: %v", commitErr)
+	}
+	assertMarkerAbsent(t, marker)
+
+	writeTestFile(t, filepath.Join(wt.Dir(), trackedFile), "content two\n")
+	if revertErr := o.RevertPaths(ctx, wt, []Change{{Path: trackedFile, Code: Modified}}); revertErr != nil {
+		t.Fatalf("RevertPaths: %v", revertErr)
+	}
+	assertMarkerAbsent(t, marker)
+
+	writeTestFile(t, filepath.Join(wt.Dir(), trackedFile), "content three\n")
+	hunk, err := o.Hunk(ctx, wt, Change{Path: trackedFile, Code: Modified})
+	if err != nil {
+		t.Fatalf("Hunk: %v", err)
+	}
+	if hunk == "" {
+		t.Error("Hunk: expected a non-empty diff")
+	}
+	assertMarkerAbsent(t, marker)
 }

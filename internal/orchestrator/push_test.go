@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -379,4 +380,31 @@ func TestOpenDraftPR(t *testing.T) {
 			t.Errorf("OpenDraftPR error = %q, want it to mention the create error %q", err.Error(), "boom")
 		}
 	})
+}
+
+// TestPushArgvDisablesHooks proves Push's git calls carry the
+// hooks-disabling prefix: a repo-local pre-push hook that writes a marker
+// file leaves no marker after a successful Push.
+func TestPushArgvDisablesHooks(t *testing.T) {
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	hookPath := filepath.Join(repo, ".git", "hooks", "pre-push")
+	writeTestFile(t, hookPath, "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(hookPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", hookPath, err)
+	}
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	wt := prepareSignedCommit(ctx, t, o, 33)
+
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	assertMarkerAbsent(t, marker)
 }
