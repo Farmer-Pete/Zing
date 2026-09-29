@@ -123,9 +123,11 @@ func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
 }
 
 // allowedParentEnv is the parent-process variables Run carries into the
-// child when they are set (design section 4.1). Everything else the
-// calling process happens to have is not the child's business.
-var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR"}
+// child when they are set (design section 4.1, decision D6). Everything
+// else the calling process happens to have is not the child's business.
+// USER is carried because claude -p reports "Not logged in" without it;
+// LOGNAME alone does not stand in for it.
+var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR", "USER"}
 
 // agentEnv builds the filtered environment (design section 4.1), shared by
 // both Claude and Codex: the allowlisted parent variables, then req.Env,

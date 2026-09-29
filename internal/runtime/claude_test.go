@@ -267,6 +267,36 @@ func TestClaude_EnvFilter(t *testing.T) {
 	}
 }
 
+// TestAgentEnvCarriesUser covers D6 (plan section 4.4): claude -p reports
+// "Not logged in" when the child sees no USER, and LOGNAME alone does not
+// stand in for it, so agentEnv must carry the parent's USER through.
+func TestAgentEnvCarriesUser(t *testing.T) {
+	// t.Setenv cannot combine with t.Parallel.
+	t.Setenv("USER", "zing-test")
+
+	env := agentEnv(RunRequest{})
+
+	if !slices.Contains(env, "USER=zing-test") {
+		t.Errorf("agentEnv() = %v, want it to contain %q", env, "USER=zing-test")
+	}
+}
+
+// TestAgentEnvOmitsLogname guards against widening the fix into a second
+// variable: LOGNAME is not in allowedParentEnv, so setting it in the parent
+// must not make it appear in the child's environment.
+func TestAgentEnvOmitsLogname(t *testing.T) {
+	// t.Setenv cannot combine with t.Parallel.
+	t.Setenv("LOGNAME", "zing-test")
+
+	env := agentEnv(RunRequest{})
+
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "LOGNAME" {
+			t.Errorf("agentEnv() = %v, want no LOGNAME entry", env)
+		}
+	}
+}
+
 // ---- fixture parse ----------------------------------------------------------
 
 func TestClaude_FixtureParse_FirstTurn(t *testing.T) {
