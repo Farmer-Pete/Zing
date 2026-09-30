@@ -9,10 +9,9 @@
 // it through task 8, which routed it through runJob so every building tick
 // already passed the sandbox rule).
 //
-// Task 13 owns the rest of design section 6: resolving an escalation once
-// the owner has answered it (retry, back to planning, abandon). When the
-// handler finds an answered escalation round, it returns ErrNoAction,
-// logged at debug naming the step.
+// Task 13 adds the rest of design section 6: resolving a building
+// escalation once the owner has answered it (retry, back to planning,
+// abandon -- design section 6.9's own choice-by-origin table).
 package job
 
 import (
@@ -116,7 +115,30 @@ const (
 
 	revertFailedWhat = "a rejected file could not be reverted"
 	revertFailedWhy  = "orchestrator.RevertPaths could not restore or remove the rejected path"
+
+	// replanUnsupportedWhat and replanUnsupportedWhy are design D14's own
+	// fixed text for an escalation round's choice "b" (back to planning),
+	// or a reply with no option at all: back-to-planning on a building
+	// ticket is deferred, so every origin re-escalates this instead
+	// (design section 6.9).
+	replanUnsupportedWhat = "replanning after the build started is not built yet; retry or abandon"
+	replanUnsupportedWhy  = "the owner chose back to planning on a building ticket"
 )
+
+// markerRetryRequested is design section 6.9's own retry marker: written
+// when a retry needs no fresh run of its own -- a build retry with no run
+// (step 0, CHECK, LAND, or RESOLVE's own escalation), a perimeter retry, or
+// a retry on a sandbox_unavailable escalation of any origin ("as build
+// with no run") -- so the next tick simply re-enters the state machine at
+// step 0 (build) or DESCRIBE (perimeter, which always retakes the first
+// undescribed extra on its own).
+const markerRetryRequested = "retry requested"
+
+// labelPerimeter is the "perimeter" input label a build resume carries
+// after a revert (design section 6.3's own resume input table): the
+// notice is raw, never fenced, since it is Zing's own fixed wording, not
+// owner- or model-supplied text.
+const labelPerimeter = "perimeter"
 
 // trustRoot and styleGuide are design section 12's two constant path lists
 // (section 6.4): every CHECK, and the adoption checks, classify an extra
@@ -253,7 +275,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "unit_session", "session_state", sessionStateName(state))
 
 	if !ok || state == store.SessionIdless {
-		commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks))
+		commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks), nil, nil)
 		return withBranchResult(commit, runErr, wt)
 	}
 
@@ -376,8 +398,7 @@ func (h buildingHandler) enterFromRounds(ctx context.Context, t store.Ticket, d 
 		// section 6.1, 6.9); this file stops here.
 		newest := round.Questions[len(round.Questions)-1]
 		if newest.ParentID != nil {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "escalation_resolution", "session_state", "n/a")
-			return store.HandlerCommit{}, ErrNoAction
+			return h.enterFromEscalationRound(ctx, t, d, round, *newest.ParentID)
 		}
 
 		kind, kindErr := newestQuestionKind(round)
@@ -515,6 +536,461 @@ func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d D
 		func(rr runResult) (store.HandlerCommit, error) {
 			return buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
 		}, &n)
+}
+
+// ---- escalation resolution (task 13, design section 6.9) ------------------
+
+// enterFromEscalationRound is design section 6.9's own Write/Resolve for a
+// building escalation: escID is the newest question's own parent id, the
+// escalation message it answers (enterFromRounds' own "the newest
+// question's own parent id" distinction). Entered before step 0 (design
+// section 6.1: "before step 0"), so a step 0 failure never stands between
+// the owner's answer and this resolution. Choice c (abandon) resolves
+// every open or answered question and transitions straight to abandoned,
+// regardless of origin; choice b, or a reply with no option at all
+// (roundChoice's own default), always re-escalates replan_unsupported
+// (D14); a retry on code sandbox_unavailable, whichever origin wrote it,
+// behaves exactly like a build retry with no run; otherwise the origin
+// alone decides (design section 6.9's own table).
+func (h buildingHandler) enterFromEscalationRound(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
+	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation %d: %w", escID, err)
+	}
+	resolveIDs := questionIDs(round)
+	choice := roundChoice(round)
+	notes := joinReplies(round.Replies)
+	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
+	origin := response.EscalationOrigin(payload.Origin)
+
+	var commit store.HandlerCommit
+	preserved := 0
+
+	switch {
+	case choice == escalationChoiceAbandon:
+		commit = abandonCommit(t, d, payload.Code)
+
+	case choice != escalationChoiceRetry:
+		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
+
+	case payload.Code == string(response.EscalationCodeSandboxUnavailable):
+		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginCapBudget:
+		commit = recapBudgetEscalation(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginCapResumes:
+		commit, preserved, err = h.retryCapResumes(ctx, t, d, resolveIDs, notes, int64OrZero(payload.SessionID))
+
+	case origin == response.EscalationOriginPerimeter:
+		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case (origin == response.EscalationOriginBuild || origin == response.EscalationOriginFix) && escMsg.RunID != nil:
+		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText)
+
+	case origin == response.EscalationOriginBuild, origin == response.EscalationOriginFix:
+		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation %d: unrecognized origin %q", escID, payload.Origin)
+	}
+	if err != nil {
+		return commit, err
+	}
+
+	slog.Info("escalation resolved", "ticket_id", t.ID, "session_id", int64OrZero(payload.SessionID),
+		"run_id", int64OrZero(escMsg.RunID), "code", payload.Code, "origin", payload.Origin,
+		"choice", choice, "preserved_rounds", preserved)
+	return commit, nil
+}
+
+// retryMarkerCommit is design section 6.9's "resolve the round, commit the
+// marker retry requested, stay" action: shared by a build retry with no
+// run (step 0, CHECK, LAND, or RESOLVE's own escalation, where the next
+// tick re-enters the state machine at step 0), a perimeter retry (the next
+// tick's DESCRIBE retakes the first undescribed extra on its own), and a
+// retry on a sandbox_unavailable escalation of any origin ("as build with
+// no run").
+func (h buildingHandler) retryMarkerCommit(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: markerRetryRequested}}
+	return c
+}
+
+// replanUnsupportedEscalation is design D14's own "back to planning is
+// deferred" row: re-escalate replan_unsupported with the origin unchanged,
+// resolving the round that led here.
+func replanUnsupportedEscalation(t store.Ticket, d Deps, resolveIDs []int64, origin response.EscalationOrigin) store.HandlerCommit {
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeReplanUnsupported), replanUnsupportedWhat, replanUnsupportedWhy, "", origin)
+	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// retryFreshRun is design section 6.9's build/fix retry-with-a-run row: RUN
+// first turn of the same unit, fresh session, inputs notes and error
+// (fenced), resolving the round. The unit still in flight is the one step
+// 2 would pick next: an error outcome never inserts a build_report, so
+// nextTaskN still names it (resumeBuildRound draws the identical
+// conclusion for an answered build question). Only a task unit's own
+// number can be derived this way (nextTaskN, unitFor); a fix unit's own
+// retry needs task 14's own unit-generic derivation, so the origin==fix
+// branch above is unreachable until task 14 wires StartFix into serve.
+func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+	plan, _, ok, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: stored plan: %w", err)
+	}
+	if !ok {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), nil
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: build reports: %w", err)
+	}
+	tasks := response.Tasks(plan)
+	taskN, hasNext := nextTaskN(tasks, reports)
+	if !hasNext {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: ticket %d: no unit in flight", t.ID)
+	}
+	u, foundUnit := unitFor(tasks, taskN)
+	if !foundUnit {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: ticket %d: plan has no task %d", t.ID, taskN)
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+	commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks), extra, resolveIDs)
+	return withBranchResult(commit, runErr, wt)
+}
+
+// retryCapResumes is design section 6.9's cap_resumes retry row: the
+// escalated session's own job (build or perimeter) is read from
+// EscalationPayload.SessionID (design section 6.9's own intro sentence),
+// which decides which of the two branches below applies. preserved is how
+// many rounds, beyond the escalation round itself, this call folds in and
+// resolves (the "escalation resolved" log's own preserved_rounds field).
+func (h buildingHandler) retryCapResumes(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes string, sessionID int64) (store.HandlerCommit, int, error) {
+	sessions, err := d.Store.SessionsForTicket(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: sessions for ticket: %w", err)
+	}
+	exhausted, found := sessionByID(sessions, sessionID)
+	if !found {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no session %d", t.ID, sessionID)
+	}
+
+	allRounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: answered rounds: %w", err)
+	}
+	var preservedRounds []store.Round
+	for _, r := range allRounds {
+		if r.SessionID != nil && *r.SessionID == sessionID {
+			preservedRounds = append(preservedRounds, r)
+		}
+	}
+
+	if exhausted.Job == jobPerimeterName {
+		return h.retryCapResumesPerimeter(ctx, t, d, resolveIDs, notes, preservedRounds)
+	}
+	return h.retryCapResumesBuild(ctx, t, d, resolveIDs, notes, preservedRounds)
+}
+
+// sessionByID finds id among sessions (design section 6.9's own "the
+// escalated session's job ... is read from EscalationPayload.SessionID").
+func sessionByID(sessions []store.Session, id int64) (store.Session, bool) {
+	for _, s := range sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return store.Session{}, false
+}
+
+// retryCapResumesBuild is retryCapResumes' build-session branch (design
+// section 6.9): every preserved round of kind question renders into one
+// combined answers input (renderRoundAnswers, joined as
+// resolveCapResumesEscalation does for planning); a preserved round of
+// kind perimeter instead applies RESOLVE steps 1 to 4
+// (applyPreservedPerimeterRound: decisions stored, rejected paths
+// reverted) and contributes the perimeter notice; the fresh run is RUN's
+// first turn of the same unit.
+func (h buildingHandler) retryCapResumesBuild(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes string, preservedRounds []store.Round) (store.HandlerCommit, int, error) {
+	plan, _, ok, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: stored plan: %w", err)
+	}
+	if !ok {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), 0, nil
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: build reports: %w", err)
+	}
+	tasks := response.Tasks(plan)
+	taskN, hasNext := nextTaskN(tasks, reports)
+	if !hasNext {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no unit in flight", t.ID)
+	}
+	u, foundUnit := unitFor(tasks, taskN)
+	if !foundUnit {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: plan has no task %d", t.ID, taskN)
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, 0, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), 0, nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	allResolveIDs := append([]int64{}, resolveIDs...)
+	var answerParts []string
+	var fileArtifacts []store.Artifact
+	var revertedExtras []orchestrator.Extra
+
+	for _, r := range preservedRounds {
+		kind, kindErr := newestQuestionKind(r)
+		if kindErr != nil {
+			return store.HandlerCommit{}, 0, kindErr
+		}
+		if kind != response.QuestionKindPerimeter {
+			rendered, renderErr := renderRoundAnswers(r)
+			if renderErr != nil {
+				return store.HandlerCommit{}, 0, renderErr
+			}
+			answerParts = append(answerParts, rendered)
+			allResolveIDs = append(allResolveIDs, questionIDs(r)...)
+			continue
+		}
+
+		artifacts, reverted, revertErr, applyErr := h.applyPreservedPerimeterRound(ctx, t, d, proj, wt, r)
+		if applyErr != nil {
+			return store.HandlerCommit{}, 0, applyErr
+		}
+		if revertErr != nil {
+			return withBranch(buildEscalation(t, d, string(response.EscalationCodeEnvironment), revertFailedWhat, revertFailedWhy, revertErr.Error()), wt), 0, nil
+		}
+		fileArtifacts = append(fileArtifacts, artifacts...)
+		revertedExtras = append(revertedExtras, reverted...)
+		allResolveIDs = append(allResolveIDs, questionIDs(r)...)
+	}
+
+	extra := []prompt.NamedInput{prompt.Notes(notes)}
+	if len(answerParts) > 0 {
+		extra = append(extra, prompt.Answers(strings.Join(answerParts, "\n\n")))
+	}
+	if len(revertedExtras) > 0 {
+		extra = append(extra, prompt.NamedInput{Label: labelPerimeter, Text: orchestrator.PerimeterNotice(revertedExtras)})
+	}
+
+	commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks), extra, allResolveIDs)
+	result, resultErr := withBranchResult(commit, runErr, wt)
+	if resultErr != nil {
+		return result, 0, resultErr
+	}
+	result.Artifacts = append(fileArtifacts, result.Artifacts...)
+	return result, len(preservedRounds), nil
+}
+
+// applyPreservedPerimeterRound is RESOLVE steps 1 to 4 (design section
+// 6.6), applied to round -- a perimeter-kind round preserved through a
+// cap_resumes escalation on the build session (design section 6.9) --
+// without RESOLVE's own "needs a resume" branch: the caller already knows
+// the session is exhausted and folds the resume into its own fresh run.
+// It returns the stored file artifacts and the orchestrator.Extra values
+// actually reverted (empty when the round rejected nothing, or every
+// rejection had already left the tree). revertErr is
+// orchestrator.RevertPaths' own failure, for the caller to escalate
+// environment/"a rejected file could not be reverted" (design section 6.6
+// step 5's own revert-failure rule); err is any other, unexpected failure.
+func (h buildingHandler) applyPreservedPerimeterRound(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, round store.Round) (artifacts []store.Artifact, reverted []orchestrator.Extra, revertErr, err error) {
+	if round.RunID == nil {
+		return nil, nil, nil, errors.New("job: building: cap_resumes retry: perimeter round has no run id")
+	}
+	rid := *round.RunID
+
+	events, err := d.Store.FileEvents(ctx, t.ID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("job: building: cap_resumes retry: file events: %w", err)
+	}
+	proposed := newestFileEventPerPath(events)
+
+	newest := round.Questions[len(round.Questions)-1]
+	var qp response.QuestionPayload
+	if unmarshalErr := json.Unmarshal(newest.Payload, &qp); unmarshalErr != nil {
+		return nil, nil, nil, fmt.Errorf("job: building: cap_resumes retry: unmarshal question payload: %w", unmarshalErr)
+	}
+	decisions := mergedItemDecisions(round.Answers)
+
+	artifacts = make([]store.Artifact, 0, len(qp.Items))
+	var rejectedPaths []string
+	accepted, rejectedN := 0, 0
+	for _, item := range qp.Items {
+		row, hasRow := proposed[item.Ref]
+		if !hasRow {
+			return nil, nil, nil, fmt.Errorf("job: building: cap_resumes retry: %q has no file artifact", item.Ref)
+		}
+		pd := response.PerimeterReject
+		switch d2, hasDecision := decisions[item.Ref]; {
+		case hasDecision && d2 == response.DecisionAccept:
+			pd = response.PerimeterAccept
+		case hasDecision && d2 == response.DecisionReject:
+			pd = response.PerimeterReject
+		default:
+			slog.Warn("perimeter decision defaulted to reject", "ticket_id", t.ID, "path", strconv.Quote(item.Ref))
+		}
+		if pd == response.PerimeterAccept {
+			accepted++
+		} else {
+			rejectedN++
+			rejectedPaths = append(rejectedPaths, item.Ref)
+		}
+		fa := row.File
+		fa.Decision = &pd
+		payload, marshalErr := json.Marshal(fa)
+		if marshalErr != nil {
+			return nil, nil, nil, fmt.Errorf("job: building: cap_resumes retry: marshal file artifact: %w", marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{Type: artifactTypeFile, RunID: row.RunID, Payload: payload})
+	}
+	slog.Info("perimeter decided", "ticket_id", t.ID, "run_id", rid, "accepted", accepted, "rejected", rejectedN)
+
+	if len(rejectedPaths) == 0 {
+		return artifacts, nil, nil, nil
+	}
+
+	changed, changedErr := proj.Orch.ChangedPaths(ctx, wt)
+	if changedErr != nil {
+		return nil, nil, nil, fmt.Errorf("job: building: cap_resumes retry: changed paths: %w", changedErr)
+	}
+	changedByPath := make(map[string]orchestrator.Change, len(changed))
+	for _, c := range changed {
+		changedByPath[c.Path] = c
+	}
+
+	sort.Strings(rejectedPaths)
+	var revertChanges []orchestrator.Change
+	var revertExtras []orchestrator.Extra
+	for _, p := range rejectedPaths {
+		c, stillChanged := changedByPath[p]
+		if !stillChanged {
+			continue // design section 6.6 step 4: gone already, nothing to revert
+		}
+		revertChanges = append(revertChanges, c)
+		revertExtras = append(revertExtras, orchestrator.Extra{Path: p, Marker: markerForFile(proposed[p].File)})
+	}
+	if len(revertChanges) == 0 {
+		return artifacts, nil, nil, nil
+	}
+
+	if rvErr := proj.Orch.RevertPaths(ctx, wt, revertChanges); rvErr != nil {
+		return nil, nil, rvErr, nil
+	}
+	slog.Warn("paths reverted", "ticket_id", t.ID, "run_id", rid, "count", len(revertChanges))
+	return artifacts, revertExtras, nil, nil
+}
+
+// retryCapResumesPerimeter is retryCapResumes' perimeter-session branch
+// (design section 6.9): the path comes from the file row whose RunID is a
+// run of the exhausted perimeter session, and the fresh run is DESCRIBE
+// for that path, with the preserved rounds' answers as a fenced answers
+// input.
+func (h buildingHandler) retryCapResumesPerimeter(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes string, preservedRounds []store.Round) (store.HandlerCommit, int, error) {
+	if len(preservedRounds) == 0 {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no preserved perimeter round", t.ID)
+	}
+	round := preservedRounds[0]
+	if round.RunID == nil {
+		return store.HandlerCommit{}, 0, errors.New("job: building: cap_resumes retry: perimeter round has no run id")
+	}
+	perimRunID := *round.RunID
+
+	events, err := d.Store.FileEvents(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: file events: %w", err)
+	}
+	fileRow, foundRow := fileEventForRun(events, perimRunID)
+	if !foundRow {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no file artifact for perimeter run %d", t.ID, perimRunID)
+	}
+	path := fileRow.File.Path
+	taskN := fileRow.File.TaskN
+
+	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: stored plan: %w", err)
+	}
+	if !havePlan {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), 0, nil
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, 0, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), 0, nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	changed, err := proj.Orch.ChangedPaths(ctx, wt)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), 0, nil
+	}
+	declaredNow := declaredPaths(plan, events, nil)
+	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
+
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: build reports: %w", err)
+	}
+	report, foundReport := findUnlandedReportForTask(reports, taskN)
+	if !foundReport {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no unlanded build_report for task %d", t.ID, taskN)
+	}
+
+	described := newestFileEventPerPath(events)
+	var undescribed []int
+	for idx, ex := range extras {
+		if !isDescribed(described, ex.Path, report.ArtifactID) {
+			undescribed = append(undescribed, idx)
+		}
+	}
+	if len(undescribed) == 0 || extras[undescribed[0]].Path != path {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: %q is not the first undescribed extra", t.ID, path)
+	}
+	i, isLast := undescribed[0], len(undescribed) == 1
+
+	allResolveIDs := append([]int64{}, resolveIDs...)
+	var answerParts []string
+	for _, r := range preservedRounds {
+		rendered, renderErr := renderRoundAnswers(r)
+		if renderErr != nil {
+			return store.HandlerCommit{}, 0, renderErr
+		}
+		answerParts = append(answerParts, rendered)
+		allResolveIDs = append(allResolveIDs, questionIDs(r)...)
+	}
+	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Answers(strings.Join(answerParts, "\n\n"))}
+
+	commit, describeErr := h.describeOne(ctx, t, d, proj, wt, taskN, report.RunID, report, changed, extras, i, isLast, described, extra, allResolveIDs)
+	result, resultErr := withBranchResult(commit, describeErr, wt)
+	return result, len(preservedRounds), resultErr
 }
 
 // ---- helpers: branch, prefix, adoption -------------------------------------
@@ -827,8 +1303,13 @@ func collapseWhitespace(s string) string {
 
 // runFirst is RUN's first turn (design section 6.3): assembles
 // prompt.ForBuild's inputs and routes runJob's result through
-// buildSuccessCommit.
-func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, totalTasks int) (store.HandlerCommit, error) {
+// buildSuccessCommit. extra carries the escalation-retry row's own "notes
+// and error" or "notes and answers" inputs (design section 6.9); the step
+// 2 entry point (Run, below) passes nil. resolveIDs resolves an escalation
+// round's questions in the same commit as the fresh run's own
+// terminalizing commit; step 2's own first turn resolves nothing, so it
+// passes nil.
+func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, totalTasks int, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
 	tasks := response.Tasks(plan)
 	tk, ok := taskByN(tasks, u.TaskN)
 	if !ok {
@@ -860,7 +1341,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	titlePrefix := fmt.Sprintf("Task %d: ", u.TaskN)
 	bt := prompt.BuildTask{N: u.TaskN, Total: totalTasks, Title: strings.TrimPrefix(u.Title, titlePrefix), Text: tk.Text, Test: tk.Test}
 
-	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, accepted, nil)
+	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
 	}
@@ -870,9 +1351,9 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	su := store.SessionUpsert{Job: jobBuildName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobBuild, Label: strconv.Itoa(u.TaskN), WorkDir: wt.Dir(), Prompt: assembled}
 	n := u.TaskN
-	return runAndRoute(ctx, d, t, jobBuildName, su, req, 0, freshSessionRecord, nil, response.EscalationOriginBuild,
+	return runAndRoute(ctx, d, t, jobBuildName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginBuild,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return buildSuccessCommit(t, d, rr, freshSessionRecord(rr), nil, u)
+			return buildSuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs, u)
 		}, &n)
 }
 
@@ -1150,7 +1631,7 @@ func (h buildingHandler) describeOrAsk(ctx context.Context, t store.Ticket, d De
 	}
 
 	if len(undescribed) > 0 {
-		return h.describeOne(ctx, t, d, proj, wt, taskN, rid, report, changed, extras, undescribed[0], len(undescribed) == 1, described)
+		return h.describeOne(ctx, t, d, proj, wt, taskN, rid, report, changed, extras, undescribed[0], len(undescribed) == 1, described, nil, nil)
 	}
 
 	// Every extra is described. A ticket already waiting on a perimeter
@@ -1180,8 +1661,11 @@ func isDescribed(described map[string]store.FileEventRow, path string, reportArt
 // describeOne runs one DESCRIBE turn for extras[i], the first undescribed
 // path by path order (design section 6.5 step 4). isLast is true when this
 // was the only undescribed extra left: a successful run's own commit then
-// also does ASK, in the same store commit.
-func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, taskN int, rid int64, report store.BuildReportRow, changed []orchestrator.Change, extras []orchestrator.Extra, i int, isLast bool, described map[string]store.FileEventRow) (store.HandlerCommit, error) {
+// also does ASK, in the same store commit. answerInputs and resolveIDs are
+// design section 6.9's own cap_resumes retry row, "the fresh run is
+// DESCRIBE for that path with the preserved answers as a fenced answers
+// input": the ordinary DESCRIBE tick (describeOrAsk) passes both nil.
+func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, taskN int, rid int64, report store.BuildReportRow, changed []orchestrator.Change, extras []orchestrator.Extra, i int, isLast bool, described map[string]store.FileEventRow, answerInputs []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
 	extra := extras[i]
 	change, ok := changeFor(changed, extra.Path)
 	if !ok {
@@ -1207,7 +1691,7 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %w", err)
 	}
 
-	in := prompt.ForPerimeter(promptText, extra.Path, hunk, nil)
+	in := prompt.ForPerimeter(promptText, extra.Path, hunk, answerInputs)
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
@@ -1219,9 +1703,14 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 	su := store.SessionUpsert{Job: jobPerimeterName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-%d", taskN, i+1), WorkDir: wt.Dir(), Prompt: assembled}
 	n := taskN
-	return runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, freshSessionRecord, nil, response.EscalationOriginPerimeter,
+	return runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, freshSessionRecord, resolveIDs, response.EscalationOriginPerimeter,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return perimeterSuccessCommit(t, d, rr, extra, change, claim, taskN, rid, isLast, extras, described)
+			c, err := perimeterSuccessCommit(t, d, rr, extra, change, claim, taskN, rid, isLast, extras, described)
+			if err != nil {
+				return store.HandlerCommit{}, err
+			}
+			c.ResolveQuestions = resolveIDs
+			return c, nil
 		}, &n)
 }
 
@@ -1633,7 +2122,7 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: strconv.Itoa(report.Report.TaskN), WorkDir: wt.Dir(),
-		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: "perimeter", Text: notice}})),
+		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: labelPerimeter, Text: notice}})),
 	}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	u := unit{TaskN: report.Report.TaskN, Title: report.Report.Title}
