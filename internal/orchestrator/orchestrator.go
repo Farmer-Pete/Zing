@@ -87,14 +87,16 @@ func hardenedGitArgs(drivers []string, args ...string) []string {
 	return append(prefix, args...)
 }
 
-// isExitCode reports whether err is (or wraps) an *exec.ExitError whose exit
-// code is code -- used to distinguish "the command ran and found nothing"
+// isExitCode1 reports whether err is (or wraps) an *exec.ExitError whose
+// exit code is 1 -- used to distinguish "the command ran and found nothing"
 // (git config --get and --get-regexp exit 1 for no match; git diff --no-
-// index exits 1 when the compared paths differ, the expected case here)
-// from a real failure.
-func isExitCode(err error, code int) bool {
+// index exits 1 when the compared paths differ; git merge-base
+// --is-ancestor exits 1 when a is not an ancestor of b) from a real
+// failure. Every call site in this package checks exactly this one code, so
+// it takes no code parameter (unparam).
+func isExitCode1(err error) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // gitLocationEnv names the environment variables that redirect where git

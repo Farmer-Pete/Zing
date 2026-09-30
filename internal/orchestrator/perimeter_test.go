@@ -26,6 +26,7 @@ const (
 	sandboxDeepPath = "sandbox/deep/file.go"
 	sharedMDPath    = "shared.md"
 	aGoPath         = "a.go"
+	bGoPath         = "b.go"
 	starMDGlob      = "*.md"
 	docsExtraPath   = "docs/extra.md"
 	newFileGoPath   = "app/newfile.go"
@@ -77,10 +78,10 @@ func TestPerimeter(t *testing.T) {
 	t.Run("a declared path is omitted by exact match, an undeclared path is an extra", func(t *testing.T) {
 		changed := []Change{
 			{Path: aGoPath, Code: Modified},
-			{Path: "b.go", Code: Added},
+			{Path: bGoPath, Code: Added},
 		}
 		got := Perimeter(changed, []string{aGoPath}, nil, nil)
-		want := []Extra{{Path: "b.go", Marker: ""}}
+		want := []Extra{{Path: bGoPath, Marker: ""}}
 		wantExtras(t, got, want)
 	})
 

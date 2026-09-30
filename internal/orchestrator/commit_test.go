@@ -118,7 +118,7 @@ func TestCommitMessageRender(t *testing.T) {
 			Title:     testGenericTitle,
 			FuncLines: []string{testSingleFuncLine},
 			Fences: []response.Fence{{
-				Path:           "a.go",
+				Path:           aGoPath,
 				Symbol:         "foo",
 				ExistedBecause: testTwoLineValue,
 			}},

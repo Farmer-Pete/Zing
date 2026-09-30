@@ -499,7 +499,7 @@ func (o *Orchestrator) readWorktreeGitConfig(ctx context.Context, wt *Worktree) 
 func (o *Orchestrator) FilterDrivers(ctx context.Context, dir string) ([]string, error) {
 	out, err := o.run.Output(ctx, dir, "git", "config", "--get-regexp", filterDriverConfigPattern)
 	if err != nil {
-		if isExitCode(err, 1) {
+		if isExitCode1(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("orchestrator: filter drivers: %w", err)
@@ -603,7 +603,7 @@ func (o *Orchestrator) checkSigningPrograms(ctx context.Context, dir string) err
 func (o *Orchestrator) gitConfigGet(ctx context.Context, dir, key string) (value string, ok bool, err error) {
 	out, err := o.run.Output(ctx, dir, "git", "config", "--get", key)
 	if err != nil {
-		if isExitCode(err, 1) {
+		if isExitCode1(err) {
 			return "", false, nil
 		}
 		return "", false, err
