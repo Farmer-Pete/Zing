@@ -176,6 +176,146 @@ const (
 	demoGateReason  = "seeded demo: the plan is posted, waiting on the owner's gate"
 )
 
+// demoPerimeterQuestionKey is the fixture key SeedQuestionFixtures reserves
+// for the perimeter kind, the fifth entry of seedQuestionKinds. SeedDemo
+// inserts its own perimeter question under this exact key, before it calls
+// SeedQuestionFixtures, so that function's own key check finds "Q5" already
+// present and skips it: the demo ticket ends up with one perimeter question,
+// in the design section 6.5 wire format, not the generic fixture.
+const demoPerimeterQuestionKey = "Q5"
+
+// demoPerimeterBody is the demo perimeter question's Body (design section
+// 6.5): the title, a blank line, then the sentence naming the task and the
+// file count. Task 1 is the demo's own landed unit (seedDemoDecidedFiles);
+// this question stands for task 2's still-open perimeter round.
+const demoPerimeterBody = "Confirm the file perimeter\n\n" +
+	"Task 2 changed three files outside the plan's declared files. Accept a file to commit it. Reject a file to revert it."
+
+// perimeterItemText builds one perimeter item's Text (design section 6.5):
+// on one line, the marker in brackets when set, then "Builder: <reason> ",
+// then "Change: <description>". marker is "trust root", "style guide", or
+// empty.
+func perimeterItemText(marker, reason, change string) string {
+	if marker == "" {
+		return fmt.Sprintf("Builder: %s Change: %s", reason, change)
+	}
+	return fmt.Sprintf("[%s] Builder: %s Change: %s", marker, reason, change)
+}
+
+// demoPerimeterItems returns the demo perimeter question's three items
+// (design section 6.5, 6.15): the new handler file with no marker, a style
+// guide change, and a trust-root change, each a plausible builder reason
+// and change description.
+func demoPerimeterItems() []response.Item {
+	return []response.Item{
+		{
+			Ref: helloHandlerPath,
+			Text: perimeterItemText("", "the handler needed a small helper for the greeting text",
+				"added a formatGreeting helper next to Handler"),
+		},
+		{
+			Ref: "CLAUDE.md",
+			Text: perimeterItemText("style guide", "the new package needed its own style note",
+				"documented the hello package's error-wrapping rule"),
+		},
+		{
+			Ref: "machine.toml",
+			Text: perimeterItemText("trust root", "the build needed the new package's test command allowed",
+				"added the hello package's test command to the sandbox allowlist"),
+		},
+	}
+}
+
+// seedDemoPerimeterQuestion inserts the demo ticket's one open question of
+// kind perimeter, in the design section 6.5 wire format, rather than the
+// generic fixture SeedQuestionFixtures would otherwise insert for that kind
+// (design section 6.15). It is idempotent: it lists the ticket's existing
+// question messages first and does nothing when a row keyed
+// demoPerimeterQuestionKey is already there, the same check
+// SeedQuestionFixtures runs against its own six keys.
+func seedDemoPerimeterQuestion(ctx context.Context, s *store.Store, ticketID int64) error {
+	existing, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		return fmt.Errorf("seed demo perimeter question: list messages: %w", err)
+	}
+	for i := range existing {
+		if existing[i].Type != msgTypeQuestion || len(existing[i].Payload) == 0 {
+			continue
+		}
+		var p response.QuestionPayload
+		if json.Unmarshal(existing[i].Payload, &p) == nil && p.Key == demoPerimeterQuestionKey {
+			return nil
+		}
+	}
+
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: demoPerimeterQuestionKey, Kind: response.QuestionKindPerimeter, State: response.QuestionStateOpen,
+		Recommended: "Decide each file",
+		Options:     []response.Option{},
+		Items:       demoPerimeterItems(),
+	})
+	if err != nil {
+		return fmt.Errorf("seed demo perimeter question: marshal payload: %w", err)
+	}
+
+	openState := msgStateOpen
+	_, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, Type: msgTypeQuestion, Author: "zing",
+		State:   &openState,
+		Body:    demoPerimeterBody,
+		Payload: payload,
+	})
+	if err != nil {
+		return fmt.Errorf("seed demo perimeter question: %w", err)
+	}
+	return nil
+}
+
+// demoDecidedFiles returns the demo ticket's two already-decided "file"
+// artifacts (design section 9.2, 6.15): an accepted new file and a rejected
+// change, both from task 1, neither sharing a path with the perimeter
+// question's three items. Standing in for what a real RESOLVE step would
+// have written, they give the plan view's "Decided during build" sub-list
+// something to show.
+func demoDecidedFiles() []response.FileArtifact {
+	accept, reject := response.PerimeterAccept, response.PerimeterReject
+	return []response.FileArtifact{
+		{
+			Path: "internal/hello/routes.go", Action: response.FileActionCreate,
+			Reason:      "the handler needed its route registration split out of main",
+			TaskN:       1,
+			Description: "adds the GET /hello route registration",
+			Decision:    &accept,
+		},
+		{
+			Path: "Makefile", Action: response.FileActionModify,
+			Reason:      "the build wanted a shortcut target for the new package's tests",
+			TaskN:       1,
+			Description: "adds a make target that is not part of this task",
+			Decision:    &reject,
+		},
+	}
+}
+
+// seedDemoDecidedFiles inserts the demo ticket's two decided "file"
+// artifacts (design section 9.2, 6.15). seedDemoCohort's own idempotency
+// check (the stored plan artifact) is what keeps a second SeedDemo call from
+// reaching this function at all, so this always inserts.
+func seedDemoDecidedFiles(ctx context.Context, s *store.Store, ticketID int64) error {
+	for _, fa := range demoDecidedFiles() {
+		payload, err := json.Marshal(fa)
+		if err != nil {
+			return fmt.Errorf("marshal file artifact %s: %w", fa.Path, err)
+		}
+		if _, err := s.InsertArtifact(ctx, store.Artifact{
+			TicketID: ticketID, Type: "file", Payload: payload,
+		}); err != nil {
+			return fmt.Errorf("insert file artifact %s: %w", fa.Path, err)
+		}
+	}
+	return nil
+}
+
 // SeedDemo seeds one demo project and one demo ticket carrying one session
 // and run (Task 11), a stored plan artifact (a small valid response.Plan
 // with a mermaid block in its Shape) and a scenario artifact set both
@@ -205,6 +345,9 @@ func SeedDemo(ctx context.Context, s *store.Store) error {
 	}
 
 	if err := seedDemoCohort(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	if err := seedDemoPerimeterQuestion(ctx, s, ticketID); err != nil {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 	if err := SeedQuestionFixtures(ctx, s, ticketID); err != nil {
@@ -238,6 +381,9 @@ func seedDemoCohort(ctx context.Context, s *store.Store, ticketID int64) error {
 	}
 	if err := seedDemoPlanReview(ctx, s, ticketID, runID); err != nil {
 		return fmt.Errorf("seed planreview: %w", err)
+	}
+	if err := seedDemoDecidedFiles(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed decided files: %w", err)
 	}
 	return nil
 }

@@ -321,3 +321,260 @@ func TestSeedDemo_GateRendersScenariosAndFindings(t *testing.T) {
 		t.Errorf("gate group shows the at-or-below-floor finding %q, want it dropped; got:\n%s", atOrBelowFloorText, gate)
 	}
 }
+
+// demoPerimeterQuestion returns the demo ticket's one open question of kind
+// perimeter, failing the test when there is not exactly one (design section
+// 6.5, 6.15: SeedDemo's perimeter question replaces the generic fixture
+// SeedQuestionFixtures would otherwise insert for that kind, so the ticket
+// still carries only one).
+func demoPerimeterQuestion(ctx context.Context, t *testing.T, s *store.Store, ticketID int64) response.QuestionPayload {
+	t.Helper()
+
+	open, err := s.QuestionsByState(ctx, ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+
+	var found []response.QuestionPayload
+	for i := range open {
+		var payload response.QuestionPayload
+		if err := json.Unmarshal(open[i].Payload, &payload); err != nil {
+			t.Fatalf("unmarshal question %d payload: %v", open[i].ID, err)
+		}
+		if payload.Kind == response.QuestionKindPerimeter {
+			found = append(found, payload)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("open perimeter questions = %d, want exactly 1", len(found))
+	}
+	return found[0]
+}
+
+// TestSeedDemoPerimeterItemsUseTheBuildFormat proves the demo ticket's
+// perimeter question carries the design section 6.5 wire format: the body
+// names task 2 and three files, Recommended asks the owner to decide each
+// file, and each of the three items' Text is one line built as the marker
+// in brackets when set, then "Builder: <reason> ", then
+// "Change: <description>" (design section 6.5, 6.15).
+func TestSeedDemoPerimeterItemsUseTheBuildFormat(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+
+	open, err := s.QuestionsByState(ctx, ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	var body string
+	for i := range open {
+		var payload response.QuestionPayload
+		if json.Unmarshal(open[i].Payload, &payload) == nil && payload.Kind == response.QuestionKindPerimeter {
+			body = open[i].Body
+		}
+	}
+	const wantBody = "Confirm the file perimeter\n\n" +
+		"Task 2 changed three files outside the plan's declared files. Accept a file to commit it. Reject a file to revert it."
+	if body != wantBody {
+		t.Errorf("perimeter question body =\n%q\nwant\n%q", body, wantBody)
+	}
+
+	payload := demoPerimeterQuestion(ctx, t, s, ticketID)
+	if payload.Recommended != "Decide each file" {
+		t.Errorf("perimeter Recommended = %q, want %q", payload.Recommended, "Decide each file")
+	}
+	if len(payload.Items) != 3 {
+		t.Fatalf("perimeter items = %d, want exactly 3", len(payload.Items))
+	}
+
+	byRef := make(map[string]response.Item, len(payload.Items))
+	for _, item := range payload.Items {
+		byRef[item.Ref] = item
+	}
+
+	handler, ok := byRef["internal/hello/handler.go"]
+	if !ok {
+		t.Fatal("no perimeter item for internal/hello/handler.go")
+	}
+	if strings.HasPrefix(handler.Text, "[") {
+		t.Errorf("handler.go item carries a marker; got %q, want none", handler.Text)
+	}
+	if !strings.Contains(handler.Text, "Builder: ") || !strings.Contains(handler.Text, " Change: ") {
+		t.Errorf("handler.go item does not follow the build format; got %q", handler.Text)
+	}
+
+	claudeMD, ok := byRef["CLAUDE.md"]
+	if !ok {
+		t.Fatal("no perimeter item for CLAUDE.md")
+	}
+	if !strings.HasPrefix(claudeMD.Text, "[style guide] Builder: ") {
+		t.Errorf("CLAUDE.md item = %q, want it to start with %q", claudeMD.Text, "[style guide] Builder: ")
+	}
+	if !strings.Contains(claudeMD.Text, " Change: ") {
+		t.Errorf("CLAUDE.md item does not follow the build format; got %q", claudeMD.Text)
+	}
+
+	machineToml, ok := byRef["machine.toml"]
+	if !ok {
+		t.Fatal("no perimeter item for machine.toml")
+	}
+	if !strings.HasPrefix(machineToml.Text, "[trust root] Builder: ") {
+		t.Errorf("machine.toml item = %q, want it to start with %q", machineToml.Text, "[trust root] Builder: ")
+	}
+	if !strings.Contains(machineToml.Text, " Change: ") {
+		t.Errorf("machine.toml item does not follow the build format; got %q", machineToml.Text)
+	}
+}
+
+// demoDecidedFileEvents returns ticketID's stored "file" events, decoded,
+// failing the test on a store or decode error.
+func demoDecidedFileEvents(ctx context.Context, t *testing.T, s *store.Store, ticketID int64) []response.FileArtifact {
+	t.Helper()
+
+	events, err := s.FileEvents(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	out := make([]response.FileArtifact, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.File)
+	}
+	return out
+}
+
+// TestSeedDemoStoresDecidedFiles proves SeedDemo stores exactly two decided
+// "file" artifacts for the demo ticket (design section 9.2, 6.15): one
+// accepted path from task 1 with a create action, one rejected path from
+// task 1 with a modify action, both carrying a builder reason and a
+// description, and neither sharing a path with the perimeter question's
+// three items.
+func TestSeedDemoStoresDecidedFiles(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+
+	files := demoDecidedFileEvents(ctx, t, s, ticketID)
+	if len(files) != 2 {
+		t.Fatalf("decided file events = %d, want exactly 2", len(files))
+	}
+
+	byPath := make(map[string]response.FileArtifact, len(files))
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+
+	perimeterPaths := map[string]bool{
+		"internal/hello/handler.go": true, "CLAUDE.md": true, "machine.toml": true,
+	}
+
+	accepted, ok := byPath["internal/hello/routes.go"]
+	if !ok {
+		t.Fatal("no decided file event for internal/hello/routes.go")
+	}
+	if accepted.Decision == nil || *accepted.Decision != response.PerimeterAccept {
+		t.Errorf("internal/hello/routes.go decision = %v, want %q", accepted.Decision, response.PerimeterAccept)
+	}
+	if accepted.Action != response.FileActionCreate {
+		t.Errorf("internal/hello/routes.go action = %q, want %q", accepted.Action, response.FileActionCreate)
+	}
+	if accepted.TaskN != 1 {
+		t.Errorf("internal/hello/routes.go task_n = %d, want 1", accepted.TaskN)
+	}
+	if accepted.Reason == "" || accepted.Description == "" {
+		t.Errorf("internal/hello/routes.go carries an empty reason or description: %+v", accepted)
+	}
+
+	rejected, ok := byPath["Makefile"]
+	if !ok {
+		t.Fatal("no decided file event for Makefile")
+	}
+	if rejected.Decision == nil || *rejected.Decision != response.PerimeterReject {
+		t.Errorf("Makefile decision = %v, want %q", rejected.Decision, response.PerimeterReject)
+	}
+	if rejected.Action != response.FileActionModify {
+		t.Errorf("Makefile action = %q, want %q", rejected.Action, response.FileActionModify)
+	}
+	if rejected.TaskN != 1 {
+		t.Errorf("Makefile task_n = %d, want 1", rejected.TaskN)
+	}
+	if rejected.Reason == "" || rejected.Description == "" {
+		t.Errorf("Makefile carries an empty reason or description: %+v", rejected)
+	}
+
+	for path := range byPath {
+		if perimeterPaths[path] {
+			t.Errorf("decided file path %q also names one of the perimeter question's three items", path)
+		}
+	}
+}
+
+// TestSeedDemoDecidedFilesAreIdempotent proves a second SeedDemo call stores
+// no additional "file" artifact: still the same two decided rows.
+func TestSeedDemoDecidedFilesAreIdempotent(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("first SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+	before := demoDecidedFileEvents(ctx, t, s, ticketID)
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("second SeedDemo: %v", err)
+	}
+	after := demoDecidedFileEvents(ctx, t, s, ticketID)
+
+	if len(after) != len(before) {
+		t.Errorf("file events after second call = %d, want still %d", len(after), len(before))
+	}
+	if len(after) != 2 {
+		t.Errorf("file events = %d, want exactly 2", len(after))
+	}
+}
+
+// TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker proves the
+// rendered demo thread (the live GET /stream a browser reads) carries the
+// plan view's "Decided during build" sub-list with both decided paths, and
+// the perimeter question's "[trust root]" marker, so the owner can see and
+// try every perimeter feature from the seeded demo alone (design section
+// 9.2, 6.5, 6.15).
+func TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, main, _, _ := readInitialFrames(t, r)
+	assertExactSSEFraming(t, main)
+
+	if !strings.Contains(main, "Decided during build") {
+		t.Errorf("rendered thread missing %q; got:\n%s", "Decided during build", main)
+	}
+	if !strings.Contains(main, "internal/hello/routes.go") {
+		t.Errorf("rendered thread missing the accepted path %q; got:\n%s", "internal/hello/routes.go", main)
+	}
+	if !strings.Contains(main, "Makefile") {
+		t.Errorf("rendered thread missing the rejected path %q; got:\n%s", "Makefile", main)
+	}
+	if !strings.Contains(main, "[trust root]") {
+		t.Errorf("rendered thread missing %q; got:\n%s", "[trust root]", main)
+	}
+}
