@@ -93,12 +93,20 @@ type recordingT struct {
 	mu       sync.Mutex
 	fataled  bool
 	fatalMsg string
+	logs     []string
 	cleanups []func()
 }
 
 func (r *recordingT) Helper() {}
 
-func (r *recordingT) Logf(string, ...any) {}
+// Logf records the formatted message instead of writing it anywhere, so a
+// caller that expects the harness to log something specific (the stale run
+// directory notice) can check for it afterward through logsContaining.
+func (r *recordingT) Logf(format string, args ...any) {
+	r.mu.Lock()
+	r.logs = append(r.logs, fmt.Sprintf(format, args...))
+	r.mu.Unlock()
+}
 
 func (r *recordingT) Cleanup(f func()) {
 	r.mu.Lock()
@@ -120,6 +128,18 @@ func (r *recordingT) message() (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.fatalMsg, r.fataled
+}
+
+// logsContaining reports whether any Logf call r recorded contains substr.
+func (r *recordingT) logsContaining(substr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.logs {
+		if strings.Contains(l, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // runCleanups runs every Cleanup callback r recorded, in reverse
@@ -615,6 +635,25 @@ func describeOpenQuestions(ctx context.Context, st *store.Store, ticketID int64)
 	return strings.Join(titles, "; "), nil
 }
 
+// listRunRootEntries returns the names of every entry directly under
+// runRoot, or nil when runRoot does not exist yet -- a sandbox cache that
+// has never held a run, or, in a fake-runtime test, a run root nothing has
+// written to.
+func listRunRootEntries(runRoot string) ([]string, error) {
+	entries, err := os.ReadDir(runRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", runRoot, err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names, nil
+}
+
 // runLiveBuildHarness drives PKG8-PLAN.md section 18 task 16's live build
 // harness to completion, sharing every line but the wiring between
 // TestLiveBuild (the real claude CLI, the real sandbox) and every fake-
@@ -655,8 +694,27 @@ func describeOpenQuestions(ctx context.Context, st *store.Store, ticketID int64)
 // copied straight from this call's own parameters, mirroring serve.go's own
 // production wiring (buildJobProjects, serveSandbox) rather than
 // hand-rolling a second shape for a test.
-func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, maxWait time.Duration) liveBuildResult {
+//
+// runRoot is the sandbox run root (<CacheRoot>/run): before the dispatcher
+// starts, this lists its current entries and logs each once, through
+// t.Logf, as "stale run directory from an earlier run: <name>" (follow-up
+// commit, "Ignore stale run directories in the live harness" -- an earlier
+// live run the owner stopped by hand left one behind, and its own cleanup
+// never ran to remove it). Once the ticket reaches "reviewing", any entry
+// that was not already there fails the run with its name; a stale entry
+// never does.
+func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait time.Duration) liveBuildResult {
 	t.Helper()
+
+	staleRunEntries, err := listRunRootEntries(runRoot)
+	if err != nil {
+		t.Fatalf("list sandbox run root before the run: %v", err)
+	}
+	stale := make(map[string]bool, len(staleRunEntries))
+	for _, name := range staleRunEntries {
+		stale[name] = true
+		t.Logf("stale run directory from an earlier run: %s", name)
+	}
 
 	m, err := machine.Load(zing.Assets, "machine.toml")
 	if err != nil {
@@ -752,6 +810,19 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 			t.Fatalf("get ticket: %v", getErr)
 		}
 		if ticket.State == "reviewing" {
+			afterRunEntries, listErr := listRunRootEntries(runRoot)
+			if listErr != nil {
+				t.Fatalf("list sandbox run root after the run: %v", listErr)
+			}
+			var newEntries []string
+			for _, name := range afterRunEntries {
+				if !stale[name] {
+					newEntries = append(newEntries, name)
+				}
+			}
+			if len(newEntries) != 0 {
+				t.Fatalf("sandbox run root %s still has new entries after the run: %v", runRoot, newEntries)
+			}
 			return liveBuildResult{Store: st, TicketID: ticketID, Orch: orch, Worktree: mustEnsureLiveWorktree(ctx, t, orch, ticketID, ticket.Title)}
 		}
 		// waiting_on names which question kind is blocking (design section
@@ -874,6 +945,17 @@ func mustSandboxCacheRoot(t *testing.T, sb sandbox.Sandbox) string {
 	return p.CacheRoot
 }
 
+// newLiveFakeRunRoot returns a run-root path for a fake-runtime caller,
+// which never wraps a real sandboxed process (sandbox.Off() is always
+// unavailable) and so has no real <CacheRoot>/run to point at: a fresh,
+// unpopulated directory under t's own temp dir stands in for one. It need
+// not exist yet -- listRunRootEntries treats a missing run root as empty,
+// the same as a sandbox cache that has never held a run.
+func newLiveFakeRunRoot(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "run")
+}
+
 // TestLiveBuildHarnessOnFake proves runLiveBuildHarness itself -- the exact
 // sequence TestLiveBuild drives -- against the fake runtime and
 // sandbox.Off() with RequireSandbox false (PKG8-PLAN.md section 18 task
@@ -900,7 +982,7 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 	}
 
 	sb := sandbox.Off()
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, 2*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -973,7 +1055,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	runRoot := filepath.Join(mustSandboxCacheRoot(t, sb), "run")
 
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, 60*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, runRoot, 60*time.Minute)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -1034,40 +1116,42 @@ func TestLiveBuild(t *testing.T) {
 		t.Error("no build questions were posted, want one or more (task 3's farewell wording)")
 	}
 
-	entries, err := os.ReadDir(runRoot)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read sandbox run root %s: %v", runRoot, err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("sandbox run directory %s still has %d entries after the run", runRoot, len(entries))
-	}
-
 	assertLiveCanaryUnchanged(t, homeCanary)
 	assertLiveCanaryUnchanged(t, gitCanary)
 	assertLiveCanaryUnchanged(t, tmpCanary)
 	assertLiveCanaryUnchanged(t, cacheCanary)
 }
 
-// runLiveBuildHarnessExpectingFatal runs runLiveBuildHarness against a
+// runLiveBuildHarnessRecording runs runLiveBuildHarness against a
 // recordingT on its own goroutine, so the harness's own Fatalf -- the retry
-// cap, or a timeout -- ends that goroutine (recordingT.Fatalf's
+// cap, a timeout, or anything else -- ends that goroutine (recordingT.Fatalf's
 // runtime.Goexit) instead of the goroutine running the *testing.T this
 // function was itself called from. It waits for that goroutine to finish,
 // runs every Cleanup the harness registered (closing the console server it
-// started), and returns the recorded Fatalf message; it fails the real t
-// when the harness never called Fatalf at all, since every caller of this
-// helper expects the harness to fail.
-func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, maxWait time.Duration) string {
+// started), and returns the recordingT so the caller can inspect whether it
+// failed, its message, and everything it logged (TestLiveBuildHarnessIgnoresStaleRunDir
+// reads the stale-run-directory notice this way, without that Logf call
+// needing anywhere else to go).
+func runLiveBuildHarnessRecording(t *testing.T, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait time.Duration) *recordingT {
 	t.Helper()
 	rec := &recordingT{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, maxWait)
+		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait)
 	}()
 	<-done
 	rec.runCleanups()
+	return rec
+}
 
+// runLiveBuildHarnessExpectingFatal is runLiveBuildHarnessRecording for a
+// caller that expects the harness to fail: it fails the real t when the
+// harness returned instead of calling Fatalf, and otherwise returns the
+// recorded message.
+func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait time.Duration) string {
+	t.Helper()
+	rec := runLiveBuildHarnessRecording(t, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait)
 	msg, fataled := rec.message()
 	if !fataled {
 		t.Fatal("runLiveBuildHarness returned instead of calling Fatalf; want it to fail")
@@ -1103,7 +1187,7 @@ func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
 	}
 
 	sb := sandbox.Off()
-	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, 2*time.Minute)
+	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute)
 
 	for _, want := range []string{string(response.EscalationCodeEnvironment), "3"} {
 		if !strings.Contains(msg, want) {
@@ -1180,7 +1264,7 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 	// wedged owner-answer path fails this test promptly instead of hanging
 	// it.
 	const shortMaxWait = 3500 * time.Millisecond
-	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, shortMaxWait)
+	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), shortMaxWait)
 
 	if !strings.Contains(msg, "did not reach reviewing") {
 		t.Errorf("fatal message %q does not describe a timeout", msg)
@@ -1215,5 +1299,59 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 		if answered[i].Type == "answer" {
 			t.Errorf("message %d is an answer; want the harness to have sent none in owner mode", answered[i].ID)
 		}
+	}
+}
+
+// TestLiveBuildHarnessIgnoresStaleRunDir proves the follow-up commit "Ignore
+// stale run directories in the live harness": a run root that already holds
+// one directory before the harness ever starts is not this run's own doing
+// -- the second real run's one failing assertion was exactly this, a
+// directory an earlier, hand-stopped live run left behind, whose own
+// cleanup never ran. The harness must pass the same three-task build
+// TestLiveBuildHarnessOnFake drives, logging the pre-existing entry's name
+// once, and must not fail over it.
+func TestLiveBuildHarnessIgnoresStaleRunDir(t *testing.T) {
+	st := newLiveStore(t)
+	projDir := newLiveFixtureRepo(t)
+
+	fake := runtime.NewFake(os.DirFS(filepath.Join("testdata", "live")))
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{
+		runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake,
+	})
+	if err != nil {
+		t.Fatalf("build runtime set: %v", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a console listener: %v", err)
+	}
+
+	runRoot := newLiveFakeRunRoot(t)
+	if mkdirErr := os.MkdirAll(runRoot, 0o755); mkdirErr != nil {
+		t.Fatalf("mkdir run root: %v", mkdirErr)
+	}
+	const staleName = "stale-run-from-an-earlier-live-run"
+	if mkdirErr := os.Mkdir(filepath.Join(runRoot, staleName), 0o755); mkdirErr != nil {
+		t.Fatalf("mkdir stale run directory: %v", mkdirErr)
+	}
+
+	sb := sandbox.Off()
+	rec := runLiveBuildHarnessRecording(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, runRoot, 2*time.Minute)
+
+	if msg, fataled := rec.message(); fataled {
+		t.Fatalf("harness failed over a stale run directory it should have ignored: %s", msg)
+	}
+	if !rec.logsContaining("stale run directory from an earlier run: " + staleName) {
+		t.Error("harness did not log the stale run directory's own message naming it")
+	}
+
+	entries, err := os.ReadDir(runRoot)
+	if err != nil {
+		t.Fatalf("read run root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != staleName {
+		t.Errorf("run root entries = %v, want only the untouched stale directory %q", entries, staleName)
 	}
 }
