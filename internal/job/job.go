@@ -180,9 +180,9 @@ var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
 	statePlanning:  {statePlanning, stateBuilding, stateDone, stateAbandoned},
 	stateBuilding:  {stateReviewing, stateAbandoned},
-	stateReviewing: {stateJudging},
-	stateJudging:   {stateShipping},
-	stateShipping:  {stateDone},
+	stateReviewing: {stateJudging, stateAbandoned},
+	stateJudging:   {stateShipping, stateAbandoned},
+	stateShipping:  {stateDone, stateAbandoned},
 }
 
 // legalWaiting is the eight waiting_on flags migrations/0001_init.sql

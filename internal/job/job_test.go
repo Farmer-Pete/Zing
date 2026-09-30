@@ -260,6 +260,23 @@ func TestValidateCommit_AcceptsBuildingToAbandoned(t *testing.T) {
 	}
 }
 
+// TestValidateCommit_AcceptsPostBuildStatesToAbandoned proves the legal-edge
+// table grew three more abandon edges (design section 5.5, #28 gap 3): a
+// post-build escalation's abandon choice may transition reviewing, judging,
+// or shipping straight to abandoned, alongside each state's own existing
+// forward edge.
+func TestValidateCommit_AcceptsPostBuildStatesToAbandoned(t *testing.T) {
+	t.Parallel()
+
+	for _, from := range []string{testStateReviewing, testStateJudging, testStateShipping} {
+		ticket := store.Ticket{State: from}
+		commit := store.HandlerCommit{Next: testStateAbandoned, Reason: "owner abandoned"}
+		if err := job.ValidateCommit(ticket, commit); err != nil {
+			t.Errorf("ValidateCommit(%s -> abandoned): %v, want nil", from, err)
+		}
+	}
+}
+
 // --- OrderCandidates ----------------------------------------------------------
 
 func TestOrderCandidates_ReverseStateOrderWins(t *testing.T) {

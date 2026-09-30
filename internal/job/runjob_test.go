@@ -46,7 +46,7 @@ const (
 )
 
 var runJobTestProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: testTrackerGithub,
 }
 
 // newRunJobTestStore opens a fresh Store on a temp-file database, closed on

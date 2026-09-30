@@ -32,7 +32,7 @@ func seedFixTestTicket(t *testing.T, s *store.Store) store.Ticket {
 	t.Helper()
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, store.Project{
-		Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+		Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: testTrackerGithub,
 	})
 	if err != nil {
 		t.Fatalf("EnsureProject: %v", err)
