@@ -67,8 +67,10 @@ const (
 // Marker's own exact-first-line match makes "claims ok run 4" and "claims ok
 // run 42" two different markers.
 const (
-	markerClaimsOkFmt           = "claims ok run %d"
-	markerClaimErrorsPendingFmt = "claim errors pending run %d"
+	markerClaimsOkFmt                 = "claims ok run %d"
+	markerClaimErrorsPendingFmt       = "claim errors pending run %d"
+	markerPerimeterResolvedFmt        = "perimeter resolved run %d"
+	markerPerimeterQuestionDroppedFmt = "perimeter question dropped run %d"
 )
 
 // The section 6.1/6.4/6.7 escalation What texts, byte for byte from the
@@ -105,6 +107,9 @@ const (
 
 	misnumberedTasksWhat = "the stored plan's tasks are not numbered 1 to n"
 	misnumberedTasksWhy  = "task progress is keyed by task number, so every task must be numbered 1 to n in order"
+
+	revertFailedWhat = "a rejected file could not be reverted"
+	revertFailedWhy  = "orchestrator.RevertPaths could not restore or remove the rejected path"
 )
 
 // trustRoot and styleGuide are design section 12's two constant path lists
@@ -142,17 +147,33 @@ type unit struct {
 type buildingHandler struct{}
 
 func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	// Step (E)/1: an answered round. Building's own AnsweredRounds routing
-	// (perimeter resolution, build question resumes, escalation
-	// resolution) is tasks 10 through 13; this task only needs to make
-	// sure such a round is never silently dropped.
+	// Step (E)/1: an answered round (design section 6.2). The newest
+	// question's kind decides the branch before round.Job does: a
+	// perimeter-kind question is always RESOLVE (section 6.6), whichever
+	// run's own id it was posted against. A build question resume and its
+	// resume-cap handling are task 12's job; escalation resolution is task
+	// 13's.
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: answered rounds: %w", err)
 	}
 	if len(rounds) > 0 {
-		slog.Debug("building entry decision", "ticket_id", t.ID, "step", "answered_round", "session_state", "n/a")
-		return store.HandlerCommit{}, ErrNoAction
+		round := rounds[0]
+		kind, kindErr := newestQuestionKind(round)
+		if kindErr != nil {
+			return store.HandlerCommit{}, kindErr
+		}
+		switch {
+		case kind == response.QuestionKindPerimeter:
+			return h.resolve(ctx, t, d, round)
+		case round.Job == jobBuildName:
+			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "answered_round_build", "session_state", "n/a")
+			return store.HandlerCommit{}, ErrNoAction
+		case round.Job == jobPerimeterName:
+			return h.resolvePerimeterQuestion(ctx, t, d, round)
+		default:
+			return store.HandlerCommit{}, fmt.Errorf("job: building: answered round of job %s", round.Job)
+		}
 	}
 
 	// Step 0: plan, worktree, branch.
@@ -1175,6 +1196,369 @@ func fileActionFor(code orchestrator.Status) response.FileAction {
 	default:
 		return response.FileActionModify
 	}
+}
+
+// ---- RESOLVE, and the perimeter run's own question (task 11) -------------
+
+// newestQuestionKind unmarshals round's newest question's payload and
+// returns its Kind (design section 6.2's own first test, checked before
+// round.Job): a perimeter-kind question is always RESOLVE, whichever run's
+// id the round is grouped by.
+func newestQuestionKind(round store.Round) (response.QuestionKind, error) {
+	newest := round.Questions[len(round.Questions)-1]
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(newest.Payload, &qp); err != nil {
+		return "", fmt.Errorf("job: building: unmarshal round question %d payload: %w", newest.ID, err)
+	}
+	return qp.Kind, nil
+}
+
+// mergedItemDecisions merges every sent answer's AnswerPayload.Items into
+// one ref->decision map, newest answer winning per ref (design section 6.6
+// step 1): answers arrive in ascending id order (AnsweredRounds' own
+// Answers), so a later maps.Copy simply overwrites an earlier one.
+func mergedItemDecisions(answers []store.MessageRow) map[string]response.Decision {
+	out := make(map[string]response.Decision)
+	for i := range answers {
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(answers[i].Payload, &ap); err != nil {
+			continue
+		}
+		maps.Copy(out, ap.Items)
+	}
+	return out
+}
+
+// markerForFile renders one decided or proposed FileArtifact's marker as an
+// orchestrator.Extra's own Marker value (design section 4.1, 6.5):
+// "trust root" when TrustRoot, "style guide" when StyleGuide, else "".
+func markerForFile(fa response.FileArtifact) string {
+	switch {
+	case fa.TrustRoot:
+		return markerTrustRoot
+	case fa.StyleGuide:
+		return markerStyleGuide
+	default:
+		return ""
+	}
+}
+
+// findUnlandedReportForTask returns reports' unlanded (no CommitSHA) row for
+// taskN, the unit currently in flight for that task.
+func findUnlandedReportForTask(reports []store.BuildReportRow, taskN int) (store.BuildReportRow, bool) {
+	for i := range slices.Backward(reports) {
+		if reports[i].Report.TaskN == taskN && reports[i].Report.CommitSHA == nil {
+			return reports[i], true
+		}
+	}
+	return store.BuildReportRow{}, false
+}
+
+// fileEventForRun returns the newest file event whose RunID equals runID
+// (design section 6.2: "the file artifact whose RunID equals round.RunID").
+func fileEventForRun(events []store.FileEventRow, runID int64) (store.FileEventRow, bool) {
+	for i := range slices.Backward(events) {
+		if events[i].RunID != nil && *events[i].RunID == runID {
+			return events[i], true
+		}
+	}
+	return store.FileEventRow{}, false
+}
+
+// extraFor finds path's own Extra in extras.
+func extraFor(extras []orchestrator.Extra, path string) (orchestrator.Extra, bool) {
+	for _, e := range extras {
+		if e.Path == path {
+			return e, true
+		}
+	}
+	return orchestrator.Extra{}, false
+}
+
+// resolve is design section 6.6's RESOLVE: entered from step 1 when the
+// newest question of round is kind perimeter. It applies the owner's
+// per-path accept/reject decisions, reverts every rejected path still in
+// the tree, and resumes the build session with the perimeter notice when a
+// revert happened. When every decision is accept (or every reject was
+// already gone from the tree), it stores the decisions and stays: the next
+// tick reaches Run's own "checked, no undecided extra" branch, which calls
+// h.check with firstCheck false -- the check before landing -- and lands
+// once it passes (design section 6.4 steps 3 to 6).
+func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	if round.RunID == nil {
+		return store.HandlerCommit{}, errors.New("job: building: resolve: round has no run id")
+	}
+	rid := *round.RunID
+	resolveIDs := questionIDs(round)
+
+	newest := round.Questions[len(round.Questions)-1]
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(newest.Payload, &qp); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: unmarshal question payload: %w", err)
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: build reports: %w", err)
+	}
+	report, foundReport := findUnitReport(reports, rid)
+	if !foundReport {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: ticket %d: no build_report for run %d", t.ID, rid)
+	}
+
+	events, err := d.Store.FileEvents(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: file events: %w", err)
+	}
+	proposed := newestFileEventPerPath(events)
+
+	decisions := mergedItemDecisions(round.Answers)
+
+	artifacts := make([]store.Artifact, 0, len(qp.Items))
+	var rejectedPaths []string
+	accepted, rejected := 0, 0
+	for _, item := range qp.Items {
+		row, hasRow := proposed[item.Ref]
+		if !hasRow {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: %q has no file artifact", item.Ref)
+		}
+
+		pd := response.PerimeterReject
+		switch d2, hasDecision := decisions[item.Ref]; {
+		case hasDecision && d2 == response.DecisionAccept:
+			pd = response.PerimeterAccept
+		case hasDecision && d2 == response.DecisionReject:
+			pd = response.PerimeterReject
+		default:
+			slog.Warn("perimeter decision defaulted to reject", "ticket_id", t.ID, "path", strconv.Quote(item.Ref))
+		}
+		if pd == response.PerimeterAccept {
+			accepted++
+		} else {
+			rejected++
+			rejectedPaths = append(rejectedPaths, item.Ref)
+		}
+
+		fa := row.File
+		fa.Decision = &pd
+		payload, marshalErr := json.Marshal(fa)
+		if marshalErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: marshal file artifact: %w", marshalErr)
+		}
+		artifacts = append(artifacts, store.Artifact{Type: artifactTypeFile, RunID: row.RunID, Payload: payload})
+	}
+	slog.Info("perimeter decided", "ticket_id", t.ID, "run_id", rid, "accepted", accepted, "rejected", rejected)
+
+	resolvedCommit := func() store.HandlerCommit {
+		c := baseCommit(t, d)
+		c.Artifacts = artifacts
+		c.ResolveQuestions = resolveIDs
+		c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: fmt.Sprintf(markerPerimeterResolvedFmt, rid)}}
+		return withBranch(c, wt)
+	}
+
+	if len(rejectedPaths) == 0 {
+		return resolvedCommit(), nil
+	}
+
+	changed, err := proj.Orch.ChangedPaths(ctx, wt)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+	}
+	changedByPath := make(map[string]orchestrator.Change, len(changed))
+	for _, c := range changed {
+		changedByPath[c.Path] = c
+	}
+
+	sort.Strings(rejectedPaths)
+	var revertChanges []orchestrator.Change
+	var revertExtras []orchestrator.Extra
+	for _, p := range rejectedPaths {
+		c, stillChanged := changedByPath[p]
+		if !stillChanged {
+			continue // design section 6.6 step 4: gone already, nothing to revert
+		}
+		revertChanges = append(revertChanges, c)
+		revertExtras = append(revertExtras, orchestrator.Extra{Path: p, Marker: markerForFile(proposed[p].File)})
+	}
+
+	if len(revertChanges) == 0 {
+		return resolvedCommit(), nil
+	}
+
+	maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobBuildName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: latest session: %w", err)
+	}
+	if state == store.SessionExhausted {
+		// Task 12 owns the resumes_exhausted escalation and the cap
+		// resolution that re-applies a preserved perimeter round; this task
+		// only needs to leave the round answered and unresolved, storing
+		// nothing and reverting nothing (design section 6.6 step 5).
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
+	}
+	if sess.ExternalID == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: session %d has no external id", sess.ID)
+	}
+
+	if revertErr := proj.Orch.RevertPaths(ctx, wt, revertChanges); revertErr != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), revertFailedWhat, revertFailedWhy, revertErr.Error()), nil
+	}
+	slog.Warn("paths reverted", "ticket_id", t.ID, "run_id", rid, "count", len(revertChanges))
+
+	notice := orchestrator.PerimeterNotice(revertExtras)
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	req := runtime.RunRequest{
+		Job: response.JobBuild, Label: strconv.Itoa(report.Report.TaskN), WorkDir: wt.Dir(),
+		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: "perimeter", Text: notice}})),
+	}
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	u := unit{TaskN: report.Report.TaskN, Title: report.Report.Title}
+	n := report.Report.TaskN
+	commit, runErr := runAndRoute(ctx, d, t, jobBuildName, su, req, 0, sessionRecord, resolveIDs, response.EscalationOriginBuild,
+		func(rr runResult) (store.HandlerCommit, error) {
+			c, successErr := buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
+			if successErr != nil {
+				return store.HandlerCommit{}, successErr
+			}
+			c.Artifacts = append(artifacts, c.Artifacts...)
+			return c, nil
+		}, &n)
+	return withBranchResult(commit, runErr, wt)
+}
+
+// resolvePerimeterQuestion is design section 6.2's third answered-round
+// branch (round.Job == "perimeter"): a model question a perimeter run asked
+// while describing one extra (design section 6.5 step 4's own "success
+// question"). It resumes that perimeter session with the owner's answer
+// when the path is still an extra in the tree, and drops the question --
+// resolving the round with the "perimeter question dropped" marker --
+// when the path is gone (an agent recreating a rejected extra, or an owner
+// reverting one by hand, before the perimeter run answers back).
+func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	if round.RunID == nil {
+		return store.HandlerCommit{}, errors.New("job: building: resolve perimeter round: round has no run id")
+	}
+	perimRunID := *round.RunID
+	resolveIDs := questionIDs(round)
+
+	events, err := d.Store.FileEvents(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: file events: %w", err)
+	}
+	fileRow, foundRow := fileEventForRun(events, perimRunID)
+	if !foundRow {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: ticket %d: no file artifact for perimeter run %d", t.ID, perimRunID)
+	}
+	path := fileRow.File.Path
+	taskN := fileRow.File.TaskN
+
+	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: stored plan: %w", err)
+	}
+	if !havePlan {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), nil
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	changed, err := proj.Orch.ChangedPaths(ctx, wt)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+	}
+	declaredNow := declaredPaths(plan, events, nil)
+	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
+
+	extra, stillExtra := extraFor(extras, path)
+	if !stillExtra {
+		c := baseCommit(t, d)
+		c.ResolveQuestions = resolveIDs
+		c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: fmt.Sprintf(markerPerimeterQuestionDroppedFmt, perimRunID)}}
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "perimeter_question_dropped", "session_state", "n/a")
+		return withBranch(c, wt), nil
+	}
+
+	maxResumes := d.Machine.Jobs[jobPerimeterName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPerimeterName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: latest session: %w", err)
+	}
+	if state == store.SessionExhausted {
+		// As above (resolve): task 12 owns raising resumes_exhausted for a
+		// perimeter session and folding this round back in.
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
+	}
+	if sess.ExternalID == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session %d has no external id", sess.ID)
+	}
+
+	change, foundChange := changeFor(changed, path)
+	if !foundChange {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: %q not found in changed paths", path)
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: build reports: %w", err)
+	}
+	report, foundReport := findUnlandedReportForTask(reports, taskN)
+	if !foundReport {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: ticket %d: no unlanded build_report for task %d", t.ID, taskN)
+	}
+	claim, foundClaim := extraClaimFor(report.Report.Extras, path)
+	if !foundClaim {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: %q has no extra claim in build_report", path)
+	}
+
+	priorInvalid, _, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPerimeterName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: consecutive invalid outputs: %w", err)
+	}
+	answers, err := answerInputsForRound(round)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	assembled := prompt.Assemble(prompt.ForBuildResume(answers))
+
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-answer", taskN), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	n := taskN
+	commit, runErr := runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPerimeter,
+		func(rr runResult) (store.HandlerCommit, error) {
+			// perimeterSuccessCommit sets no ResolveQuestions of its own (its
+			// only other caller, describeOne, is always a fresh run with no
+			// round to resolve): this resume's own round must be resolved
+			// here, on every outcome (ok, question, error) alike.
+			c, successErr := perimeterSuccessCommit(t, d, rr, extra, change, claim, taskN, report.RunID, false, nil, nil)
+			if successErr != nil {
+				return store.HandlerCommit{}, successErr
+			}
+			c.ResolveQuestions = resolveIDs
+			return c, nil
+		}, &n)
+	return withBranchResult(commit, runErr, wt)
 }
 
 // ---- step 0.5: verified adoption of an unrecorded commit -------------------

@@ -258,7 +258,11 @@ func (c *console) loadPlan(ctx context.Context, ticketID int64) (*templates.Rend
 	if unmarshalErr := json.Unmarshal(artifact.Payload, &plan); unmarshalErr != nil {
 		return nil, fmt.Errorf("console: unmarshal plan artifact for ticket %d: %w", ticketID, unmarshalErr)
 	}
-	rendered, err := buildRenderedPlan(plan)
+	events, err := c.store.FileEvents(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("console: load file events for ticket %d: %w", ticketID, err)
+	}
+	rendered, err := buildRenderedPlan(plan, events)
 	if err != nil {
 		return nil, fmt.Errorf("console: render plan artifact for ticket %d: %w", ticketID, err)
 	}

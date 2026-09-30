@@ -1164,3 +1164,480 @@ func TestPerimeterSecondInvalidEscalates(t *testing.T) {
 		t.Errorf("second invalid escalation code = %q, want response_invalid", second.Escalation.Payload.Code)
 	}
 }
+
+// ---- RESOLVE, and the perimeter run's own question (task 11) ---------------
+
+// findOpenQuestionByKind returns ticketID's one open question of kind,
+// failing the test when none exists.
+func findOpenQuestionByKind(t *testing.T, s *store.Store, ticketID int64, kind response.QuestionKind) store.MessageRow {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, string(response.QuestionStateOpen))
+	if err != nil {
+		t.Fatalf("QuestionsByState: %v", err)
+	}
+	for i := range open {
+		var payload response.QuestionPayload
+		if json.Unmarshal(open[i].Payload, &payload) == nil && payload.Kind == kind {
+			return open[i]
+		}
+	}
+	t.Fatalf("no open question of kind %s found", kind)
+	return store.MessageRow{}
+}
+
+// answerPerimeterQuestion drives the real console draft/send path
+// (SaveDraft, then SendBatch) against questionID: one item draft per entry
+// of decisions, all sent in one batch, so AnsweredRounds sees one round
+// with every item decided (design section 6.6's own precondition: "Every
+// item has a decision").
+func answerPerimeterQuestion(t *testing.T, s *store.Store, ticketID, questionID int64, decisions map[string]response.Decision) {
+	t.Helper()
+	for ref, d := range decisions {
+		if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &questionID, Item: &store.ItemDecision{Ref: ref, Decision: d}}); err != nil {
+			t.Fatalf("SaveDraft(item %s): %v", ref, err)
+		}
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+}
+
+// countPerimeterQuestions counts every kind=perimeter question message the
+// ticket has ever carried, open, answered, or resolved alike.
+func countPerimeterQuestions(t *testing.T, s *store.Store, ticketID int64) int {
+	t.Helper()
+	all, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	n := 0
+	for i := range all {
+		if all[i].Type != testMsgTypeQuestion {
+			continue
+		}
+		var payload response.QuestionPayload
+		if json.Unmarshal(all[i].Payload, &payload) == nil && payload.Kind == response.QuestionKindPerimeter {
+			n++
+		}
+	}
+	return n
+}
+
+// TestResolveAllAcceptedLandsWithExtra proves design section 6.6's
+// all-accepted branch, example 13.2's own tick 4/5 shape: RESOLVE stores
+// the decision and stays, the next tick's check before landing (design
+// section 6.4 steps 3-6) passes with no extras left, and LAND stages the
+// accepted path along with the declared ones -- the landed build_report
+// keeping its original extra element untouched.
+func TestResolveAllAcceptedLandsWithExtra(t *testing.T) {
+	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionAccept})
+
+	resolveCommit := describeTick(t, s, scriptRT, ticketID) // RESOLVE: accept, stay
+	if resolveCommit.Next != "" {
+		t.Errorf("RESOLVE commit.Next = %q, want empty (RESOLVE never lands by itself)", resolveCommit.Next)
+	}
+	wantMarker := fmt.Sprintf(markerPerimeterResolvedFmtForTest, rid)
+	if len(resolveCommit.Messages) != 1 || resolveCommit.Messages[0].Body != wantMarker {
+		t.Fatalf("RESOLVE commit.Messages = %+v, want exactly [%q]", resolveCommit.Messages, wantMarker)
+	}
+
+	landCommit := describeTick(t, s, scriptRT, ticketID) // check before landing + LAND
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("LAND commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if err := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); err != nil {
+		t.Fatalf("unmarshal landed build_report: %v", err)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+	if len(landed.Extras) != 1 || landed.Extras[0].Path != testExtraPath {
+		t.Errorf("landed.Extras = %+v, want the original extra element kept", landed.Extras)
+	}
+
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	proj, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	changes, err := proj.Orch.CommitChanges(t.Context(), wt, *landed.CommitSHA)
+	if err != nil {
+		t.Fatalf("CommitChanges: %v", err)
+	}
+	found := false
+	for _, c := range changes {
+		if c.Path == testExtraPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("landed commit paths = %+v, want %q among them", changes, testExtraPath)
+	}
+}
+
+// markerPerimeterResolvedFmtForTest mirrors building.go's own unexported
+// markerPerimeterResolvedFmt (design section 6.6 step 6): this file cannot
+// reach the job package's own private constant, and the marker's exact
+// wording is part of what this test proves.
+const markerPerimeterResolvedFmtForTest = "perimeter resolved run %d"
+
+// TestResolveRejectedIsRevertedAndResumed proves design section 6.6's
+// reject branch, example 13.2's own tick 4 shape: the rejected path is
+// reverted from the tree, the build session is resumed with
+// orchestrator.PerimeterNotice, and the fresh run's own report -- once
+// landed -- excludes the reverted path entirely.
+func TestResolveRejectedIsRevertedAndResumed(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterStep("Adds a small helper.", "perim-sess-1"),
+		buildStep([]string{helloTxt}, 0, 0, nil, "resume-sess"),
+	)
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionReject})
+
+	resolveCommit := describeTick(t, s, scriptRT, ticketID) // RESOLVE: revert + resume
+	if len(resolveCommit.Runs) != 1 {
+		t.Fatalf("RESOLVE commit.Runs = %+v, want exactly one (the resumed build run)", resolveCommit.Runs)
+	}
+
+	if len(scriptRT.reqs) == 0 {
+		t.Fatal("scriptRT recorded no requests")
+	}
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "were reverted") {
+		t.Errorf("resume prompt = %q, want it to carry orchestrator.PerimeterNotice's own wording", lastReq.Prompt)
+	}
+	if lastReq.SessionID == "" {
+		t.Error("resume request carries no session id, want the build session's own external id")
+	}
+
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	ticket := getTicket(t, s, ticketID)
+	proj, wt := buildWorktreeFor(t, deps, ticket)
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), testExtraPath)); !os.IsNotExist(statErr) {
+		t.Errorf("stat %s after reject: err=%v, want not-exist (reverted)", testExtraPath, statErr)
+	}
+
+	landCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // check + LAND for the fresh report
+	if err != nil {
+		t.Fatalf("CHECK/LAND: %v", err)
+	}
+	apply(t, s, ticket, landCommit)
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("LAND commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if unmarshalErr := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); unmarshalErr != nil {
+		t.Fatalf("unmarshal landed build_report: %v", unmarshalErr)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+
+	changes, err := proj.Orch.CommitChanges(t.Context(), wt, *landed.CommitSHA)
+	if err != nil {
+		t.Fatalf("CommitChanges: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Path != helloTxt {
+		t.Errorf("landed commit changes = %+v, want exactly [hello.txt] (the rejected path never reaches a commit)", changes)
+	}
+}
+
+// TestAcceptedPathAsksOnceOnly proves design section 14's own edge case ("An
+// accepted path is changed again by a later task: it is declared now; no
+// question"), applied within one unit: a round mixing one accepted and one
+// rejected extra reverts and resumes for the rejected path only, and the
+// fresh report's own re-check never asks about the accepted path again,
+// even though describeOrAsk runs fresh against a brand-new build_report.
+func TestAcceptedPathAsksOnceOnly(t *testing.T) {
+	const acceptedPath = "extra_ok.go"
+	const rejectedPath = "extra_bad.go"
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
+		acceptedPath: "needed a helper",
+		rejectedPath: "not actually needed",
+	})
+	// Path order (sorted): extra_bad.go, extra_ok.go.
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterStep("Adds a helper the task does not use.", "perim-sess-bad"),
+		perimeterStep("Adds a helper the task uses.", "perim-sess-ok"),
+		// acceptedPath is already declared by the time this fresh report is
+		// checked (its accept decision was inserted in the same RESOLVE
+		// commit that produced this run, at a lower artifact id): the
+		// resumed run claims it as an ordinary changed path, not a new
+		// extra.
+		buildStep([]string{helloTxt, acceptedPath}, 0, 0, nil, "resume-sess"),
+	)
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE extra_bad.go
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE extra_ok.go + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{
+		acceptedPath: response.DecisionAccept,
+		rejectedPath: response.DecisionReject,
+	})
+
+	describeTick(t, s, scriptRT, ticketID)               // RESOLVE: revert extra_bad.go, resume
+	landCommit := describeTick(t, s, scriptRT, ticketID) // check (first, for the fresh report) + LAND directly
+
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if err := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); err != nil {
+		t.Fatalf("unmarshal landed build_report: %v", err)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha (extra_ok.go must not need a second question)")
+	}
+
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	proj, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	changes, err := proj.Orch.CommitChanges(t.Context(), wt, *landed.CommitSHA)
+	if err != nil {
+		t.Fatalf("CommitChanges: %v", err)
+	}
+	gotPaths := make([]string, 0, len(changes))
+	for _, c := range changes {
+		gotPaths = append(gotPaths, c.Path)
+	}
+	sort.Strings(gotPaths)
+	want := []string{acceptedPath, helloTxt}
+	if len(gotPaths) != len(want) || gotPaths[0] != want[0] || gotPaths[1] != want[1] {
+		t.Errorf("landed commit paths = %v, want %v", gotPaths, want)
+	}
+
+	if n := countPerimeterQuestions(t, s, ticketID); n != 1 {
+		t.Errorf("perimeter questions ever asked = %d, want exactly 1 (the accepted path must not be asked about twice)", n)
+	}
+}
+
+// TestResolveDefaultsUnknownDecisionToReject proves design section 6.6 step
+// 2's defensive default: the console's own SaveDraft already refuses a
+// perimeter item decision outside accept/reject (internal/store/console_
+// writes.go), so this seeds an already-answered round directly through
+// store.InsertMessage -- the one path that can still carry a decision
+// SaveDraft would have refused -- and proves RESOLVE treats it as a reject
+// rather than panicking or silently dropping the path, logging the
+// defaulted warning design section 11 names.
+func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
+	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterStep("Adds a small helper.", "perim-sess-1"),
+		buildStep([]string{helloTxt}, 0, 0, nil, "resume-defaulted-sess"),
+	)
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + the real ASK (left open, unused)
+
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q9", Kind: response.QuestionKindPerimeter, State: response.QuestionStateAnswered,
+		Recommended: "Decide each file", Options: []response.Option{},
+		Items: []response.Item{{Ref: testExtraPath, Text: "Builder: " + testExtraReason}},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, RunID: &rid, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: new("answered"), Body: "Confirm the file perimeter", Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(question): %v", err)
+	}
+
+	answerPayload, err := json.Marshal(response.AnswerPayload{Items: map[string]response.Decision{testExtraPath: response.DecisionDiscuss}})
+	if err != nil {
+		t.Fatalf("marshal answer payload: %v", err)
+	}
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &qID, Type: "answer", Author: "you",
+		State: new("sent"), Payload: answerPayload,
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(answer): %v", insertErr)
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RESOLVE: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "perimeter decision defaulted to reject") {
+		t.Errorf("log missing the defaulted-to-reject warning; got:\n%s", logBuf.String())
+	}
+	apply(t, s, ticket, commit)
+
+	events, err := s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	var decided *response.PerimeterDecision
+	for _, e := range events {
+		if e.File.Path == testExtraPath && e.File.Decision != nil {
+			decided = e.File.Decision
+		}
+	}
+	if decided == nil || *decided != response.PerimeterReject {
+		t.Errorf("decided path %s decision = %v, want reject", testExtraPath, decided)
+	}
+}
+
+// TestResolveNoEmptyQuestionAfterAccept proves RESOLVE's own accept-all
+// commit never re-raises the perimeter question it just answered, and
+// clears the ticket's wait (design section 6.6 step 6: "commit the file
+// artifacts, ResolveQuestions, and the marker ... stay").
+func TestResolveNoEmptyQuestionAfterAccept(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionAccept})
+
+	resolveCommit := describeTick(t, s, scriptRT, ticketID) // RESOLVE
+
+	if resolveCommit.Waiting != nil {
+		t.Errorf("RESOLVE commit.Waiting = %q, want nil", *resolveCommit.Waiting)
+	}
+	for _, m := range resolveCommit.Messages {
+		if m.Type == testMsgTypeQuestion {
+			t.Errorf("RESOLVE posted a new question: %+v, want none", m)
+		}
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q after RESOLVE, want nil", *final.WaitingOn)
+	}
+}
+
+// TestPerimeterRunAnswerResumesItsSession proves design section 6.2's third
+// answered-round branch (round.Job == "perimeter"): the owner's answer to a
+// perimeter run's own question resumes that same session (BumpResumes, the
+// same external session id), rather than starting a fresh one, and the
+// resumed run's own description lands as the path's file event.
+func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	const wantDescription = "Uses a hyphen, matching the style guide."
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterQuestionStep("perim-q-sess"),
+		perimeterStep(wantDescription, "perim-q-sess"),
+	)
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use a hyphen."}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	sessionsBefore, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+
+	commit := describeTick(t, s, scriptRT, ticketID) // resolvePerimeterQuestion: resume
+
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one file artifact (the description)", commit.Artifacts)
+	}
+	if len(commit.ResolveQuestions) == 0 {
+		t.Error("commit.ResolveQuestions is empty, want the round resolved")
+	}
+
+	sessionsAfter, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	if len(sessionsAfter) != len(sessionsBefore) {
+		t.Errorf("sessions after answering = %d, want %d (a resume, not a fresh session)", len(sessionsAfter), len(sessionsBefore))
+	}
+
+	if len(scriptRT.reqs) == 0 {
+		t.Fatal("scriptRT recorded no requests")
+	}
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if lastReq.SessionID != "perim-q-sess" {
+		t.Errorf("resume request SessionID = %q, want %q (the perimeter run's own external id)", lastReq.SessionID, "perim-q-sess")
+	}
+
+	events, err := s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	described := false
+	for _, e := range events {
+		if e.File.Path == testExtraPath && e.File.Description == wantDescription {
+			described = true
+		}
+	}
+	if !described {
+		t.Errorf("no file event carries the resumed run's own description %q; events = %+v", wantDescription, events)
+	}
+}
+
+// TestPerimeterQuestionDroppedWhenPathGone proves design section 6.2's
+// third answered-round branch's other outcome: when the path the perimeter
+// run asked about is no longer an extra (removed from the tree by hand
+// here, standing in for an agent's own revert or recreate), the round
+// resolves with the "perimeter question dropped" marker and no runtime
+// call at all.
+func TestPerimeterQuestionDroppedWhenPathGone(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-sess"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
+
+	events, err := s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	var perimRunID int64
+	for _, e := range events {
+		if e.File.Path == testExtraPath && e.RunID != nil {
+			perimRunID = *e.RunID
+		}
+	}
+	if perimRunID == 0 {
+		t.Fatal("no file event carries the perimeter run's own id")
+	}
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "It's fine either way."}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	_, wt := buildWorktreeFor(t, deps, ticket)
+	if removeErr := os.Remove(filepath.Join(wt.Dir(), testExtraPath)); removeErr != nil {
+		t.Fatalf("remove %s: %v", testExtraPath, removeErr)
+	}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("resolve perimeter round: %v", err)
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none (a dropped question makes no runtime call)", commit.Runs)
+	}
+	wantMarker := fmt.Sprintf("perimeter question dropped run %d", perimRunID)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != wantMarker {
+		t.Fatalf("commit.Messages = %+v, want exactly [%q]", commit.Messages, wantMarker)
+	}
+	if len(commit.ResolveQuestions) == 0 {
+		t.Error("commit.ResolveQuestions is empty, want the round's question ids resolved")
+	}
+}

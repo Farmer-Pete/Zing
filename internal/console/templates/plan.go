@@ -53,12 +53,16 @@ type RenderedTask struct {
 
 // RenderedDelivery is Delivery (design section 6.9) with each Task's Text
 // pre-rendered. Files, Deletions, and Tests carry no markdown field of
-// their own.
+// their own. DecidedFiles is design section 9.2's own addition: the newest
+// FileEvents row per path that carries an owner decision (path, decision,
+// task number, marker, builder reason, perimeter description), not part of
+// the stored Plan itself.
 type RenderedDelivery struct {
-	Files     []response.FileChange
-	Deletions response.Deletions
-	Tests     []response.TestCase
-	Tasks     []RenderedTask
+	Files        []response.FileChange
+	Deletions    response.Deletions
+	Tests        []response.TestCase
+	Tasks        []RenderedTask
+	DecidedFiles []response.FileArtifact
 }
 
 // RenderedPlan is a stored response.Plan (design section 6.9) with every

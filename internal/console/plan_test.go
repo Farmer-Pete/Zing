@@ -7,6 +7,7 @@ import (
 
 	"zing/internal/console"
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // planChangePath, planMigrationFile, and planTestName are fixture string
@@ -110,10 +111,12 @@ func fixturePlan() response.Plan {
 
 // renderPlanToString drives console.RenderPlan's returned templ.Component
 // the same way a handler does (render_test.go's renderToString), so this
-// exercises the real boundary.
-func renderPlanToString(t *testing.T, plan response.Plan) string {
+// exercises the real boundary. events feeds the Declared files section's
+// own "Decided during build" sub-list (design section 9.2); nil is a plan
+// with no perimeter decisions yet.
+func renderPlanToString(t *testing.T, plan response.Plan, events []store.FileEventRow) string {
 	t.Helper()
-	comp, err := console.RenderPlan(plan)
+	comp, err := console.RenderPlan(plan, events)
 	if err != nil {
 		t.Fatalf("console.RenderPlan: %v", err)
 	}
@@ -131,7 +134,7 @@ func renderPlanToString(t *testing.T, plan response.Plan) string {
 // map: the four parts as <h2>, their children as <h3>, and recognizable
 // output for every field, not only the headings.
 func TestRenderPlanEveryField(t *testing.T) {
-	got := renderPlanToString(t, fixturePlan())
+	got := renderPlanToString(t, fixturePlan(), nil)
 
 	t.Run("four parts as h2", func(t *testing.T) {
 		for _, want := range []string{"<h2>Overview</h2>", "<h2>Design</h2>", "<h2>Delivery</h2>", "<h2>Review</h2>"} {
@@ -354,7 +357,7 @@ func TestRenderPlanNoneLines(t *testing.T) {
 	plan.Design.Migrations = response.Migrations{None: true}
 	plan.Delivery.Deletions = response.Deletions{None: true}
 
-	got := renderPlanToString(t, plan)
+	got := renderPlanToString(t, plan, nil)
 
 	if strings.Contains(got, planMigrationFile) {
 		t.Error("Migrations.None: still rendered the fixture's migration")
@@ -367,5 +370,69 @@ func TestRenderPlanNoneLines(t *testing.T) {
 	}
 	if !strings.Contains(got, "Nothing deleted.") {
 		t.Errorf("Deletions.None did not render a none line; got:\n%s", got)
+	}
+}
+
+// decidedFilePath and decidedFileTaskN are TestPlanListsDecidedFiles' own
+// fixture path and task number, named once so goconst has nothing to flag.
+const (
+	decidedFilePath   = "Makefile"
+	decidedFileTaskN  = 2
+	decidedFileReason = "the test target must build the greeter first"
+	decidedFileDesc   = "Adds a test target that builds the greeter binary."
+)
+
+// TestPlanListsDecidedFiles proves the Declared files section's own
+// "Decided during build" sub-list (design section 9.2): fed by the newest
+// FileEvents row per path that carries a decision, showing path, decision,
+// task number, marker, builder reason, and perimeter description. A second,
+// older row for the same path (no decision yet) proves the reduction reads
+// the newest row, not every row.
+func TestPlanListsDecidedFiles(t *testing.T) {
+	accept := response.PerimeterAccept
+	events := []store.FileEventRow{
+		{
+			ArtifactID: 1,
+			File: response.FileArtifact{
+				FileChange: response.FileChange{Path: decidedFilePath, Action: response.FileActionCreate, Reason: decidedFileReason},
+				TrustRoot:  true, TaskN: decidedFileTaskN, Description: decidedFileDesc,
+			},
+		},
+		{
+			ArtifactID: 2,
+			File: response.FileArtifact{
+				FileChange:  response.FileChange{Path: decidedFilePath, Action: response.FileActionCreate, Reason: decidedFileReason},
+				TrustRoot:   true,
+				TaskN:       decidedFileTaskN,
+				Description: decidedFileDesc,
+				Decision:    &accept,
+			},
+		},
+	}
+
+	got := renderPlanToString(t, fixturePlan(), events)
+
+	if !strings.Contains(got, "Decided during build") {
+		t.Fatalf("missing the Decided during build heading; got:\n%s", got)
+	}
+	for _, want := range []string{
+		decidedFilePath, "accept", "trust root",
+		decidedFileReason,
+		decidedFileDesc,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("decided files table missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlanOmitsDecidedListWhenEmpty proves a plan with no perimeter
+// decisions yet renders no "Decided during build" heading at all (design
+// section 9.2: "It renders nothing when empty").
+func TestPlanOmitsDecidedListWhenEmpty(t *testing.T) {
+	got := renderPlanToString(t, fixturePlan(), nil)
+
+	if strings.Contains(got, "Decided during build") {
+		t.Errorf("no perimeter decisions exist yet, want no Decided during build heading; got:\n%s", got)
 	}
 }
