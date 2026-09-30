@@ -8,13 +8,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/store"
 )
 
@@ -114,7 +114,7 @@ type zingTOMLOpts struct {
 func newTestGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if out, err := exec.CommandContext(t.Context(), "git", "init", "-q", dir).CombinedOutput(); err != nil { //nolint:gosec // G204: fixed argv, test-only
+	if out, err := gitfixture.Git(t.Context(), dir, "init", "-q", dir); err != nil {
 		t.Fatalf("git init %s: %v (%s)", dir, err, out)
 	}
 	return dir

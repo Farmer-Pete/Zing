@@ -16,13 +16,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/orchestrator"
 	"zing/internal/response"
@@ -122,17 +122,17 @@ func buildStep(filesChanged []string, testExit, lintExit int, extras []response.
 // against.
 func rawGitCommit(t *testing.T, dir string, files []string, title string, sign bool) {
 	t.Helper()
-	addArgs := append([]string{"-C", dir, "add"}, files...)
-	if out, err := exec.CommandContext(t.Context(), "git", addArgs...).CombinedOutput(); err != nil { //nolint:gosec // G204: fixed argv, test-only
+	addArgs := append([]string{"add"}, files...)
+	if out, err := gitfixture.Git(t.Context(), dir, addArgs...); err != nil {
 		t.Fatalf("git add: %v: %s", err, out)
 	}
-	commitArgs := []string{"-C", dir, "commit", "-q", "-m", title}
+	commitArgs := []string{"commit", "-q", "-m", title}
 	if sign {
 		commitArgs = append(commitArgs, "-S")
 	} else {
 		commitArgs = append(commitArgs, "--no-gpg-sign")
 	}
-	if out, err := exec.CommandContext(t.Context(), "git", commitArgs...).CombinedOutput(); err != nil { //nolint:gosec // G204: fixed argv, test-only
+	if out, err := gitfixture.Git(t.Context(), dir, commitArgs...); err != nil {
 		t.Fatalf("git commit: %v: %s", err, out)
 	}
 }
@@ -562,7 +562,7 @@ func TestBuildEscalatesWhenRecordedCommitMissing(t *testing.T) {
 	apply(t, s, ticket, commit)
 
 	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
-	if out, resetErr := exec.CommandContext(t.Context(), "git", "-C", wt.Dir(), "reset", "--hard", "HEAD~1").CombinedOutput(); resetErr != nil {
+	if out, resetErr := gitfixture.Git(t.Context(), wt.Dir(), "reset", "--hard", "HEAD~1"); resetErr != nil {
 		t.Fatalf("git reset --hard: %v: %s", resetErr, out)
 	}
 
@@ -820,7 +820,7 @@ func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
 // BranchCommits.
 func orchestratorHeadSHA(t *testing.T, dir string) (string, error) {
 	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "rev-parse", "HEAD").CombinedOutput() //nolint:gosec // G204: fixed argv, test-only
+	out, err := gitfixture.Git(t.Context(), dir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse HEAD: %w: %s", err, out)
 	}

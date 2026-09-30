@@ -2,7 +2,6 @@ package gitfixture
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,9 +13,7 @@ import (
 // error rather than output, for the test's own use.
 func readGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := Git(t.Context(), dir, args...)
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
