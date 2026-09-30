@@ -1,0 +1,10 @@
+<zing job="build" outcome="question">
+  <question key="q1">
+    <title>Which farewell wording should Farewell use?</title>
+    <body>Task 1 asks for Farewell(name string) string, but the plan leaves the exact wording to the owner: "Goodbye, &lt;name&gt;." or "See you, &lt;name&gt;."</body>
+    <option key="a">Goodbye, &lt;name&gt;.</option>
+    <option key="b">See you, &lt;name&gt;.</option>
+    <recommended>a: it reads as a complete, self-contained sentence.</recommended>
+  </question>
+  <progress>Read greet.go and task 1's text; blocked on the exact farewell wording before writing Farewell.</progress>
+</zing>

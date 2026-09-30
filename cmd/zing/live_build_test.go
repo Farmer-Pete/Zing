@@ -14,12 +14,16 @@
 //
 //	ZING_LIVE_CLI=1 go test ./cmd/zing -run TestLiveBuild -v -timeout 70m
 //
-// TestLiveBuildSkipsWithoutGate, TestLiveBuildFixtureIsValid, and
-// TestLiveBuildHarnessOnFake run in every normal test suite: the first two
-// prove the gate and the fixture without touching a runtime at all: the
-// third proves runLiveBuildHarness itself -- the exact sequence TestLiveBuild
-// drives -- against the fake runtime and sandbox.Off(), so every line but
-// the wiring runs on every CI build.
+// TestLiveBuildSkipsWithoutGate, TestLiveBuildFixtureIsValid,
+// TestLiveBuildHarnessOnFake, TestLiveBuildHarnessCapsRepeatedEscalations, and
+// TestLiveBuildHarnessOwnerModeAnswersNothing run in every normal test suite:
+// the first two prove the gate and the fixture without touching a runtime at
+// all; the rest prove runLiveBuildHarness itself -- the exact sequence
+// TestLiveBuild drives -- against the fake runtime and sandbox.Off(), so
+// every line but the wiring runs on every CI build. ZING_LIVE_ANSWER=owner
+// switches the harness to owner-answer mode: it answers nothing itself and
+// waits for the console's own owner to. TestLiveBuildHarnessOnFake never
+// sets it, so it stays on automatic answers.
 package main
 
 import (
@@ -37,7 +41,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +60,99 @@ import (
 	"zing/internal/sandbox"
 	"zing/internal/store"
 )
+
+// liveHarnessT is the subset of *testing.T runLiveBuildHarness itself
+// depends on (its ctx comes in as its own parameter instead, so the harness
+// never calls t.Context()). It is small enough that
+// TestLiveBuildHarnessCapsRepeatedEscalations and
+// TestLiveBuildHarnessOwnerModeAnswersNothing can each run the harness
+// against a recordingT instead of the real *testing.T: both tests prove the
+// harness's own Fatalf call, and a real t.Fatalf would also fail whichever
+// test called it, which is exactly what these two tests must not do to the
+// test recording them. *testing.T satisfies this interface already, so
+// every other caller just passes t.
+type liveHarnessT interface {
+	Helper()
+	Cleanup(func())
+	Logf(format string, args ...any)
+	Fatalf(format string, args ...any)
+}
+
+// recordingT is a liveHarnessT that records its first Fatalf call instead
+// of failing a real test, then ends the calling goroutine with
+// runtime.Goexit -- the same way testing.T.FailNow ends the goroutine that
+// called it -- so the code under test stops exactly where a real Fatalf
+// would have stopped it, while the goroutine that started it keeps running
+// (design: the harness runs on its own goroutine so this Goexit cannot end
+// the test function itself). Cleanup callbacks are recorded, not run
+// immediately (design: goroutine.Goexit does still run this goroutine's own
+// deferred functions, but a testing.T.Cleanup callback is not a defer); the
+// caller runs them itself, in reverse order, through runCleanups once the
+// goroutine has finished.
+type recordingT struct {
+	mu       sync.Mutex
+	fataled  bool
+	fatalMsg string
+	cleanups []func()
+}
+
+func (r *recordingT) Helper() {}
+
+func (r *recordingT) Logf(string, ...any) {}
+
+func (r *recordingT) Cleanup(f func()) {
+	r.mu.Lock()
+	r.cleanups = append(r.cleanups, f)
+	r.mu.Unlock()
+}
+
+func (r *recordingT) Fatalf(format string, args ...any) {
+	r.mu.Lock()
+	r.fataled = true
+	r.fatalMsg = fmt.Sprintf(format, args...)
+	r.mu.Unlock()
+	goruntime.Goexit()
+}
+
+// message returns r's recorded Fatalf message, or ("", false) when Fatalf
+// was never called.
+func (r *recordingT) message() (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fatalMsg, r.fataled
+}
+
+// runCleanups runs every Cleanup callback r recorded, in reverse
+// registration order (testing.T's own order), once the goroutine that ran
+// the harness against r has finished.
+func (r *recordingT) runCleanups() {
+	r.mu.Lock()
+	cleanups := r.cleanups
+	r.mu.Unlock()
+	for _, f := range slices.Backward(cleanups) {
+		f()
+	}
+}
+
+// newLiveStore opens a fresh store.Store for one test, in its own temp
+// directory, and closes it in t's own Cleanup. Split out of
+// runLiveBuildHarness (which takes the store as a parameter instead of
+// opening its own) so a caller that expects the harness itself to fail
+// (TestLiveBuildHarnessCapsRepeatedEscalations,
+// TestLiveBuildHarnessOwnerModeAnswersNothing) still has a live store to
+// read afterward: the harness's own goroutine exits through
+// recordingT.Fatalf's runtime.Goexit before it would ever reach a return,
+// so nothing it constructed internally would otherwise survive it.
+func newLiveStore(t *testing.T) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dir, "zing.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // liveModulePathFor joins name onto the fixture module directory this
 // harness's plan.xml, its build fixtures, and its gitfixture repo all share
@@ -164,6 +263,12 @@ const liveDefaultBranch = "main"
 // liveTestCmd is the fixture "greeter" module's own test command, named once
 // so goconst has one definition to point at.
 const liveTestCmd = "go test ./..."
+
+// liveJobBuild is the sessions.job value every build-turn session carries
+// (machine.toml's "build" job, response.JobBuild's own string form), named
+// once so goconst has one definition to point at rather than a second raw
+// "build" literal alongside the unrelated "go build" exec argv above.
+const liveJobBuild = "build"
 
 // normalizeLivePlanArrays mirrors internal/job/planning.go's own
 // (unexported) normalizePlanArrays: a Plan decoded from XML leaves an
@@ -415,19 +520,134 @@ type liveBuildResult struct {
 	Worktree orchestrator.Worktree
 }
 
+// liveEscalationRetryCap bounds how many times runLiveBuildHarness answers
+// consecutive escalations that share the same code (follow-up commit,
+// "Cap the live harness retries"): the first live run looped, spending one
+// real Sonnet run per retry on a single defect, because nothing here
+// noticed the same code kept coming back rather than the build making
+// progress.
+const liveEscalationRetryCap = 3
+
+// liveOwnerAnswerEnv and liveOwnerAnswerValue are the environment variable
+// and value that switch runLiveBuildHarness to owner-answer mode
+// (follow-up commit): ZING_LIVE_ANSWER=owner answers nothing itself and
+// waits for the console's own owner to; any other value, or none, keeps
+// the automatic answers TestLiveBuild and TestLiveBuildHarnessOnFake both
+// rely on.
+const (
+	liveOwnerAnswerEnv   = "ZING_LIVE_ANSWER"
+	liveOwnerAnswerValue = "owner"
+)
+
+// openEscalationQuestion is one of ticketID's still-open question messages
+// that answers an escalation (its ParentID names the escalation message,
+// internal/store/commit.go's escalateTx), paired with that escalation's own
+// decoded payload.
+type openEscalationQuestion struct {
+	questionID   int64
+	escalationID int64
+	payload      response.EscalationPayload
+}
+
+// openEscalationQuestions returns every one of ticketID's still-open,
+// escalation-linked question messages, each paired with its escalation's
+// own payload; a plain build or perimeter question (no ParentID) is not
+// one of these.
+func openEscalationQuestions(ctx context.Context, st *store.Store, ticketID int64) ([]openEscalationQuestion, error) {
+	msgs, err := st.ListMessages(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+
+	escalations := make(map[int64]response.EscalationPayload)
+	for i := range msgs {
+		if msgs[i].Type != "escalation" {
+			continue
+		}
+		var p response.EscalationPayload
+		if json.Unmarshal(msgs[i].Payload, &p) == nil {
+			escalations[msgs[i].ID] = p
+		}
+	}
+
+	var open []openEscalationQuestion
+	for i := range msgs {
+		if msgs[i].Type != "question" || msgs[i].ParentID == nil {
+			continue
+		}
+		if msgs[i].State == nil || *msgs[i].State != "open" {
+			continue
+		}
+		payload, ok := escalations[*msgs[i].ParentID]
+		if !ok {
+			continue
+		}
+		open = append(open, openEscalationQuestion{questionID: msgs[i].ID, escalationID: *msgs[i].ParentID, payload: payload})
+	}
+	return open, nil
+}
+
+// formatEscalationCapMessage is runLiveBuildHarness's Fatalf text once code
+// has repeated count times (the code, the newest escalation's own What
+// text, and the count, exactly as the follow-up commit asks for).
+func formatEscalationCapMessage(ticketID int64, code, what string, count int) string {
+	return fmt.Sprintf("ticket %d: escalation %s repeated %d times (cap %d), newest: %s",
+		ticketID, code, count, liveEscalationRetryCap, what)
+}
+
+// describeOpenQuestions names every one of ticketID's currently open
+// questions by id and title (its Body's first line, the same title/body
+// split views.go's own splitQuestionBody renders), for the timeout message
+// below: "(none)" when there is nothing open.
+func describeOpenQuestions(ctx context.Context, st *store.Store, ticketID int64) (string, error) {
+	open, err := st.QuestionsByState(ctx, ticketID, "open")
+	if err != nil {
+		return "", fmt.Errorf("questions by state: %w", err)
+	}
+	if len(open) == 0 {
+		return "(none)", nil
+	}
+	titles := make([]string, len(open))
+	for i := range open {
+		title, _, _ := strings.Cut(open[i].Body, "\n")
+		titles[i] = fmt.Sprintf("Q(message %d): %s", open[i].ID, title)
+	}
+	return strings.Join(titles, "; "), nil
+}
+
 // runLiveBuildHarness drives PKG8-PLAN.md section 18 task 16's live build
 // harness to completion, sharing every line but the wiring between
-// TestLiveBuild (the real claude CLI, the real sandbox) and
-// TestLiveBuildHarnessOnFake (the fake runtime, sandbox.Off()): it seeds one
-// ticket directly into "building" with a stored three-task plan and a
-// sealed scenario cohort (seedLiveBuildTicket), starts the real dispatcher
-// and the real console over ln, and ticks until the ticket reaches
-// "reviewing" or maxWait passes, answering every open question along the
-// way (design section 6.5's DESCRIBE/ASK perimeter round, and task 3's own
-// farewell-wording question) through the console's real POST /draft and
-// POST /send. projDir is an already-built gitfixture "greeter" repository
-// (newLiveFixtureRepo); the caller owns it so it can place a canary inside
-// its .git directory before this runs.
+// TestLiveBuild (the real claude CLI, the real sandbox) and every fake-
+// runtime caller (TestLiveBuildHarnessOnFake,
+// TestLiveBuildHarnessCapsRepeatedEscalations,
+// TestLiveBuildHarnessOwnerModeAnswersNothing): it seeds one ticket
+// directly into "building" with a stored three-task plan and a sealed
+// scenario cohort (seedLiveBuildTicket), starts the real dispatcher and the
+// real console over ln, and ticks until the ticket reaches "reviewing" or
+// maxWait passes. st is a store the caller already opened (newLiveStore)
+// and owns: a caller that expects this to fail before it ever returns
+// still has a live store to read afterward. projDir is an already-built
+// gitfixture "greeter" repository (newLiveFixtureRepo); the caller owns it
+// so it can place a canary inside its .git directory before this runs.
+//
+// Two safety rules run every tick a question is open, before either mode
+// answers anything (follow-up commit, "Cap the live harness retries and add
+// an owner-answer mode"):
+//
+//  1. The retry cap. Every still-open, escalation-linked question is
+//     counted by its escalation's own code, the first time this call sees
+//     that escalation's id; when a code's count would reach
+//     liveEscalationRetryCap, t.Fatalf fires with the code, the newest
+//     escalation's What text, and the count, and nothing is answered past
+//     the cap.
+//  2. Owner-answer mode. When ZING_LIVE_ANSWER=owner, the harness answers
+//     nothing itself: it logs "waiting on the owner: <url>" once per open
+//     question (by message id) and keeps ticking, relying entirely on the
+//     console's own owner to answer, bounded by the same maxWait deadline.
+//     Any other value, or none, answers automatically through
+//     answerAllOpenQuestions, exactly as before (design section 6.5's
+//     DESCRIBE/ASK perimeter round, and a plain build question, through the
+//     console's real POST /draft and POST /send).
 //
 // The one orchestrator this builds carries a GitHub client
 // (selftestGitHub) that returns an error on every call: the build never
@@ -435,16 +655,8 @@ type liveBuildResult struct {
 // copied straight from this call's own parameters, mirroring serve.go's own
 // production wiring (buildJobProjects, serveSandbox) rather than
 // hand-rolling a second shape for a test.
-func runLiveBuildHarness(t *testing.T, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, maxWait time.Duration) liveBuildResult {
+func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, maxWait time.Duration) liveBuildResult {
 	t.Helper()
-	ctx := t.Context()
-
-	dir := t.TempDir()
-	st, err := store.Open(ctx, filepath.Join(dir, "zing.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	m, err := machine.Load(zing.Assets, "machine.toml")
 	if err != nil {
@@ -520,6 +732,11 @@ func runLiveBuildHarness(t *testing.T, projDir string, rts runtime.Set, sb sandb
 	t.Logf("console: %s", srv.URL)
 	fmt.Println("console:", srv.URL) //nolint:forbidigo // PKG8-PLAN.md section 18 task 16: printed to standard output as well as the test log
 
+	ownerMode := os.Getenv(liveOwnerAnswerEnv) == liveOwnerAnswerValue
+	escalationCounts := map[string]int{}   // escalation code -> how many this call has counted
+	countedEscalations := map[int64]bool{} // escalation message id -> already counted, so a still-open one is never counted twice
+	printedWaitingOn := map[int64]bool{}   // question message id -> already logged, owner mode only
+
 	// A plain for{} loop, exited only through the "reviewing" return below:
 	// Go's own terminating-statement rule (a for loop with no break) is what
 	// lets this function end here with no further statement and no separate
@@ -535,21 +752,56 @@ func runLiveBuildHarness(t *testing.T, projDir string, rts runtime.Set, sb sandb
 			t.Fatalf("get ticket: %v", getErr)
 		}
 		if ticket.State == "reviewing" {
-			return liveBuildResult{Store: st, TicketID: ticketID, Orch: orch, Worktree: mustEnsureLiveWorktree(t, orch, ticketID, ticket.Title)}
+			return liveBuildResult{Store: st, TicketID: ticketID, Orch: orch, Worktree: mustEnsureLiveWorktree(ctx, t, orch, ticketID, ticket.Title)}
 		}
 		// waiting_on names which question kind is blocking (design section
-		// 6.7): "questions" for a plain build question (questionOutcomeCommit),
+		// 6.7): "questions" for a plain build question (questionOutcomeCommit)
+		// or an escalation's own linked question (escalationCommit),
 		// "perimeter" for the owner's file-perimeter round (askCommit). Either
 		// way there is an open question to answer, so any non-nil value is
 		// the same signal here.
 		if ticket.WaitingOn != nil {
-			if answerErr := answerAllOpenQuestions(ctx, st, srv.URL, ticketID); answerErr != nil {
+			escalated, escErr := openEscalationQuestions(ctx, st, ticketID)
+			if escErr != nil {
+				t.Fatalf("open escalation questions: %v", escErr)
+			}
+			for i := range escalated {
+				eq := escalated[i]
+				if countedEscalations[eq.escalationID] {
+					continue
+				}
+				countedEscalations[eq.escalationID] = true
+				escalationCounts[eq.payload.Code]++
+				if escalationCounts[eq.payload.Code] >= liveEscalationRetryCap {
+					t.Fatalf("%s", formatEscalationCapMessage(ticketID, eq.payload.Code, eq.payload.What, escalationCounts[eq.payload.Code]))
+				}
+			}
+
+			if ownerMode {
+				open, openErr := st.QuestionsByState(ctx, ticketID, "open")
+				if openErr != nil {
+					t.Fatalf("questions by state: %v", openErr)
+				}
+				for i := range open {
+					if printedWaitingOn[open[i].ID] {
+						continue
+					}
+					printedWaitingOn[open[i].ID] = true
+					t.Logf("waiting on the owner: %s", srv.URL)
+					fmt.Println("waiting on the owner:", srv.URL) //nolint:forbidigo // follow-up commit: printed to standard output as well as the test log, matching the console-URL line above
+				}
+			} else if answerErr := answerAllOpenQuestions(ctx, st, srv.URL, ticketID); answerErr != nil {
 				t.Fatalf("answer open questions: %v", answerErr)
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("ticket %d did not reach reviewing within %s (state=%s, waiting_on=%v)",
-				ticketID, maxWait, ticket.State, ticket.WaitingOn)
+			desc, descErr := describeOpenQuestions(ctx, st, ticketID)
+			if descErr != nil {
+				t.Fatalf("ticket %d did not reach reviewing within %s (state=%s, waiting_on=%v); describe open questions: %v",
+					ticketID, maxWait, ticket.State, ticket.WaitingOn, descErr)
+			}
+			t.Fatalf("ticket %d did not reach reviewing within %s (state=%s, waiting_on=%v, open questions: %s)",
+				ticketID, maxWait, ticket.State, ticket.WaitingOn, desc)
 		}
 		time.Sleep(time.Second)
 	}
@@ -559,9 +811,9 @@ func runLiveBuildHarness(t *testing.T, projDir string, rts runtime.Set, sb sandb
 // already created for ticketID, using the same (ticketID, title) pair every
 // building tick passes EnsureWorktree (internal/job/building.go), so the
 // caller gets the real Worktree value to inspect commits against.
-func mustEnsureLiveWorktree(t *testing.T, orch *orchestrator.Orchestrator, ticketID int64, title string) orchestrator.Worktree {
+func mustEnsureLiveWorktree(ctx context.Context, t liveHarnessT, orch *orchestrator.Orchestrator, ticketID int64, title string) orchestrator.Worktree {
 	t.Helper()
-	wt, _, err := orch.EnsureWorktree(t.Context(), ticketID, title)
+	wt, _, err := orch.EnsureWorktree(ctx, ticketID, title)
 	if err != nil {
 		t.Fatalf("ensure worktree: %v", err)
 	}
@@ -630,6 +882,7 @@ func mustSandboxCacheRoot(t *testing.T, sb sandbox.Sandbox) string {
 // question all land, and the ticket reaches "reviewing" with three signed
 // commits.
 func TestLiveBuildHarnessOnFake(t *testing.T) {
+	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
 	fake := runtime.NewFake(os.DirFS(filepath.Join("testdata", "live")))
@@ -647,7 +900,7 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 	}
 
 	sb := sandbox.Off()
-	res := runLiveBuildHarness(t, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, 2*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, 2*time.Minute)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -681,6 +934,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	gocache := strings.TrimSpace(string(gocacheOut))
 
+	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
 	homeCanary := placeLiveCanary(t, home)
@@ -719,7 +973,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	runRoot := filepath.Join(mustSandboxCacheRoot(t, sb), "run")
 
-	res := runLiveBuildHarness(t, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, 60*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, 60*time.Minute)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -744,7 +998,7 @@ func TestLiveBuild(t *testing.T) {
 		t.Fatalf("sessions for ticket: %v", err)
 	}
 	for _, s := range sessions {
-		if s.Job == "build" && s.Runtime != "claude" {
+		if s.Job == liveJobBuild && s.Runtime != "claude" {
 			t.Errorf("build session %d runtime = %q, want claude", s.ID, s.Runtime)
 		}
 	}
@@ -792,4 +1046,174 @@ func TestLiveBuild(t *testing.T) {
 	assertLiveCanaryUnchanged(t, gitCanary)
 	assertLiveCanaryUnchanged(t, tmpCanary)
 	assertLiveCanaryUnchanged(t, cacheCanary)
+}
+
+// runLiveBuildHarnessExpectingFatal runs runLiveBuildHarness against a
+// recordingT on its own goroutine, so the harness's own Fatalf -- the retry
+// cap, or a timeout -- ends that goroutine (recordingT.Fatalf's
+// runtime.Goexit) instead of the goroutine running the *testing.T this
+// function was itself called from. It waits for that goroutine to finish,
+// runs every Cleanup the harness registered (closing the console server it
+// started), and returns the recorded Fatalf message; it fails the real t
+// when the harness never called Fatalf at all, since every caller of this
+// helper expects the harness to fail.
+func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, maxWait time.Duration) string {
+	t.Helper()
+	rec := &recordingT{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, maxWait)
+	}()
+	<-done
+	rec.runCleanups()
+
+	msg, fataled := rec.message()
+	if !fataled {
+		t.Fatal("runLiveBuildHarness returned instead of calling Fatalf; want it to fail")
+	}
+	return msg
+}
+
+// TestLiveBuildHarnessCapsRepeatedEscalations proves item 1 of the
+// follow-up commit "Cap the live harness retries and add an owner-answer
+// mode": a fake build turn that always returns the same environment error
+// escalates, the harness answers "Retry" (through the generic
+// answerAllOpenQuestions, its first offered option) twice, each retry
+// reserving a fresh build session and run, and on the third occurrence of
+// the same code it fails instead of answering, naming the code, the count,
+// and the newest escalation's own What text -- and no fourth run is ever
+// reserved.
+func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
+	st := newLiveStore(t)
+	projDir := newLiveFixtureRepo(t)
+
+	fake := runtime.NewFake(os.DirFS(filepath.Join("testdata", "live-escalation-cap")))
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{
+		runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake,
+	})
+	if err != nil {
+		t.Fatalf("build runtime set: %v", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a console listener: %v", err)
+	}
+
+	sb := sandbox.Off()
+	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, 2*time.Minute)
+
+	for _, want := range []string{string(response.EscalationCodeEnvironment), "3"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("fatal message %q does not contain %q", msg, want)
+		}
+	}
+
+	tickets, err := st.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("list all tickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+
+	sessions, err := st.SessionsForTicket(t.Context(), tickets[0].ID)
+	if err != nil {
+		t.Fatalf("sessions for ticket: %v", err)
+	}
+	buildSessions := make(map[int64]bool, len(sessions))
+	for _, s := range sessions {
+		if s.Job == liveJobBuild {
+			buildSessions[s.ID] = true
+		}
+	}
+
+	runs, err := st.RunsForTicket(t.Context(), tickets[0].ID)
+	if err != nil {
+		t.Fatalf("runs for ticket: %v", err)
+	}
+	var buildRuns int
+	for _, r := range runs {
+		if buildSessions[r.SessionID] {
+			buildRuns++
+		}
+	}
+	// Every retry reserves a fresh build session (retryFreshRun), each with
+	// exactly one run, so the build run count and the build session count
+	// are the same thing here; the cap must stop before a fourth of either.
+	if buildRuns != liveEscalationRetryCap {
+		t.Fatalf("build runs = %d, want %d (the cap must stop before a fourth is reserved)", buildRuns, liveEscalationRetryCap)
+	}
+}
+
+// TestLiveBuildHarnessOwnerModeAnswersNothing proves item 2 of the
+// follow-up commit: with ZING_LIVE_ANSWER=owner, a fake build turn whose
+// first turn asks a question is left open for the whole, short maxWait --
+// the harness never drafts or sends an answer, which a still-"open"
+// question in the store after the timeout proves directly -- and the
+// timeout's own Fatalf names that open question.
+func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
+	t.Setenv(liveOwnerAnswerEnv, liveOwnerAnswerValue)
+
+	st := newLiveStore(t)
+	projDir := newLiveFixtureRepo(t)
+
+	fake := runtime.NewFake(os.DirFS(filepath.Join("testdata", "live-owner-mode")))
+	rts, err := runtime.NewSet(map[string]runtime.Runtime{
+		runtimeNameClaude: fake, runtimeNameCodex: fake, runtimeNameFake: fake,
+	})
+	if err != nil {
+		t.Fatalf("build runtime set: %v", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a console listener: %v", err)
+	}
+
+	sb := sandbox.Off()
+	// Three ticks, one second apart, plus headroom: long enough to prove
+	// the harness keeps ticking without answering, short enough that a
+	// wedged owner-answer path fails this test promptly instead of hanging
+	// it.
+	const shortMaxWait = 3500 * time.Millisecond
+	msg := runLiveBuildHarnessExpectingFatal(t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, shortMaxWait)
+
+	if !strings.Contains(msg, "did not reach reviewing") {
+		t.Errorf("fatal message %q does not describe a timeout", msg)
+	}
+
+	tickets, err := st.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("list all tickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets = %d, want 1", len(tickets))
+	}
+	ticketID := tickets[0].ID
+
+	open, err := st.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("questions by state: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open questions = %d, want 1 (the harness must never have answered it)", len(open))
+	}
+	title, _, _ := strings.Cut(open[0].Body, "\n")
+	if !strings.Contains(msg, title) {
+		t.Errorf("fatal message %q does not name the open question %q", msg, title)
+	}
+
+	answered, err := st.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	for i := range answered {
+		if answered[i].Type == "answer" {
+			t.Errorf("message %d is an answer; want the harness to have sent none in owner mode", answered[i].ID)
+		}
+	}
 }
