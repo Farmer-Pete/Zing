@@ -33,6 +33,11 @@ func NewCommandRunner(sb sandbox.Sandbox, requireSandbox bool) CommandRunner {
 
 func (c sandboxedCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
 	var execPrefix, env []string
+	// Overwritten below with ParamsFor's own resolved worktree when the
+	// sandbox is available, so the command runs in the same directory the
+	// profile's WORKTREE rule names (task 16a: a dir reached through a
+	// symlink otherwise fails every write with EPERM).
+	workDir := dir
 
 	if c.Sandbox.Available() {
 		runDir, cleanup, err := c.Sandbox.NewRunDir()
@@ -51,11 +56,12 @@ func (c sandboxedCommands) Run(ctx context.Context, dir, repoGit, shellCmd strin
 		}
 		execPrefix = prefix
 		env = c.Sandbox.Env(p, os.Getenv("PATH"))
+		workDir = p.Worktree
 	} else if c.RequireSandbox {
 		return -1, ErrSandbox
 	}
 
-	return runShellCommand(ctx, dir, shellCmd, execPrefix, env, timeout)
+	return runShellCommand(ctx, workDir, shellCmd, execPrefix, env, timeout)
 }
 
 // runShellCommand runs "/bin/sh -c shellCmd" (behind execPrefix, when set),

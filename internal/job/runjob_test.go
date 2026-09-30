@@ -479,6 +479,10 @@ func loadTestSandboxOrSkip(t *testing.T) sandbox.Sandbox {
 // model is "sonnet"; the exact id does not matter, since rt is a Fake or a
 // counting wrapper around one), and Projects carries one entry, keyed by
 // projectID, so applySandbox's own d.Projects[t.ProjectID] lookup resolves.
+// RepoGit is a real, existing directory (not merely a plausible-looking
+// path): ParamsFor resolves it with filepath.EvalSymlinks, so a path with
+// nothing there would fail every test here that loads a real, available
+// sandbox.
 func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectID int64, owner string, expires time.Time, sb sandbox.Sandbox, requireSandbox bool) Deps {
 	t.Helper()
 	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: rt, testRuntimeCodex: rt, runtimeFake: rt})
@@ -489,7 +493,7 @@ func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectI
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
 		Models: map[string]string{"sonnet": testModelExact, "opus": testModelExact, "fable": testModelExact, "codex": testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
-		Projects:       map[int64]Project{projectID: {RepoGit: "/tmp/zing-git"}},
+		Projects:       map[int64]Project{projectID: {RepoGit: t.TempDir()}},
 		Sandbox:        sb,
 		RequireSandbox: requireSandbox,
 	}
@@ -510,8 +514,12 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
+	// A real, existing directory: ParamsFor resolves WORKTREE with
+	// filepath.EvalSymlinks, and building always passes a real worktree
+	// directory here in production (runjob.go's own "Building passes the
+	// worktree directory in req.WorkDir already").
 	rr, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -597,8 +605,10 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
+	// A real, existing directory: see TestRunJobWrapsWhenAvailable's own
+	// comment on WorkDir.
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -614,6 +624,49 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 	}
 	if _, err := os.Stat(runDir); !os.IsNotExist(err) {
 		t.Errorf("run dir %s still exists after runJob returned (stat err = %v)", runDir, err)
+	}
+}
+
+// TestRunJobUsesResolvedWorkDir proves runJob's sandbox step hands the
+// runtime the resolved worktree, not the one req.WorkDir was given, so the
+// CLI's own working directory matches the WORKTREE rule the profile was
+// built against and the TRANSCRIPTS folder it names (task 16a's own
+// live-harness defect: a worktree path through macOS's /var ->
+// /private/var symlink never matched a seatbelt subpath rule built from the
+// unresolved path).
+func TestRunJobUsesResolvedWorkDir(t *testing.T) {
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", realDir, err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", realDir, err)
+	}
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	_, err = runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: link}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if counting.lastReq.WorkDir != resolved {
+		t.Errorf("WorkDir = %q, want %q (resolved)", counting.lastReq.WorkDir, resolved)
 	}
 }
 

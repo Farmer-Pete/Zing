@@ -224,21 +224,53 @@ func (s Sandbox) NewRunDir() (dir string, cleanup func(), err error) {
 }
 
 // ParamsFor fills the per-run values: the host's own fields, plus worktree,
-// repoGit, and runDir as given, plus Transcripts, derived from worktree
-// (section 5.2's worked example).
+// repoGit, and runDir, each symlink-resolved (section 5.2's "symlinks
+// resolved" note on WORKTREE, extended here to REPO_GIT and RUN_DIR for the
+// same reason), plus Transcripts, derived from the resolved worktree
+// (section 5.2's worked example) since the CLI names its transcript folder
+// after the working directory it sees. Seatbelt's own subpath match runs
+// against the path the kernel resolves, not the one a caller wrote down;
+// macOS's own /var -> /private/var symlink means the two differ for every
+// worktree under a temp directory, so a rule built from the unresolved path
+// never matches a real write (task 16a). A path that does not resolve --
+// missing, or a dangling symlink -- is an error, since a rule built from it
+// would name a path no write can ever match either.
 func (s Sandbox) ParamsFor(worktree, repoGit, runDir string) (Params, error) {
+	resolvedWorktree, err := resolveParam("WORKTREE", worktree)
+	if err != nil {
+		return Params{}, err
+	}
+	resolvedRepoGit, err := resolveParam("REPO_GIT", repoGit)
+	if err != nil {
+		return Params{}, err
+	}
+	resolvedRunDir, err := resolveParam("RUN_DIR", runDir)
+	if err != nil {
+		return Params{}, err
+	}
 	return Params{
 		Home:        s.host.Home,
-		Worktree:    worktree,
-		RepoGit:     repoGit,
+		Worktree:    resolvedWorktree,
+		RepoGit:     resolvedRepoGit,
 		DataDir:     s.host.DataDir,
 		ZingBin:     s.host.ZingBin,
 		CacheRoot:   s.host.CacheRoot,
 		CacheShared: s.host.CacheShared,
-		RunDir:      runDir,
-		Transcripts: transcriptsDir(s.host.Home, worktree),
+		RunDir:      resolvedRunDir,
+		Transcripts: transcriptsDir(s.host.Home, resolvedWorktree),
 		MDSCache:    s.host.MDSCache,
 	}, nil
+}
+
+// resolveParam resolves value's symlinks for the per-run param named name,
+// wrapping a failure with section 5.2's error text so the caller learns
+// which param's path did not resolve.
+func resolveParam(name, value string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: param %s does not resolve: %w", name, err)
+	}
+	return resolved, nil
 }
 
 // transcriptsDir builds TRANSCRIPTS (section 5.2's worked example): worktree

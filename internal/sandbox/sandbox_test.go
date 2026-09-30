@@ -16,12 +16,17 @@ import (
 // its Sandbox from.
 const testMinimalRenderedProfile = "(version 1)\n"
 
+// testHomeDir is the fixed HOME every Params/Host literal in this file that
+// does not need a real, resolvable directory builds from (goconst: reused
+// by testParams and the ParamsFor tests below).
+const testHomeDir = "/Users/test/home"
+
 // testParams is a Params literal every absolute-field test in this file
 // starts from and overrides one field of, so a test failure names exactly
 // the field it changed.
 func testParams() Params {
 	return Params{
-		Home:        "/Users/test/home",
+		Home:        testHomeDir,
 		Worktree:    "/Users/test/wt",
 		RepoGit:     "/Users/test/repo/.git",
 		DataDir:     "/Users/test/data",
@@ -261,16 +266,94 @@ func TestOffIsNeverAvailable(t *testing.T) {
 // ---- transcripts encoding -------------------------------------------------
 
 // TestParamsForTranscriptsWorkedExample proves ParamsFor's TRANSCRIPTS value
-// against section 5.2's own worked example.
+// against section 5.2's own worked example encoding rule (every byte outside
+// [A-Za-z0-9] becomes '-'), applied to a real, existing worktree under
+// t.TempDir() rather than the plan's own illustrative path: this task makes
+// ParamsFor resolve WORKTREE with filepath.EvalSymlinks
+// (TestParamsForRejectsMissingPath), so a path that does not exist on this
+// machine, such as the plan's own literal example, is now an error.
 func TestParamsForTranscriptsWorkedExample(t *testing.T) {
-	sb := Sandbox{host: Host{Home: "/Users/peter"}}
-	p, err := sb.ParamsFor("/Users/peter/Code/personal/zing/.zing/wt/12", "/repo/.git", "/run/dir")
+	home := t.TempDir()
+	worktree := filepath.Join(t.TempDir(), "zing", ".zing", "wt", "12")
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", worktree, err)
+	}
+
+	sb := Sandbox{host: Host{Home: home}}
+	p, err := sb.ParamsFor(worktree, t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatalf("ParamsFor: %v", err)
 	}
-	want := "/Users/peter/.claude/projects/-Users-peter-Code-personal-zing--zing-wt-12"
+
+	resolvedWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", worktree, err)
+	}
+	want := filepath.Join(home, ".claude", "projects", encodeTranscriptDir(resolvedWorktree))
 	if p.Transcripts != want {
 		t.Errorf("Transcripts = %q, want %q", p.Transcripts, want)
+	}
+}
+
+// ---- ParamsFor symlink resolution -----------------------------------------
+
+// TestParamsForResolvesSymlinks proves ParamsFor resolves Worktree, RepoGit,
+// and RunDir before it ever uses them, so a seatbelt subpath rule matches
+// what the kernel actually resolves a sandboxed child's own opens against
+// (macOS's own /var -> /private/var, most notably; task 16a's own
+// live-harness defect). Transcripts is derived from the resolved worktree,
+// not the one ParamsFor was given, since the CLI names its transcript
+// folder after the working directory it sees.
+func TestParamsForResolvesSymlinks(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", realDir, err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", realDir, err)
+	}
+
+	sb := Sandbox{host: Host{Home: testHomeDir}}
+	p, err := sb.ParamsFor(link, link, link)
+	if err != nil {
+		t.Fatalf("ParamsFor: %v", err)
+	}
+	if p.Worktree != resolved {
+		t.Errorf("Worktree = %q, want %q (resolved)", p.Worktree, resolved)
+	}
+	if p.RepoGit != resolved {
+		t.Errorf("RepoGit = %q, want %q (resolved)", p.RepoGit, resolved)
+	}
+	if p.RunDir != resolved {
+		t.Errorf("RunDir = %q, want %q (resolved)", p.RunDir, resolved)
+	}
+	wantTranscripts := transcriptsDir(sb.host.Home, resolved)
+	if p.Transcripts != wantTranscripts {
+		t.Errorf("Transcripts = %q, want %q", p.Transcripts, wantTranscripts)
+	}
+}
+
+// TestParamsForRejectsMissingPath proves a param path that does not resolve
+// (here, a WORKTREE that does not exist) is refused with the exact error
+// text this task adds, naming the offending param, rather than silently
+// carrying a path no rule will ever match.
+func TestParamsForRejectsMissingPath(t *testing.T) {
+	sb := Sandbox{host: Host{Home: testHomeDir}}
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	_, err := sb.ParamsFor(missing, t.TempDir(), t.TempDir())
+	if err == nil {
+		t.Fatal("ParamsFor with a missing WORKTREE: want an error, got nil")
+	}
+	want := "sandbox: param WORKTREE does not resolve:"
+	if !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("ParamsFor error = %q, want prefix %q", err.Error(), want)
 	}
 }
 

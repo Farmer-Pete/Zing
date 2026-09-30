@@ -339,6 +339,47 @@ func TestAllowsWorktreeWrite(t *testing.T) {
 	}
 }
 
+// TestAllowsWorktreeWriteThroughSymlink proves a worktree reached through a
+// symlink is still writable (task 16a's own live-harness defect: the build
+// harness's worktree path went through macOS's own /var -> /private/var
+// symlink, so the profile's WORKTREE rule, built from the path as given,
+// never matched what the kernel resolved a write against). ParamsFor now
+// resolves WORKTREE before Prefix ever builds a rule from it, so this test
+// fails before that fix and passes after.
+func TestAllowsWorktreeWriteThroughSymlink(t *testing.T) {
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", realDir, err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	p, err := sb.ParamsFor(link, dirs.repoGit, dirs.runDir)
+	if err != nil {
+		t.Fatalf("ParamsFor: %v", err)
+	}
+	p.Home = dirs.home
+	p.DataDir = dirs.dataDir
+	p.ZingBin = dirs.zingBin
+	p.CacheRoot = dirs.cacheRoot
+	p.CacheShared = dirs.cacheShared
+	p.MDSCache = dirs.mdsCache
+
+	target := filepath.Join(link, "hello.txt")
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/touch", target); exitCode != 0 {
+		t.Fatalf("touch a worktree file reached through a symlink: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "hello.txt")); err != nil {
+		t.Errorf("worktree file was not created at the resolved path: %v", err)
+	}
+}
+
 func TestAllowsRunDirWrite(t *testing.T) {
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)

@@ -137,13 +137,19 @@ func noopCleanup() {}
 // reserves a fresh run directory, builds req's ExecPrefix and appends its
 // Env, all from d.Projects[t.ProjectID]'s own RepoGit, and returns the run
 // directory's cleanup for the caller to defer (nothing is reserved yet, so
-// runJob's own defer chain, not this function, decides when it runs). With
-// the sandbox unavailable, it returns ErrSandbox when d.RequireSandbox, or
-// noopCleanup and no error for a suite on the fake runtime. Every failure
-// short of an unavailable-and-required sandbox is a configuration error
-// (design section 5.5): a job named a sandbox but this process has no
-// Project row for the ticket, or the sandbox's own run-dir, param, or prefix
-// calls failed.
+// runJob's own defer chain, not this function, decides when it runs). It
+// also overwrites req.WorkDir with the sandbox's own resolved worktree
+// (ParamsFor's Worktree), so the CLI runs with its working directory equal
+// to the path the profile's WORKTREE rule and TRANSCRIPTS folder actually
+// name, not a path that reaches the same directory through a symlink (task
+// 16a: a worktree under macOS's own /var -> /private/var symlink otherwise
+// fails every write with EPERM, since seatbelt matches subpath against the
+// resolved path). With the sandbox unavailable, it returns ErrSandbox when
+// d.RequireSandbox, or noopCleanup and no error for a suite on the fake
+// runtime. Every failure short of an unavailable-and-required sandbox is a
+// configuration error (design section 5.5): a job named a sandbox but this
+// process has no Project row for the ticket, or the sandbox's own run-dir,
+// param, or prefix calls failed.
 func applySandbox(d Deps, t store.Ticket, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
 	if !d.Sandbox.Available() {
 		if d.RequireSandbox {
@@ -174,6 +180,7 @@ func applySandbox(d Deps, t store.Ticket, workDir string, req *runtime.RunReques
 	}
 	req.ExecPrefix = prefix
 	req.Env = append(req.Env, d.Sandbox.Env(p, os.Getenv("PATH"))...)
+	req.WorkDir = p.Worktree
 	return cleanup, nil
 }
 
