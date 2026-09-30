@@ -286,66 +286,8 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 
 	switch outcome {
 	case string(response.OutcomeOk):
-		rid := newestRun.ID
-		markerRow, pending, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
-		if markerErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: claim errors marker: %w", markerErr)
-		}
-		if pending {
-			capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
-			if !mayResume {
-				return withBranchResult(capCommit, capErr, wt)
-			}
-			// The claims input is exactly the marker's own error lines
-			// (design section 6.4): priorInvalid is 0, not computed, since
-			// this session's newest run is the "ok" one CHECK just wrote a
-			// pending marker for -- ConsecutiveInvalidOutputs' own walk
-			// stops at the first non-"error" outcome, so it can only ever
-			// read 0 here.
-			_, errsText, _ := strings.Cut(markerRow.Body, "\n")
-			claimsInput := prompt.NamedInput{Label: "claims", Text: errsText, Untrusted: true}
-			resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput})
-			if resumeErr == nil && len(resumeCommit.Runs) > 0 {
-				resumeCommit.Messages = append(resumeCommit.Messages, store.Message{
-					TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-					Body: fmt.Sprintf(markerClaimErrorsDeliveredFmt, rid),
-				})
-			}
-			return withBranchResult(resumeCommit, resumeErr, wt)
-		}
-
-		_, checked, okMarkerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimsOkFmt, rid))
-		if okMarkerErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: claims ok marker: %w", okMarkerErr)
-		}
-
-		report, foundReport := findUnitReport(reports, rid)
-		if !foundReport {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: ticket %d: no build_report for run %d", t.ID, rid)
-		}
-
-		if !checked {
-			commit, checkErr := h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, true)
-			return withBranchResult(commit, checkErr, wt)
-		}
-
-		events, evErr := d.Store.FileEvents(ctx, t.ID)
-		if evErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", evErr)
-		}
-		declaredNow := declaredPaths(plan, events, nil)
-		changed, changedErr := proj.Orch.ChangedPaths(ctx, wt)
-		if changedErr != nil {
-			return withBranchResult(buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, changedErr.Error()), nil, wt)
-		}
-		extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
-		if len(extras) == 0 {
-			commit, checkErr := h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, false)
-			return withBranchResult(commit, checkErr, wt)
-		}
-
-		commit, describeErr := h.describeOrAsk(ctx, t, d, proj, wt, taskN, rid, report, events, changed, extras)
-		return withBranchResult(commit, describeErr, wt)
+		commit, runErr := h.advanceCheckedRun(ctx, t, d, proj, wt, plan, taskN, sess, state, newestRun.ID, reports)
+		return withBranchResult(commit, runErr, wt)
 
 	case string(response.OutcomeError):
 		// One of two "needs a resume" cases design section 6.3/6.10 group
@@ -376,6 +318,77 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "unrecognized", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, ErrNoAction
 	}
+}
+
+// advanceCheckedRun is the unit session's outcome=="ok" branch (design
+// section 6.4, 6.5, 6.6, 6.7): the claims-pending resume, the not-yet-
+// checked CHECK, and -- once checked -- the tree read into DESCRIBE/ASK or
+// the check-before-landing recheck that itself reaches LAND. Task 14
+// generalizes this out of Run() so a fix unit (taskN 0, no plan task of
+// its own) shares it verbatim with a task unit (AdvanceFix, fix.go): the
+// resuming unit's own title is read from its own build_report
+// (report.Report.Title) rather than from the plan, since runBuildResume
+// only ever needs u.TaskN and u.Title, and both are always recoverable
+// from the report by the time a claims-pending resume can exist at all --
+// CHECK itself required a report to write that marker in the first place.
+// rid is the unit session's newest ok run.
+func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, taskN int, sess store.Session, state store.SessionState, rid int64, reports []store.BuildReportRow) (store.HandlerCommit, error) {
+	report, foundReport := findUnitReport(reports, rid)
+	if !foundReport {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: ticket %d: no build_report for run %d", t.ID, rid)
+	}
+	u := unit{TaskN: taskN, Title: report.Report.Title}
+
+	markerRow, pending, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
+	if markerErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: claim errors marker: %w", markerErr)
+	}
+	if pending {
+		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
+		if !mayResume {
+			return capCommit, capErr
+		}
+		// The claims input is exactly the marker's own error lines (design
+		// section 6.4): priorInvalid is 0, not computed, since this
+		// session's newest run is the "ok" one CHECK just wrote a pending
+		// marker for -- ConsecutiveInvalidOutputs' own walk stops at the
+		// first non-"error" outcome, so it can only ever read 0 here.
+		_, errsText, _ := strings.Cut(markerRow.Body, "\n")
+		claimsInput := prompt.NamedInput{Label: "claims", Text: errsText, Untrusted: true}
+		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput})
+		if resumeErr == nil && len(resumeCommit.Runs) > 0 {
+			resumeCommit.Messages = append(resumeCommit.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: fmt.Sprintf(markerClaimErrorsDeliveredFmt, rid),
+			})
+		}
+		return resumeCommit, resumeErr
+	}
+
+	_, checked, okMarkerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimsOkFmt, rid))
+	if okMarkerErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: claims ok marker: %w", okMarkerErr)
+	}
+
+	if !checked {
+		return h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, true)
+	}
+
+	events, evErr := d.Store.FileEvents(ctx, t.ID)
+	if evErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", evErr)
+	}
+	declaredNow := declaredPaths(plan, events, nil)
+	changed, changedErr := proj.Orch.ChangedPaths(ctx, wt)
+	if changedErr != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, changedErr.Error()), nil
+	}
+	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
+	if len(extras) == 0 {
+		return h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, false)
+	}
+
+	return h.describeOrAsk(ctx, t, d, proj, wt, taskN, rid, report, events, changed, extras)
 }
 
 // ---- answered rounds: build question resume, resume cap ------------------
