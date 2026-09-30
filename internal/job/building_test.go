@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,12 @@ const (
 	helloTxt          = "hello.txt"
 	extraTxt          = "extra.txt"
 	helloWorldContent = "hello, world\n"
+
+	// testExtraPath and testExtraReason are the single-extra scenario's own
+	// path and builder reason, shared across the DESCRIBE and ASK tests
+	// that only need one extra to prove their own point.
+	testExtraPath   = "extra1.go"
+	testExtraReason = "needed a helper"
 )
 
 // ---- shared building fixtures ----------------------------------------------
@@ -319,7 +326,7 @@ func TestCheckReadsTreeAfterCommands(t *testing.T) {
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	overrideProj := deps.Projects[ticket.ProjectID]
 	overrideProj.TestCmd = "touch extra.txt && printf 'hello, world\\n' > hello.txt && test -f hello.txt"
-	overrideProj.LintCmd = "true"
+	overrideProj.LintCmd = testNoopShellCmd
 	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
 
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
@@ -794,4 +801,366 @@ func orchestratorHeadSHA(t *testing.T, dir string) (string, error) {
 		return "", fmt.Errorf("git rev-parse HEAD: %w: %s", err, out)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// ---- DESCRIBE, ASK (task 10) ------------------------------------------------
+
+// perimeterStep builds a scriptedStep whose Response is a minimal, hand-built
+// PerimeterResponse (design section 4.1, 6.5): a canned "ok" outcome
+// carrying the perimeter run's own one-sentence description.
+func perimeterStep(reason, sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response:  &response.PerimeterResponse{Job: response.JobPerimeter, Outcome: response.OutcomeOk, Reason: reason},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// perimeterQuestionStep builds a scriptedStep whose Response is a minimal
+// QuestionResponse, the universal outcome a perimeter run can return
+// instead of describing (design section 6.5 step 4's "success question").
+func perimeterQuestionStep(sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response: &response.QuestionResponse{
+			Job: response.JobPerimeter, Outcome: response.OutcomeQuestion,
+			Questions: []response.Question{{Key: "q1", Title: "Which file?", Body: "Say which one you mean.", Options: []response.Option{}, Recommended: "keep it as is"}},
+		},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// perimeterErrorStep builds a scriptedStep whose Response is a minimal
+// ErrorResponse (design section 6.5 step 4's "success error").
+func perimeterErrorStep(sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response: &response.ErrorResponse{
+			Job: response.JobPerimeter, Outcome: response.OutcomeError,
+			Error: response.RunError{Code: response.ErrorCodeOther, What: "could not read the hunk", Why: "the file looked binary"},
+		},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// perimeterScenario drives a fresh ticket from queued through a task-1 RUN
+// that truthfully claims filesChanged (hello.txt plus every path in
+// extraReasons) and one ExtraClaim per extraReasons entry, then CHECK,
+// using a project whose real test command creates every one of those paths
+// for real, so the tree genuinely holds them when CHECK reads it (design
+// section 6.4 step 2). It returns the store, the ticket id, rid (task 1's
+// unit run, the id the ASK message must carry), and the scriptedRuntime,
+// left open for the caller to append its own DESCRIBE steps in path order
+// (extraReasons' keys, sorted).
+func perimeterScenario(t *testing.T, extraReasons map[string]string) (s *store.Store, ticketID, rid int64, scriptRT *scriptedRuntime) {
+	t.Helper()
+	s, _, ticketID = buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	paths := make([]string, 0, len(extraReasons))
+	for p := range extraReasons {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	filesChanged := append([]string{helloTxt}, paths...)
+	extras := make([]response.ExtraClaim, len(paths))
+	for i, p := range paths {
+		extras[i] = response.ExtraClaim{Path: p, Reason: extraReasons[p]}
+	}
+
+	scriptRT = &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(filesChanged, 0, 0, extras, "run-sess")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	overrideProj := deps.Projects[ticket.ProjectID]
+	overrideProj.TestCmd = "printf 'hello, world\\n' > hello.txt && touch " + strings.Join(paths, " ") + " && test -f hello.txt"
+	overrideProj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	deps2.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+	commit2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(commit2.Messages) != 1 || !strings.HasPrefix(commit2.Messages[0].Body, "claims ok run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want a claims-ok marker (the extras are still undecided)", commit2.Messages)
+	}
+	apply(t, s, ticket, commit2)
+
+	reports, err := s.BuildReports(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	rid = findUnlandedReport(t, reports, 1).RunID
+
+	return s, ticketID, rid, scriptRT
+}
+
+// describeTick runs one more building tick, fresh-claimed against scriptRT,
+// applies its commit, and returns it.
+func describeTick(t *testing.T, s *store.Store, scriptRT *scriptedRuntime, ticketID int64) store.HandlerCommit {
+	t.Helper()
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("describe tick: %v", err)
+	}
+	apply(t, s, ticket, commit)
+	return commit
+}
+
+// TestPerimeterOneRunPerExtra proves DESCRIBE takes one tick per extra
+// (design section 6.5 step 4): two extras need two ticks, each landing
+// exactly one file artifact, and only the second (the last undescribed
+// one) also carries the ASK question.
+func TestPerimeterOneRunPerExtra(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
+		testExtraPath: testExtraReason,
+		"extra2.go":   "needed another helper",
+	})
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterStep("Adds a small helper.", "perim-sess-1"),
+		perimeterStep("Adds another small helper.", "perim-sess-2"),
+	)
+
+	first := describeTick(t, s, scriptRT, ticketID)
+	if len(first.Artifacts) != 1 {
+		t.Fatalf("first DESCRIBE commit.Artifacts = %+v, want exactly one file artifact", first.Artifacts)
+	}
+	if len(first.Messages) != 0 {
+		t.Errorf("first DESCRIBE commit.Messages = %+v, want none (one extra is still undescribed)", first.Messages)
+	}
+
+	events, err := s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("file events after the first DESCRIBE = %d, want 1", len(events))
+	}
+
+	second := describeTick(t, s, scriptRT, ticketID)
+	if len(second.Artifacts) != 1 {
+		t.Fatalf("second DESCRIBE commit.Artifacts = %+v, want exactly one file artifact", second.Artifacts)
+	}
+	if len(second.Messages) != 1 {
+		t.Fatalf("second DESCRIBE commit.Messages = %+v, want one perimeter question (the last extra)", second.Messages)
+	}
+
+	events, err = s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("file events after both DESCRIBEs = %d, want 2", len(events))
+	}
+
+	if len(scriptRT.reqs) != 3 {
+		t.Fatalf("scriptRT saw %d requests, want 3 (one RUN, two DESCRIBEs)", len(scriptRT.reqs))
+	}
+}
+
+// TestPerimeterAskInLastDescribeCommit proves the ASK message carries the
+// build run's own id, set explicitly (design section 6.5, the "Boundaries"
+// rule that a question always names the build run, never AttachRunToMsgs).
+func TestPerimeterAskInLastDescribeCommit(t *testing.T) {
+	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+
+	commit := describeTick(t, s, scriptRT, ticketID)
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly one question message", commit.Messages)
+	}
+	msg := commit.Messages[0]
+	if msg.RunID == nil || *msg.RunID != rid {
+		t.Errorf("question RunID = %v, want the build run %d", msg.RunID, rid)
+	}
+	if commit.Waiting == nil || *commit.Waiting != string(response.QuestionKindPerimeter) {
+		t.Errorf("commit.Waiting = %v, want %q", commit.Waiting, response.QuestionKindPerimeter)
+	}
+}
+
+// TestPerimeterItemText proves Item.Text's exact format (design section
+// 6.5): the marker in brackets when set, then "Builder: <reason> ", then
+// "Change: <description>" -- covering no marker, trust root, and style
+// guide.
+func TestPerimeterItemText(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
+		"extra_plain.go": "a plain reason",
+		"machine.toml":   "a trust root reason",
+		"CLAUDE.md":      "a style guide reason",
+	})
+	// Path order (sorted): CLAUDE.md, extra_plain.go, machine.toml.
+	scriptRT.steps = append(scriptRT.steps,
+		perimeterStep("Adjusts the style guide.", "perim-sess-1"),
+		perimeterStep("Adds a helper.", "perim-sess-2"),
+		perimeterStep("Tweaks the machine config.", "perim-sess-3"),
+	)
+
+	describeTick(t, s, scriptRT, ticketID)
+	describeTick(t, s, scriptRT, ticketID)
+	final := describeTick(t, s, scriptRT, ticketID)
+
+	if len(final.Messages) != 1 {
+		t.Fatalf("final commit.Messages = %+v, want one question", final.Messages)
+	}
+	var payload response.QuestionPayload
+	if err := json.Unmarshal(final.Messages[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 3 {
+		t.Fatalf("payload.Items = %+v, want 3", payload.Items)
+	}
+	want := map[string]string{
+		"CLAUDE.md":      "[style guide] Builder: a style guide reason Change: Adjusts the style guide.",
+		"extra_plain.go": "Builder: a plain reason Change: Adds a helper.",
+		"machine.toml":   "[trust root] Builder: a trust root reason Change: Tweaks the machine config.",
+	}
+	for _, item := range payload.Items {
+		wantText, ok := want[item.Ref]
+		if !ok {
+			t.Fatalf("unexpected item ref %q", item.Ref)
+		}
+		if item.Text != wantText {
+			t.Errorf("item %q text = %q, want %q", item.Ref, item.Text, wantText)
+		}
+	}
+}
+
+// TestPerimeterNoAskWithoutExtras proves a clean build (no extras) never
+// raises a perimeter question (design section 6.5's own precondition: "run
+// only with one or more extras in the tree").
+func TestPerimeterNoAskWithoutExtras(t *testing.T) {
+	s, rt, ticketID := buildTicketInBuilding(t)
+	advanceBuilding(t, s, rt, ticketID)
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, string(response.QuestionStateOpen))
+	if err != nil {
+		t.Fatalf("QuestionsByState: %v", err)
+	}
+	for _, m := range open {
+		var payload response.QuestionPayload
+		if json.Unmarshal(m.Payload, &payload) == nil && payload.Kind == response.QuestionKindPerimeter {
+			t.Fatalf("a clean build with no extras must not raise a perimeter question; got %+v", payload)
+		}
+	}
+}
+
+// TestPerimeterRunQuestionStoresPath proves a perimeter run's own question
+// outcome still links the run to its path (design section 6.5 step 4): a
+// file artifact with the perimeter run's id, the builder's reason and
+// markers, and no description.
+func TestPerimeterRunQuestionStoresPath(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-sess"))
+
+	commit := describeTick(t, s, scriptRT, ticketID)
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Fatalf("commit.Waiting = %v, want %q (the model's own question outcome)", commit.Waiting, testWaitingQuestions)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one file artifact linking the question to its path", commit.Artifacts)
+	}
+
+	events, err := s.FileEvents(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("FileEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("file events = %d, want 1", len(events))
+	}
+	if events[0].File.Path != testExtraPath {
+		t.Errorf("file event path = %q, want %q", events[0].File.Path, testExtraPath)
+	}
+	if events[0].File.Description != "" {
+		t.Errorf("file event description = %q, want empty (no description until the question is answered)", events[0].File.Description)
+	}
+	if events[0].RunID == nil {
+		t.Fatal("file event RunID = nil, want the perimeter run's id")
+	}
+}
+
+// TestPerimeterFailureDescribesAgain proves invalid output, an exec
+// failure, and an error outcome each leave the path undescribed, and the
+// next tick describes it again with a fresh session, never a resume
+// (design section 6.5 step 4's own "every other continuation is a fresh
+// run").
+func TestPerimeterFailureDescribesAgain(t *testing.T) {
+	cases := []struct {
+		name string
+		step scriptedStep
+	}{
+		{"invalid output", invalidResult("not well-formed", "perim-fail-sess")},
+		{"exec failure", scriptedStep{res: runtime.RunResult{SessionID: "", ExitCode: -1}, err: runtime.ErrStart}},
+		{"error outcome", perimeterErrorStep("perim-fail-sess")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+			scriptRT.steps = append(scriptRT.steps, tc.step)
+
+			failCommit := describeTick(t, s, scriptRT, ticketID)
+			if len(failCommit.Artifacts) != 0 {
+				t.Fatalf("failure commit.Artifacts = %+v, want none (the path stays undescribed)", failCommit.Artifacts)
+			}
+
+			events, err := s.FileEvents(t.Context(), ticketID)
+			if err != nil {
+				t.Fatalf("FileEvents: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("file events after the failure = %d, want 0", len(events))
+			}
+
+			sessionsBefore, err := s.SessionsForTicket(t.Context(), ticketID)
+			if err != nil {
+				t.Fatalf("SessionsForTicket: %v", err)
+			}
+
+			scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-retry-sess"))
+			retryCommit := describeTick(t, s, scriptRT, ticketID)
+			if len(retryCommit.Artifacts) != 1 {
+				t.Fatalf("retry commit.Artifacts = %+v, want exactly one file artifact", retryCommit.Artifacts)
+			}
+
+			sessionsAfter, err := s.SessionsForTicket(t.Context(), ticketID)
+			if err != nil {
+				t.Fatalf("SessionsForTicket: %v", err)
+			}
+			if len(sessionsAfter) != len(sessionsBefore)+1 {
+				t.Errorf("sessions after the retry = %d, want %d (a fresh session, not a resume)", len(sessionsAfter), len(sessionsBefore)+1)
+			}
+		})
+	}
+}
+
+// TestPerimeterSecondInvalidEscalates proves the invalid-output rule
+// applies to perimeter runs too (design section 6.5 step 4, Package 7 D9):
+// the second consecutive invalid perimeter output escalates
+// response_invalid.
+func TestPerimeterSecondInvalidEscalates(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps,
+		invalidResult("not well-formed", "perim-invalid-1"),
+		invalidResult("not well-formed", "perim-invalid-2"),
+	)
+
+	first := describeTick(t, s, scriptRT, ticketID)
+	if first.Escalation != nil {
+		t.Fatalf("first invalid commit.Escalation = %+v, want nil (first strike)", first.Escalation)
+	}
+
+	second := describeTick(t, s, scriptRT, ticketID)
+	if second.Escalation == nil {
+		t.Fatal("second invalid commit.Escalation = nil, want response_invalid")
+	}
+	if second.Escalation.Payload.Code != testCodeResponseInvalid {
+		t.Errorf("second invalid escalation code = %q, want response_invalid", second.Escalation.Payload.Code)
+	}
 }

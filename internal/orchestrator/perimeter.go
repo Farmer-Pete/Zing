@@ -446,7 +446,10 @@ var smallNumberWords = map[int]string{
 	6: "six", 7: "seven", 8: "eight", 9: "nine",
 }
 
-func countWord(n int) string {
+// CountWord spells out a small count in words (one file, two files, ...),
+// falling back to the digits past nine. PerimeterNotice and the building
+// handler's own ASK message (design section 6.5) both use it.
+func CountWord(n int) string {
 	if w, ok := smallNumberWords[n]; ok {
 		return w
 	}
@@ -466,7 +469,7 @@ func PerimeterNotice(reverted []Extra) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "You changed %s %s outside the set the plan declared. "+
-		"They were reverted, so your task is not committed yet.\n\n", countWord(len(reverted)), noun)
+		"They were reverted, so your task is not committed yet.\n\n", CountWord(len(reverted)), noun)
 
 	for _, e := range reverted {
 		if e.Marker == "" {

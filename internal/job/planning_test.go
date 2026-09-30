@@ -760,7 +760,7 @@ func TestPlanningHandler_Classify_D14_SecondConsecutiveInvalidEscalates(t *testi
 	if unmarshalErr := json.Unmarshal(mustEscalationPayload(t, secondCommit), &payload); unmarshalErr != nil {
 		t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
 	}
-	if payload.Code != "response_invalid" {
+	if payload.Code != testCodeResponseInvalid {
 		t.Errorf("payload.Code = %q, want response_invalid", payload.Code)
 	}
 	if payload.Origin != "classify" {
@@ -2298,7 +2298,7 @@ func TestPlanningHandler_ReviewTick_D14_SecondConsecutiveInvalidEscalates(t *tes
 	if err := json.Unmarshal(mustEscalationPayload(t, secondCommit), &payload); err != nil {
 		t.Fatalf("unmarshal escalation payload: %v", err)
 	}
-	if payload.Code != "response_invalid" || payload.Origin != testArtifactTypePlanreview {
+	if payload.Code != testCodeResponseInvalid || payload.Origin != testArtifactTypePlanreview {
 		t.Errorf("payload = (Code=%q, Origin=%q), want (response_invalid, planreview)", payload.Code, payload.Origin)
 	}
 	apply(t, s, getTicket(t, s, ticketID), secondCommit)

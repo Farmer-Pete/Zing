@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -280,8 +281,8 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 			return withBranchResult(commit, checkErr, wt)
 		}
 
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "describe_or_ask", "session_state", sessionStateName(state))
-		return store.HandlerCommit{}, ErrNoAction
+		commit, describeErr := h.describeOrAsk(ctx, t, d, proj, wt, taskN, rid, report, events, changed, extras)
+		return withBranchResult(commit, describeErr, wt)
 
 	case string(response.OutcomeError):
 		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "needs_resume_error", "session_state", sessionStateName(state))
@@ -889,6 +890,291 @@ func landCommit(t store.Ticket, d Deps, plan response.Plan, taskN int, rid int64
 		c.Next, c.Reason = stateReviewing, reasonBuildDone
 	}
 	return c, nil
+}
+
+// ---- DESCRIBE, ASK ------------------------------------------------------
+
+// jobPerimeterName is the job.go/machine.toml key DESCRIBE's own session
+// and job config are keyed under, "perimeter" (design section 4.3, 6.5).
+const jobPerimeterName = string(response.JobPerimeter)
+
+// markerTrustRoot and markerStyleGuide are the two non-empty values
+// orchestrator.Perimeter's own Extra.Marker carries (perimeter.go,
+// unexported there): this file matches on them by value to fill
+// FileArtifact.TrustRoot/StyleGuide and the ASK item text's bracketed
+// prefix (design section 4.1, 6.5).
+const (
+	markerTrustRoot  = "trust root"
+	markerStyleGuide = "style guide"
+)
+
+// describeOrAsk is design section 6.5's DESCRIBE and ASK, entered once
+// CHECK has written "claims ok run <rid>" and left one or more extras in
+// the tree. It describes one undeclared path per tick with a fresh
+// perimeter run (DESCRIBE), and once every extra carries a description,
+// posts the one question the owner decides them all from (ASK) -- in the
+// same commit as the last DESCRIBE when that call is what completes the
+// set, or alone, with no runtime call, when a later CHECK found a new
+// extra after every earlier one was already described.
+func (h buildingHandler) describeOrAsk(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, taskN int, rid int64, report store.BuildReportRow, events []store.FileEventRow, changed []orchestrator.Change, extras []orchestrator.Extra) (store.HandlerCommit, error) {
+	described := newestFileEventPerPath(events)
+
+	var undescribed []int
+	for i, ex := range extras {
+		if !isDescribed(described, ex.Path, report.ArtifactID) {
+			undescribed = append(undescribed, i)
+		}
+	}
+
+	if len(undescribed) > 0 {
+		return h.describeOne(ctx, t, d, proj, wt, taskN, rid, report, changed, extras, undescribed[0], len(undescribed) == 1, described)
+	}
+
+	// Every extra is described. A ticket already waiting on a perimeter
+	// answer must not get a second, identical question: the owner's answer
+	// is handled at step 1 (AnsweredRounds), before this step is ever
+	// reached again, so checking the ticket's own Waiting here is enough
+	// to make ASK idempotent without a further store read (design section
+	// 6.5 step 5).
+	if t.WaitingOn != nil && *t.WaitingOn == string(response.QuestionKindPerimeter) {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "perimeter_open", "session_state", "n/a")
+		return store.HandlerCommit{}, ErrNoAction
+	}
+
+	return askCommit(t, d, taskN, rid, perimeterItems(extras, described))
+}
+
+// isDescribed is design section 6.5 step 3: path is described when its
+// newest file artifact (across the whole ticket; a stale row from an
+// earlier unit is filtered out by the artifact id check) carries an id
+// greater than the unit's own unlanded build_report and a non-empty
+// Description.
+func isDescribed(described map[string]store.FileEventRow, path string, reportArtifactID int64) bool {
+	row, ok := described[path]
+	return ok && row.ArtifactID > reportArtifactID && row.File.Description != ""
+}
+
+// describeOne runs one DESCRIBE turn for extras[i], the first undescribed
+// path by path order (design section 6.5 step 4). isLast is true when this
+// was the only undescribed extra left: a successful run's own commit then
+// also does ASK, in the same store commit.
+func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, taskN int, rid int64, report store.BuildReportRow, changed []orchestrator.Change, extras []orchestrator.Extra, i int, isLast bool, described map[string]store.FileEventRow) (store.HandlerCommit, error) {
+	extra := extras[i]
+	change, ok := changeFor(changed, extra.Path)
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %q not found in changed paths", extra.Path)
+	}
+	claim, ok := extraClaimFor(report.Report.Extras, extra.Path)
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %q has no extra claim in build_report", extra.Path)
+	}
+
+	hunk, err := proj.Orch.Hunk(ctx, wt, change)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+	}
+
+	jobCfg := d.Machine.Jobs[jobPerimeterName]
+	promptText, err := readAsset(jobCfg.Prompt.Single)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %w", err)
+	}
+	schemas, err := renderSchemas(response.JobPerimeter, response.OutcomeOk)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %w", err)
+	}
+
+	in := prompt.ForPerimeter(promptText, extra.Path, hunk, nil)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	priorInvalid, _, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPerimeterName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: consecutive invalid outputs: %w", err)
+	}
+
+	su := store.SessionUpsert{Job: jobPerimeterName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-%d", taskN, i+1), WorkDir: wt.Dir(), Prompt: assembled}
+	n := taskN
+	return runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, freshSessionRecord, nil, response.EscalationOriginPerimeter,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return perimeterSuccessCommit(t, d, rr, extra, change, claim, taskN, rid, isLast, extras, described)
+		}, &n)
+}
+
+// perimeterSuccessCommit routes a perimeter run's parsed response (design
+// section 6.5 step 4): ok inserts one file artifact carrying the
+// description, adding ASK to the same commit when this was the last
+// undescribed extra; question and error are the universal outcomes
+// classify and build already share, with the question case also linking a
+// no-description file row to the run so a later resume can find its path
+// (design section 6.2's "perimeter-job question" round).
+func perimeterSuccessCommit(t store.Ticket, d Deps, rr runResult, extra orchestrator.Extra, change orchestrator.Change, claim response.ExtraClaim, taskN int, buildRunID int64, isLast bool, extras []orchestrator.Extra, described map[string]store.FileEventRow) (store.HandlerCommit, error) {
+	perimRunID := rr.Reserved.RunID
+
+	switch resp := rr.Res.Response.(type) {
+	case *response.PerimeterResponse:
+		fa := fileArtifactFor(extra, change, claim, taskN, resp.Reason)
+		payload, err := json.Marshal(fa)
+		if err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: describe: marshal file artifact: %w", err)
+		}
+		c := baseCommit(t, d)
+		c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+		c.Session = freshSessionRecord(rr)
+		c.Artifacts = []store.Artifact{{Type: artifactTypeFile, RunID: &perimRunID, Payload: payload}}
+		slog.Info("perimeter described", "ticket_id", t.ID, "run_id", perimRunID, "task_n", taskN, "path", strconv.Quote(extra.Path), "marker", extra.Marker)
+
+		if isLast {
+			items := perimeterItems(extras, describedWith(described, extra.Path, fa))
+			askC, askErr := askCommit(t, d, taskN, buildRunID, items)
+			if askErr != nil {
+				return store.HandlerCommit{}, askErr
+			}
+			c.Messages = askC.Messages
+			c.Waiting = askC.Waiting
+		}
+		return c, nil
+
+	case *response.QuestionResponse:
+		c, err := questionOutcomeCommit(t, d, rr, resp, freshSessionRecord(rr), nil)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		fa := fileArtifactFor(extra, change, claim, taskN, "")
+		payload, err := json.Marshal(fa)
+		if err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: describe: marshal file artifact: %w", err)
+		}
+		c.Artifacts = append(c.Artifacts, store.Artifact{Type: artifactTypeFile, RunID: &perimRunID, Payload: payload})
+		return c, nil
+
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, freshSessionRecord(rr), nil, response.EscalationOriginPerimeter), nil
+
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// fileArtifactFor builds one FileArtifact for extra (design section 4.1,
+// 6.5): action from change's git status, reason the builder's own
+// ExtraClaim.Reason, trust_root/style_guide from extra's own marker, and
+// description (empty when the perimeter run has none to give yet: the
+// question-outcome case, whose row only links the run to the path).
+func fileArtifactFor(extra orchestrator.Extra, change orchestrator.Change, claim response.ExtraClaim, taskN int, description string) response.FileArtifact {
+	return response.FileArtifact{
+		Path: extra.Path, Action: fileActionFor(change.Code), Reason: claim.Reason,
+		TrustRoot:   extra.Marker == markerTrustRoot,
+		StyleGuide:  extra.Marker == markerStyleGuide,
+		TaskN:       taskN,
+		Description: description,
+	}
+}
+
+// describedWith returns described with path's entry replaced by fa, a
+// shallow copy so the caller's own map is untouched: the just-completed
+// DESCRIBE has no store row yet when this same tick's commit also does ASK
+// (design section 6.5 step 4's "same commit").
+func describedWith(described map[string]store.FileEventRow, path string, fa response.FileArtifact) map[string]store.FileEventRow {
+	out := make(map[string]store.FileEventRow, len(described)+1)
+	maps.Copy(out, described)
+	out[path] = store.FileEventRow{File: fa}
+	return out
+}
+
+// perimeterItems builds one Item per extra, in path order (design section
+// 6.5's "ASK adds to the commit"): Item.Ref is the path, and Item.Text is
+// the marker in brackets when set, then the builder's own reason, then the
+// perimeter run's own description.
+func perimeterItems(extras []orchestrator.Extra, described map[string]store.FileEventRow) []response.Item {
+	items := make([]response.Item, len(extras))
+	for i, ex := range extras {
+		items[i] = response.Item{Ref: ex.Path, Text: itemText(described[ex.Path].File)}
+	}
+	return items
+}
+
+// itemText is Item.Text's own format (design section 6.5): the marker in
+// brackets when set ("[trust root] " or "[style guide] "), then
+// "Builder: <reason> ", then "Change: <description>".
+func itemText(fa response.FileArtifact) string {
+	prefix := ""
+	switch {
+	case fa.TrustRoot:
+		prefix = "[trust root] "
+	case fa.StyleGuide:
+		prefix = "[style guide] "
+	}
+	return prefix + "Builder: " + fa.Reason + " Change: " + fa.Description
+}
+
+// askCommit is design section 6.5's ASK: one perimeter question, one item
+// per extra in path order, carrying the build run's own id explicitly (not
+// AttachRunToMsgs: an ASK-alone commit reserves no run at all), no runtime
+// call.
+func askCommit(t store.Ticket, d Deps, taskN int, rid int64, items []response.Item) (store.HandlerCommit, error) {
+	noun := "file"
+	if len(items) != 1 {
+		noun = "files"
+	}
+	body := fmt.Sprintf(
+		"Confirm the file perimeter\n\nTask %d changed %s %s outside the plan's declared files. Accept a file to commit it. Reject a file to revert it.",
+		taskN, orchestrator.CountWord(len(items)), noun,
+	)
+	payload, err := json.Marshal(response.QuestionPayload{
+		Kind: response.QuestionKindPerimeter, State: response.QuestionStateOpen,
+		Recommended: "Decide each file", Options: []response.Option{}, Items: items,
+	})
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: ask: marshal question payload: %w", err)
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, RunID: &rid, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: body, Payload: payload,
+	}}
+	waiting := string(response.QuestionKindPerimeter)
+	c.Waiting = &waiting
+	slog.Info("perimeter asked", "ticket_id", t.ID, "run_id", rid, "task_n", taskN, "items", len(items))
+	return c, nil
+}
+
+// changeFor finds path's own Change in changed.
+func changeFor(changed []orchestrator.Change, path string) (orchestrator.Change, bool) {
+	for _, c := range changed {
+		if c.Path == path {
+			return c, true
+		}
+	}
+	return orchestrator.Change{}, false
+}
+
+// extraClaimFor finds path's own ExtraClaim in claims (a build_report's own
+// Extras): the builder's justification, design section 6.5's own "the
+// builder's ExtraClaim.Reason".
+func extraClaimFor(claims []response.ExtraClaim, path string) (response.ExtraClaim, bool) {
+	for _, c := range claims {
+		if c.Path == path {
+			return c, true
+		}
+	}
+	return response.ExtraClaim{}, false
+}
+
+// fileActionFor maps a changed path's git status to the file action an
+// extra's FileArtifact carries (design section 4.1): Added and Untracked
+// become create, Modified becomes modify, Deleted becomes delete.
+func fileActionFor(code orchestrator.Status) response.FileAction {
+	switch code {
+	case orchestrator.Added, orchestrator.Untracked:
+		return response.FileActionCreate
+	case orchestrator.Deleted:
+		return response.FileActionDelete
+	default:
+		return response.FileActionModify
+	}
 }
 
 // ---- step 0.5: verified adoption of an unrecorded commit -------------------

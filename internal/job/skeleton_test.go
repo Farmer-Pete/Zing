@@ -42,6 +42,15 @@ const (
 	testRuntimeFake      = "fake"
 	testRuntimeCodex     = "codex"
 
+	// testNoopShellCmd is the always-succeeds shell command several
+	// building tests give a project's TestCmd or LintCmd when the test
+	// only cares that the command exits 0, not what it does.
+	testNoopShellCmd = "true"
+	// testCodeResponseInvalid is D14's own escalation code (design section
+	// 5.4), shared across classify, planning, and perimeter invalid-output
+	// tests.
+	testCodeResponseInvalid = "response_invalid"
+
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
 
@@ -171,7 +180,7 @@ func buildJobTestProjects(t *testing.T, s *store.Store) map[int64]job.Project {
 		if gitErr != nil {
 			continue // not a git repository; never reached by a building test
 		}
-		out[p.ID] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"}
+		out[p.ID] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: testNoopShellCmd}
 	}
 	return out
 }

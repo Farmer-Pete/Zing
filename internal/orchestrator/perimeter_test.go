@@ -189,6 +189,37 @@ func TestStatusFromXY(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Pure: CountWord
+// -----------------------------------------------------------------------
+
+// TestCountWord proves CountWord's own small-number spelling (design
+// section 6.5's ASK message and PerimeterNotice both use it): one through
+// nine spell out, and anything past nine falls back to its digits.
+func TestCountWord(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{1, "one"},
+		{2, "two"},
+		{3, "three"},
+		{4, "four"},
+		{5, "five"},
+		{6, "six"},
+		{7, "seven"},
+		{8, "eight"},
+		{9, "nine"},
+		{10, "10"},
+		{42, "42"},
+	}
+	for _, tc := range cases {
+		if got := CountWord(tc.n); got != tc.want {
+			t.Errorf("CountWord(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
 // Pure: PerimeterNotice
 // -----------------------------------------------------------------------
 
