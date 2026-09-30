@@ -38,6 +38,19 @@ var gitLocationEnv = []string{
 	"GIT_CEILING_DIRECTORIES",
 }
 
+// Git runs one git command against dir with the repository-location
+// variables scrubbed (gitLocationEnv) and returns its combined output. Test
+// helpers in other packages use it in place of a bare exec.Command so a
+// test that runs under a git hook (lefthook's pre-push exports GIT_DIR)
+// cannot be redirected at the real repository. Found when the first
+// Package 8 push failed every git-init test in three packages.
+func Git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = scrubGitLocationEnv(os.Environ())
+	return cmd.CombinedOutput()
+}
+
 // NewSigningRepo inits a git repository at dir on branch "main" with one
 // signed commit. It generates a fresh ed25519 signing key with
 // ssh-keygen under "<dir>/.git/zing-fixture-key" and configures it
