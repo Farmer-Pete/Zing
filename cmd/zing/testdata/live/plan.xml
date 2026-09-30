@@ -1,0 +1,69 @@
+<zing job="planning" outcome="ready">
+  <claims>
+    <claim kind="code" verdict="false" evidence="greet.go:1">greet.go declares the greeter package with no Greet or Farewell function; neither one exists today.</claim>
+  </claims>
+  <scenarios>
+    <scenario id="s1" kind="behavior" check="go run ./cmd/greeter">
+      <given>the greeter module is built</given>
+      <when>a caller runs the command</when>
+      <then>it prints a greeting that names the compiled-in person</then>
+    </scenario>
+    <scenario id="s2" kind="negative" check="go vet ./...">
+      <given>the greeter module is built</given>
+      <when>a caller reads greet.go without running anything</when>
+      <then>Greet and Farewell each take a name parameter, so neither one can be called without naming who it addresses</then>
+    </scenario>
+  </scenarios>
+  <plan>
+    <overview>
+      <objective>Give the greeter module a personalized Greet, a runnable command, and a matching Farewell, so a caller gets a complete, name-aware greeting pair.</objective>
+      <context>The greeter module is a standalone Go package with no exported function and no command a person can run; this ticket adds the name parameter, a command line entry point, and the farewell.</context>
+      <problem>greet.go declares the package and nothing else: there is no function that turns a name into a greeting or a farewell, and no way to run the module from a terminal.</problem>
+      <goals>
+        <goal>Greet(name string) string returns a personalized greeting for name</goal>
+        <goal>cmd/greeter/main.go runs the greeter from the command line</goal>
+        <goal>Farewell(name string) string returns a personalized farewell for name</goal>
+      </goals>
+      <nongoals>
+        <nongoal>Reading the name from a flag, an argument, or a prompt is out of scope; the command passes a fixed literal name to Greet</nongoal>
+        <nongoal>Choosing the exact farewell wording is left to the owner during the build, not decided in this plan</nongoal>
+      </nongoals>
+    </overview>
+    <design>
+      <demo cmd="go run ./cmd/greeter">the command prints a personalized greeting for the name compiled into main.go</demo>
+      <shape>Two files carry the work: greet.go, which grows a Greet function and, on the third task, a Farewell function; and cmd/greeter/main.go, a new command that imports the greeter package and prints what Greet returns.
+
+```mermaid
+graph TD
+  Main[cmd/greeter/main.go] -->|calls| Greet[greeter.Greet]
+  Main -->|calls, once added| Farewell[greeter.Farewell]
+```</shape>
+      <migrations none="true"></migrations>
+    </design>
+    <delivery>
+      <files>
+        <file path="greet.go" action="modify">adds Greet, task 1, and Farewell, task 3</file>
+        <file path="greet_test.go" action="create">pins Greet's return value for a given name, task 1</file>
+        <file path="cmd/greeter/main.go" action="create">a runnable command that prints Greet's text, task 2</file>
+      </files>
+      <deletions none="true"></deletions>
+      <tests>
+        <test name="TestGreet" seam="greeter.Greet" kind="unit" mocks="">Greet(name) returns a greeting that contains name</test>
+      </tests>
+      <tasks>
+        <task n="1" test="TestGreet" demo="false">Add Greet(name string) string to greet.go, returning a personalized greeting for name, with greet_test.go pinning its return value.</task>
+        <task n="2" test="TestGreet" demo="true">Add cmd/greeter/main.go, a command that prints Greet's text for a fixed name. The new command needs to be documented for anyone reading the module: update README.md to describe it, even though README.md is not among this plan's declared files.</task>
+        <task n="3" test="TestGreet" demo="false">Add Farewell(name string) string to greet.go, returning a personalized farewell for name. This plan does not choose the exact wording: ask the owner to pick between "Goodbye, name." and "See you, name." before writing Farewell.</task>
+      </tasks>
+    </delivery>
+    <review>
+      <trust_root>none</trust_root>
+      <alternatives>
+        <alternative>Deliver Greet, the command, and Farewell in one task: rejected, since this fixture exists to exercise the build loop across more than a single task, with one commit each.</alternative>
+      </alternatives>
+      <risks>
+        <risk>The command is not wired into any larger program yet; a later ticket would connect it to a real caller.</risk>
+      </risks>
+    </review>
+  </plan>
+</zing>

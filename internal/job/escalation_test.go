@@ -93,7 +93,7 @@ func reserveTerminalRun(t *testing.T, s *store.Store, ticketID int64, jobName st
 	if err != nil || !claimed {
 		t.Fatalf("reserveTerminalRun: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: jobName, Runtime: testRuntimeClaude}, "claude-x")
+	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: jobName, Runtime: testRuntimeClaude}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("reserveTerminalRun: reserve: %v", err)
 	}
@@ -127,7 +127,7 @@ func seedAnsweredPlanningRound(t *testing.T, s *store.Store, ticketID int64) (se
 	if err != nil || !claimed {
 		t.Fatalf("seedAnsweredPlanningRound: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, "claude-x")
+	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("seedAnsweredPlanningRound: reserve: %v", err)
 	}
@@ -297,8 +297,13 @@ func TestEscalationResolve_PlanningResume_EveryChoiceResumesWithNotesAndError(t 
 			if rec.lastReq.SessionID == "" {
 				t.Errorf("RunRequest.SessionID is empty, want the surviving session's external id (a resume)")
 			}
-			if commit.Session == nil || !commit.Session.BumpResumes {
-				t.Fatalf("commit.Session = %+v, want a resume (BumpResumes true)", commit.Session)
+			// BumpResumes is charged by Reserve now, not by the terminal
+			// commit (design section 4.2), so a resume's own commit no
+			// longer carries it; the resume is proved instead by the
+			// commit's session id matching the surviving session sessID
+			// names, not a freshly minted one.
+			if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != sessID {
+				t.Fatalf("commit.Session = %+v, want the resumed session %d", commit.Session, sessID)
 			}
 			assertFenced(t, rec.lastReq.Prompt, "notes", "please resume")
 			assertFenced(t, rec.lastReq.Prompt, "error", "what happened")
@@ -343,14 +348,22 @@ func TestEscalationResolve_Planreview_BackResumesPlanningWithNotesAndError(t *te
 	qID := escalateDirect(t, s, ticketID, &runID, &sessID, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginPlanreview)
 	answerGateQuestion(t, s, ticketID, qID, new("b"), "go back to planning")
 
+	cohortSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
 	rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "planreview-back-sess")}}
 	rec := &recordingRuntime{rt: rt}
 	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 	if err != nil {
 		t.Fatalf("escalation resolve (planreview back) Run: %v", err)
 	}
-	if commit.Session == nil || !commit.Session.BumpResumes {
-		t.Fatalf("commit.Session = %+v, want a resume (BumpResumes true: the cohort's own planning session is still open)", commit.Session)
+	// BumpResumes is charged by Reserve now, not by the terminal commit
+	// (design section 4.2); the resume is proved instead by the commit's
+	// session id matching the cohort's own still-open planning session.
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != cohortSess.ID {
+		t.Fatalf("commit.Session = %+v, want the cohort's own planning session %d", commit.Session, cohortSess.ID)
 	}
 	if rec.lastReq.SessionID == "" {
 		t.Error("RunRequest.SessionID is empty, want the cohort's own planning session's external id")

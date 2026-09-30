@@ -48,6 +48,12 @@ type RunRequest struct {
 	// RunToken rides in the run's env so a later zing scenarios finds this
 	// ticket's scenarios.
 	RunToken string
+	// ExecPrefix, when non-empty, is prepended to the command: the process
+	// started is ExecPrefix[0] with arguments ExecPrefix[1:], then the
+	// resolved binary, then the runtime's own argv (design section 4.4). The
+	// sandbox package builds it (sandbox.Sandbox.Prefix). The fake runtime
+	// ignores it.
+	ExecPrefix []string
 }
 
 // RunResult is what a Runtime returns for one turn (design section 6.9,

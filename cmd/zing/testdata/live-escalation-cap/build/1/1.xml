@@ -1,0 +1,7 @@
+<zing job="build" outcome="error">
+  <error code="environment">
+    <what>The task's test command cannot run.</what>
+    <why>go test ./... fails immediately with no output, as if the toolchain itself were missing.</why>
+    <tried>Ran go test ./... and go vet ./... directly; both failed the same way.</tried>
+  </error>
+</zing>

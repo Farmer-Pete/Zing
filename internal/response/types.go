@@ -254,10 +254,17 @@ type Finding struct {
 
 type BuildResponse struct { // outcome ok
 	Head
-	Claims BuildClaims `xml:"claims" json:"claims"`
-	Fences []Fence     `xml:"fence"  json:"fences" doc:"one per deletion this task made"`
-	Report string      `xml:"report" json:"report" jsonschema:"minLength=1" doc:"what was built, what was decided, markdown"`
-	Notes  string      `xml:"notes"  json:"notes"  doc:"anything the owner must know"`
+	Claims BuildClaims  `xml:"claims" json:"claims"`
+	Extras []ExtraClaim `xml:"extra"  json:"extras" doc:"one per changed path the plan does not declare"`
+	Fences []Fence      `xml:"fence"  json:"fences" doc:"one per deletion this task made"`
+	Report string       `xml:"report" json:"report" jsonschema:"minLength=1" doc:"what was built, what was decided, markdown"`
+	Notes  string       `xml:"notes"  json:"notes"  doc:"anything the owner must know"`
+}
+
+// ExtraClaim is the builder's own justification for one undeclared path.
+type ExtraClaim struct {
+	Path   string `xml:"path,attr" json:"path"   jsonschema:"minLength=1"`
+	Reason string `xml:",chardata" json:"reason" jsonschema:"minLength=1" doc:"why this task cannot be done without this path"`
 }
 
 type BuildClaims struct {
@@ -323,13 +330,13 @@ type AnswerPayload struct {
 }
 
 type EscalationPayload struct {
-	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed"`
+	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed,enum=sandbox_unavailable,enum=replan_unsupported"`
 	What      string   `json:"what"    jsonschema:"minLength=1"`
 	Why       string   `json:"why"     jsonschema:"minLength=1"`
 	Tried     string   `json:"tried"`
 	Options   []string `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
 	SessionID *int64   `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
-	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims" doc:"the step that produced this escalation (design section 6.7)"`
+	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix" doc:"the step that produced this escalation (design section 6.7)"`
 }
 
 type StatePayload struct {
@@ -342,8 +349,11 @@ type StatePayload struct {
 
 type FileArtifact struct {
 	FileChange
-	TrustRoot  bool `json:"trust_root"`
-	StyleGuide bool `json:"style_guide"`
+	TrustRoot   bool               `json:"trust_root"`
+	StyleGuide  bool               `json:"style_guide"`
+	TaskN       int                `json:"task_n"                jsonschema:"minimum=0,maximum=12" doc:"0 for a fix run"`
+	Description string             `json:"description,omitempty" doc:"the perimeter run's sentence"`
+	Decision    *PerimeterDecision `json:"decision,omitempty"`
 }
 
 type TaskArtifact struct {
@@ -353,8 +363,14 @@ type TaskArtifact struct {
 	CommitSHA *string   `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
 }
 
+// BuildReport is the stored form of one build run that returned ok, and,
+// with CommitSHA set, the record that the unit landed.
 type BuildReport struct {
-	TaskN int `json:"task_n"`
+	TaskN int `json:"task_n" jsonschema:"minimum=0,maximum=12" doc:"0 for a fix run"`
 	BuildClaims
-	Report string `json:"report"`
+	Extras    []ExtraClaim `json:"extras"`
+	Fences    []Fence      `json:"fences"`
+	Report    string       `json:"report"`
+	Title     string       `json:"title"                jsonschema:"minLength=1" doc:"the commit subject"`
+	CommitSHA *string      `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
 }

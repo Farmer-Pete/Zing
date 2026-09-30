@@ -144,12 +144,12 @@ func waitForTicketAssertingNoDemoProject(t *testing.T, dbPath string, serveDone 
 				t.Fatalf("ListAllTickets: %v", err)
 			}
 			// Wait on the directly-seeded ticket by its TrackerRef
-			// (seedQueuedTicketForServe writes "manual#1"), ignoring anything
-			// the real GitHub tracker's Intake may land during the poll: a
-			// landed ticket would make len(tickets) > 1 and hang a
+			// (seedQueuedTicketForServe writes testServeTicketRef), ignoring
+			// anything the real GitHub tracker's Intake may land during the
+			// poll: a landed ticket would make len(tickets) > 1 and hang a
 			// count-based wait forever.
 			for i := range tickets {
-				if tickets[i].TrackerRef == "manual#1" && tickets[i].State != testServeStateQueued {
+				if tickets[i].TrackerRef == testServeTicketRef && tickets[i].State != testServeStateQueued {
 					return
 				}
 			}

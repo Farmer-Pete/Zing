@@ -1,0 +1,3 @@
+<zing job="perimeter" outcome="ok">
+  <reason>Adds a test target that builds the greeter binary.</reason>
+</zing>

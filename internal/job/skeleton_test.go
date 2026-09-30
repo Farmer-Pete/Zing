@@ -2,6 +2,7 @@ package job_test
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,10 +11,13 @@ import (
 
 	zing "zing"
 	"zing/fixtures"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -38,6 +42,20 @@ const (
 	testRuntimeFake      = "fake"
 	testRuntimeCodex     = "codex"
 
+	// testNoopShellCmd is the always-succeeds shell command several
+	// building tests give a project's TestCmd or LintCmd when the test
+	// only cares that the command exits 0, not what it does.
+	testNoopShellCmd = "true"
+	// testCodeResponseInvalid is D14's own escalation code (design section
+	// 5.4), shared across classify, planning, and perimeter invalid-output
+	// tests.
+	testCodeResponseInvalid = "response_invalid"
+	// testCodeResumesExhausted and testOriginCapResumes are the
+	// resumes_exhausted escalation's own code and origin (design D17,
+	// section 6.9), shared across planning's and building's own cap tests.
+	testCodeResumesExhausted = "resumes_exhausted"
+	testOriginCapResumes     = "cap_resumes"
+
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"
 
@@ -50,6 +68,7 @@ const (
 	testKindBug       = "bug"
 	testKindFeature   = "feature"
 	testTicketTitle   = "Add a hello endpoint"
+	testModelClaudeX  = "claude-x"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -111,6 +130,87 @@ func seedQueuedTicket(t *testing.T, s *store.Store) int64 {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	ticketID, err := s.InsertTicket(ctx, store.Ticket{
+		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	return ticketID
+}
+
+// jobTestGitHub is a never-called orchestrator.GitHub, enough to satisfy
+// orchestrator.New's required parameter: this package's own building tests
+// never push or open a pull request.
+type jobTestGitHub struct{}
+
+func (jobTestGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errFakeGitHub
+}
+
+func (jobTestGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errFakeGitHub
+}
+
+func (jobTestGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (prURL string, number int, err error) {
+	return "", 0, errFakeGitHub
+}
+
+func (jobTestGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
+	return "", 0, false, errFakeGitHub
+}
+
+var errFakeGitHub = errors.New("jobTestGitHub: not implemented")
+
+// buildJobTestProjects returns a job.Project for every store project whose
+// LocalPath is a real git repository: orchestrator.New never fails on a
+// plain directory, but GitCommonDir does, so a project seeded through the
+// ordinary testProjectDir (no .git) is silently left out, and only a
+// project seeded through seedQueuedGitBackedTicket ever reaches the real
+// building handler with what it needs (PKG8-PLAN.md section 4.3).
+func buildJobTestProjects(t *testing.T, s *store.Store) map[int64]job.Project {
+	t.Helper()
+	projects, err := s.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	out := make(map[int64]job.Project, len(projects))
+	for _, p := range projects {
+		orch, orchErr := orchestrator.New(
+			orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: p.LocalPath, DefaultBranch: "main"},
+			jobTestGitHub{}, orchestrator.NewRunner(), nil)
+		if orchErr != nil {
+			continue
+		}
+		repoGit, gitErr := orch.GitCommonDir(t.Context())
+		if gitErr != nil {
+			continue // not a git repository; never reached by a building test
+		}
+		out[p.ID] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: testNoopShellCmd}
+	}
+	return out
+}
+
+// seedQueuedGitBackedTicket is seedQueuedTicket, but on a real, signed
+// gitfixture repository carrying readyClaimEvidencePath at HEAD
+// (PKG8-PLAN.md section 9.4, 10): the one shape the real building handler
+// needs to run EnsureWorktree, CommitTask, and SignedStatus for real.
+func seedQueuedGitBackedTicket(t *testing.T, s *store.Store) int64 {
+	t.Helper()
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	if err := gitfixture.AddFile(t.Context(), dir, readyClaimEvidencePath, []byte("package main\n")); err != nil {
+		t.Fatalf("gitfixture.AddFile: %v", err)
+	}
+
+	proj := testProject
+	proj.LocalPath = dir
+	projectID, err := s.EnsureProject(t.Context(), proj)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
 		ProjectID: projectID, TrackerRef: testRefFake1, Title: testTicketTitle, State: testStateQueued,
 	})
 	if err != nil {
@@ -186,9 +286,12 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 	return job.Deps{
 		Store: s, Runtimes: set, Machine: testMachine(t), Models: testModels, Budget: testBudget, Floor: testFloor,
 		Owner: owner, Expires: expires,
-		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
+		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Commands: job.NewCommandRunner(sandbox.Off(), false),
+		Projects: buildJobTestProjects(t, s),
 	}
 }
 
@@ -251,7 +354,7 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
-	ticketID := seedQueuedTicket(t, s)
+	ticketID := seedQueuedGitBackedTicket(t, s)
 	reg := job.Registry()
 
 	// queued -> planning.
@@ -312,8 +415,17 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	// (claim's own doc comment).
 	advancePlanningWithAnAnswer(t, s, rt, ticketID)
 
+	// building: the real handler (design section 6) takes a RUN call and a
+	// CHECK-then-LAND call per fixture task, not the skeleton's one-shot
+	// fake build.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateBuilding {
+		t.Fatalf("before building: ticket state = %q, want %q", ticket.State, testStateBuilding)
+	}
+	advanceBuilding(t, s, rt, ticketID)
+
 	// the remaining code-only states.
-	order := []string{testStateBuilding, testStateReviewing, testStateJudging, testStateShipping}
+	order := []string{testStateReviewing, testStateJudging, testStateShipping}
 	for _, state := range order {
 		ticket = getTicket(t, s, ticketID)
 		if ticket.State != state {
@@ -401,38 +513,6 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	}
 }
 
-// TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking proves
-// the new d.Runtimes.For(d.Machine.Jobs[job].Runtime) lookup (design
-// section 4.4, task 2) fails closed: a Deps whose Set carries no runtime
-// under the name machine.toml's build job actually names ("claude") must
-// return a wrapped error, never panic.
-func TestBuildingHandler_UnknownRuntimeNameWrapsErrorWithoutPanicking(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning)
-
-	ticket := getTicket(t, s, ticketID)
-	owner := "test-owner-no-claude"
-	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
-	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
-	if err != nil || !claimed {
-		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
-	}
-
-	// A Set that carries only "codex", never "claude" (the name
-	// machine.toml's build job actually uses), so the lookup must fail.
-	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeCodex: fakeRuntime(t)})
-	if err != nil {
-		t.Fatalf("runtime.NewSet: %v", err)
-	}
-	deps := job.Deps{Store: s, Runtimes: set, Machine: testMachine(t), Owner: owner, Expires: expires}
-
-	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
-	if err == nil {
-		t.Fatal("building Run with no claude runtime registered: want an error, got nil")
-	}
-}
-
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
 // queuedHandler's commit shape (design section 6.5).
 func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
@@ -466,39 +546,6 @@ func advanceQueuedToPlanning(t *testing.T, s *store.Store, rt runtime.Runtime, t
 	apply(t, s, ticket, commit)
 }
 
-func TestBuildingHandler_OkTransitionsToReviewing(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning)
-
-	ticket := getTicket(t, s, ticketID)
-	if ticket.State != testStateBuilding {
-		t.Fatalf("ticket state = %q, want building", ticket.State)
-	}
-	deps := claim(t, s, fakeRuntime(t), ticketID)
-
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("building Run: %v", err)
-	}
-	if commit.Next != testStateReviewing || commit.Reason != "build done" {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (reviewing, build done)", commit.Next, commit.Reason)
-	}
-	if commit.Session == nil || commit.Session.Job != "build" {
-		t.Fatalf("commit.Session = %+v, want a fresh build session", commit.Session)
-	}
-	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != "ok" {
-		t.Errorf("commit.Runs = %+v, want exactly one turn-0 run with outcome ok", commit.Runs)
-	}
-
-	apply(t, s, ticket, commit)
-
-	final := getTicket(t, s, ticketID)
-	if final.State != testStateReviewing {
-		t.Errorf("final ticket state = %q, want reviewing", final.State)
-	}
-}
-
 // advanceThroughStates runs the handler registered for each of states, in
 // order, applying every commit, so a test can arrange a ticket already
 // sitting in the state right after the last one named (each named state
@@ -521,6 +568,10 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 			advancePlanningWithAnAnswer(t, s, fakeRuntime(t), ticketID)
 			continue
 		}
+		if state == testStateBuilding {
+			advanceBuilding(t, s, fakeRuntime(t), ticketID)
+			continue
+		}
 
 		deps := claim(t, s, fakeRuntime(t), ticketID)
 		commit, err := reg[state].Run(t.Context(), ticket, deps)
@@ -529,6 +580,35 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 		}
 		apply(t, s, ticket, commit)
 	}
+}
+
+// advanceBuildingMaxCalls bounds advanceBuilding's own handler-call loop
+// (PKG8-PLAN.md task 9): each of the fixture plan's three tasks takes one
+// RUN call and one CHECK-then-LAND call, so six calls lands every task; the
+// headroom catches a stuck handler instead of hanging the test.
+const advanceBuildingMaxCalls = 8
+
+// advanceBuilding drives the real building handler through as many calls as
+// it now takes to land every fixture task and transition to reviewing
+// (design section 6): unlike the skeleton's one-shot fake build, each call
+// only advances one step (RUN, or CHECK and LAND together), so this loops
+// until the ticket leaves "building".
+func advanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	reg := job.Registry()
+	for range advanceBuildingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		deps := claim(t, s, rt, ticketID)
+		commit, err := reg[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building Run: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		if getTicket(t, s, ticketID).State != testStateBuilding {
+			return
+		}
+	}
+	t.Fatalf("advanceBuilding: still in building after %d handler calls", advanceBuildingMaxCalls)
 }
 
 // advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
@@ -612,7 +692,7 @@ func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
 
 func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
 	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
+	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding)
 
 	ticket := getTicket(t, s, ticketID)
@@ -632,7 +712,7 @@ func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
 
 func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
 	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
+	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
 
 	ticket := getTicket(t, s, ticketID)
@@ -652,7 +732,7 @@ func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
 
 func TestShippingHandler_TransitionsToDone(t *testing.T) {
 	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
+	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging)
 
 	ticket := getTicket(t, s, ticketID)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"time"
 
@@ -36,10 +37,12 @@ type runResult struct {
 // returned a run id, the call is logged ("runJob end") with that id
 // regardless of how rt.Run comes back, so a caller can always terminalize
 // it; the prompt and the raw output are never logged (design section 9,
-// 10).
+// 10). taskN becomes RunSeed.TaskN on the reserved run: &n for a build or
+// perimeter task unit, nil for every other job, including a fix unit.
+// Planning's four callers pass nil.
 func runJob(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
-	su store.SessionUpsert, req runtime.RunRequest,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int,
 ) (runResult, error) {
 	jobCfg, ok := d.Machine.Jobs[jobName]
 	if !ok {
@@ -71,14 +74,33 @@ func runJob(
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: project for ticket %d: %w", jobName, t.ID, err)
 	}
-	req.WorkDir = proj.LocalPath
+	// Building passes the worktree directory in req.WorkDir already; every
+	// other caller leaves it empty, and falls back to the ticket's project
+	// checkout (design section 5.5).
+	if req.WorkDir == "" {
+		req.WorkDir = proj.LocalPath
+	}
 
 	req.Tools = jobCfg.Tools
 	req.Timeout = time.Duration(jobCfg.TimeoutMinutes) * time.Minute
+
+	if jobCfg.Sandbox != "" {
+		cleanup, sandboxErr := applySandbox(d, t, req.WorkDir, &req)
+		// Deferred unconditionally, even on a returned error: applySandbox
+		// never returns a nil cleanup (noopCleanup stands in when there is
+		// nothing to remove). Runs after rt.Run has returned, below: the run
+		// directory must stay in place for the whole life of the sandboxed
+		// process (design section 5.5).
+		defer cleanup()
+		if sandboxErr != nil {
+			return runResult{}, sandboxErr
+		}
+	}
+
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	rsv, err := d.Reserve(runCtx, t.ID, su, req.Model)
+	rsv, err := d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN})
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, err)
 	}
@@ -102,6 +124,103 @@ func runJob(
 	)
 
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
+}
+
+// seedTaskN is store.RunSeed.TaskN's own value for a build or perimeter
+// unit run (review F003, F005): nil for a fix unit (task 0), so a fix's own
+// runs never carry the task_n a real task 0 would otherwise be confused
+// with; a pointer to taskN for every other unit.
+func seedTaskN(taskN int) *int {
+	if taskN == 0 {
+		return nil
+	}
+	n := taskN
+	return &n
+}
+
+// buildLabel is runtime.RunRequest.Label for a build run of taskN (design
+// section 6.3's own table: "the decimal task number, or fix for a fix
+// unit"): fixRunLabel for a fix unit (task 0), the decimal task number
+// otherwise.
+func buildLabel(taskN int) string {
+	if taskN == 0 {
+		return fixRunLabel
+	}
+	return strconv.Itoa(taskN)
+}
+
+// perimeterLabel is runtime.RunRequest.Label for a DESCRIBE run: the same
+// fix-versus-task split as buildLabel, with i (the extra's own 1-based
+// position among the unit's undescribed extras) appended: "fix-<i>" for a
+// fix unit, "<n>-<i>" otherwise.
+func perimeterLabel(taskN, i int) string {
+	if taskN == 0 {
+		return fmt.Sprintf("fix-%d", i)
+	}
+	return fmt.Sprintf("%d-%d", taskN, i)
+}
+
+// fixRunLabel is runtime.RunRequest's own Label for every fix run (design
+// section 6.3's own table: "the decimal task number, or fix for a fix
+// unit"), first turn and every resume alike (fix.go's own StartFix).
+const fixRunLabel = "fix"
+
+// noopCleanup is applySandbox's own "nothing to clean up" return: a real
+// closure rather than a nil func, so its (cleanup, error) result is never
+// the (nil, nil) shape (nilnil), and runJob can defer it unconditionally.
+func noopCleanup() {}
+
+// applySandbox is design section 5.5's sandbox step, run after WorkDir,
+// Tools, and Timeout are filled and before Reserve, for any job whose
+// machine.toml entry names a sandbox. With the sandbox available, it
+// reserves a fresh run directory, builds req's ExecPrefix and appends its
+// Env, all from d.Projects[t.ProjectID]'s own RepoGit, and returns the run
+// directory's cleanup for the caller to defer (nothing is reserved yet, so
+// runJob's own defer chain, not this function, decides when it runs). It
+// also overwrites req.WorkDir with the sandbox's own resolved worktree
+// (ParamsFor's Worktree), so the CLI runs with its working directory equal
+// to the path the profile's WORKTREE rule and TRANSCRIPTS folder actually
+// name, not a path that reaches the same directory through a symlink (task
+// 16a: a worktree under macOS's own /var -> /private/var symlink otherwise
+// fails every write with EPERM, since seatbelt matches subpath against the
+// resolved path). With the sandbox unavailable, it returns ErrSandbox when
+// d.RequireSandbox, or noopCleanup and no error for a suite on the fake
+// runtime. Every failure short of an unavailable-and-required sandbox is a
+// configuration error (design section 5.5): a job named a sandbox but this
+// process has no Project row for the ticket, or the sandbox's own run-dir,
+// param, or prefix calls failed.
+func applySandbox(d Deps, t store.Ticket, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
+	if !d.Sandbox.Available() {
+		if d.RequireSandbox {
+			return noopCleanup, ErrSandbox
+		}
+		return noopCleanup, nil
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return noopCleanup, fmt.Errorf("%w: no sandbox project for ticket %d (project %d)", ErrConfig, t.ID, t.ProjectID)
+	}
+
+	runDir, cleanup, err := d.Sandbox.NewRunDir()
+	if err != nil {
+		return noopCleanup, fmt.Errorf("%w: sandbox run dir: %v", ErrConfig, err) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
+	}
+
+	p, err := d.Sandbox.ParamsFor(workDir, proj.RepoGit, runDir)
+	if err != nil {
+		cleanup()
+		return noopCleanup, fmt.Errorf("%w: sandbox params: %v", ErrConfig, err) //nolint:errorlint // see above
+	}
+	prefix, err := d.Sandbox.Prefix(p)
+	if err != nil {
+		cleanup()
+		return noopCleanup, fmt.Errorf("%w: sandbox prefix: %v", ErrConfig, err) //nolint:errorlint // see above
+	}
+	req.ExecPrefix = prefix
+	req.Env = append(req.Env, d.Sandbox.Env(p, os.Getenv("PATH"))...)
+	req.WorkDir = p.Worktree
+	return cleanup, nil
 }
 
 // errKind renders err for the "runJob end" observability event only (design

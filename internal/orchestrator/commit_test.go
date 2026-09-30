@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -323,7 +324,7 @@ func (r stripDashSRunner) Output(ctx context.Context, dir, name string, args ...
 }
 
 func stripDashS(name string, args []string) []string {
-	if name != "git" || len(args) == 0 || args[0] != "commit" {
+	if name != gitName || len(args) == 0 || args[0] != "commit" {
 		return args
 	}
 	out := make([]string, 0, len(args))
@@ -656,7 +657,7 @@ type cancelAfterCommitRunner struct {
 
 func (r cancelAfterCommitRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
 	out, err := r.inner.Run(ctx, dir, name, args...)
-	if name == "git" && len(args) > 0 && args[0] == "commit" {
+	if name == gitName && len(args) > 0 && args[0] == "commit" {
 		r.cancel()
 	}
 	return out, err
@@ -700,4 +701,265 @@ func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
 	if afterHead != priorHead {
 		t.Errorf("HEAD = %q after a failed signed commit under a cancelled ctx, want it reset back to %q", afterHead, priorHead)
 	}
+}
+
+// -----------------------------------------------------------------------
+// A validated build response's fences render through CommitMessage.Render
+// -----------------------------------------------------------------------
+
+// TestRenderAcceptsValidatedFences proves CommitMessage.Render accepts the
+// Fences a real, response.Validate-passing build document carries: this
+// lives here, not in internal/response, because orchestrator imports
+// response, and the reverse import would be a cycle.
+func TestRenderAcceptsValidatedFences(t *testing.T) {
+	xmlDoc := `<zing job="build" outcome="ok">` +
+		`<claims><files_changed><path>a.go</path></files_changed><test_exit>0</test_exit><lint_exit>0</lint_exit></claims>` +
+		`<fence path="internal/orchestrator/old.go" symbol="scanTree">existed because the walking skeleton diffed by hand</fence>` +
+		`<report>did stuff</report><notes></notes></zing>`
+
+	doc, err := response.Parse([]byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("response.Parse: %v", err)
+	}
+	if errs := response.Validate(doc, response.ValidateContext{Job: response.JobBuild}); len(errs) != 0 {
+		t.Fatalf("response.Validate: unexpected errors: %v", errs)
+	}
+
+	build, ok := doc.Response.(*response.BuildResponse)
+	if !ok {
+		t.Fatalf("doc.Response = %T, want *response.BuildResponse", doc.Response)
+	}
+
+	m := CommitMessage{Title: testGenericTitle, FuncLines: []string{testSingleFuncLine}, Fences: build.Fences}
+	if _, err := m.Render(); err != nil {
+		t.Fatalf("Render: unexpected error for a validated document's fences: %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------
+// CommitTask runs no repo-local hook
+// -----------------------------------------------------------------------
+
+// TestCommitTaskRunsNoHook proves CommitTask's git calls carry the
+// hooks-disabling prefix: a repo-local pre-commit hook that writes a marker
+// file leaves no marker after a successful CommitTask.
+func TestCommitTaskRunsNoHook(t *testing.T) {
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 6, "nohook", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	// Hooks are shared across every worktree of a repository, living in
+	// the main checkout's ".git/hooks" (a linked worktree's own ".git" is
+	// a pointer file, not a directory), which is exactly what
+	// core.hooksPath=/dev/null overrides.
+	marker := filepath.Join(t.TempDir(), "marker")
+	hookPath := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	writeTestFile(t, hookPath, "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(hookPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", hookPath, err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "approved content\n")
+	msg := CommitMessage{Title: testCommitTitle, FuncLines: []string{testFuncLine}}
+	if _, err := o.CommitTask(ctx, wt, []string{approvedTestFile}, msg); err != nil {
+		t.Fatalf("CommitTask: %v", err)
+	}
+
+	assertMarkerAbsent(t, marker)
+}
+
+// -----------------------------------------------------------------------
+// CommitChanges, CommitSubject, SignedStatus (exported)
+// -----------------------------------------------------------------------
+
+func TestCommitChanges(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 7, "commitchanges", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), "added.txt"), "new\n")
+	if removeErr := os.Remove(filepath.Join(wt.Dir(), "docs", "extra.md")); removeErr != nil {
+		t.Fatalf("remove docs/extra.md: %v", removeErr)
+	}
+	writeTestFile(t, filepath.Join(wt.Dir(), "README.md"), "# changed\n")
+	runGit(ctx, t, wt.Dir(), "add", "-A")
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "three changes")
+	sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	changes, err := o.CommitChanges(ctx, wt, sha)
+	if err != nil {
+		t.Fatalf("CommitChanges: %v", err)
+	}
+
+	want := map[string]Status{
+		"added.txt":   Added,
+		docsExtraPath: Deleted,
+		"README.md":   Modified,
+	}
+	if len(changes) != len(want) {
+		t.Fatalf("CommitChanges = %+v, want %d entries", changes, len(want))
+	}
+	for _, c := range changes {
+		wantCode, ok := want[c.Path]
+		if !ok {
+			t.Errorf("unexpected path %q in %+v", c.Path, changes)
+			continue
+		}
+		if c.Code != wantCode {
+			t.Errorf("%s code = %v, want %v", c.Path, c.Code, wantCode)
+		}
+	}
+	if !sort.IsSorted(sort.StringSlice(changePaths(changes))) {
+		t.Errorf("CommitChanges result not sorted by path: %+v", changes)
+	}
+}
+
+// changePaths extracts the Path of each Change, in order, for a sortedness
+// check.
+func changePaths(changes []Change) []string {
+	paths := make([]string, len(changes))
+	for i, c := range changes {
+		paths[i] = c.Path
+	}
+	return paths
+}
+
+func TestCommitSubject(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 8, "commitsubject", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "x\n")
+	runGit(ctx, t, wt.Dir(), "add", approvedTestFile)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "the subject line\n\na longer body follows")
+	sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	got, err := o.CommitSubject(ctx, wt, sha)
+	if err != nil {
+		t.Fatalf("CommitSubject: %v", err)
+	}
+	if got != "the subject line" {
+		t.Errorf("CommitSubject = %q, want %q", got, "the subject line")
+	}
+}
+
+// TestContentMethodsRevalidateRewrittenGitPointer proves review findings
+// F007 and F008: CommitChanges, CommitSubject, and the exported
+// SignedStatus used to run git in wt.dir with no o.revalidate(ctx, wt)
+// guard first, unlike every sibling content method. Extending
+// TestRevalidateRejectsRewrittenGitPointer's pattern, a worktree whose
+// ".git" pointer file was rewritten must be rejected by all three, with the
+// same "unexpected .git pointer" error revalidate itself already produces.
+func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 900, "revalidate", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "x\n")
+	runGit(ctx, t, wt.Dir(), "add", approvedTestFile)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "a commit to read back")
+	sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	pointerPath := filepath.Join(wt.Dir(), ".git")
+	if err := os.WriteFile(pointerPath, []byte("gitdir: /somewhere/else\n"), 0o644); err != nil {
+		t.Fatalf("rewrite .git pointer: %v", err)
+	}
+
+	const wantErrSubstr = "unexpected .git pointer"
+
+	t.Run("CommitChanges", func(t *testing.T) {
+		if _, err := o.CommitChanges(ctx, wt, sha); err == nil {
+			t.Fatal("CommitChanges: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("CommitChanges error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+
+	t.Run("CommitSubject", func(t *testing.T) {
+		if _, err := o.CommitSubject(ctx, wt, sha); err == nil {
+			t.Fatal("CommitSubject: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("CommitSubject error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+
+	t.Run("SignedStatus", func(t *testing.T) {
+		if _, err := o.SignedStatus(ctx, wt, sha); err == nil {
+			t.Fatal("SignedStatus: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("SignedStatus error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+}
+
+func TestSignedStatusExported(t *testing.T) {
+	t.Run("a signed commit", func(t *testing.T) {
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
+		ctx := t.Context()
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 9, "signedstatus", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "x\n")
+		msg := CommitMessage{Title: testCommitTitle, FuncLines: []string{testFuncLine}}
+		sha, err := o.CommitTask(ctx, wt, []string{approvedTestFile}, msg)
+		if err != nil {
+			t.Fatalf("CommitTask: %v", err)
+		}
+
+		signed, err := o.SignedStatus(ctx, wt, sha)
+		if err != nil {
+			t.Fatalf("SignedStatus: %v", err)
+		}
+		if !signed {
+			t.Error("SignedStatus = false, want true")
+		}
+	})
+
+	t.Run("an unsigned commit", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 10, "unsignedstatus", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "x\n")
+		runGit(ctx, t, wt.Dir(), "add", approvedTestFile)
+		runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "unsigned")
+		sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+		signed, err := o.SignedStatus(ctx, wt, sha)
+		if err != nil {
+			t.Fatalf("SignedStatus: %v", err)
+		}
+		if signed {
+			t.Error("SignedStatus = true, want false")
+		}
+	})
 }

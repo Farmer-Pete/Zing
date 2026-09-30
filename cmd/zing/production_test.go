@@ -2,12 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	zing "zing"
+	"zing/fixtures"
 	"zing/internal/config"
+	zdispatch "zing/internal/dispatch"
+	"zing/internal/gitfixture"
+	"zing/internal/job"
+	"zing/internal/machine"
+	"zing/internal/orchestrator"
+	"zing/internal/response"
+	"zing/internal/runtime"
+	"zing/internal/sandbox"
+	"zing/internal/store"
 )
 
 // --- productionRuntimes (task 14, D2) ---------------------------------------
@@ -144,5 +159,312 @@ func TestNewFixtureReferencedOnlyFromSelftestOrTests(t *testing.T) {
 
 	if len(offenders) > 0 {
 		t.Errorf("%s referenced outside selftest.go and _test.go files: %v", needle, offenders)
+	}
+}
+
+// --- the sandbox (task 8) ------------------------------------------------
+
+// TestServeRequiresSandbox proves serve's own dispatcher config always sets
+// RequireSandbox true (design N9, section 10): no config key overrides it.
+func TestServeRequiresSandbox(t *testing.T) {
+	t.Parallel()
+	if !serveRequireSandbox {
+		t.Error("serveRequireSandbox = false, want true (a real build run must refuse to start without a loaded sandbox)")
+	}
+}
+
+// TestServeBuildsOneOrchestratorPerProject proves buildJobProjects builds
+// exactly one job.Project per configured project, keyed by its store
+// project id, each carrying its own repository's real git common dir.
+func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
+	t.Parallel()
+
+	repoA := newTestGitRepo(t)
+	repoB := newTestGitRepo(t)
+	cfgProjects := []config.Project{
+		{Name: "alpha", Repo: "acme/alpha", Path: repoA, Tracker: testServeTracker},
+		{Name: "beta", Repo: "acme/beta", Path: repoB, Tracker: testServeTracker},
+	}
+	bindings := []zdispatch.Binding{
+		{StoreProjectID: 10, TrackerProject: "alpha"},
+		{StoreProjectID: 20, TrackerProject: "beta"},
+	}
+	gh, err := orchestrator.NewGitHub("test-github-token")
+	if err != nil {
+		t.Fatalf("orchestrator.NewGitHub: %v", err)
+	}
+
+	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
+	if err != nil {
+		t.Fatalf("buildJobProjects: %v", err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("len(projects) = %d, want 2", len(projects))
+	}
+	for id, wantRepo := range map[int64]string{10: repoA, 20: repoB} {
+		p, ok := projects[id]
+		if !ok {
+			t.Fatalf("projects[%d] missing", id)
+		}
+		if p.Orch == nil {
+			t.Errorf("projects[%d].Orch is nil", id)
+		}
+		// git itself resolves symlinks in its own --path-format=absolute
+		// output (macOS's /var -> /private/var, most commonly), so the
+		// comparison must too.
+		resolved, err := filepath.EvalSymlinks(wantRepo)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%s): %v", wantRepo, err)
+		}
+		wantGitDir := filepath.Join(resolved, ".git")
+		if p.RepoGit != wantGitDir {
+			t.Errorf("projects[%d].RepoGit = %q, want %q", id, p.RepoGit, wantGitDir)
+		}
+	}
+}
+
+// productionTestModels is the job.Deps.Models alias table the tests below
+// wire every claim/run with: the exact model ids do not matter, since every
+// runtime here is a *runtime.Fake or a spy.
+var productionTestModels = map[string]string{
+	modelAliasSonnet: "claude-sonnet-5", modelAliasOpus: "claude-opus-4-8",
+	modelAliasFable: "claude-fable-5-1", modelAliasCodex: "gpt-5.5",
+}
+
+// neverCalledRuntime fails the test if its Run is ever called: proves the
+// sandbox gate refuses a sandboxed job before the runtime does anything.
+type neverCalledRuntime struct{ t *testing.T }
+
+func (n neverCalledRuntime) Run(context.Context, runtime.RunRequest) (runtime.RunResult, error) {
+	n.t.Helper()
+	n.t.Fatal("runtime.Run was called; the sandbox gate should have refused before any run")
+	return runtime.RunResult{}, nil
+}
+
+// neverCalledCommandRunner fails the test if its Run is ever called.
+type neverCalledCommandRunner struct{ t *testing.T }
+
+func (n neverCalledCommandRunner) Run(context.Context, string, string, string, time.Duration) (int, error) {
+	n.t.Helper()
+	n.t.Fatal("CommandRunner.Run was called; the sandbox gate should have refused before any command ran")
+	return -1, nil
+}
+
+// answerOneOpenQuestion answers ticketID's one open question with option
+// (or its first offered option, when option is ""), through
+// store.AnswerQuestion, exactly as the console's POST /answer would.
+func answerOneOpenQuestion(t *testing.T, st *store.Store, ticketID int64, option string) {
+	t.Helper()
+	open, err := st.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) == 0 {
+		t.Fatal("QuestionsByState(open): no open questions")
+	}
+	if option == "" {
+		var payload response.QuestionPayload
+		if unmarshalErr := json.Unmarshal(open[0].Payload, &payload); unmarshalErr != nil {
+			t.Fatalf("unmarshal question payload: %v", unmarshalErr)
+		}
+		if len(payload.Options) == 0 {
+			t.Fatal("question has no options")
+		}
+		option = payload.Options[0].Key
+	}
+	result, err := st.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: option})
+	if err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q", result.Conflict)
+	}
+}
+
+// driveTicketToBuilding claims and runs ticketID's handler, state by state,
+// through queued -> planning (classify, the first entry, an answered
+// question, the ready resume, the clean review tick, an approved gate),
+// until it reaches "building" -- the same ring
+// TestRing_QueuedToDoneAnsweringOneQuestion (internal/job/skeleton_test.go)
+// drives further, stopped here one state short of it. Every call runs
+// unsandboxed (Sandbox: sandbox.Off(), RequireSandbox: false): only the
+// caller's own separate, final building tick exercises the sandbox gate.
+func driveTicketToBuilding(t *testing.T, st *store.Store, m *machine.Machine, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	reg := job.Registry()
+
+	run := func(state string) {
+		ticket, err := st.GetTicket(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("GetTicket: %v", err)
+		}
+		owner := "production-test-owner"
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := st.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+		set, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: rt, runtimeNameCodex: rt, runtimeNameFake: rt})
+		if err != nil {
+			t.Fatalf("runtime.NewSet: %v", err)
+		}
+		deps := job.Deps{
+			Store: st, Runtimes: set, Machine: m, Models: productionTestModels,
+			Budget: time.Hour, Floor: response.SeverityMinor, Owner: owner, Expires: expires,
+			Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+				return st.Reserve(ctx, tid, owner, expires, su, seed)
+			},
+			Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+		}
+		commit, err := reg[state].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("%s handler.Run: %v", state, err)
+		}
+		if validateErr := job.ValidateCommit(ticket, commit); validateErr != nil {
+			t.Fatalf("ValidateCommit: %v", validateErr)
+		}
+		applied, err := st.CommitHandlerResult(t.Context(), commit)
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false")
+		}
+	}
+
+	run("queued") // -> planning
+
+	const maxPlanningCalls = 10
+	for range maxPlanningCalls {
+		run("planning")
+		ticket, err := st.GetTicket(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("GetTicket: %v", err)
+		}
+		if ticket.State == "building" {
+			return
+		}
+		if ticket.WaitingOn == nil {
+			continue
+		}
+		switch *ticket.WaitingOn {
+		case "questions":
+			answerOneOpenQuestion(t, st, ticketID, "")
+		case "gate":
+			answerOneOpenQuestion(t, st, ticketID, "a")
+		default:
+			t.Fatalf("driveTicketToBuilding: waiting_on = %q, want questions, gate, or nil", *ticket.WaitingOn)
+		}
+	}
+	t.Fatalf("driveTicketToBuilding: ticket did not reach building within %d planning calls", maxPlanningCalls)
+}
+
+// TestProductionBuildNeedsSandbox proves that with the production wiring
+// (serveRequireSandbox) and an unavailable sandbox, a building tick
+// escalates sandbox_unavailable and never calls the runtime or the command
+// runner (design section 5.5, N9).
+func TestProductionBuildNeedsSandbox(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	m, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+
+	// A real, signed gitfixture repository (PKG8-PLAN.md section 9.4, 10),
+	// not the bare newTestGitRepo other tests in this package use: the real
+	// building handler's own EnsureWorktree needs a commit to branch off of.
+	// The fixture ready cohort's one code claim cites cmd/zing/main.go:60,
+	// committed here on top of gitfixture's own initial commit.
+	repoDir := t.TempDir()
+	if fixErr := gitfixture.NewSigningRepo(t.Context(), repoDir); fixErr != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", fixErr)
+	}
+	if addErr := gitfixture.AddFile(t.Context(), repoDir, filepath.Join("cmd", testServeProjectName, "main.go"), []byte("package main\n")); addErr != nil {
+		t.Fatalf("gitfixture.AddFile: %v", addErr)
+	}
+
+	projectID, err := st.EnsureProject(t.Context(), store.Project{
+		Name: testServeProjectName, RepoURL: "https://example.invalid/zing", LocalPath: repoDir, Tracker: testServeTracker,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := st.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testServeTicketRef, Title: "t", State: testServeStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	scriptsFS, err := fs.Sub(fixtures.FS, "scripts")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	fake := runtime.NewFake(scriptsFS)
+
+	driveTicketToBuilding(t, st, m, fake, ticketID)
+
+	ticket, err := st.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.State != "building" {
+		t.Fatalf("ticket.State = %q, want building", ticket.State)
+	}
+
+	// The production gate: RequireSandbox is always true
+	// (serveRequireSandbox), the sandbox is unavailable, and the runtime
+	// and command runner must never be called.
+	owner := "production-test-owner-gate"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := st.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	spyRT := neverCalledRuntime{t: t}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: spyRT, runtimeNameCodex: spyRT, runtimeNameFake: spyRT})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+	// gitfixture.NewSigningRepo always inits its repo on branch "main".
+	const gitfixtureDefaultBranch = "main"
+	orch, err := orchestrator.New(
+		orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: repoDir, DefaultBranch: gitfixtureDefaultBranch},
+		selftestGitHub{}, orchestrator.NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	repoGit, err := orch.GitCommonDir(t.Context())
+	if err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+	deps := job.Deps{
+		Store: st, Runtimes: set, Machine: m, Models: productionTestModels,
+		Budget: time.Hour, Floor: response.SeverityMinor, Owner: owner, Expires: expires,
+		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return st.Reserve(ctx, tid, owner, expires, su, seed)
+		},
+		Sandbox: sandbox.Off(), RequireSandbox: serveRequireSandbox,
+		Commands: neverCalledCommandRunner{t: t},
+		Projects: map[int64]job.Project{
+			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+		},
+	}
+
+	commit, err := job.Registry()["building"].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("building Run: %v", err)
+	}
+	if commit.Escalation == nil || commit.Escalation.Payload.Code != "sandbox_unavailable" {
+		t.Fatalf("commit.Escalation = %+v, want a sandbox_unavailable escalation", commit.Escalation)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (an escalation, not a transition)", commit.Next)
 	}
 }

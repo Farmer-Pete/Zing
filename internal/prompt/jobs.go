@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -136,4 +137,171 @@ func Error(text string) NamedInput { return NamedInput{Label: "error", Text: tex
 // every other owner- or model-originated input (plan section 4.2, D15).
 func Answers(text string) NamedInput {
 	return NamedInput{Label: "answers", Text: text, Untrusted: true}
+}
+
+// BuildResumeHeader replaces the prompt file on a build resume turn: there
+// is no fresh job prompt to load, only this fixed instruction to continue
+// the open worktree session (plan section 6.3), byte-for-byte from the
+// plan.
+const BuildResumeHeader = "Continue this build task in the same worktree. The input below says why " +
+	"you were resumed. Finish the task and return the next document."
+
+// buildTaskLine is the literal line prompts/build.md carries for a first
+// build turn. ForFix replaces the whole line at once, rather than filling
+// its three placeholders individually, since a fix run has no task number
+// or title to fill them with (plan section 9.1).
+const buildTaskLine = "Task {n} of {total}: {task title}"
+
+// buildPlaceholder pairs one of the five tokens prompts/build.md must
+// carry with the value ForBuild fills it with (plan section 12.1,
+// section 9.1).
+type buildPlaceholder struct {
+	token, value string
+}
+
+// fillPlaceholder replaces the single occurrence of token in text with
+// value. A job prompt missing the token is the fixed error the plan
+// names: a caller-supplied build prompt is expected to name each
+// placeholder exactly once, so fillPlaceholder does not check for a
+// second occurrence.
+func fillPlaceholder(text, token, value string) (string, error) {
+	if !strings.Contains(text, token) {
+		return "", fmt.Errorf("prompt: build prompt lacks placeholder %s", token)
+	}
+	return strings.Replace(text, token, value, 1), nil
+}
+
+// fillPlaceholders applies fillPlaceholder for each pair in order,
+// stopping at the first missing placeholder.
+func fillPlaceholders(text string, pairs []buildPlaceholder) (string, error) {
+	var err error
+	for _, p := range pairs {
+		text, err = fillPlaceholder(text, p.token, p.value)
+		if err != nil {
+			return "", err
+		}
+	}
+	return text, nil
+}
+
+// BuildTask is one task of an approved plan: the shape ForBuild needs to
+// fill the build job prompt's placeholders and compose the task input
+// (plan section 9.1).
+type BuildTask struct {
+	N, Total int
+	Title    string // unit.Title without the "Task <n>: " prefix
+	Text     string // the task text, raw
+	Test     string // the task's named test, raw
+}
+
+// buildInputs assembles the inputs shared by ForBuild and ForFix: ticket
+// fenced, plan raw, accepted raw (omitted when empty), the task or fix
+// input as given, then extra (plan section 9.1).
+func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput, extra []NamedInput) []NamedInput {
+	inputs := make([]NamedInput, 0, 3+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
+		NamedInput{Label: "plan", Text: planXML},
+	)
+	if len(accepted) > 0 {
+		inputs = append(inputs, NamedInput{Label: "accepted", Text: strings.Join(accepted, "\n")})
+	}
+	inputs = append(inputs, taskInput)
+	inputs = append(inputs, extra...)
+	return inputs
+}
+
+// ForBuild fills the build job prompt's five placeholders (`{n}`,
+// `{total}`, `{task title}`, `{test_cmd}`, `{lint_cmd}`) and lists the
+// inputs: ticket (fenced), plan (raw), accepted (raw, omitted when none),
+// task (raw, "Task <n> of <total>\nTest: <test>\n\n<text>"), then extra.
+// A jobPrompt missing one of the five placeholders is the error
+// `prompt: build prompt lacks placeholder <name>`. Called by
+// internal/job's build turn (plan section 6.3); calls Assemble once
+// Schemas is set from response.RenderTemplate(JobBuild, ...) in build
+// schema order.
+func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
+	filled, err := fillPlaceholders(jobPrompt, []buildPlaceholder{
+		{"{n}", strconv.Itoa(task.N)},
+		{"{total}", strconv.Itoa(task.Total)},
+		{"{task title}", task.Title},
+		{"{test_cmd}", testCmd},
+		{"{lint_cmd}", lintCmd},
+	})
+	if err != nil {
+		return Input{}, err
+	}
+
+	taskText := fmt.Sprintf("Task %d of %d\nTest: %s\n\n%s", task.N, task.Total, task.Test, task.Text)
+	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: "task", Text: taskText}, extra)
+
+	return Input{JobPrompt: filled, Inputs: inputs}, nil
+}
+
+// ForFix is ForBuild with the fix input in place of the task: the line
+// "Task {n} of {total}: {task title}" becomes "Fix run: <subject>", and
+// the task input is replaced by {label, text, fenced}. A jobPrompt
+// missing that line, or missing `{test_cmd}` or `{lint_cmd}`, is the same
+// fixed error ForBuild returns. Called by internal/job's fix turn (plan
+// section 8); calls Assemble once Schemas is set from
+// response.RenderTemplate(JobBuild, ...) in build schema order.
+func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
+	if !strings.Contains(jobPrompt, buildTaskLine) {
+		return Input{}, fmt.Errorf("prompt: build prompt lacks placeholder %s", buildTaskLine)
+	}
+	filled := strings.Replace(jobPrompt, buildTaskLine, "Fix run: "+subject, 1)
+
+	filled, err := fillPlaceholders(filled, []buildPlaceholder{
+		{"{test_cmd}", testCmd},
+		{"{lint_cmd}", lintCmd},
+	})
+	if err != nil {
+		return Input{}, err
+	}
+
+	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: label, Text: text, Untrusted: true}, extra)
+
+	return Input{JobPrompt: filled, Inputs: inputs}, nil
+}
+
+// ForBuildResume builds a build resume turn's Input: BuildResumeHeader in
+// place of a prompt file, inputs passed through unchanged — built by the
+// caller with the labeled input the resume reason names (plan section
+// 6.3). Called by internal/job's build resume turn; calls Assemble once
+// Schemas is set from response.RenderTemplate(JobBuild, ...) in build
+// schema order.
+func ForBuildResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: BuildResumeHeader, Inputs: inputs}
+}
+
+// ForPerimeter builds the perimeter job's Input: the job prompt, then the
+// path and the hunk, both fenced, then any carried inputs. Called by
+// internal/job's perimeter turn (plan section 12.2); calls Assemble once
+// Schemas is set from response.RenderTemplate(JobPerimeter, ...) in
+// perimeter schema order.
+func ForPerimeter(jobPrompt, path, hunk string, extra []NamedInput) Input {
+	inputs := make([]NamedInput, 0, 2+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: "path", Text: path, Untrusted: true},
+		NamedInput{Label: "hunk", Text: hunk, Untrusted: true},
+	)
+	inputs = append(inputs, extra...)
+	return Input{JobPrompt: jobPrompt, Inputs: inputs}
+}
+
+// PerimeterResumeHeader replaces the prompt file on a perimeter resume
+// turn: there is no fresh job prompt to load, only this fixed instruction
+// to continue describing the file after the owner's answer (plan section
+// 6.2), byte-for-byte from the plan.
+const PerimeterResumeHeader = "Continue describing this file. The owner's answer follows. Return the next document."
+
+// ForPerimeterResume builds a perimeter resume turn's Input:
+// PerimeterResumeHeader in place of a prompt file, inputs passed through
+// unchanged -- built by the caller with Answer, so it carries the fencing
+// plan section 4.2's table assigns it. Called by internal/job's
+// perimeter-question resume (plan section 6.2); calls Assemble once
+// Schemas is set from response.RenderTemplate(JobPerimeter, ...) in
+// perimeter schema order.
+func ForPerimeterResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: PerimeterResumeHeader, Inputs: inputs}
 }

@@ -247,9 +247,10 @@ func (ErrorCode) Values() []string {
 // EscalationCode is the closed set an escalation payload's code may carry
 // (design section 6.7): the eight already stored, plus split_unsupported,
 // nothing_to_do_with_true_claims, runtime_exec_failed, response_invalid,
-// seal_failed, and post_run_failed. EscalationPayload.Code itself stays a
-// plain string (matching its jsonschema enum tag); these constants let Go
-// code name a code instead of writing the literal.
+// seal_failed, post_run_failed, and (Package 8) sandbox_unavailable and
+// replan_unsupported. EscalationPayload.Code itself stays a plain string
+// (matching its jsonschema enum tag); these constants let Go code name a
+// code instead of writing the literal.
 type EscalationCode string
 
 const (
@@ -272,6 +273,14 @@ const (
 	// Zing could not store or check its result. job.postRunFailure is its one
 	// writer.
 	EscalationCodePostRunFailed EscalationCode = "post_run_failed"
+	// EscalationCodeSandboxUnavailable is Package 8's own code (section 6.4):
+	// a build or perimeter run's sandbox did not load, so the run refuses to
+	// start (design decision N9, D5).
+	EscalationCodeSandboxUnavailable EscalationCode = "sandbox_unavailable"
+	// EscalationCodeReplanUnsupported is Package 8's own code (design
+	// decision D14): "back to planning" from a building escalation is
+	// deferred, so that option re-escalates under this code instead.
+	EscalationCodeReplanUnsupported EscalationCode = "replan_unsupported"
 )
 
 // Values returns every valid EscalationCode.
@@ -282,6 +291,7 @@ func (EscalationCode) Values() []string {
 		string(EscalationCodeEnvironment), string(EscalationCodeOther), string(EscalationCodeSplitUnsupported),
 		string(EscalationCodeNothingToDoWithTrueClaims), string(EscalationCodeRuntimeExecFailed),
 		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed), string(EscalationCodePostRunFailed),
+		string(EscalationCodeSandboxUnavailable), string(EscalationCodeReplanUnsupported),
 	}
 }
 
@@ -304,6 +314,12 @@ const (
 	EscalationOriginCapBudget         EscalationOrigin = "cap_budget"
 	EscalationOriginSplit             EscalationOrigin = "split"
 	EscalationOriginNothingToDoClaims EscalationOrigin = "nothing_to_do_claims"
+	// EscalationOriginBuild, EscalationOriginPerimeter, and
+	// EscalationOriginFix are Package 8's own origins: the building
+	// handler, a perimeter run, and the fix-run entry point.
+	EscalationOriginBuild     EscalationOrigin = "build"
+	EscalationOriginPerimeter EscalationOrigin = "perimeter"
+	EscalationOriginFix       EscalationOrigin = "fix"
 )
 
 // Values returns every valid EscalationOrigin.
@@ -313,6 +329,7 @@ func (EscalationOrigin) Values() []string {
 		string(EscalationOriginPlanreview), string(EscalationOriginGateApprove), string(EscalationOriginSeal),
 		string(EscalationOriginCapResumes), string(EscalationOriginCapLoops), string(EscalationOriginCapBudget),
 		string(EscalationOriginSplit), string(EscalationOriginNothingToDoClaims),
+		string(EscalationOriginBuild), string(EscalationOriginPerimeter), string(EscalationOriginFix),
 	}
 }
 
@@ -380,6 +397,22 @@ const (
 // Values returns every valid Decision.
 func (Decision) Values() []string {
 	return []string{string(DecisionAccept), string(DecisionReject), string(DecisionDrop), string(DecisionDiscuss)}
+}
+
+// PerimeterDecision is the owner's call on one undeclared path. It is its
+// own type because Decision has four values and a jsonschema enum tag on a
+// Decision field adds to them instead of narrowing them (found in the build
+// of task 3: the generated enum held six entries).
+type PerimeterDecision string
+
+const (
+	PerimeterAccept PerimeterDecision = "accept"
+	PerimeterReject PerimeterDecision = "reject"
+)
+
+// Values returns accept and reject, in that order.
+func (PerimeterDecision) Values() []string {
+	return []string{string(PerimeterAccept), string(PerimeterReject)}
 }
 
 // Result is a scenario verdict's pass/fail result.

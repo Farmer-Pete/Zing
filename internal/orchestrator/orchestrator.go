@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -23,6 +24,15 @@ type Project struct {
 	Repo          string // "Zing"; non-empty
 	LocalPath     string // absolute path to the main checkout; must be absolute
 	DefaultBranch string // "main"; non-empty
+	// BuildWritableRoots names every path a sandboxed build run can write
+	// outside the worktree itself (PKG8-PLAN.md section 15, task 8): the
+	// sandbox cache root and the login's mds cache folder. Each entry must
+	// be absolute; checkSigningPrograms' own disallowed-roots list
+	// (worktree.go) always includes these alongside o.proj.LocalPath and
+	// the Claude Code transcripts folder, so a git signing program that
+	// resolves into a build's own writable cache is refused exactly like
+	// one resolving into the worktree.
+	BuildWritableRoots []string
 }
 
 // Runner runs an external command in a working directory. Run returns
@@ -39,10 +49,52 @@ type Runner interface {
 // holds additional environment variables appended to the scrubbed process
 // environment (see command and scrubGitLocationEnv) for every command this
 // Runner runs -- a caller adds GIT_LITERAL_PATHSPECS=1 through it for the
-// pathspec-consuming git calls in commit.go and perimeter.go. The zero value
-// runs with the scrubbed process environment and no additions.
+// pathspec-consuming git calls in commit.go and perimeter.go. drivers names
+// the filter drivers (PKG8-PLAN.md section 7.2) command overrides to empty
+// on every git call this Runner makes, so a worktree-content-touching
+// command never runs an owner-configured clean, smudge, or process filter; a
+// caller building a runner scoped to one Worktree sets it from that
+// Worktree's own drivers field. The zero value runs with the scrubbed
+// process environment, no additions, and no driver overrides (still hooks-
+// and fsmonitor-disabled, since command applies that unconditionally).
 type execRunner struct {
 	extraEnv []string
+	drivers  []string
+}
+
+// hardenedGitArgs returns args with the hardening prefix in front
+// (PKG8-PLAN.md section 7.2): core.hooksPath and core.fsmonitor are always
+// disabled, so no repo-local git hook and no filesystem monitor ever runs on
+// the orchestrator's behalf; then, for each name in drivers (sorted, so the
+// result is deterministic regardless of call order), the four settings that
+// make that filter driver a no-op are added. A driver name reaches git as
+// one argv element per "-c filter.<name>.<key>=<value>", never through a
+// shell, so a driver name cannot inject an option or another setting.
+func hardenedGitArgs(drivers []string, args ...string) []string {
+	sorted := append([]string(nil), drivers...)
+	sort.Strings(sorted)
+
+	prefix := make([]string, 0, 4+4*len(sorted)+len(args))
+	prefix = append(prefix, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+	for _, name := range sorted {
+		prefix = append(prefix,
+			"-c", "filter."+name+".clean=",
+			"-c", "filter."+name+".smudge=",
+			"-c", "filter."+name+".process=",
+			"-c", "filter."+name+".required=false",
+		)
+	}
+	return append(prefix, args...)
+}
+
+// isExitCode reports whether err is (or wraps) an *exec.ExitError whose exit
+// code is code -- used to distinguish "the command ran and found nothing"
+// (git config --get and --get-regexp exit 1 for no match; git diff --no-
+// index exits 1 when the compared paths differ, the expected case here)
+// from a real failure.
+func isExitCode(err error, code int) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
 }
 
 // gitLocationEnv names the environment variables that redirect where git
@@ -94,8 +146,16 @@ var localeEnv = []string{"LC_ALL=C", "LANG=C"}
 // sets cmd.Env to the scrubbed process environment, the C locale, and
 // extraEnv, so no git child ever inherits a repository-redirecting GIT_*
 // variable and its messages never depend on the host locale; cmd.Dir is the
-// single source of truth for which repository the command acts on.
+// single source of truth for which repository the command acts on. When
+// name is "git", args is first passed through hardenedGitArgs(r.drivers,
+// ...), so every git call this Runner makes -- whatever the caller asked
+// for -- carries the hooks/fsmonitor/driver-override prefix; a non-git
+// command (there are none in production, but tests exercise this) is left
+// alone.
 func (r execRunner) command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
+	if name == "git" {
+		args = hardenedGitArgs(r.drivers, args...)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	env := scrubGitLocationEnv(os.Environ())
@@ -166,6 +226,15 @@ func New(proj Project, gh GitHub, run Runner, log *slog.Logger) (*Orchestrator, 
 	return &Orchestrator{proj: proj, gh: gh, run: run, log: log}, nil
 }
 
+// NewRunner returns the real Runner: os/exec commands, hooks and fsmonitor
+// always disabled, and no filter driver overrides of its own -- a method
+// scoped to one Worktree builds its own runner carrying that Worktree's
+// drivers instead of using this one directly for a content-touching
+// command. cmd/zing's serve and selftest pass this to New.
+func NewRunner() Runner {
+	return execRunner{}
+}
+
 func validateProject(proj Project) error {
 	switch {
 	case proj.Owner == "":
@@ -176,6 +245,11 @@ func validateProject(proj Project) error {
 		return errors.New("orchestrator: project default branch must not be empty")
 	case !filepath.IsAbs(proj.LocalPath):
 		return fmt.Errorf("orchestrator: project local path must be absolute: %q", proj.LocalPath)
+	}
+	for _, root := range proj.BuildWritableRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("orchestrator: project build writable root must be absolute: %q", root)
+		}
 	}
 	return nil
 }

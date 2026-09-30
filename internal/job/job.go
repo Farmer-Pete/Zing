@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -55,14 +57,64 @@ type Deps struct {
 	// tick's Owner and Expires, so a handler and its tests never see those
 	// two arguments directly.
 	Reserve ReserveFunc
+	// Projects carries what building needs to know about each store
+	// project, keyed by its id (PKG8-PLAN.md section 4.3): the orchestrator,
+	// the repository's common git dir, and the project's test and lint
+	// commands. Wired by dispatch.Config.Projects.
+	Projects map[int64]Project
+	// Sandbox is the seatbelt profile runJob wraps a sandboxed job's run in
+	// (section 5.5). serve loads a real one; selftest and most test suites
+	// use sandbox.Off().
+	Sandbox sandbox.Sandbox
+	// RequireSandbox is true in serve (a real build run refuses to start
+	// without a loaded sandbox, design N9) and false in selftest and every
+	// suite that drives the fake runtime.
+	RequireSandbox bool
+	// Commands runs the test and lint re-runs a build unit's CHECK step
+	// makes (task 9). Wired by dispatch.Config.Commands.
+	Commands CommandRunner
 }
+
+// Project is what building needs to know about one store project (design
+// section 4.3).
+type Project struct {
+	Orch    *orchestrator.Orchestrator
+	RepoGit string // the repository's common git dir, absolute; Orch.GitCommonDir at startup
+	TestCmd string // config projects[i].commands.test
+	LintCmd string // config projects[i].commands.lint
+}
+
+// CommandRunner runs one shell command in dir, in its own process group, and
+// returns its exit code. The whole group is killed when Run returns (design
+// section 4.3, 5.5):
+//
+//	err == nil:                 the process ran and exited; exitCode is real
+//	ErrCommandTimeout:          the timeout killed it; exitCode is -1
+//	ErrSandbox:                 the sandbox is required and unavailable
+//	context.Canceled (wrapped): the parent context ended; exitCode is -1
+//	any other error:            the command could not start; exitCode is -1
+type CommandRunner interface {
+	Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (exitCode int, err error)
+}
+
+// ErrSandbox and ErrCommandTimeout are the two new job-level errors this
+// package's sandboxing adds (design section 4.3). ErrSandbox is runJob's own
+// sandbox-unavailable failure (section 5.5) and sandboxedCommands' failure
+// when RequireSandbox is true and the sandbox never loaded; routeFailure
+// (planning.go) escalates it as sandbox_unavailable. ErrCommandTimeout is
+// the real CommandRunner's own timeout failure (commands.go).
+var (
+	ErrSandbox        = errors.New("job: sandbox unavailable")
+	ErrCommandTimeout = errors.New("job: command timed out")
+)
 
 // ReserveFunc reserves the next run for ticketID under the caller's claim
 // and returns it (design section 4.4, 4.5): su creates or resumes a session,
-// model is the run's exact model id. It returns store.ErrClaimLost,
+// seed carries the run's exact model id and, for a build or perimeter task
+// unit, its task number. It returns store.ErrClaimLost,
 // unwrapped-but-wrappable, when the claim this call was reserved under has
 // already moved on.
-type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error)
+type ReserveFunc func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error)
 
 // The typed job-level errors (design section 4.4). runJob (runjob.go) wires
 // ErrBudget into its budget check and ErrConfig into the job/runtime/model
@@ -86,8 +138,11 @@ type Handler interface {
 	Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error)
 }
 
-// Registry returns the six skeleton handlers (design section 6.5), keyed by
-// the pipeline state each drives. done is terminal and carries no handler.
+// Registry returns the six pipeline-state handlers (design section 6.5),
+// keyed by the state each drives: queued, reviewing, judging, and shipping
+// are still the skeleton's code-only transitions; planning (task 6) and
+// building (task 9) are the real handlers. done is terminal and carries no
+// handler.
 func Registry() map[string]Handler {
 	return map[string]Handler{
 		stateQueued:    queuedHandler{},
@@ -124,7 +179,7 @@ func Validate(m *machine.Machine, reg map[string]Handler) error {
 var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
 	statePlanning:  {statePlanning, stateBuilding, stateDone, stateAbandoned},
-	stateBuilding:  {stateReviewing},
+	stateBuilding:  {stateReviewing, stateAbandoned},
 	stateReviewing: {stateJudging},
 	stateJudging:   {stateShipping},
 	stateShipping:  {stateDone},
@@ -141,7 +196,7 @@ var legalWaiting = map[string]bool{
 // commit shape rules (design section 6.5): c.TicketID must name the ticket
 // it was built against, the commit must do something (it is never wholly
 // empty: at least one of Next, Waiting, Messages, Runs, ResolveQuestions,
-// Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or
+// Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or
 // TrackerEffect must be set), when Next is set it names a legal successor of
 // t.State and carries a non-empty Reason, and it does not also set a
 // non-error Waiting; any set Waiting is one of the eight closed-set flags.
@@ -151,9 +206,9 @@ func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 	}
 	if c.Next == "" && c.Waiting == nil && len(c.Messages) == 0 && len(c.Runs) == 0 &&
 		len(c.ResolveQuestions) == 0 && c.Session == nil &&
-		c.SetKind == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
+		c.SetKind == nil && c.SetBranch == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
 		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

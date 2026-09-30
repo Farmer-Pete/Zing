@@ -3,5 +3,8 @@
   "files_changed": ["internal/cart/cart.go", "internal/cart/cart_test.go"],
   "test_exit": 0,
   "lint_exit": 0,
-  "report": "Initialized cart.Items to an empty slice; added TestEmptyCart_ReturnsEmptyOrder."
+  "extras": [],
+  "fences": [],
+  "report": "Initialized cart.Items to an empty slice; added TestEmptyCart_ReturnsEmptyOrder.",
+  "title": "Initialize cart.Items to an empty slice"
 }

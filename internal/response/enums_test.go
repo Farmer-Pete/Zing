@@ -56,3 +56,43 @@ func TestSeverity_Rank_OrdersLowestToHighest(t *testing.T) {
 		t.Error("Rank() must strictly increase nit < minor < major < blocker")
 	}
 }
+
+// TestEscalationCode_Values_IncludesPackage8Codes proves the two codes
+// Package 8 adds (design section 4.1), sandbox_unavailable and
+// replan_unsupported, appear in EscalationCode's own Values().
+func TestEscalationCode_Values_IncludesPackage8Codes(t *testing.T) {
+	t.Parallel()
+
+	values := EscalationCode("").Values()
+	for _, want := range []EscalationCode{EscalationCodeSandboxUnavailable, EscalationCodeReplanUnsupported} {
+		found := false
+		for _, v := range values {
+			if v == string(want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("EscalationCode.Values() = %v, want it to contain %q", values, want)
+		}
+	}
+}
+
+// TestEscalationOrigin_Values_IncludesPackage8Origins proves the three
+// origins Package 8 adds (design section 4.1), build, perimeter, and fix,
+// appear in EscalationOrigin's own Values().
+func TestEscalationOrigin_Values_IncludesPackage8Origins(t *testing.T) {
+	t.Parallel()
+
+	values := EscalationOrigin("").Values()
+	for _, want := range []EscalationOrigin{EscalationOriginBuild, EscalationOriginPerimeter, EscalationOriginFix} {
+		found := false
+		for _, v := range values {
+			if v == string(want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("EscalationOrigin.Values() = %v, want it to contain %q", values, want)
+		}
+	}
+}

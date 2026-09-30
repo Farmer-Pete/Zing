@@ -123,6 +123,16 @@ templ palette() {
 		}
 		h2, h3 { margin-top: 0; }
 		.empty { color: var(--zing-text-dim); }
+		/* The sandbox indicator (design section 9.2, Task 15): renders only
+		   while the sandbox is unavailable (nav.templ's own sandboxReason !=
+		   "" guard), so red is enough on its own -- there is no "on" state of
+		   this span to distinguish it from. */
+		.sandbox-off {
+			display: block;
+			margin-bottom: 0.5rem;
+			color: var(--zing-danger);
+			font-size: 0.8rem;
+		}
 		.nav-link {
 			display: flex;
 			justify-content: space-between;
@@ -137,7 +147,7 @@ templ palette() {
 			text-decoration: none;
 		}
 		.nav-link:hover { border-color: var(--zing-accent); }
-		.badge, .pill {
+		.badge, .pill, .item-marker {
 			font-size: 0.75rem;
 			padding: 0.125rem 0.5rem;
 			border-radius: 999px;
@@ -193,6 +203,51 @@ templ palette() {
 		}
 		.chip.picked::after, .decision.picked::after {
 			content: " \2713";
+		}
+
+		/* The item rows an item-kind question renders (design section 6.5,
+		   9.2, Task 11b): the path, the marker pill, the builder reason, and
+		   the change, on one line, with the decision buttons pushed to the
+		   far end. */
+		.item-row {
+			display: flex;
+			align-items: baseline;
+			gap: 0.5rem;
+			padding: 0.375rem 0;
+			border-bottom: 1px solid var(--zing-border);
+		}
+		.item-row:last-child { border-bottom: none; }
+		.item-ref { font-family: monospace; }
+		.item-reason, .item-text { color: var(--zing-text-dim); }
+		.item-change { flex: 1; }
+		.item-decisions { display: flex; gap: 0.375rem; margin-left: auto; }
+
+		/* The option chip and the item-decision button (design section 6.6,
+		   Task 11b): the same base look, so a decision button reads as the
+		   same kind of control as a chip rather than a bare browser button;
+		   .chip.picked/.decision.picked above still layers the picked state
+		   on top of this. */
+		.chip, .decision {
+			border: 1px solid var(--zing-border);
+			border-radius: 999px;
+			background: var(--zing-surface);
+			color: var(--zing-text);
+			padding: 0.25rem 0.75rem;
+			font-size: 0.8rem;
+			cursor: pointer;
+		}
+		.chip:hover, .decision:hover { border-color: var(--zing-accent); }
+
+		/* The free reply input (design section 6.6, Task 11b): dark-themed
+		   to match the rest of the console instead of the browser default. */
+		.reply-input {
+			width: 100%;
+			background: var(--zing-surface);
+			color: var(--zing-text);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			padding: 0.375rem 0.5rem;
+			font: inherit;
 		}
 
 		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the

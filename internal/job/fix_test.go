@@ -1,0 +1,402 @@
+// fix_test.go tests task 14: the fix-run entry point (design section 8),
+// StartFix and AdvanceFix. It reuses skeleton_test.go and building_test.go's
+// shared fixtures (newJobTestStore, claim, apply, getTicket,
+// buildTicketInBuilding, claimForBuild, buildStep, helloTxt,
+// testNoopShellCmd, scriptedRuntime, recordingRuntime, assertFenced) and
+// drives job.StartFix and job.AdvanceFix directly: neither function is
+// wired into job.Registry() (design section 8: "nothing in serve calls
+// it"), so there is no ticket-state handler to go through.
+package job_test
+
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	"zing/internal/job"
+	"zing/internal/response"
+	"zing/internal/store"
+)
+
+// fixTestCmd is the shell test command this file's own scenarios override
+// TestCmd with: it writes hello.txt for real, the same technique
+// building_test.go's own perimeterScenario uses, since a scriptedRuntime's
+// buildStep carries no fake-runtime tree effect of its own (design section
+// 9.3) to create the file its claim names.
+const fixTestCmd = "printf 'hello, world\\n' > hello.txt && test -f hello.txt"
+
+// testFixCILogText is the fixed FixInput.Text every FixKindCILog scenario
+// in this file (and building_test.go's own cross-unit fix scenario) uses
+// when the exact wording does not matter, named once so goconst has
+// nothing to flag across the two files.
+const testFixCILogText = "log tail"
+
+// withFixTestCmd returns deps with its one project's TestCmd overridden to
+// fixTestCmd and LintCmd to testNoopShellCmd, keyed by ticket's own
+// project id.
+func withFixTestCmd(deps job.Deps, ticket store.Ticket) job.Deps {
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = fixTestCmd
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	return deps
+}
+
+// TestStartFixSubjectAndLabel proves design section 8's own table for all
+// three kinds: the run request's own Label is "fix" regardless of kind, the
+// prompt carries the kind's own input label with the fix text fenced, and
+// the landed build_report's Title is the kind's own commit subject with
+// TaskN 0.
+func TestStartFixSubjectAndLabel(t *testing.T) {
+	for _, tc := range []struct {
+		kind    job.FixKind
+		subject string
+		label   string
+	}{
+		{job.FixKindFindings, "Fix review findings", "findings"},
+		{job.FixKindFailure, "Fix failed scenarios", "failure"},
+		{job.FixKindCILog, "Fix the failing check", "ci_log"},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			s, _, ticketID := buildTicketInBuilding(t)
+			ticket := getTicket(t, s, ticketID)
+
+			scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-sess-"+string(tc.kind))}}
+			rec := &recordingRuntime{rt: scriptRT}
+			deps := claimForBuild(t, s, rec, ticketID)
+
+			commit, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: tc.kind, Text: "do the thing"})
+			if err != nil {
+				t.Fatalf("StartFix: %v", err)
+			}
+			if rec.lastReq.Label != "fix" {
+				t.Errorf("RunRequest.Label = %q, want \"fix\"", rec.lastReq.Label)
+			}
+			assertFenced(t, rec.lastReq.Prompt, tc.label, "do the thing")
+
+			if len(commit.Artifacts) != 1 {
+				t.Fatalf("commit.Artifacts = %+v, want one build_report", commit.Artifacts)
+			}
+			var report response.BuildReport
+			if unmarshalErr := json.Unmarshal(commit.Artifacts[0].Payload, &report); unmarshalErr != nil {
+				t.Fatalf("unmarshal build_report: %v", unmarshalErr)
+			}
+			if report.Title != tc.subject {
+				t.Errorf("report.Title = %q, want %q", report.Title, tc.subject)
+			}
+			if report.TaskN != 0 {
+				t.Errorf("report.TaskN = %d, want 0", report.TaskN)
+			}
+		})
+	}
+}
+
+// TestStartFixRejectsUnknownKind proves design section 8's own validation
+// rule: a kind outside FixKind.Values() returns the fixed error, before any
+// worktree or run is touched (the deps' own runtime never sees a call).
+func TestStartFixRejectsUnknownKind(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, &scriptedRuntime{t: t}, ticketID) // no runtime call expected
+
+	_, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKind("bogus"), Text: "x"})
+	if err == nil || !strings.Contains(err.Error(), "job: unknown fix kind bogus") {
+		t.Fatalf("StartFix error = %v, want it to contain %q", err, "job: unknown fix kind bogus")
+	}
+}
+
+// TestStartFixRejectsEmptyText proves design section 8's own validation
+// rule: text that is empty after strings.TrimSpace returns the fixed
+// error, again with no runtime call.
+func TestStartFixRejectsEmptyText(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, &scriptedRuntime{t: t}, ticketID) // no runtime call expected
+
+	_, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindFindings, Text: "   \n\t "})
+	if err == nil || err.Error() != "job: fix input is empty" {
+		t.Fatalf("StartFix error = %v, want \"job: fix input is empty\"", err)
+	}
+}
+
+// TestFixTextIsFenced proves in.Text always enters the prompt fenced
+// (design section 8), independent of TestStartFixSubjectAndLabel's own
+// per-kind table.
+func TestFixTextIsFenced(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-fence-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+	deps := claimForBuild(t, s, rec, ticketID)
+
+	_, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindCILog, Text: "the CI log tail"})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "ci_log", "the CI log tail")
+}
+
+// TestFixLandsOneCommit proves the fix unit shares CHECK and LAND verbatim
+// with a task unit (design section 8): a claim that truthfully names
+// hello.txt, with no test or lint failure and no extra, checks clean on
+// the first try and lands in the very next AdvanceFix tick, exactly as
+// TestLastResumeReturningOkLands proves for a task. The landed
+// build_report carries TaskN 0, and the ticket never transitions (a fix
+// is not a plan task, so section 6.8's "last task" rule never fires for
+// one).
+func TestFixLandsOneCommit(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-land-sess")}}
+	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+
+	commit, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindFailure, Text: "scenario 2 failed: timeout"})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	landCommit, err := job.AdvanceFix(t.Context(), ticket, deps2) // CHECK, clean, straight to LAND
+	if err != nil {
+		t.Fatalf("AdvanceFix (CHECK+LAND): %v", err)
+	}
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if unmarshalErr := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); unmarshalErr != nil {
+		t.Fatalf("unmarshal landed build_report: %v", unmarshalErr)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+	if landed.TaskN != 0 {
+		t.Errorf("landed.TaskN = %d, want 0", landed.TaskN)
+	}
+	if landCommit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (a fix never transitions the ticket)", landCommit.Next)
+	}
+	apply(t, s, ticket, landCommit)
+}
+
+// TestAdvanceFixNoActionAfterLanding proves design section 8's own
+// stopping rule: once the newest fix unit has landed, AdvanceFix returns
+// job.ErrNoAction, with no runtime call.
+func TestAdvanceFixNoActionAfterLanding(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-noaction-sess")}}
+	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	apply(t, s, ticket, mustStartFix(t, ticket, deps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText}))
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	landCommit, err := job.AdvanceFix(t.Context(), ticket, deps2)
+	if err != nil {
+		t.Fatalf("AdvanceFix (CHECK+LAND): %v", err)
+	}
+	apply(t, s, ticket, landCommit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps3 := withFixTestCmd(claimForBuild(t, s, &scriptedRuntime{t: t}, ticketID), ticket) // no runtime call expected
+	_, err = job.AdvanceFix(t.Context(), ticket, deps3)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("AdvanceFix after landing: err = %v, want job.ErrNoAction", err)
+	}
+}
+
+// TestFixRunHasNoTaskN proves design section 8's own storage rule: a fix
+// run's own task_n column is nil (RunSeed.TaskN nil), never 0, even though
+// its build_report's own TaskN field is 0.
+func TestFixRunHasNoTaskN(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-tasknil-sess")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+
+	commit, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	if len(commit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
+	}
+	runID := commit.Runs[0].ID
+	apply(t, s, ticket, commit)
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	found := false
+	for _, r := range runs {
+		if r.ID == runID {
+			found = true
+			if r.TaskN != nil {
+				t.Errorf("run.TaskN = %d, want nil", *r.TaskN)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("RunsForTicket(%d) = %+v, want to find run %d", ticketID, runs, runID)
+	}
+}
+
+// TestFixClaimsPendingResumeHasNoTaskN proves review F003/F005's own claims-
+// pending resume case: a fix unit's own RUN claims a passing test_exit the
+// real command contradicts (the default project's TestCmd, "test -f
+// hello.txt", with no file ever written), so CHECK writes a claim-errors-
+// pending marker and the next AdvanceFix tick resumes it. That resume's own
+// request carries Label "fix" (never task number "0"), and the run it
+// stores carries a nil task_n, the same rule StartFix's own first turn
+// already follows.
+func TestFixClaimsPendingResumeHasNoTaskN(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-pending-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+	deps := claimForBuild(t, s, rec, ticketID)
+
+	commit, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, rec, ticketID)
+	checkCommit, err := job.AdvanceFix(t.Context(), ticket, deps2) // CHECK: claim errors pending (test_exit false)
+	if err != nil {
+		t.Fatalf("AdvanceFix (CHECK): %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-pending-sess"))
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, rec, ticketID)
+	resumeCommit, err := job.AdvanceFix(t.Context(), ticket, deps3) // resume: claims
+	if err != nil {
+		t.Fatalf("AdvanceFix (resume): %v", err)
+	}
+	if rec.lastReq.Label != "fix" {
+		t.Errorf("resume request Label = %q, want %q", rec.lastReq.Label, "fix")
+	}
+	if len(resumeCommit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one", resumeCommit.Runs)
+	}
+	runID := resumeCommit.Runs[0].ID
+	apply(t, s, ticket, resumeCommit)
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	found := false
+	for _, r := range runs {
+		if r.ID == runID {
+			found = true
+			if r.TaskN != nil {
+				t.Errorf("resume run.TaskN = %d, want nil", *r.TaskN)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("RunsForTicket(%d) = %+v, want to find run %d", ticketID, runs, runID)
+	}
+}
+
+// TestFixDescribeRunHasNoTaskN proves review F003/F005's own DESCRIBE case:
+// a fix unit whose RUN claims an undeclared extra path reaches DESCRIBE
+// (design section 6.5, shared with a task unit through task 14's own
+// generalizing of advanceCheckedRun). That perimeter run's own request
+// carries Label "fix-1" (never "0-1"), and the run it stores carries a nil
+// task_n.
+func TestFixDescribeRunHasNoTaskN(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	extras := []response.ExtraClaim{{Path: testExtraPath, Reason: testExtraReason}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		buildStep([]string{helloTxt, testExtraPath}, 0, 0, extras, "fix-describe-sess"),
+	}}
+	rec := &recordingRuntime{rt: scriptRT}
+	deps := claimForBuild(t, s, rec, ticketID)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = "printf 'hello, world\\n' > hello.txt && touch " + testExtraPath + " && test -f hello.txt"
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+
+	commit, err := job.StartFix(t.Context(), ticket, deps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, rec, ticketID)
+	deps2.Projects = deps.Projects
+	checkCommit, err := job.AdvanceFix(t.Context(), ticket, deps2) // CHECK: claims ok, one extra left undescribed
+	if err != nil {
+		t.Fatalf("AdvanceFix (CHECK): %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claims ok run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the claims-ok marker", checkCommit.Messages)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "fix-describe-perim-sess"))
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, rec, ticketID)
+	deps3.Projects = deps.Projects
+	describeCommit, err := job.AdvanceFix(t.Context(), ticket, deps3) // DESCRIBE
+	if err != nil {
+		t.Fatalf("AdvanceFix (DESCRIBE): %v", err)
+	}
+	if rec.lastReq.Label != "fix-1" {
+		t.Errorf("DESCRIBE request Label = %q, want %q", rec.lastReq.Label, "fix-1")
+	}
+	if len(describeCommit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one", describeCommit.Runs)
+	}
+	runID := describeCommit.Runs[0].ID
+	apply(t, s, ticket, describeCommit)
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	found := false
+	for _, r := range runs {
+		if r.ID == runID {
+			found = true
+			if r.TaskN != nil {
+				t.Errorf("DESCRIBE run.TaskN = %d, want nil", *r.TaskN)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("RunsForTicket(%d) = %+v, want to find run %d", ticketID, runs, runID)
+	}
+}
+
+// mustStartFix runs job.StartFix and fails the test on error, returning the
+// commit for the caller to apply.
+func mustStartFix(t *testing.T, ticket store.Ticket, deps job.Deps, in job.FixInput) store.HandlerCommit {
+	t.Helper()
+	commit, err := job.StartFix(t.Context(), ticket, deps, in)
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	return commit
+}

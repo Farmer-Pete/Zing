@@ -9,13 +9,20 @@ import (
 
 // Shared test-fixture literals, factored out so goconst does not flag
 // their repetition across these tables. testMainGo is shared with
-// plancheck_test.go.
+// plancheck_test.go; the build-shape literals are shared with
+// semantics_test.go and validate_test.go.
 const (
 	testFileA      = "a.go"
 	testFileB      = "b.go"
 	testMainGo     = "cmd/zing/main.go"
 	ranIt          = "ran it"
 	evidenceAGoOne = "a.go:1"
+
+	testNeededIt      = "needed it"
+	testFenceSymbol   = "Old"
+	testFenceExisted  = "existed because it was needed"
+	testMultilinePath = "a.go\nb.go"
+	wantTaskTwoNumber = "plan/delivery/tasks/task[1]/n: want 2"
 )
 
 func TestCheckBuildClaims_MatchingPasses(t *testing.T) {
@@ -252,5 +259,115 @@ func TestCheckCoverage_UnknownScenario(t *testing.T) {
 	want := "verdict for unknown scenario s9"
 	if !containsMsg(errs, want) {
 		t.Fatalf("CheckCoverage = %v, want to contain %q", msgs(errs), want)
+	}
+}
+
+func TestCheckCommandsPassed_BothZeroPasses(t *testing.T) {
+	t.Parallel()
+
+	errs := CheckCommandsPassed(0, 0)
+	if len(errs) != 0 {
+		t.Fatalf("CheckCommandsPassed = %v, want no errors", dumpErrs(errs))
+	}
+}
+
+func TestCheckCommandsPassed_TestNonZero(t *testing.T) {
+	t.Parallel()
+
+	errs := CheckCommandsPassed(1, 0)
+	want := "claims/test_exit: observed 1, want 0"
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckCommandsPassed = %v, want to contain %q", dumpErrs(errs), want)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("CheckCommandsPassed = %v, want exactly 1 error", dumpErrs(errs))
+	}
+}
+
+func TestCheckCommandsPassed_LintNonZero(t *testing.T) {
+	t.Parallel()
+
+	errs := CheckCommandsPassed(0, 2)
+	want := "claims/lint_exit: observed 2, want 0"
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckCommandsPassed = %v, want to contain %q", dumpErrs(errs), want)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("CheckCommandsPassed = %v, want exactly 1 error", dumpErrs(errs))
+	}
+}
+
+func TestCheckCommandsPassed_BothNonZero(t *testing.T) {
+	t.Parallel()
+
+	errs := CheckCommandsPassed(1, 2)
+	wantTest := "claims/test_exit: observed 1, want 0"
+	wantLint := "claims/lint_exit: observed 2, want 0"
+	if !containsErr(errs, wantTest) || !containsErr(errs, wantLint) {
+		t.Fatalf("CheckCommandsPassed = %v, want to contain %q and %q", dumpErrs(errs), wantTest, wantLint)
+	}
+	if len(errs) != 2 {
+		t.Fatalf("CheckCommandsPassed = %v, want exactly 2 errors", dumpErrs(errs))
+	}
+}
+
+func TestCheckBuildTree_MissingExtraElement(t *testing.T) {
+	t.Parallel()
+
+	r := &BuildResponse{Claims: BuildClaims{FilesChanged: []string{testFileA, testFileB}}}
+	tree := BuildTree{Changed: []string{testFileA, testFileB}, Extras: []string{testFileB}}
+
+	errs := CheckBuildTree(r, tree)
+	want := "extra: missing for undeclared path " + testFileB
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckBuildTree = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestCheckBuildTree_ExtraNamingDeclaredPath(t *testing.T) {
+	t.Parallel()
+
+	r := &BuildResponse{
+		Claims: BuildClaims{FilesChanged: []string{testFileA}},
+		Extras: []ExtraClaim{{Path: testFileA, Reason: testNeededIt}},
+	}
+	tree := BuildTree{Changed: []string{testFileA}} // testFileA is declared, not a tree extra
+
+	errs := CheckBuildTree(r, tree)
+	want := "extra[0]/path: " + testFileA + " is declared or unchanged"
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckBuildTree = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+func TestCheckBuildTree_DeletedPathWithoutFence(t *testing.T) {
+	t.Parallel()
+
+	r := &BuildResponse{Claims: BuildClaims{FilesChanged: []string{testFileA}}}
+	tree := BuildTree{Changed: []string{testFileA}, Deleted: []string{testFileA}}
+
+	errs := CheckBuildTree(r, tree)
+	want := "fence: missing for deleted path " + testFileA
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckBuildTree = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+// TestCheckBuildTree_FenceOnPathThatStillExistsPasses proves a fence may
+// name a path still present in the tree (design section 4.1): it covers a
+// removed function, flag, or behavior inside a file the task modified, not
+// necessarily a deleted file.
+func TestCheckBuildTree_FenceOnPathThatStillExistsPasses(t *testing.T) {
+	t.Parallel()
+
+	r := &BuildResponse{
+		Claims: BuildClaims{FilesChanged: []string{testFileA}},
+		Fences: []Fence{{Path: testFileA, Symbol: testFenceSymbol, ExistedBecause: testFenceExisted}},
+	}
+	tree := BuildTree{Changed: []string{testFileA}} // no deletions, no extras
+
+	errs := CheckBuildTree(r, tree)
+	if len(errs) != 0 {
+		t.Fatalf("CheckBuildTree = %v, want no errors: the fenced path still exists", dumpErrs(errs))
 	}
 }

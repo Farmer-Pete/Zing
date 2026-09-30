@@ -330,14 +330,23 @@ func TestPlanningHandler_Gate_Reject_OptionBWithNotesResumesOpenSession(t *testi
 	const notes = "not quite right, please revisit the greeting copy"
 	answerGateQuestion(t, s, ticketID, qID, new("b"), notes)
 
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "gate-reject-sess")}}
 	rec := &recordingRuntime{rt: resumeRT}
 	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 	if err != nil {
 		t.Fatalf("gate reject Run: %v", err)
 	}
-	if commit.Session == nil || commit.Session.ID == nil || !commit.Session.BumpResumes {
-		t.Fatalf("commit.Session = %+v, want an existing session id with BumpResumes true (a resume, not fresh)", commit.Session)
+	// BumpResumes is charged by Reserve now, not by the terminal commit
+	// (design section 4.2); the resume is proved instead by the commit's
+	// session id matching the already-open session, not a freshly minted
+	// one.
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
 	}
 	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
 		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
@@ -367,14 +376,23 @@ func TestPlanningHandler_Gate_Reject_ReplyOnlyResumesOpenSession(t *testing.T) {
 	const notes = "reply only, no chip clicked"
 	answerGateQuestion(t, s, ticketID, qID, nil, notes)
 
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "gate-reply-only-sess")}}
 	rec := &recordingRuntime{rt: resumeRT}
 	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 	if err != nil {
 		t.Fatalf("gate reply-only Run: %v", err)
 	}
-	if commit.Session == nil || commit.Session.ID == nil || !commit.Session.BumpResumes {
-		t.Fatalf("commit.Session = %+v, want an existing session id with BumpResumes true (a resume, not fresh)", commit.Session)
+	// BumpResumes is charged by Reserve now, not by the terminal commit
+	// (design section 4.2); the resume is proved instead by the commit's
+	// session id matching the already-open session, not a freshly minted
+	// one.
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
 	}
 	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
 		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
@@ -446,7 +464,7 @@ func seedCohortWithSeals(t *testing.T, s *store.Store, ticketID int64, plan resp
 	if err != nil || !claimed {
 		t.Fatalf("seedCohortWithSeals: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, "claude-x")
+	rsv, err := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeClaude}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("seedCohortWithSeals: reserve: %v", err)
 	}

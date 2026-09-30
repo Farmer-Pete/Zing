@@ -107,3 +107,33 @@ func TestDisplayBody_UnknownUpdateBodyIsUnchanged(t *testing.T) {
 		t.Errorf("displayBody(%q) = %q, want it unchanged", body, got)
 	}
 }
+
+// TestUpdateLineBuildMarkers proves the six build markers design section
+// 9.2 names each render as their own owner-facing sentence: "claims ok run
+// <rid>", "claim errors pending run <rid>" (with its error lines kept
+// below the header sentence), "claim errors delivered run <rid>",
+// "perimeter resolved run <rid>", "retry requested" (no run id), and
+// "perimeter question dropped run <rid>".
+func TestUpdateLineBuildMarkers(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"claims ok", "claims ok run 12", "Claims checked for run 12."},
+		{
+			"claim errors pending",
+			"claim errors pending run 12\nclaims/test_exit: observed 1, want 0",
+			"Claim check failed for run 12:\nclaims/test_exit: observed 1, want 0",
+		},
+		{"claim errors delivered", "claim errors delivered run 12", "Claim errors sent back to run 12."},
+		{"perimeter resolved", "perimeter resolved run 9", "Perimeter decided for run 9."},
+		{"retry requested", "retry requested", "Retry requested."},
+		{"perimeter question dropped", "perimeter question dropped run 4", "Perimeter question dropped for run 4."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := displayBody(updateRow(tc.body)); got != tc.want {
+				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}

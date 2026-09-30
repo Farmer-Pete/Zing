@@ -50,3 +50,33 @@ func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 		}
 	}
 }
+
+// TestPostRunFailedWhatFor covers postRunFailedWhatFor's own table (design
+// section 4.1): the four origins runAndRoute already threads through
+// postRunFailure, the three origins Package 8 adds ahead of their own
+// callers, and an unknown origin's fallback sentence.
+func TestPostRunFailedWhatFor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		origin response.EscalationOrigin
+		want   string
+	}{
+		{response.EscalationOriginClassify, "classifying the ticket"},
+		{response.EscalationOriginPlanningFirst, "storing or checking the plan"},
+		{response.EscalationOriginPlanningResume, "storing or checking the plan"},
+		{response.EscalationOriginPlanreview, "storing the plan review"},
+		{response.EscalationOriginBuild, "storing or checking the build result"},
+		{response.EscalationOriginFix, "storing or checking the build result"},
+		{response.EscalationOriginPerimeter, "storing the perimeter description"},
+		{response.EscalationOriginSeal, "storing or checking the agent's result"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.origin), func(t *testing.T) {
+			t.Parallel()
+			if got := postRunFailedWhatFor(tt.origin); got != tt.want {
+				t.Errorf("postRunFailedWhatFor(%s) = %q, want %q", tt.origin, got, tt.want)
+			}
+		})
+	}
+}

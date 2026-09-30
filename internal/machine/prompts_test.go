@@ -40,6 +40,16 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 			path:   "prompts/planreview.md",
 			sha256: "c0cc39368632ea2ffa0f4672e8c576d7d044b26a4cae9c43d7fc81c1c2320d7f",
 		},
+		{
+			name:   testJobNameBuild,
+			path:   "prompts/build.md",
+			sha256: "3a88533d216936fba660e84fcf4dea0004f61442b9195b6ee00b3c2428b10fc8",
+		},
+		{
+			name:   "perimeter",
+			path:   "prompts/perimeter.md",
+			sha256: "78b4863acf309085bc37f8f33cfea8f430d08b57d44102023eea1f3c03ef00b6",
+		},
 	}
 
 	for _, tc := range cases {
@@ -60,5 +70,25 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 				t.Errorf("%s sha256 = %s, want %s", tc.path, gotHex, tc.sha256)
 			}
 		})
+	}
+}
+
+// TestBuildPromptPlaceholders checks that prompts/build.md carries each of
+// its five placeholders exactly once, so ForBuild's single replacement of
+// each cannot silently miss or double up.
+func TestBuildPromptPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	got, err := zing.Assets.ReadFile("prompts/build.md")
+	if err != nil {
+		t.Fatalf("ReadFile(prompts/build.md): %v", err)
+	}
+	text := string(got)
+
+	placeholders := []string{"{n}", "{total}", "{task title}", "{test_cmd}", "{lint_cmd}"}
+	for _, p := range placeholders {
+		if n := strings.Count(text, p); n != 1 {
+			t.Errorf("prompts/build.md contains %s %d times, want 1", p, n)
+		}
 	}
 }

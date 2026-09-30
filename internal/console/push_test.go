@@ -43,7 +43,7 @@ func newPushTestServer(t *testing.T) (srv *httptest.Server) {
 	port := addr.Port
 
 	push := notify.New(s)
-	handler := console.New(s, bus.New(), nil, []string{testBindHost}, port, newTestLogHandler(t), push, testPushToken2, response.SeverityMinor)
+	handler := console.New(s, bus.New(), nil, []string{testBindHost}, port, newTestLogHandler(t), push, testPushToken2, response.SeverityMinor, "")
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -105,7 +105,7 @@ func newPushTestServerWithToken(t *testing.T, pushToken string) (srv *httptest.S
 	port := addr.Port
 
 	push := notify.New(s)
-	handler := console.New(s, bus.New(), nil, []string{testBindHost}, port, newTestLogHandler(t), push, pushToken, response.SeverityMinor)
+	handler := console.New(s, bus.New(), nil, []string{testBindHost}, port, newTestLogHandler(t), push, pushToken, response.SeverityMinor, "")
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -341,7 +341,7 @@ func TestPushSubscribe_StoreFailureReturns500NotBadRequest(t *testing.T) {
 	}
 
 	push := notify.New(s)
-	handler := console.New(s, bus.New(), nil, []string{testBindHost}, addr.Port, newTestLogHandler(t), push, testPushToken2, response.SeverityMinor)
+	handler := console.New(s, bus.New(), nil, []string{testBindHost}, addr.Port, newTestLogHandler(t), push, testPushToken2, response.SeverityMinor, "")
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)

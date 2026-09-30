@@ -141,6 +141,16 @@ func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machi
 // this directly.
 func newTestServerFloor(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, floor response.Severity) *httptest.Server {
 	t.Helper()
+	return newTestServerSandbox(t, s, b, m, log, floor, "")
+}
+
+// newTestServerSandbox is newTestServerFloor with an explicit sandboxReason
+// (design section 9.2, Task 15): every other test in this package keeps the
+// default "" (sandbox available) through newTestServer or newTestServerFloor;
+// TestNavShowsSandboxOff and TestNavHidesSandboxWhenLoaded call this
+// directly, to prove the nav region's sandbox indicator at both values.
+func newTestServerSandbox(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, floor response.Severity, sandboxReason string) *httptest.Server {
+	t.Helper()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
@@ -152,7 +162,7 @@ func newTestServerFloor(t *testing.T, s *store.Store, b *bus.Broker, m *machine.
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -296,7 +306,7 @@ func seedRun(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 
 	reserved, err := s.Reserve(t.Context(), ticketID, owner, expires,
-		store.SessionUpsert{Job: testPlanningLiteral, Runtime: testRuntimeFake}, "test-model")
+		store.SessionUpsert{Job: testPlanningLiteral, Runtime: testRuntimeFake}, store.RunSeed{Model: "test-model"})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -512,5 +522,52 @@ func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 	_ = staticResp.Body.Close()
 	if staticResp.StatusCode != http.StatusOK {
 		t.Errorf("GET /static/datastar.js status = %d, want 200", staticResp.StatusCode)
+	}
+}
+
+// TestNavShowsSandboxOff proves the nav region's sandbox indicator (design
+// section 9.2, Task 15): with a non-empty sandboxReason, GET / renders the
+// closed span with the reason as its title.
+func TestNavShowsSandboxOff(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "sandbox-exec not found")
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	want := `<span class="sandbox-off" role="status" title="sandbox-exec not found">sandbox: off</span>`
+	if got := string(body); !strings.Contains(got, want) {
+		t.Errorf("GET / body missing %q; got:\n%s", want, got)
+	}
+}
+
+// TestNavHidesSandboxWhenLoaded proves the nav region renders no sandbox
+// indicator when sandboxReason is empty (design section 9.2: "empty means
+// available").
+func TestNavHidesSandboxWhenLoaded(t *testing.T) {
+	s := newConsoleTestStore(t)
+	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "")
+
+	//nolint:noctx // a bare GET on a test server needs no deadline
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if got := string(body); strings.Contains(got, `<span class="sandbox-off"`) {
+		t.Errorf("GET / body contains a sandbox-off span with sandboxReason empty; got:\n%s", got)
 	}
 }

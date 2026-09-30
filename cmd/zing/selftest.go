@@ -26,15 +26,40 @@ import (
 	"zing/internal/bus"
 	"zing/internal/console"
 	zdispatch "zing/internal/dispatch"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/lens"
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/schemagen"
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
+
+// selftestGitHub is a never-called orchestrator.GitHub, enough to satisfy
+// orchestrator.New's required parameter (PKG8-PLAN.md section 10): the
+// building state machine's own tests never push or open a pull request, so
+// every method here is unreachable in this suite.
+type selftestGitHub struct{}
+
+func (selftestGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (prURL string, number int, err error) {
+	return "", 0, errors.New("selftestGitHub: not implemented")
+}
+
+func (selftestGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
+	return "", 0, false, errors.New("selftestGitHub: not implemented")
+}
 
 // runSelftest proves the foundation on an empty machine: it migrates a fresh
 // temporary database and checks it. It prints "selftest: OK" and returns 0
@@ -97,6 +122,10 @@ func selftest() error {
 	}
 
 	if err := checkResponseExamples(response.ExampleFS); err != nil {
+		return err
+	}
+
+	if err := checkSandboxProfile(dir); err != nil {
 		return err
 	}
 
@@ -338,23 +367,41 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	// dir must carry "cmd/zing/main.go": the planning handler's ready entry
-	// point (design section 6.5) opens the project for real through
-	// os.OpenRoot and checks the fixture cohort's one code claim
-	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60") against
-	// it.
-	if mkErr := os.MkdirAll(filepath.Join(dir, "cmd", "zing"), 0o755); mkErr != nil {
-		return fmt.Errorf("mkdir cmd/zing: %w", mkErr)
+	// The project path is a real, signed gitfixture repository (PKG8-PLAN.md
+	// section 9.4, 10): building's EnsureWorktree, ChangedPaths, CommitTask,
+	// and SignedStatus all run real git against it. The planning handler's
+	// ready entry point (design section 6.5) opens the same directory
+	// through os.OpenRoot and checks the fixture cohort's one code claim
+	// (fixtures/scripts/planning/2.xml cites "cmd/zing/main.go:60"), so that
+	// path is committed here too, on top of gitfixture's own initial commit,
+	// and never shows up as an extra once building starts.
+	projDir := filepath.Join(dir, "project")
+	if mkErr := os.MkdirAll(projDir, 0o755); mkErr != nil {
+		return fmt.Errorf("mkdir project dir: %w", mkErr)
 	}
-	if wErr := os.WriteFile(filepath.Join(dir, "cmd", "zing", "main.go"), []byte("package main\n"), 0o600); wErr != nil {
-		return fmt.Errorf("write cmd/zing/main.go: %w", wErr)
+	if fixErr := gitfixture.NewSigningRepo(ctx, projDir); fixErr != nil {
+		return fmt.Errorf("build gitfixture repo: %w", fixErr)
+	}
+	if addErr := gitfixture.AddFile(ctx, projDir, filepath.Join("cmd", "zing", "main.go"), []byte("package main\n")); addErr != nil {
+		return fmt.Errorf("add cmd/zing/main.go to gitfixture repo: %w", addErr)
 	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
-		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: dir, Tracker: "github",
+		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: projDir, Tracker: "github",
 	})
 	if err != nil {
 		return err
+	}
+
+	orch, err := orchestrator.New(
+		orchestrator.Project{Owner: "zing-fixture", Repo: "zing-fixture", LocalPath: projDir, DefaultBranch: "main"},
+		selftestGitHub{}, orchestrator.NewRunner(), nil)
+	if err != nil {
+		return fmt.Errorf("build orchestrator: %w", err)
+	}
+	repoGit, err := orch.GitCommonDir(ctx)
+	if err != nil {
+		return fmt.Errorf("git common dir: %w", err)
 	}
 
 	b := bus.New()
@@ -363,6 +410,18 @@ func selftestResumeE2E(ctx context.Context) error {
 		zdispatch.Config{
 			Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner,
 			Models: e2eModels, Budget: e2eBudget, Floor: e2eFloor,
+			// selftest drives the fake runtime, never a real sandboxed
+			// process: sandbox.Off() is always unavailable, and
+			// RequireSandbox false lets a sandboxed job (build, perimeter)
+			// run unwrapped instead of refusing (design D5, section 10).
+			Sandbox: sandbox.Off(), RequireSandbox: false,
+			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			// Projects carries what the real building handler needs for
+			// this one project (PKG8-PLAN.md section 4.3): the fixture
+			// project's own test and lint commands (section 9.4).
+			Projects: map[int64]job.Project{
+				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+			},
 		}, rts)
 	if err != nil {
 		return err
@@ -558,7 +617,11 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 // reserved 127.0.0.1 listener, so its own real port -- not an arbitrary one
 // -- is what console.New's mutation guard allowlists (mw.go, design section
 // 6.14), and starts it, matching internal/console's own test helper
-// technique (mw_test.go's newMutationTestServer).
+// technique (mw_test.go's newMutationTestServer). It passes sandbox.Off()'s
+// own Reason() as console.New's sandboxReason (design section 9.2, Task
+// 15), matching the dispatcher's own sandbox.Off() above: selftest never
+// runs a real sandboxed process, so its console honestly shows sandbox: off
+// rather than claiming an availability nothing here provides.
 func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broker, m *machine.Machine, logHandler *console.Handler) (*httptest.Server, error) {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
@@ -571,7 +634,7 @@ func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broke
 		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor)
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor, sandbox.Off().Reason())
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)
@@ -841,6 +904,39 @@ func verifySelftestCohortSealed(ctx context.Context, st *store.Store, ticketID i
 	}
 	return nil
 }
+
+// checkSandboxProfile proves the checked-in seatbelt profile actually loads
+// on this machine (design section 10, task 8): on macOS it runs sandbox.Load
+// for real, against dataDir, and fails with the sandbox's own reason when
+// it did not load, since an operator running selftest on their own laptop
+// should learn now, not at the first real build tick, that a real build run
+// would refuse to start (N9). selftest's own dispatcher never uses this
+// sandbox -- it always runs sandbox.Off() (below) -- so this is a canary
+// check, not a dependency of the e2e suite that follows it. It is a no-op
+// off darwin, where the sandbox is always unavailable by definition, and
+// when ZING_SANDBOXED is set (design section 5.3, Task 15): macOS refuses a
+// nested sandbox, so a selftest already running inside the profile -- for
+// example while zing builds itself -- cannot start sandbox-exec to prove
+// anything here, the same skip internal/sandbox's own darwin tests apply.
+func checkSandboxProfile(dataDir string) error {
+	if goruntime.GOOS != "darwin" || os.Getenv("ZING_SANDBOXED") != "" {
+		return nil
+	}
+	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+	if err != nil {
+		return fmt.Errorf("read embedded sandbox profile: %w", err)
+	}
+	sb := sandbox.Load(profile, dataDir, nil, e2eSandboxCheckPort)
+	if !sb.Available() {
+		return fmt.Errorf("selftest: sandbox profile did not load: %s", sb.Reason())
+	}
+	return nil
+}
+
+// e2eSandboxCheckPort is an arbitrary, valid port checkSandboxProfile's own
+// Load call renders into the profile's console-deny rule: it is never
+// dialed, so any value in 1-65535 would do.
+const e2eSandboxCheckPort = 7420
 
 // checkResponseTemplates renders every registered (job, outcome) pair's
 // annotated template, failing on the first error (design section 6.10):

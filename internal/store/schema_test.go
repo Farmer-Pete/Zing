@@ -300,11 +300,11 @@ func escalationPayloadJSON(code, origin string) []byte {
 		`{"code":%q,"what":"w","why":"y","tried":"t","options":["retry"],"origin":%q}`, code, origin))
 }
 
-// TestValidate_EscalationCodeAndOrigin proves every one of the fourteen
-// EscalationCode values (thirteen plus F025's post_run_failed) and the
-// eleven EscalationOrigin values validates against the committed escalation
-// schema, and an unknown value of either fails (design section 6.7, task
-// 4c).
+// TestValidate_EscalationCodeAndOrigin proves every one of the sixteen
+// EscalationCode values (fourteen plus Package 8's sandbox_unavailable and
+// replan_unsupported) and the fourteen EscalationOrigin values validates
+// against the committed escalation schema, and an unknown value of either
+// fails (design section 6.7, task 4c; design section 4.1, Package 8).
 func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -314,8 +314,8 @@ func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	}
 
 	codes := response.EscalationCode("").Values()
-	if len(codes) != 14 {
-		t.Fatalf("len(EscalationCode values) = %d, want 14", len(codes))
+	if len(codes) != 16 {
+		t.Fatalf("len(EscalationCode values) = %d, want 16", len(codes))
 	}
 	for _, code := range codes {
 		t.Run("code "+code, func(t *testing.T) {
@@ -328,8 +328,8 @@ func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	}
 
 	origins := response.EscalationOrigin("").Values()
-	if len(origins) != 11 {
-		t.Fatalf("len(EscalationOrigin values) = %d, want 11", len(origins))
+	if len(origins) != 14 {
+		t.Fatalf("len(EscalationOrigin values) = %d, want 14", len(origins))
 	}
 	for _, origin := range origins {
 		t.Run("origin "+origin, func(t *testing.T) {
@@ -377,5 +377,46 @@ func TestValidate_EscalationSessionIDOptional(t *testing.T) {
 	withSessionID := `{"code":"other","what":"w","why":"y","tried":"t","options":["retry"],"origin":"seal","session_id":42}`
 	if err := schemas.validate(testTableMessages, testTypeEscalation, []byte(withSessionID)); err != nil {
 		t.Errorf("validate(session_id=42): %v, want nil", err)
+	}
+}
+
+// TestFileDecisionSchemaIsNarrow proves the file artifact's decision enum
+// holds only accept and reject (section 4.1): FileArtifact.Decision's own
+// type narrows the four-value Decision enum tag on Package 3's field, which
+// generated a six-entry enum by appending instead of narrowing.
+func TestFileDecisionSchemaIsNarrow(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	filePayload := func(decision string) string {
+		return `{"path":"a.go","action":"create","reason":"r","trust_root":false,"style_guide":false,"task_n":1,"decision":"` + decision + `"}`
+	}
+
+	tests := []struct {
+		name     string
+		decision string
+		wantOK   bool
+	}{
+		{"accept validates", "accept", true},
+		{"reject validates", "reject", true},
+		{"drop is refused", "drop", false},
+		{"discuss is refused", "discuss", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := schemas.validate(testTableArtifacts, "file", []byte(filePayload(tt.decision)))
+			if tt.wantOK && err != nil {
+				t.Errorf("validate(decision=%s) = %v, want nil", tt.decision, err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Errorf("validate(decision=%s) = nil, want error", tt.decision)
+			}
+		})
 	}
 }

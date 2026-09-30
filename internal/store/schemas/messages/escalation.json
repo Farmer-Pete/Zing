@@ -17,7 +17,9 @@
         "runtime_exec_failed",
         "response_invalid",
         "seal_failed",
-        "post_run_failed"
+        "post_run_failed",
+        "sandbox_unavailable",
+        "replan_unsupported"
       ]
     },
     "what": {
@@ -58,7 +60,10 @@
         "cap_loops",
         "cap_budget",
         "split",
-        "nothing_to_do_claims"
+        "nothing_to_do_claims",
+        "build",
+        "perimeter",
+        "fix"
       ]
     }
   },

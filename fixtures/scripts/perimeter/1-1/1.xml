@@ -1,0 +1,10 @@
+<zing job="perimeter" outcome="question">
+  <question key="Q1">
+    <title>Which style?</title>
+    <body>Say which one you mean.</body>
+    <option key="a">Use a hyphen</option>
+    <option key="b">Use a space</option>
+    <recommended>a</recommended>
+  </question>
+  <progress>Not yet described.</progress>
+</zing>

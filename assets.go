@@ -5,5 +5,5 @@ package zing
 
 import "embed"
 
-//go:embed machine.toml prompts
+//go:embed machine.toml prompts sandbox
 var Assets embed.FS

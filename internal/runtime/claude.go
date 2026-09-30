@@ -123,27 +123,30 @@ func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
 }
 
 // allowedParentEnv is the parent-process variables Run carries into the
-// child when they are set (design section 4.1). Everything else the
-// calling process happens to have is not the child's business.
-var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR"}
+// child when they are set (design section 4.1, decision D6). Everything
+// else the calling process happens to have is not the child's business.
+// USER is carried because claude -p reports "Not logged in" without it;
+// LOGNAME alone does not stand in for it.
+var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR", "USER"}
 
-// agentEnv builds the filtered environment (design section 4.1), shared by
-// both Claude and Codex: the allowlisted parent variables, then req.Env,
-// then the two variables every run needs, then a drop pass that removes
-// anything shaped like a secret except ZING_RUN_TOKEN by its exact name --
-// so a GITHUB_TOKEN or an AWS_SECRET_ACCESS_KEY riding in on req.Env can
-// never reach the child. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a
-// codex run: it is an environment variable, not a flag, and codex ignores
-// names it does not read.
-func agentEnv(req RunRequest) []string {
-	merged := make([]string, 0, len(allowedParentEnv)+len(req.Env)+2)
+// FilteredEnv builds the filtered environment two callers share (review
+// F051): agentEnv below (Claude and Codex runs) and runShellCommand in
+// internal/job/commands.go (the sandbox-probe, git, and lint/test commands
+// a build or fix unit runs). It is the allowlisted parent variables, then
+// extra, then a drop pass that removes anything shaped like a secret except
+// ZING_RUN_TOKEN by its exact name -- so a GITHUB_TOKEN or an
+// AWS_SECRET_ACCESS_KEY, whether inherited from the calling process's own
+// environment or riding in on extra, can never reach the child. Duplicate
+// names: os/exec keeps the last value for a repeated name, so a value in
+// extra always wins over the same name from the parent allowlist.
+func FilteredEnv(extra []string) []string {
+	merged := make([]string, 0, len(allowedParentEnv)+len(extra))
 	for _, name := range allowedParentEnv {
 		if v, ok := os.LookupEnv(name); ok {
 			merged = append(merged, name+"="+v)
 		}
 	}
-	merged = append(merged, req.Env...)
-	merged = append(merged, "CLAUDE_CODE_PROMPT_CACHE_TTL=1h", "ZING_RUN_TOKEN="+req.RunToken)
+	merged = append(merged, extra...)
 
 	out := make([]string, 0, len(merged))
 	for _, kv := range merged {
@@ -153,6 +156,15 @@ func agentEnv(req RunRequest) []string {
 		}
 	}
 	return out
+}
+
+// agentEnv builds the filtered environment (design section 4.1), shared by
+// both Claude and Codex: FilteredEnv over req.Env plus the two variables
+// every run needs. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a codex run:
+// it is an environment variable, not a flag, and codex ignores names it
+// does not read.
+func agentEnv(req RunRequest) []string {
+	return FilteredEnv(append(req.Env, "CLAUDE_CODE_PROMPT_CACHE_TTL=1h", "ZING_RUN_TOKEN="+req.RunToken))
 }
 
 // envNameBlocked reports whether name is shaped like a secret (design
@@ -259,6 +271,40 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.WaitDelay = 5 * time.Second
 }
 
+// killProcessGroup sends SIGKILL to cmd's whole process group, once Wait has
+// already returned, on every path -- success and failure alike (design
+// section 5.5): configureProcessGroup's own cmd.Cancel only reaches the
+// group on ctx cancellation, so a descendant the CLI forked (a build task's
+// own shell, say) that outlives a clean exit would otherwise survive Run
+// returning. ESRCH (no such process: the group is already gone) is not
+// logged; any other failure to signal it is, since it means a descendant may
+// still be running past the point Run's caller believes the run is over.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Warn("kill process group", "pid", cmd.Process.Pid, "error", err)
+	}
+}
+
+// commandNameArgs resolves the name and args exec.CommandContext should
+// start (design section 4.4): with no ExecPrefix, the resolved binary and
+// argv unchanged; with one, ExecPrefix[0] as name and ExecPrefix[1:] plus
+// the resolved binary plus argv as args, so the sandbox's own
+// "sandbox-exec -D ... -p <profile>" prefix wraps the real claude
+// invocation without argv itself ever changing shape.
+func (c Claude) commandNameArgs(req RunRequest, argv []string) (name string, args []string) {
+	if len(req.ExecPrefix) == 0 {
+		return c.resolveBin(), argv
+	}
+	args = make([]string, 0, len(req.ExecPrefix)-1+1+len(argv))
+	args = append(args, req.ExecPrefix[1:]...)
+	args = append(args, c.resolveBin())
+	args = append(args, argv...)
+	return req.ExecPrefix[0], args
+}
+
 // classifyProcessOutcome applies the shared priority order both runtimes use
 // once a process has exited (design section 4.1): ctx.Err() explains the
 // exit before anything else, because after a kill a process's own exit
@@ -331,7 +377,8 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 // wait for it, and classify however it ended (design section 4.1). It
 // never logs; Run does that once, for every path, after this returns.
 func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID string, start time.Time) (RunResult, error) {
-	cmd := exec.CommandContext(ctx, c.resolveBin(), argv...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, never from raw external input
+	name, args := c.commandNameArgs(req, argv)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
 	cmd.Env = agentEnv(req)
 	cmd.Stdin = strings.NewReader(req.Prompt)
@@ -349,6 +396,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	}
 
 	waitErr := cmd.Wait()
+	killProcessGroup(cmd)
 
 	res := RunResult{
 		AgentTime:    time.Since(start),

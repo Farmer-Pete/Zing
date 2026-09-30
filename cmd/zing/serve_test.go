@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/store"
 )
 
@@ -88,6 +89,10 @@ const (
 	testServeProjectName = "zing"
 	testServeTracker     = "github"
 	testServeStateQueued = "queued"
+	// testServeTicketRef is seedQueuedTicketForServe's own tracker_ref
+	// (goconst): every file that later looks for that one ticket by ref
+	// shares this constant rather than repeating the literal.
+	testServeTicketRef = "manual#1"
 )
 
 // zingTOMLOpts parameterizes writeZingTOML's console.bind, dispatch, and
@@ -100,8 +105,25 @@ type zingTOMLOpts struct {
 	Bind            []string // nil or empty writes bind = [], an invalid config
 }
 
+// newTestGitRepo git-inits a fresh temp directory and returns its path: task
+// 8's serve wires one orchestrator.Orchestrator per configured project and
+// resolves its git common dir at startup (GitCommonDir), so writeZingTOML's
+// project path must be a real repository, not merely an existing directory.
+// "git rev-parse --git-common-dir" succeeds against a freshly initialized
+// repo with no commits, so init alone is enough.
+func newTestGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := gitfixture.Git(t.Context(), dir, "init", "-q", dir); err != nil {
+		t.Fatalf("git init %s: %v (%s)", dir, err, out)
+	}
+	return dir
+}
+
 // writeZingTOML writes a zing.toml built from opts to path, quoting each
-// Bind entry into a TOML array (an empty or nil Bind writes bind = []).
+// Bind entry into a TOML array (an empty or nil Bind writes bind = []). The
+// one configured project's path is a fresh, real git repository
+// (newTestGitRepo), since serve now resolves its git common dir at startup.
 func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	t.Helper()
 
@@ -125,10 +147,10 @@ max_parallel = %d
 [[projects]]
 name = "zing"
 repo = "x/zing"
-path = "/tmp/zing-project"
+path = %q
 tracker = "github"
 commands = { test = "go test ./...", lint = "golangci-lint run" }
-`, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel)
+`, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t))
 
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
@@ -288,7 +310,7 @@ func seedQueuedTicketForServe(t *testing.T, st *store.Store) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	if _, err := st.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: "manual#1", Title: "a ticket", State: testServeStateQueued,
+		ProjectID: projectID, TrackerRef: testServeTicketRef, Title: "a ticket", State: testServeStateQueued,
 	}); err != nil {
 		t.Fatalf("InsertTicket: %v", err)
 	}

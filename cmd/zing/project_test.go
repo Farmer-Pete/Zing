@@ -142,8 +142,8 @@ func TestProjectAdd_WritesProjectWithDiscoveredDefaultBranch(t *testing.T) {
 		t.Fatalf("Projects = %+v, want exactly one", cfg.Projects)
 	}
 	got := cfg.Projects[0]
-	if got.Name != "zing" || got.Repo != "Farmer-Pete/Zing" || got.Path != dir ||
-		got.DefaultBranch != discoveredBranch || got.Tracker != "github" ||
+	if got.Name != testServeProjectName || got.Repo != "Farmer-Pete/Zing" || got.Path != dir ||
+		got.DefaultBranch != discoveredBranch || got.Tracker != testServeTracker ||
 		got.Commands.Test != "go test ./..." || got.Commands.Lint != "golangci-lint run" {
 		t.Errorf("saved project = %+v, want name=zing repo=Farmer-Pete/Zing path=%s default_branch=%s tracker=github", got, dir, discoveredBranch)
 	}

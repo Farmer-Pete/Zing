@@ -11,6 +11,9 @@ import (
 const (
 	machineTOMLPath = "machine.toml"
 	stubPromptPath  = "classify.md"
+	// testJobNameBuild is the real machine.toml's "build" job name
+	// (goconst): both this file and prompts_test.go repeat it.
+	testJobNameBuild = "build"
 )
 
 func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
@@ -46,7 +49,7 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 
 	// build sets max_resumes explicitly.
-	if got := m.Jobs["build"].MaxResumes; got != 3 {
+	if got := m.Jobs[testJobNameBuild].MaxResumes; got != 3 {
 		t.Errorf("build.MaxResumes = %d, want 3", got)
 	}
 
@@ -54,6 +57,59 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if got := m.Jobs["classify"].MaxResumes; got != 1 {
 		t.Errorf("classify.MaxResumes = %d, want 1 (the absent-key default)", got)
 	}
+
+	// build and perimeter both run under the seatbelt sandbox; classify does
+	// not (PKG8-PLAN.md section 4.5).
+	if got := m.Jobs[testJobNameBuild].Sandbox; got != testJobNameBuild {
+		t.Errorf("build.Sandbox = %q, want build", got)
+	}
+	if got := m.Jobs["perimeter"].Sandbox; got != testJobNameBuild {
+		t.Errorf("perimeter.Sandbox = %q, want build", got)
+	}
+	if got := m.Jobs["classify"].Sandbox; got != "" {
+		t.Errorf("classify.Sandbox = %q, want empty", got)
+	}
+}
+
+// TestJobSandboxKey proves the sandbox key's own validation (PKG8-PLAN.md
+// section 4.5): absent or "build" both load clean, and any other value is
+// rejected with the exact error text.
+func TestJobSandboxKey(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "" {
+			t.Errorf("Sandbox = %q, want empty", got)
+		}
+	})
+
+	t.Run(testJobNameBuild, func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"build\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != testJobNameBuild {
+			t.Errorf("Sandbox = %q, want build", got)
+		}
+	})
+
+	t.Run("anything else", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"bogus\"\n"), machineTOMLPath)
+		if err == nil {
+			t.Fatal("Load() = nil, want an error")
+		}
+		want := "machine.toml: job test: sandbox: must be absent or build"
+		if err.Error() != want {
+			t.Errorf("Load() = %q, want %q", err.Error(), want)
+		}
+	})
 }
 
 // TestLoad_UnknownKeyIsRejected proves the machine.toml unknown-key check

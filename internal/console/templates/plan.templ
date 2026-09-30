@@ -39,6 +39,7 @@ templ PlanView(p RenderedPlan) {
 		<h2>Delivery</h2>
 		<h3>Files</h3>
 		@filesTable(p.Delivery.Files)
+		@decidedFilesSection(p.Delivery.DecidedFiles)
 		<h3>Deletions</h3>
 		@deletionsSection(p.Delivery.Deletions)
 		<h3>Tests</h3>
@@ -263,6 +264,54 @@ templ filesTable(files []response.FileChange) {
 			}
 		</tbody>
 	</table>
+}
+
+// decidedFilesSection renders Delivery.DecidedFiles (design section 9.2): a
+// "Decided during build" sub-list of path, decision, task number, marker,
+// builder reason, and perimeter description, fed by the newest FileEvents
+// row per path that carries an owner decision. It renders nothing when
+// DecidedFiles is empty (no perimeter decision made yet).
+templ decidedFilesSection(files []response.FileArtifact) {
+	if len(files) > 0 {
+		<h4>Decided during build</h4>
+		<table class="decided-files">
+			<thead>
+				<tr>
+					<th>Path</th>
+					<th>Decision</th>
+					<th>Task</th>
+					<th>Marker</th>
+					<th>Builder reason</th>
+					<th>Description</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, f := range files {
+					<tr>
+						<td>{ f.Path }</td>
+						<td>{ string(*f.Decision) }</td>
+						<td>{ strconv.Itoa(f.TaskN) }</td>
+						<td>{ decidedMarker(f) }</td>
+						<td>{ f.Reason }</td>
+						<td>{ f.Description }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// decidedMarker renders one decided file's marker (design section 4.1,
+// 6.5, 9.2): "trust root" or "style guide" when set, empty otherwise.
+func decidedMarker(f response.FileArtifact) string {
+	switch {
+	case f.TrustRoot:
+		return "trust root"
+	case f.StyleGuide:
+		return "style guide"
+	default:
+		return ""
+	}
 }
 
 // deletionsSection renders Delivery.Deletions (design section 6.9): a table

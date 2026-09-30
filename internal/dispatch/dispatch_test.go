@@ -23,10 +23,13 @@ import (
 	"zing/fixtures"
 	"zing/internal/bus"
 	"zing/internal/dispatch"
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 	"zing/internal/tracker"
 )
@@ -42,8 +45,9 @@ const (
 	testStateShipping  = "shipping"
 	testStateDone      = "done"
 
-	testOwner      = "test-host-1"
-	testFixtureRef = "fake#1" // fixtures/tickets.toml's one ticket
+	testOwner       = "test-host-1"
+	testFixtureRef  = "fake#1" // fixtures/tickets.toml's one ticket
+	testTicketTitle = "a ticket"
 
 	testWaitingQuestions = "questions"
 	testWaitingGate      = "gate"
@@ -54,6 +58,7 @@ const (
 
 	testMsgTypeEscalation = "escalation"
 	testOutcomeError      = "error"
+	testModelClaudeX      = "claude-x"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -171,16 +176,113 @@ func testRuntimeSet(t *testing.T, rt runtime.Runtime) runtime.Set {
 // so classify and planning can resolve a model and pass the budget check,
 // and Reserve wired to a real store.Reserve closure over (owner, expires),
 // exactly as dispatch.Dispatcher.runAndCommit wires it for a real Tick
-// (design D13).
+// (design D13). Sandbox is always off and RequireSandbox false (this suite
+// drives the fake runtime, never a real sandboxed process, design D5);
+// Commands is the real, unwrapped CommandRunner (PKG8-PLAN.md section 10);
+// Projects covers every seeded project whose LocalPath happens to be a real
+// git repository (buildTestProjects), which is every project a building
+// test seeds through seedGitBackedProject and no other project in this
+// file, since testProjectDir's own plain directory has no .git for
+// GitCommonDir to resolve.
 func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, expires time.Time) job.Deps {
 	t.Helper()
 	return job.Deps{
 		Store: s, Runtimes: testRuntimeSet(t, rt), Machine: loadMachine(t),
 		Models: testModels, Budget: testBudget, Owner: owner, Expires: expires,
-		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, model string) (store.Reserved, error) {
-			return s.Reserve(ctx, ticketID, owner, expires, su, model)
+		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
+			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
+		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Commands: job.NewCommandRunner(sandbox.Off(), false),
+		Projects: buildTestProjects(t, s),
 	}
+}
+
+// dispatchTestGitHub is a never-called orchestrator.GitHub, enough to
+// satisfy orchestrator.New's required parameter: this file's own building
+// test never pushes or opens a pull request.
+type dispatchTestGitHub struct{}
+
+func (dispatchTestGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("dispatchTestGitHub: not implemented")
+}
+
+func (dispatchTestGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("dispatchTestGitHub: not implemented")
+}
+
+func (dispatchTestGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (prURL string, number int, err error) {
+	return "", 0, errors.New("dispatchTestGitHub: not implemented")
+}
+
+func (dispatchTestGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
+	return "", 0, false, errors.New("dispatchTestGitHub: not implemented")
+}
+
+// buildTestProjects returns a job.Project for every store project whose
+// LocalPath is a real git repository: orchestrator.New never fails on a
+// plain directory, but GitCommonDir does, so a project seeded through the
+// ordinary testProjectDir (no .git) is silently left out, and only a
+// project seeded through seedGitBackedProject ever reaches the building
+// handler with what it needs.
+func buildTestProjects(t *testing.T, s *store.Store) map[int64]job.Project {
+	t.Helper()
+	projects, err := s.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	out := make(map[int64]job.Project, len(projects))
+	for _, p := range projects {
+		orch, orchErr := orchestrator.New(
+			orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: p.LocalPath, DefaultBranch: "main"},
+			dispatchTestGitHub{}, orchestrator.NewRunner(), nil)
+		if orchErr != nil {
+			continue
+		}
+		repoGit, gitErr := orch.GitCommonDir(t.Context())
+		if gitErr != nil {
+			continue // not a git repository; never reached by a building test
+		}
+		out[p.ID] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"}
+	}
+	return out
+}
+
+// seedGitBackedProject inserts a project whose LocalPath is a real, signed
+// gitfixture repository carrying readyClaimEvidencePath at HEAD (PKG8-PLAN.md
+// section 9.4, 10): the one shape the real building handler needs to run
+// EnsureWorktree, CommitTask, and SignedStatus for real.
+func seedGitBackedProject(t *testing.T, s *store.Store) int64 {
+	t.Helper()
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	if err := gitfixture.AddFile(t.Context(), dir, readyClaimEvidencePath, []byte("package main\n")); err != nil {
+		t.Fatalf("gitfixture.AddFile: %v", err)
+	}
+	proj := testProject
+	proj.LocalPath = dir
+	id, err := s.EnsureProject(t.Context(), proj)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	return id
+}
+
+// seedQueuedGitBackedTicket inserts one queued ticket under ref on a fresh
+// git-backed project (seedGitBackedProject), for a test that drives it all
+// the way through building.
+func seedQueuedGitBackedTicket(t *testing.T, s *store.Store, ref string) int64 {
+	t.Helper()
+	projectID := seedGitBackedProject(t, s)
+	id, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket(%s): %v", ref, err)
+	}
+	return id
 }
 
 // seedProject inserts testProject and returns its id.
@@ -200,7 +302,7 @@ func seedQueuedTicket(t *testing.T, s *store.Store, ref string) int64 {
 	t.Helper()
 	projectID := seedProject(t, s)
 	id, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: ref, Title: "a ticket", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket(%s): %v", ref, err)
@@ -233,8 +335,34 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 			advancePlanning(t, s, rt, ticketID)
 			continue
 		}
+		if state == testStateBuilding {
+			advanceBuilding(t, s, rt, ticketID)
+			continue
+		}
 		runHandlerOnce(t, s, rt, ticketID, state)
 	}
+}
+
+// advanceBuildingMaxCalls bounds advanceBuilding's own handler-call loop
+// (PKG8-PLAN.md task 9): each of the fixture plan's three tasks takes one
+// RUN call and one CHECK-then-LAND call, so six calls lands every task; the
+// headroom catches a stuck handler instead of hanging the test.
+const advanceBuildingMaxCalls = 8
+
+// advanceBuilding drives the real building handler through as many calls as
+// it now takes to land every fixture task and transition to reviewing
+// (design section 6): unlike the skeleton's one-shot fake build, each call
+// only advances one step (RUN, or CHECK and LAND together), so this loops
+// until the ticket leaves "building".
+func advanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	for range advanceBuildingMaxCalls {
+		runHandlerOnce(t, s, rt, ticketID, testStateBuilding)
+		if getTicket(t, s, ticketID).State != testStateBuilding {
+			return
+		}
+	}
+	t.Fatalf("advanceBuilding: still in building after %d handler calls", advanceBuildingMaxCalls)
 }
 
 // advancePlanningMaxCalls bounds advancePlanning's own handler-call loop:
@@ -612,21 +740,38 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 	s := newDispatchTestStore(t)
 	rt := fakeRuntime(t)
 
-	doneID := seedQueuedTicket(t, s, "fake#1")
+	doneID := seedQueuedGitBackedTicket(t, s, "fake#1")
 	advanceTicket(t, s, rt, doneID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging, testStateShipping)
 
-	buildingID := seedQueuedTicket(t, s, "fake#2")
+	buildingID := seedQueuedGitBackedTicket(t, s, "fake#2")
 	advanceTicket(t, s, rt, buildingID, testStateQueued, testStatePlanning)
 
 	queuedID := seedQueuedTicket(t, s, "fake#3")
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil, dispatch.Config{
+		MaxParallel: 2, Owner: testOwner,
+		Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+		Projects: buildTestProjects(t, s),
+	})
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	if got := getTicket(t, s, buildingID).State; got != testStateReviewing {
-		t.Errorf("building ticket state = %q, want reviewing (picked first, furthest along)", got)
+	// One tick only runs the building handler's own RUN first turn for the
+	// furthest-along ticket (task 9: a unit takes a RUN call and a separate
+	// CHECK-then-LAND call, never both in one tick), so buildingID stays in
+	// "building" -- but its first task's build_report now exists, proving
+	// it really was picked and run this tick, unlike the untouched queued
+	// ticket below.
+	if got := getTicket(t, s, buildingID).State; got != testStateBuilding {
+		t.Errorf("building ticket state = %q, want still building (one tick runs one build step)", got)
+	}
+	reports, err := s.BuildReports(t.Context(), buildingID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	if len(reports) == 0 {
+		t.Error("building ticket has no build_report after being picked first, want one from this tick's RUN")
 	}
 	if got := getTicket(t, s, queuedID).State; got != testStateQueued {
 		t.Errorf("queued ticket state = %q, want still queued (lower priority)", got)
@@ -1616,7 +1761,7 @@ const testPlanPayload = `{
 type sealMismatchHandler struct{}
 
 func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -1712,7 +1857,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	projectID := seedProject(t, s)
 	kind := "feature"
 	ticketID, err := s.InsertTicket(ctx, store.Ticket{
-		ProjectID: projectID, TrackerRef: "gate-race#1", Title: "a ticket", Kind: &kind, State: testStateQueued,
+		ProjectID: projectID, TrackerRef: "gate-race#1", Title: testTicketTitle, Kind: &kind, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("seedGateReadyTicket: InsertTicket: %v", err)
@@ -1725,7 +1870,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	if err != nil || !claimed {
 		t.Fatalf("seedGateReadyTicket: claim: claimed=%v err=%v", claimed, err)
 	}
-	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := s.Reserve(ctx, ticketID, owner, expires, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		t.Fatalf("seedGateReadyTicket: reserve: %v", err)
 	}
@@ -1964,7 +2109,7 @@ func TestTick_ErrNoActionReleasesClaimWithoutStopping(t *testing.T) {
 type cancelingReserveHandler struct{}
 
 func (cancelingReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x"); err != nil {
+	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX}); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{}, runtime.ErrCanceled
@@ -2039,7 +2184,7 @@ func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
 type postRunFailureHandler struct{}
 
 func (postRunFailureHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -2141,7 +2286,7 @@ func (claimLostBeforeReserveHandler) Run(ctx context.Context, t store.Ticket, d 
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, "claude-x")
+	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
 	if err == nil {
 		return store.HandlerCommit{}, errors.New("Reserve unexpectedly succeeded after the lease was stolen")
 	}

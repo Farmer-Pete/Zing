@@ -17,8 +17,16 @@ import (
 // bridge design section 6.3 gives console.js, so navigation goes through
 // the one authoritative trigger element from day one, not a shortcut around
 // it.
-templ Nav(projects []store.Project, threads []NavThread) {
+//
+// sandboxReason is console.New's own sandboxReason (design section 9.2,
+// Task 15): empty when the sandbox is available, in which case this renders
+// no indicator at all; otherwise the closed span shows in red (shell.templ)
+// with the reason as its title.
+templ Nav(projects []store.Project, threads []NavThread, sandboxReason string) {
 	<nav id="nav">
+		if sandboxReason != "" {
+			<span class="sandbox-off" role="status" title={ sandboxReason }>sandbox: off</span>
+		}
 		<section class="nav-views">
 			@navLink("inbox", 0, 0, "Inbox")
 			@navLink("recent", 0, 0, "Recent")

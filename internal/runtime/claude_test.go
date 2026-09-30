@@ -9,7 +9,9 @@ import (
 	"regexp"
 	goruntime "runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -267,6 +269,59 @@ func TestClaude_EnvFilter(t *testing.T) {
 	}
 }
 
+// TestAgentEnvCarriesUser covers D6 (plan section 4.4): claude -p reports
+// "Not logged in" when the child sees no USER, and LOGNAME alone does not
+// stand in for it, so agentEnv must carry the parent's USER through.
+func TestAgentEnvCarriesUser(t *testing.T) {
+	// t.Setenv cannot combine with t.Parallel.
+	t.Setenv("USER", "zing-test")
+
+	env := agentEnv(RunRequest{})
+
+	if !slices.Contains(env, "USER=zing-test") {
+		t.Errorf("agentEnv() = %v, want it to contain %q", env, "USER=zing-test")
+	}
+}
+
+// TestAgentEnvOmitsLogname guards against widening the fix into a second
+// variable: LOGNAME is not in allowedParentEnv, so setting it in the parent
+// must not make it appear in the child's environment.
+func TestAgentEnvOmitsLogname(t *testing.T) {
+	// t.Setenv cannot combine with t.Parallel.
+	t.Setenv("LOGNAME", "zing-test")
+
+	env := agentEnv(RunRequest{})
+
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "LOGNAME" {
+			t.Errorf("agentEnv() = %v, want no LOGNAME entry", env)
+		}
+	}
+}
+
+// TestFilteredEnvExtraOverridesAllowlist proves FilteredEnv (review F051)
+// lets a value in extra override the same name from the parent allowlist --
+// os/exec keeps the last value for a duplicate name, so extra's own value
+// must sort after the allowlisted one in the returned slice -- and drops a
+// secret-shaped name in extra the same way it drops one inherited from the
+// parent. Not parallel: t.Setenv cannot combine with t.Parallel.
+func TestFilteredEnvExtraOverridesAllowlist(t *testing.T) {
+	t.Setenv("PATH", "/parent/path")
+
+	env := FilteredEnv([]string{"PATH=/extra/path", "EVIL_TOKEN=x"})
+
+	parentIdx := slices.Index(env, "PATH=/parent/path")
+	extraIdx := slices.Index(env, "PATH=/extra/path")
+	if parentIdx == -1 || extraIdx == -1 || extraIdx < parentIdx {
+		t.Errorf("FilteredEnv() = %v, want both PATH values present with extra's own value last (os/exec keeps the last duplicate)", env)
+	}
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "EVIL_TOKEN" {
+			t.Errorf("FilteredEnv() = %v, want no EVIL_TOKEN entry", env)
+		}
+	}
+}
+
 // ---- fixture parse ----------------------------------------------------------
 
 func TestClaude_FixtureParse_FirstTurn(t *testing.T) {
@@ -511,6 +566,79 @@ func TestClaude_StderrMetadata(t *testing.T) {
 	}
 	if strings.Contains(res.Log, "eeeeee") {
 		t.Error("Log retained raw stderr content")
+	}
+}
+
+// ---- ExecPrefix and process-group cleanup (design section 4.4, 5.5) -------
+
+// TestClaudeArgvWithExecPrefix proves commandNameArgs' own contract: name =
+// ExecPrefix[0], args = ExecPrefix[1:] + resolveBin() + argv. "env
+// PREFIX_MARKER=1 <fake_claude.sh> <argv...>" is a real prefix a sandbox
+// could plausibly build, using only a POSIX-standard binary: env sets
+// PREFIX_MARKER in the child's own environment before exec'ing the fake
+// script with the rest of ExecPrefix's contract intact -- the fake script
+// still records the normal argv unchanged.
+func TestClaudeArgvWithExecPrefix(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	req.ExecPrefix = []string{"env", "PREFIX_MARKER=1"}
+	c := NewClaude(fakeClaudeScript)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	want := wantArgv("--session-id", res.SessionID)
+	if !slices.Equal(argv, want) {
+		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
+	}
+
+	env := readRecordedEnv(t, dir)
+	if v, ok := env["PREFIX_MARKER"]; !ok || v != "1" {
+		t.Errorf("PREFIX_MARKER = %q, ok=%v, want \"1\" (proves env ran ahead of the fake script)", v, ok)
+	}
+}
+
+// TestClaudeKillsGroupAfterExit proves Run's process-group kill reaches a
+// grandchild the CLI forked and disowned (design section 5.5): the fixture
+// records the grandchild's pid, the test polls until that pid is gone, and
+// only then checks that the canary the grandchild would have written two
+// seconds in is absent. Polling for the death, not sleeping past the
+// write, is what makes the negative assertion mean something (review F031).
+func TestClaudeKillsGroupAfterExit(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	canary := filepath.Join(t.TempDir(), "canary")
+	req := newFakeRequest(dir, "fork_delay_write", "FAKE_CLAUDE_CANARY="+canary)
+
+	c := NewClaude(fakeClaudeScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "grandchild_pid"))
+	if err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse grandchild pid %q: %v", raw, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild %d still alive 5s after Run returned", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(canary); err == nil {
+		t.Error("the canary file exists: the forked grandchild survived Run and wrote it")
 	}
 }
 

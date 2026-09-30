@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -58,6 +59,41 @@ func TestSchemagenDiff_CatchesTamperedSchema(t *testing.T) {
 	if len(diffs) != 1 || diffs[0] != tamperedPath {
 		t.Errorf("Diff(tampered) = %v, want [%s]", diffs, tamperedPath)
 	}
+}
+
+// TestSelftestChecksProfileOnDarwin proves checkSandboxProfile's two darwin
+// behaviors Task 15 adds: it fails with the sandbox's own reason when the
+// real profile does not load, and it skips the check entirely when
+// ZING_SANDBOXED is set (design section 5.3). Skipped off darwin, where
+// checkSandboxProfile is always a no-op by definition. t.Setenv("PATH", "")
+// forces sandbox.Load's own exec.LookPath("sandbox-exec") to fail
+// (reasonSandboxExecNotFound), the same closed reason a laptop missing
+// Xcode's command line tools would hit for real, so this proves the failure
+// path without touching the checked-in profile.
+func TestSelftestChecksProfileOnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("checkSandboxProfile is a no-op off darwin")
+	}
+
+	t.Run("fails with the sandbox's reason when the profile cannot load", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		err := checkSandboxProfile(t.TempDir())
+		if err == nil {
+			t.Fatal("checkSandboxProfile() = nil, want an error with an empty PATH")
+		}
+		want := "selftest: sandbox profile did not load: sandbox-exec not found"
+		if err.Error() != want {
+			t.Errorf("checkSandboxProfile() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("skips when ZING_SANDBOXED is set", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		t.Setenv("ZING_SANDBOXED", "1")
+		if err := checkSandboxProfile(t.TempDir()); err != nil {
+			t.Errorf("checkSandboxProfile() = %v, want nil with ZING_SANDBOXED set", err)
+		}
+	})
 }
 
 // TestCheckResponseTemplates_RendersEveryRegisteredPair proves the pair
