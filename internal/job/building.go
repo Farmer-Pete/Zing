@@ -324,16 +324,13 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, fmt.Errorf("job: building: build reports: %w", err)
 	}
 
-	shas, err := proj.Orch.BranchCommits(ctx, wt)
+	unrecorded, prefixOK, err := unrecordedCommits(ctx, proj, wt, reports)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: branch commits: %w", err)
+		return store.HandlerCommit{}, err
 	}
-
-	recorded := recordedShas(reports)
-	if !isPrefixOf(recorded, shas) {
+	if !prefixOK {
 		return withBranch(buildEscalation(t, d, branchMissingRecordedWhat, branchMissingRecordedWhy, ""), wt), nil
 	}
-	unrecorded := shas[len(recorded):]
 
 	switch len(unrecorded) {
 	case 0:
@@ -354,7 +351,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	if !hasNext {
 		c := baseCommit(t, d)
 		c.Next, c.Reason = stateReviewing, reasonBuildDone
-		slog.Info("build done", "ticket_id", t.ID, "tasks", len(tasks), "commits", len(recorded))
+		slog.Info("build done", "ticket_id", t.ID, "tasks", len(tasks), "commits", len(recordedShas(reports)))
 		return withBranch(c, wt), nil
 	}
 	u, ok := unitFor(tasks, taskN)
@@ -1253,6 +1250,29 @@ func isPrefixOf(recorded, shas []string) bool {
 		}
 	}
 	return true
+}
+
+// unrecordedCommits reads wt's own branch commits and reports the ones past
+// what reports has recorded (design section 6.1 step 5, section 5.3 step 0
+// and 5.4 change 4): building's own Run and the fix driver's own step 0
+// both read this before deciding whether to escalate, continue, or adopt a
+// single unrecorded commit, so the branch read and the prefix check live
+// here once instead of twice. ok is false when recorded is not a prefix of
+// the branch's own commits (a recorded commit is missing from the branch,
+// or the branch holds them in a different order); the caller escalates
+// branchMissingRecordedWhat/Why itself, since the two callers' own
+// escalations carry different origins (building has no unit yet; a fix
+// unit is always origin fix).
+func unrecordedCommits(ctx context.Context, proj Project, wt orchestrator.Worktree, reports []store.BuildReportRow) (unrecorded []string, ok bool, err error) {
+	shas, err := proj.Orch.BranchCommits(ctx, wt)
+	if err != nil {
+		return nil, false, fmt.Errorf("job: building: branch commits: %w", err)
+	}
+	recorded := recordedShas(reports)
+	if !isPrefixOf(recorded, shas) {
+		return nil, false, nil
+	}
+	return shas[len(recorded):], true, nil
 }
 
 // nextTaskN is design section 6's step 2: the lowest task n with no landed
@@ -2551,28 +2571,30 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 
 // ---- step 0.5: verified adoption of an unrecorded commit -------------------
 
-// adopt is design section 6.1's single-unrecorded-commit branch: it runs
-// the seven checks in order, escalating unverifiable_commit at the first
-// failure (Tried names the failing check), and otherwise returns the LAND
-// commit for sha without ever calling CommitTask again.
+// adopt is design section 6.1's single-unrecorded-commit branch, shared by
+// building's own Run and the fix driver's own step 0 (design section 5.4
+// change 4, #28 gap 4): it runs the seven checks in order, escalating
+// unverifiable_commit at the first failure (Tried names the failing
+// check), and otherwise returns the LAND commit for sha without ever
+// calling CommitTask again -- carrying "fix landed <id> sha <sha>" too
+// when the unit in flight is a fix unit.
 func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, reports []store.BuildReportRow, sha string) (store.HandlerCommit, error) {
-	// taskN (and so u) is read first, ahead of every check below (design
-	// section 5.4 change 2): nextTaskN is pure over plan/reports, already
-	// this call's own parameters, so nothing is lost by knowing the unit
-	// before the commands run, and every escalation adopt can raise --
-	// including the two commandInfraEscalation calls right below -- can
-	// then carry u's own origin (fix when u.TaskN == 0, else build)
-	// instead of a hardcoded "build". Adopting an unrecorded commit for a
-	// fix unit is task 4's own job (#28 gap 4); today taskN is always a
-	// real task (1..n), since step 0 only ever reaches adopt before the
-	// plan's last task has landed.
-	tasks := response.Tasks(plan)
-	taskN, hasNext := nextTaskN(tasks, reports)
-	u := unit{TaskN: taskN}
+	// u is read first, ahead of every check below (design section 5.4
+	// change 2): unitInFlight is pure over t.State plus this call's own
+	// plan/reports parameters (a store read only for a fix unit, to find
+	// the open request), so nothing is lost by knowing the unit before the
+	// commands run, and every escalation adopt can raise -- including the
+	// two commandInfraEscalation calls right below -- can then carry u's
+	// own origin (fix when u.TaskN == 0, else build) instead of a
+	// hardcoded "build".
+	u, hasUnit, err := unitInFlight(ctx, t, d, plan, reports)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: unit in flight: %w", err)
+	}
 	fail := func(check string) store.HandlerCommit {
 		return unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), unverifiableCommitWhat, unverifiableCommitWhy, check)
 	}
-	if !hasNext {
+	if !hasUnit {
 		return fail("no report"), nil
 	}
 
@@ -2605,7 +2627,27 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 
 	maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
-	_, _, newestRun, ok, err := d.Store.UnitSession(ctx, t.ID, taskN, maxResumes)
+	var newestRun store.Run
+	var ok bool
+	if u.FixRequestID == nil {
+		_, _, newestRun, ok, err = d.Store.UnitSession(ctx, t.ID, u.TaskN, maxResumes)
+	} else {
+		// A fix unit's own session is found by watermark, not task number
+		// (design D22, section 5.3 step 1): u.FixRequestID names the same
+		// request unitInFlight just read, so re-reading it here costs one
+		// more store read but keeps adopt's own session lookup self-
+		// contained, needing nothing from its caller beyond plan/reports.
+		var req FixRequest
+		var reqOK bool
+		req, reqOK, err = openFixRequest(ctx, d, t)
+		if err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: open fix request: %w", err)
+		}
+		if !reqOK {
+			return fail("no report"), nil
+		}
+		_, _, newestRun, ok, err = d.Store.SessionAfter(ctx, t.ID, jobBuildName, req.AfterRunID, maxResumes)
+	}
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: unit session: %w", err)
 	}
@@ -2662,6 +2704,19 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 		return fail("undeclared path"), nil
 	}
 
-	slog.Warn("unrecorded commit adopted", "ticket_id", t.ID, "task_n", taskN, "commit_sha", sha)
-	return landCommit(t, d, plan, taskN, newestRun.ID, report.Report, sha)
+	slog.Warn("unrecorded commit adopted", "ticket_id", t.ID, "task_n", u.TaskN, "commit_sha", sha)
+	c, err := landCommit(t, d, plan, u.TaskN, newestRun.ID, report.Report, sha)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if u.FixRequestID != nil {
+		// design D22, section 5.1, 5.3: adopting an unrecorded commit for a
+		// fix unit lands it exactly as h.land does, so openFixRequest reads
+		// the same "fix landed <id> sha <sha>" marker either way.
+		c.Messages = append(c.Messages, store.Message{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("fix landed %d sha %s", *u.FixRequestID, sha),
+		})
+	}
+	return c, nil
 }

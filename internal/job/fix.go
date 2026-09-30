@@ -199,8 +199,12 @@ func fixUnit(req FixRequest) unit {
 // yet, so it is left for the state's own step machine; no producer wires
 // one through DriveFix until a later task needs it.
 //
-// It does not yet reconcile the branch before CHECK or LAND (design
-// section 5.4 change 4, task 4). Origin is tagged fix throughout (change 2,
+// Step 0 reconciles the branch before CHECK or LAND run, exactly as
+// building's own Run does (design section 5.4 change 4, #28 gap 4): a
+// single unrecorded commit at the tip is adopted through h.adopt when it
+// passes every check of Package 8's own adoption table, and any other
+// mismatch between the branch and the recorded reports escalates
+// environment, origin fix. Origin is tagged fix throughout (change 2,
 // #28 gap 2): the two pre-reserve failures below call unitEscalation
 // directly with u, and every shared step it calls into (check, land,
 // describeOrAsk, describeOne, resolve, advanceUnit's own runFirst and
@@ -249,6 +253,38 @@ func DriveFix(ctx context.Context, t store.Ticket, d Deps, req FixRequest) (stor
 	}
 	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
 
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: fix: build reports: %w", err)
+	}
+
+	// Step 0's branch reconcile (design section 5.3 step 0, 5.4 change 4,
+	// #28 gap 4): the same read building's own Run does before choosing a
+	// unit, so a fix commit git already holds -- landed by a previous tick
+	// that then failed to store -- is adopted, or a foreign commit escalates,
+	// before CHECK or LAND ever runs against the branch. u is always this
+	// request's own fix unit here (origin fix throughout, change 2), unlike
+	// building's own step 0, which has not chosen a unit yet.
+	unrecorded, prefixOK, err := unrecordedCommits(ctx, proj, wt, reports)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if !prefixOK {
+		return withBranch(unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), branchMissingRecordedWhat, branchMissingRecordedWhy, ""), wt), nil
+	}
+	switch len(unrecorded) {
+	case 0:
+		// continue to step 1
+	case 1:
+		commit, adoptErr := h.adopt(ctx, t, d, proj, wt, plan, reports, unrecorded[0])
+		if adoptErr != nil {
+			return store.HandlerCommit{}, adoptErr
+		}
+		return withBranch(commit, wt), nil
+	default:
+		return withBranch(unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), foreignCommitsWhat, foreignCommitsWhy, ""), wt), nil
+	}
+
 	sess, state, newestRun, ok, err := d.Store.SessionAfter(ctx, t.ID, jobBuildName, req.AfterRunID, maxResumes)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: session after: %w", err)
@@ -257,11 +293,6 @@ func DriveFix(ctx context.Context, t store.Ticket, d Deps, req FixRequest) (stor
 	if !ok || state == store.SessionIdless {
 		commit, runErr := runFixFirst(ctx, t, d, proj, wt, plan, req, nil, nil)
 		return withBranchResult(commit, runErr, wt)
-	}
-
-	reports, err := d.Store.BuildReports(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: fix: build reports: %w", err)
 	}
 
 	commit, runErr := h.advanceUnit(ctx, t, d, proj, wt, plan, u, sess, state, newestRun, true, reports)

@@ -26,6 +26,7 @@ import (
 
 	"zing/internal/gitfixture"
 	"zing/internal/job"
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
@@ -820,4 +821,288 @@ func landedMessageID(t *testing.T, msgs []store.Message) int64 {
 	}
 	t.Fatalf("msgs = %+v, want one \"fix landed <id> sha ...\" marker", msgs)
 	return 0
+}
+
+// ---- step 0: branch reconcile for a fix unit (task 4, #28 gap 4) -----------
+
+// fixTicket returns ticket with its own State overridden to "reviewing",
+// design section 5.4 change 3's own post-build gate: DriveFix is still not
+// wired into job.Registry() (this file's own header comment), so every
+// scenario here drives a ticket whose real stored state is still
+// "building" (buildTicketInBuilding); only step 0's own branch reconcile
+// (unitInFlight, called from adopt) reads t.State to tell a fix unit from
+// a task unit, and it reads this struct field directly rather than
+// re-reading the ticket from the store, so overriding the passed-in copy
+// is enough, exactly as a post-build ticket would carry it for real.
+func fixTicket(ticket store.Ticket) store.Ticket {
+	ticket.State = testStateReviewing
+	return ticket
+}
+
+// prepareUnrecordedFixCommit drives an open fix request's own first RUN
+// turn (claiming claimFiles/lintExit, test_exit always claimed truthfully
+// as 0) and then commits writeFiles directly to the worktree branch
+// (signed unless signed is false) under title (the landed report's own
+// Title when empty) -- without ever calling DriveFix's own LAND. It is
+// design section 5.3 step 0's single-unrecorded-commit scenario every
+// TestDriveFixAdoptionChecks case starts from, the fix driver's own mirror
+// of building_test.go's prepareUnrecordedCommit.
+func prepareUnrecordedFixCommit(t *testing.T, claimFiles []string, lintExit int, extras []response.ExtraClaim, titleOverride string, writeFiles map[string]string, signed bool) (*store.Store, int64, job.Deps, orchestrator.Worktree, job.FixRequest) {
+	t.Helper()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(claimFiles, 0, lintExit, extras, "fix-adopt-sess")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps, req) // RUN: first turn
+	if err != nil {
+		t.Fatalf("DriveFix (RUN): %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	reports, err := s.BuildReports(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	report := findUnlandedReport(t, reports, 0)
+
+	proj, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	approved := make([]string, 0, len(writeFiles))
+	for path, content := range writeFiles {
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), path), []byte(content), 0o600); writeErr != nil {
+			t.Fatalf("write %s: %v", path, writeErr)
+		}
+		approved = append(approved, path)
+	}
+	title := report.Report.Title
+	if titleOverride != "" {
+		title = titleOverride
+	}
+	if signed {
+		if _, commitErr := proj.Orch.CommitTask(t.Context(), wt, approved, orchestrator.CommitMessage{Title: title, Fences: report.Report.Fences}); commitErr != nil {
+			t.Fatalf("CommitTask: %v", commitErr)
+		}
+	} else {
+		rawGitCommit(t, wt.Dir(), approved, title, false)
+	}
+
+	// Rebuild Projects fresh, as prepareUnrecordedCommit does: a case that
+	// mutates deps.Projects's TestCmd or LintCmd below starts from an
+	// unshared copy.
+	deps.Projects = buildJobTestProjects(t, s)
+	return s, ticketID, deps, wt, req
+}
+
+// assertFixAdoptionFails runs one more DriveFix tick and asserts it
+// escalated the unverifiable-commit case with wantTried as the failing
+// check's own name (Package 8's own adoption table, design section 6.1,
+// reused unchanged for a fix unit by design section 5.4 change 4), origin
+// fix throughout (change 2).
+func assertFixAdoptionFails(t *testing.T, s *store.Store, ticketID int64, deps job.Deps, req job.FixRequest, wantTried string) {
+	t.Helper()
+	ticket := fixTicket(getTicket(t, s, ticketID))
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req)
+	if err != nil {
+		t.Fatalf("DriveFix (adopt tick): %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an unverifiable-commit escalation")
+	}
+	if commit.Escalation.Payload.Tried != wantTried {
+		t.Errorf("escalation Tried = %q, want %q", commit.Escalation.Payload.Tried, wantTried)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+	}
+	const wantWhat = "the ticket branch holds a commit Zing cannot verify"
+	if !strings.Contains(commit.Escalation.Body, wantWhat) {
+		t.Errorf("escalation body = %q, want it to contain %q", commit.Escalation.Body, wantWhat)
+	}
+}
+
+// TestDriveFixAdoptsVerifiedCommit proves the happy adoption path for a fix
+// unit (design section 5.4 change 4, #28 gap 4): a signed commit that
+// passes every check adopts cleanly, landing the build_report with that
+// commit's own sha, writing "fix landed <id> sha <sha>", and never calling
+// CommitTask again.
+func TestDriveFixAdoptsVerifiedCommit(t *testing.T) {
+	s, ticketID, _, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+
+	sha, err := orchestratorHeadSHA(t, wt.Dir())
+	if err != nil {
+		t.Fatalf("read HEAD sha: %v", err)
+	}
+
+	// prepareUnrecordedFixCommit's own RUN already claimed and released the
+	// ticket once (apply()); this tick needs its own fresh claim.
+	ticket := fixTicket(getTicket(t, s, ticketID))
+	deps := claimForBuild(t, s, fakeRuntime(t), ticketID)
+	deps.Projects = buildJobTestProjects(t, s)
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req)
+	if err != nil {
+		t.Fatalf("DriveFix (adopt tick): %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want none (a verified commit adopts cleanly)", commit.Escalation)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (a fix never transitions the ticket)", commit.Next)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one landed build_report", commit.Artifacts)
+	}
+	var landed response.BuildReport
+	if unmarshalErr := json.Unmarshal(commit.Artifacts[0].Payload, &landed); unmarshalErr != nil {
+		t.Fatalf("unmarshal landed build_report: %v", unmarshalErr)
+	}
+	if landed.CommitSHA == nil || *landed.CommitSHA != sha {
+		t.Errorf("landed.CommitSHA = %v, want %s", landed.CommitSHA, sha)
+	}
+	if landed.TaskN != 0 {
+		t.Errorf("landed.TaskN = %d, want 0", landed.TaskN)
+	}
+
+	if landedMessageID(t, commit.Messages) != req.MessageID {
+		t.Errorf("landed marker names message %d, want %d", landedMessageID(t, commit.Messages), req.MessageID)
+	}
+	apply(t, s, ticket, commit)
+}
+
+// TestDriveFixAdoptionChecks proves Package 8's own adoption table (design
+// section 6.1, PKG8-PLAN.md), reused unchanged by a fix unit's own step 0
+// (design section 5.4 change 4): one case per row, each escalating with
+// that row's own Tried name.
+func TestDriveFixAdoptionChecks(t *testing.T) {
+	t.Run("commands failed", func(t *testing.T) {
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		ticket := getTicket(t, s, ticketID)
+		badProj := deps.Projects[ticket.ProjectID]
+		badProj.TestCmd = "false"
+		deps.Projects = map[int64]job.Project{ticket.ProjectID: badProj}
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "commands failed")
+	})
+
+	t.Run("tree not clean", func(t *testing.T) {
+		s, ticketID, deps, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "untracked.txt"), []byte("x"), 0o600); writeErr != nil {
+			t.Fatalf("write untracked file: %v", writeErr)
+		}
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "tree not clean")
+	})
+
+	t.Run("unsigned", func(t *testing.T) {
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "unsigned")
+	})
+
+	t.Run("subject mismatch", func(t *testing.T) {
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "subject mismatch")
+	})
+
+	t.Run("claims failed", func(t *testing.T) {
+		// The run claims lint_exit 1; the fixture project's real lint
+		// command ("true") always exits 0, so the adoption re-run
+		// disagrees with the stored claim.
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 1, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "claims failed")
+	})
+
+	t.Run("undeclared path", func(t *testing.T) {
+		extras := []response.ExtraClaim{{Path: extraTxt, Reason: "needed it"}}
+		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
+		assertFixAdoptionFails(t, s, ticketID, deps, req, "undeclared path")
+	})
+}
+
+// TestDriveFixEscalatesForeignCommits proves design section 5.4 change 4's
+// own "any other unrecorded commit" branch for a fix unit: more than one
+// unrecorded commit on the branch (two hand-made commits) escalates
+// environment/"the ticket branch holds commits Zing did not record",
+// origin fix.
+func TestDriveFixEscalatesForeignCommits(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	ticket := getTicket(t, s, ticketID)
+
+	deps := claimForBuild(t, s, fakeRuntime(t), ticketID)
+	_, wt := buildWorktreeFor(t, deps, ticket)
+
+	for i, name := range []string{"foreign1.txt", "foreign2.txt"} {
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), name), []byte("x"), 0o600); writeErr != nil {
+			t.Fatalf("write %s: %v", name, writeErr)
+		}
+		rawGitCommit(t, wt.Dir(), []string{name}, fmt.Sprintf("hand-made commit %d", i), true)
+	}
+
+	commit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps, req)
+	if err != nil {
+		t.Fatalf("DriveFix: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	const wantBody = "environment: the ticket branch holds commits Zing did not record"
+	if commit.Escalation.Body != wantBody {
+		t.Errorf("escalation body = %q, want %q", commit.Escalation.Body, wantBody)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+	}
+}
+
+// TestDriveFixEscalatesMissingRecorded proves design section 5.4 change 4's
+// own "recorded is not a prefix of the branch" case for a fix unit: once a
+// fix has landed and something then rewrites the branch out from under it
+// (here, resetting past the landed commit), the next DriveFix tick
+// escalates environment/"the ticket branch does not hold the commits Zing
+// recorded", origin fix, instead of running CHECK or LAND against a branch
+// it can no longer trust.
+func TestDriveFixEscalatesMissingRecorded(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-missing-sess")}}
+	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps, req) // RUN: first turn
+	if err != nil {
+		t.Fatalf("DriveFix (RUN): %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	landCommit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps2, req) // CHECK, clean, LAND
+	if err != nil {
+		t.Fatalf("DriveFix (CHECK+LAND): %v", err)
+	}
+	apply(t, s, ticket, landCommit)
+
+	_, wt := buildWorktreeFor(t, deps2, getTicket(t, s, ticketID))
+	if out, resetErr := gitfixture.Git(t.Context(), wt.Dir(), "reset", "--hard", "HEAD~1"); resetErr != nil {
+		t.Fatalf("git reset --hard: %v: %s", resetErr, out)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps3 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err = job.DriveFix(t.Context(), fixTicket(ticket), deps3, req)
+	if err != nil {
+		t.Fatalf("DriveFix: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	const wantBody = "environment: the ticket branch does not hold the commits Zing recorded"
+	if commit.Escalation.Body != wantBody {
+		t.Errorf("escalation body = %q, want %q", commit.Escalation.Body, wantBody)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+	}
 }
