@@ -123,6 +123,16 @@ templ palette() {
 		}
 		h2, h3 { margin-top: 0; }
 		.empty { color: var(--zing-text-dim); }
+		/* The sandbox indicator (design section 9.2, Task 15): renders only
+		   while the sandbox is unavailable (nav.templ's own sandboxReason !=
+		   "" guard), so red is enough on its own -- there is no "on" state of
+		   this span to distinguish it from. */
+		.sandbox-off {
+			display: block;
+			margin-bottom: 0.5rem;
+			color: var(--zing-danger);
+			font-size: 0.8rem;
+		}
 		.nav-link {
 			display: flex;
 			justify-content: space-between;

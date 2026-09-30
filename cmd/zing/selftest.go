@@ -617,7 +617,11 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 // reserved 127.0.0.1 listener, so its own real port -- not an arbitrary one
 // -- is what console.New's mutation guard allowlists (mw.go, design section
 // 6.14), and starts it, matching internal/console's own test helper
-// technique (mw_test.go's newMutationTestServer).
+// technique (mw_test.go's newMutationTestServer). It passes sandbox.Off()'s
+// own Reason() as console.New's sandboxReason (design section 9.2, Task
+// 15), matching the dispatcher's own sandbox.Off() above: selftest never
+// runs a real sandboxed process, so its console honestly shows sandbox: off
+// rather than claiming an availability nothing here provides.
 func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broker, m *machine.Machine, logHandler *console.Handler) (*httptest.Server, error) {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
@@ -630,7 +634,7 @@ func newSelftestConsoleServer(ctx context.Context, st *store.Store, b *bus.Broke
 		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor)
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, e2ePushToken, e2eFloor, sandbox.Off().Reason())
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)
@@ -909,9 +913,13 @@ func verifySelftestCohortSealed(ctx context.Context, st *store.Store, ticketID i
 // would refuse to start (N9). selftest's own dispatcher never uses this
 // sandbox -- it always runs sandbox.Off() (below) -- so this is a canary
 // check, not a dependency of the e2e suite that follows it. It is a no-op
-// off darwin, where the sandbox is always unavailable by definition.
+// off darwin, where the sandbox is always unavailable by definition, and
+// when ZING_SANDBOXED is set (design section 5.3, Task 15): macOS refuses a
+// nested sandbox, so a selftest already running inside the profile -- for
+// example while zing builds itself -- cannot start sandbox-exec to prove
+// anything here, the same skip internal/sandbox's own darwin tests apply.
 func checkSandboxProfile(dataDir string) error {
-	if goruntime.GOOS != "darwin" {
+	if goruntime.GOOS != "darwin" || os.Getenv("ZING_SANDBOXED") != "" {
 		return nil
 	}
 	profile, err := zing.Assets.ReadFile("sandbox/build.sb")

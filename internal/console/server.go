@@ -74,15 +74,19 @@ var keysJSON []byte
 // context region (views.go's loadFindings) keeps only a stored planreview
 // artifact's findings whose severity ranks strictly above it, the same
 // threshold job/planning.go's own floor split uses, without either package
-// importing the other.
+// importing the other. sandboxReason is the sandbox's own Reason() (design
+// section 9.2, Task 15): empty when the sandbox is available, in which case
+// the nav region renders no indicator; otherwise it renders the sandbox-off
+// span with this as the reason.
 type console struct {
-	store     *store.Store
-	bus       *bus.Broker
-	machine   *machine.Machine
-	log       *Handler
-	push      PushKeys
-	pushToken string
-	floor     response.Severity
+	store         *store.Store
+	bus           *bus.Broker
+	machine       *machine.Machine
+	log           *Handler
+	push          PushKeys
+	pushToken     string
+	floor         response.Severity
+	sandboxReason string
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -129,11 +133,16 @@ type console struct {
 // job.Deps.Floor, so the gate's context region and the planning handler's
 // floor split agree on one threshold.
 //
+// sandboxReason is the sandbox's own Reason() (design section 5.4, 9.2,
+// Task 15): empty means available. serve passes sb.Reason() from the real
+// sandbox.Load result it already builds; selftest passes sandbox.Off()'s
+// own reason, since its dispatcher always runs unwrapped.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity) http.Handler {
-	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken, floor: floor}
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string) http.Handler {
+	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken, floor: floor, sandboxReason: sandboxReason}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()

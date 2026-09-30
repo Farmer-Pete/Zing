@@ -95,7 +95,7 @@ func (c *console) navComponent(ctx context.Context) (templ.Component, error) {
 	if err != nil {
 		return nil, err
 	}
-	return templates.Nav(projects, buildNavThreads(items)), nil
+	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason), nil
 }
 
 // buildNavThreads turns InboxItems into #nav's badge rows, preserving their
