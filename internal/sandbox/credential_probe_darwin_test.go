@@ -658,16 +658,60 @@ func probeRepoGitDir(t *testing.T, repoRoot string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestBuildProfileStillPassesPackage8Proofs re-runs every row of Package
-// 8's own section 2 proof table that used the build profile, under the
-// changed build.sb (PKG9-PLAN.md section 7.3): the Mach and keychain
-// changes alter what several of them relied on (the Claude login used to
-// live in the keychain). Each row logs its exit code; most also assert it.
+// package8SandboxProofs is every automated proof PKG8-PLAN.md section 18's
+// task 8 wrote for the sandbox rules of section 5, exactly as named there:
+// the two directory-scoped denials, the writable set, the console-port and
+// escape-hatch (open/osascript/launchctl) denials, and TLS still working
+// (version 7's own probe, folded into task 8). They already run in every
+// plain `go test ./internal/sandbox/...`, against whatever build.sb is
+// currently embedded; listing them here and calling them as subtests makes
+// this file's own ZING_LIVE_CLI-gated run re-assert every one of them by
+// name, rather than re-deriving the same assertions from Makefile targets.
+var package8SandboxProofs = []struct {
+	name string
+	fn   func(*testing.T)
+}{
+	{"TestProfileLoads", TestProfileLoads},
+	{"TestDeniesHomeRead", TestDeniesHomeRead},
+	{"TestDeniesDataDir", TestDeniesDataDir},
+	{"TestRunsZingBinFromDataDir", TestRunsZingBinFromDataDir},
+	{"TestDeniesHomeWrite", TestDeniesHomeWrite},
+	{"TestDeniesHostTempWrite", TestDeniesHostTempWrite},
+	{"TestDeniesGitPointerWrite", TestDeniesGitPointerWrite},
+	{"TestDeniesGitConfigWrite", TestDeniesGitConfigWrite},
+	{"TestAllowsWorktreeWrite", TestAllowsWorktreeWrite},
+	{"TestAllowsRunDirWrite", TestAllowsRunDirWrite},
+	{"TestChildSeesSandboxTmpdir", TestChildSeesSandboxTmpdir},
+	{"TestReadPathsAllowsExtra", TestReadPathsAllowsExtra},
+	{"TestDeniesConsolePort", TestDeniesConsolePort},
+	{"TestAllowsOtherLocalPort", TestAllowsOtherLocalPort},
+	{"TestDeniesOpen", TestDeniesOpen},
+	{"TestDeniesOsascriptToApplication", TestDeniesOsascriptToApplication},
+	{"TestDeniesLaunchctlSubmit", TestDeniesLaunchctlSubmit},
+	{"TestAllowsTLSDownload", TestAllowsTLSDownload},
+}
+
+// TestBuildProfileStillPassesPackage8Proofs re-runs Package 8's own host
+// proofs (PKG8-PLAN.md section 5, section 19's "make ci green" and "zing
+// selftest green", and task 8's named tests) under the changed build.sb
+// (PKG9-PLAN.md section 7.3): the Mach and keychain changes alter what
+// several of them relied on (the Claude login used to live in the
+// keychain). Every sandbox-rule proof that already has a Package 8 test
+// runs as that test, via package8SandboxProofs, instead of a
+// re-implementation. The rows that need the real repository, the real
+// toolchain, or the owner's real login -- which no existing test covers --
+// stay here: the claude login, the full suite, make lint, make test-js,
+// zing validate, and a fresh module's TLS download. Each row logs its exit
+// code; most also assert it.
 func TestBuildProfileStillPassesPackage8Proofs(t *testing.T) {
 	requireLiveProbe(t)
 	token := probeClaudeOAuthToken(t)
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude is not on PATH")
+	}
+
+	for _, proof := range package8SandboxProofs {
+		t.Run(proof.name, proof.fn)
 	}
 
 	repoRoot := probeRepoRoot(t)
@@ -722,48 +766,6 @@ func TestBuildProfileStillPassesPackage8Proofs(t *testing.T) {
 		t.Logf("go mod download: exit=%d output_len=%d", exitCode, len(out))
 		if exitCode != 0 {
 			t.Errorf("go mod download: exit=%d, want 0", exitCode)
-		}
-	})
-
-	row("curl proxy.golang.org", repoRoot, env, 0, "curl", "-fsS", "--max-time", "15", "-o", os.DevNull, "https://proxy.golang.org")
-
-	t.Run("console port denied", func(t *testing.T) {
-		exitCode, _ := runProbe(t, sb, p, env, "/usr/bin/nc", "-z", "-w", "2", "127.0.0.1", "7420")
-		if exitCode == 0 {
-			t.Error("nc to the console port succeeded, want denied")
-		}
-	})
-
-	t.Run("escape: open", func(t *testing.T) {
-		exitCode, _ := runProbe(t, sb, p, env, "/usr/bin/open", "-g", "-a", "TextEdit")
-		if exitCode == 0 {
-			t.Error("open succeeded, want denied")
-		}
-	})
-	t.Run("escape: osascript", func(t *testing.T) {
-		exitCode, _ := runProbe(t, sb, p, env, "/usr/bin/osascript", "-e", `tell application "Finder" to activate`)
-		if exitCode == 0 {
-			t.Error("osascript succeeded, want denied")
-		}
-	})
-	t.Run("escape: launchctl submit", func(t *testing.T) {
-		label := "com.zing.probe." + probeUUID(t)
-		t.Cleanup(func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = exec.CommandContext(cleanupCtx, "launchctl", "remove", label).Run() //nolint:gosec,errcheck // best-effort cleanup, matches sandbox_darwin_test.go's own TestDeniesLaunchctlSubmit
-		})
-		exitCode, _ := runProbe(t, sb, p, env, "/bin/launchctl", "submit", "-l", label, "--", "/usr/bin/true")
-		if exitCode == 0 {
-			t.Error("launchctl submit succeeded, want denied")
-		}
-	})
-	t.Run("escape: write into .git", func(t *testing.T) {
-		target := filepath.Join(p.RepoGit, "zing-probe-canary")
-		exitCode, _ := runProbe(t, sb, p, env, "/usr/bin/touch", target)
-		if exitCode == 0 {
-			t.Error("touch inside .git succeeded, want denied")
-			_ = os.Remove(target)
 		}
 	})
 }
