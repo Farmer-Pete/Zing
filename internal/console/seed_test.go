@@ -544,9 +544,10 @@ func TestSeedDemoDecidedFilesAreIdempotent(t *testing.T) {
 // TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker proves the
 // rendered demo thread (the live GET /stream a browser reads) carries the
 // plan view's "Decided during build" sub-list with both decided paths, and
-// the perimeter question's "[trust root]" marker, so the owner can see and
-// try every perimeter feature from the seeded demo alone (design section
-// 9.2, 6.5, 6.15).
+// the perimeter question's marker pill (Task 11b: itemRow renders the
+// "trust root" marker as its own element, not the raw bracketed text), so
+// the owner can see and try every perimeter feature from the seeded demo
+// alone (design section 9.2, 6.5, 6.15).
 func TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
@@ -574,7 +575,74 @@ func TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker(t *testing.T) {
 	if !strings.Contains(main, "Makefile") {
 		t.Errorf("rendered thread missing the rejected path %q; got:\n%s", "Makefile", main)
 	}
-	if !strings.Contains(main, "[trust root]") {
-		t.Errorf("rendered thread missing %q; got:\n%s", "[trust root]", main)
+	const wantMarkerPill = `<span class="pill item-marker">trust root</span>`
+	if !strings.Contains(main, wantMarkerPill) {
+		t.Errorf("rendered thread missing %q; got:\n%s", wantMarkerPill, main)
+	}
+}
+
+// TestSeedDemoStoresBuildMarkers proves SeedDemo seeds the demo ticket's
+// three build markers (Task 11b): all three type="update" messages exist
+// after one call and still exactly three after a second (idempotent), and
+// the rendered thread (views.go's updateLine) shows the claims-ok marker as
+// its owner-facing sentence.
+func TestSeedDemoStoresBuildMarkers(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ctx := t.Context()
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("first SeedDemo: %v", err)
+	}
+	ticketID := demoTicketID(ctx, t, s)
+	assertSeedDemoBuildMarkerCount(ctx, t, s, ticketID, 3)
+
+	if err := console.SeedDemo(ctx, s); err != nil {
+		t.Fatalf("second SeedDemo: %v", err)
+	}
+	assertSeedDemoBuildMarkerCount(ctx, t, s, ticketID, 3)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, main, _, _ := readInitialFrames(t, r)
+	assertExactSSEFraming(t, main)
+
+	const want = "Claims checked for run 5."
+	if !strings.Contains(main, want) {
+		t.Errorf("rendered thread missing %q; got:\n%s", want, main)
+	}
+}
+
+// demoBuildMarkerBodies mirrors seed.go's own demoBuildMarkers, unexported:
+// this file is package console_test, so it recognizes the three seeded
+// build markers by their own literal bodies (design section 9.2, Task 11b)
+// rather than importing seed.go's unexported constants.
+var demoBuildMarkerBodies = map[string]bool{
+	"claims ok run 5": true,
+	"claim errors pending run 6\n" +
+		"claims/test_exit: observed 1, want 0\n" +
+		"claims/files_changed: observed [greet.go], claimed [greet.go, greet_test.go]": true,
+	"perimeter resolved run 6": true,
+}
+
+// assertSeedDemoBuildMarkerCount asserts ticketID carries exactly want
+// type="update" messages whose body is one of demoBuildMarkerBodies.
+func assertSeedDemoBuildMarkerCount(ctx context.Context, t *testing.T, s *store.Store, ticketID int64, want int) {
+	t.Helper()
+
+	messages, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var got int
+	for i := range messages {
+		if messages[i].Type == "update" && demoBuildMarkerBodies[messages[i].Body] {
+			got++
+		}
+	}
+	if got != want {
+		t.Errorf("build marker messages = %d, want exactly %d", got, want)
 	}
 }

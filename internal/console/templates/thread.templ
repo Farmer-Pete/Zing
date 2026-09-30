@@ -2,6 +2,7 @@ package templates
 
 import (
 	"strconv"
+	"strings"
 
 	"zing/internal/response"
 	"zing/internal/store"
@@ -210,17 +211,82 @@ templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []respo
 	}
 }
 
-// itemRow is one perimeter file or review finding: its ref and text, and
-// its decision controls, the kind's own allowed set (design section 6.6, 8,
-// 9.2). Each control carries data-draft-ticket, data-draft-question,
-// data-item-ref, and data-decision, the composer contract Task 7's POST
-// /draft reads to merge one ref-to-decision entry into the question's draft
-// (design section 6.7: "An item answer merges one ref->decision into the
-// ... draft's items map").
+// itemMarkerTrustRoot and itemMarkerStyleGuide are section 6.5's two closed
+// bracketed markers a stored Item.Text may carry, matching
+// internal/orchestrator/perimeter.go's own markerTrustRoot/markerStyleGuide
+// literals: this package cannot import that one (no shared dependency
+// direction between them), so it keeps its own copy, the same
+// package-local-copy pattern internal/console/views.go already uses for
+// job's marker literals.
+const (
+	itemMarkerTrustRoot  = "trust root"
+	itemMarkerStyleGuide = "style guide"
+)
+
+// itemBuilderPrefix and itemChangeSeparator are section 6.5's own Item.Text
+// wire format literals, matching internal/console/seed.go's
+// perimeterItemText, which builds a stored Item.Text in exactly this shape:
+// an optional "[<marker>] " prefix, then "Builder: ", then " Change: ".
+const (
+	itemBuilderPrefix   = "Builder: "
+	itemChangeSeparator = " Change: "
+)
+
+// itemTextParts is one perimeter item's Text split into the parts itemRow
+// renders separately (design section 6.5, 9.2, Task 11b): the marker (""
+// when the text carries none), the builder's own reason, and the perimeter
+// description of the change.
+type itemTextParts struct {
+	Marker, Reason, Change string
+}
+
+// splitItemText parses a stored Item.Text into itemTextParts, or reports ok
+// == false when text does not follow section 6.5's format, so itemRow can
+// fall back to rendering it unchanged (Task 11b: "A text that does not
+// follow the format renders as it is today"). The stored text itself never
+// changes; this only decides how itemRow renders it.
+func splitItemText(text string) (itemTextParts, bool) {
+	rest := text
+	var marker string
+	for _, m := range []string{itemMarkerTrustRoot, itemMarkerStyleGuide} {
+		if prefix := "[" + m + "] "; strings.HasPrefix(rest, prefix) {
+			marker = m
+			rest = strings.TrimPrefix(rest, prefix)
+			break
+		}
+	}
+	if !strings.HasPrefix(rest, itemBuilderPrefix) {
+		return itemTextParts{}, false
+	}
+	reason, change, ok := strings.Cut(strings.TrimPrefix(rest, itemBuilderPrefix), itemChangeSeparator)
+	if !ok {
+		return itemTextParts{}, false
+	}
+	return itemTextParts{Marker: marker, Reason: reason, Change: change}, true
+}
+
+// itemRow is one perimeter file or review finding: its path, its parsed
+// text -- the marker pill when set, the builder reason, and the change,
+// each its own element (design section 6.5, 9.2, Task 11b) -- or the raw
+// text in one element when it does not parse, and its decision controls,
+// the kind's own allowed set (design section 6.6, 8, 9.2). Each control
+// carries data-draft-ticket, data-draft-question, data-item-ref, and
+// data-decision, the composer contract Task 7's POST /draft reads to merge
+// one ref-to-decision entry into the question's draft (design section 6.7:
+// "An item answer merges one ref->decision into the ... draft's items
+// map").
 templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision) {
 	<div class="item-row" data-item-ref={ item.Ref }>
 		<span class="item-ref">{ item.Ref }</span>
-		<span class="item-text">{ item.Text }</span>
+		if parts, ok := splitItemText(item.Text); ok {
+			if parts.Marker != "" {
+				<span class="pill item-marker">{ parts.Marker }</span>
+			}
+			<span class="item-reason">{ parts.Reason }</span>
+			<span class="item-change">{ parts.Change }</span>
+		} else {
+			<span class="item-text">{ item.Text }</span>
+		}
 		<div class="item-decisions">
 			for _, d := range decisions {
 				<button type="button" class="decision" aria-pressed="false" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>

@@ -316,13 +316,76 @@ func seedDemoDecidedFiles(ctx context.Context, s *store.Store, ticketID int64) e
 	return nil
 }
 
+// demoBuildMarkerClaimsOk, demoBuildMarkerClaimErrorsPending, and
+// demoBuildMarkerPerimeterResolved are the demo ticket's three seeded
+// type="update" build markers (design section 9.2, Task 11b), matching
+// job/building.go's own markerClaimsOkFmt, markerClaimErrorsPendingFmt, and
+// markerPerimeterResolvedFmt literals, so the demo thread shows the same
+// build-marker sentences (views.go's updateLine) a real build tick would
+// have produced.
+const (
+	demoBuildMarkerClaimsOk           = "claims ok run 5"
+	demoBuildMarkerClaimErrorsPending = "claim errors pending run 6\n" +
+		"claims/test_exit: observed 1, want 0\n" +
+		"claims/files_changed: observed [greet.go], claimed [greet.go, greet_test.go]"
+	demoBuildMarkerPerimeterResolved = "perimeter resolved run 6"
+)
+
+// demoBuildMarkerAuthor is the author every build marker message carries,
+// matching job/building.go's own authorSystem literal: this package cannot
+// import job's unexported constant, so it keeps its own copy, the same
+// package-local-copy pattern views.go's updateMarker* constants already use.
+const demoBuildMarkerAuthor = "system"
+
+// demoBuildMarkers returns, in order, the three type="update" bodies
+// seedDemoBuildMarkers inserts (Task 11b): a clean claim check, a claim
+// mismatch with its two error lines, and the perimeter's resolution.
+func demoBuildMarkers() []string {
+	return []string{
+		demoBuildMarkerClaimsOk,
+		demoBuildMarkerClaimErrorsPending,
+		demoBuildMarkerPerimeterResolved,
+	}
+}
+
+// seedDemoBuildMarkers inserts the demo ticket's three build markers (Task
+// 11b), each a type="update" message from author "system", so the thread
+// shows real build markers rendered as sentences. It is idempotent: it
+// lists the ticket's existing update messages first and skips any body
+// already present, so a second call inserts nothing new.
+func seedDemoBuildMarkers(ctx context.Context, s *store.Store, ticketID int64) error {
+	existing, err := s.ListMessages(ctx, ticketID)
+	if err != nil {
+		return fmt.Errorf("seed demo build markers: list messages: %w", err)
+	}
+	have := make(map[string]bool, len(existing))
+	for i := range existing {
+		if existing[i].Type == msgTypeUpdate {
+			have[existing[i].Body] = true
+		}
+	}
+
+	for _, body := range demoBuildMarkers() {
+		if have[body] {
+			continue
+		}
+		if _, err := s.InsertMessage(ctx, store.Message{
+			TicketID: ticketID, Type: msgTypeUpdate, Author: demoBuildMarkerAuthor, Body: body,
+		}); err != nil {
+			return fmt.Errorf("seed demo build markers: insert %q: %w", body, err)
+		}
+	}
+	return nil
+}
+
 // SeedDemo seeds one demo project and one demo ticket carrying one session
 // and run (Task 11), a stored plan artifact (a small valid response.Plan
 // with a mermaid block in its Shape) and a scenario artifact set both
 // carrying that run's id (so the gate's context region renders them through
 // the real cohort path, not the legacy fallback), a "planreview" artifact
-// at the plan's own version carrying a finding set, and one open question
-// of each of the six kinds (design section 6.15, 7), every row through the
+// at the plan's own version carrying a finding set, three type="update"
+// build markers (Task 11b), and one open question of each of the six kinds
+// (design section 6.15, 7), every row through the
 // store's validated inserts (InsertArtifact, InsertMessage, by way of
 // SeedQuestionFixtures; Claim, Reserve, and CommitHandlerResult for the run
 // itself), so a seeded row is a row a real producer could have written. It
@@ -348,6 +411,9 @@ func SeedDemo(ctx context.Context, s *store.Store) error {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 	if err := seedDemoPerimeterQuestion(ctx, s, ticketID); err != nil {
+		return fmt.Errorf("seed demo: %w", err)
+	}
+	if err := seedDemoBuildMarkers(ctx, s, ticketID); err != nil {
 		return fmt.Errorf("seed demo: %w", err)
 	}
 	if err := SeedQuestionFixtures(ctx, s, ticketID); err != nil {
