@@ -65,19 +65,6 @@ var fixInputLabelFor = map[FixKind]string{
 	FixKindCILog:    "ci_log",
 }
 
-// fixEscalation is buildEscalation with origin "fix" (design section 6.9):
-// every escalation the fix driver writes with no run in scope -- a missing
-// stored plan, or a worktree that could not be prepared, the only two
-// infrastructure failures it can hit before it ever reserves a run --
-// carries a nil RunID and SessionID, code "environment", and origin fix.
-// Task 2 (#28 gap 2) generalizes escalation origin across every shared
-// step; this one stays fix.go's own until then.
-func fixEscalation(t store.Ticket, d Deps, what, why, tried string) store.HandlerCommit {
-	code := string(response.EscalationCodeEnvironment)
-	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginFix))
-	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginFix)
-}
-
 // FixRequest is one open fix unit, read back from its marker (design
 // section 5.2, D18, D22).
 type FixRequest struct {
@@ -213,11 +200,12 @@ func fixUnit(req FixRequest) unit {
 // one through DriveFix until a later task needs it.
 //
 // It does not yet reconcile the branch before CHECK or LAND (design
-// section 5.4 change 4, task 4) or tag every escalation it raises origin
-// fix (change 2, task 2, #28 gap 2): only fixEscalation's own two
-// pre-reserve failures carry origin fix here; every shared step it calls
-// into (check, land, describeOrAsk, resolve) still escalates origin build
-// until task 2 lands.
+// section 5.4 change 4, task 4). Origin is tagged fix throughout (change 2,
+// #28 gap 2): the two pre-reserve failures below call unitEscalation
+// directly with u, and every shared step it calls into (check, land,
+// describeOrAsk, describeOne, resolve, advanceUnit's own runFirst and
+// runBuildResume) derives origin fix or build from the same u, by
+// originFor's rule (u.TaskN == 0 is always a fix).
 func DriveFix(ctx context.Context, t store.Ticket, d Deps, req FixRequest) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	u := fixUnit(req)
@@ -248,7 +236,7 @@ func DriveFix(ctx context.Context, t store.Ticket, d Deps, req FixRequest) (stor
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: stored plan: %w", err)
 	}
 	if !havePlan {
-		return fixEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, ""), nil
+		return unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), nil
 	}
 
 	proj, ok := d.Projects[t.ProjectID]
@@ -257,7 +245,7 @@ func DriveFix(ctx context.Context, t store.Ticket, d Deps, req FixRequest) (stor
 	}
 	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
 	if err != nil {
-		return fixEscalation(t, d, worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+		return unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
 	}
 	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
 

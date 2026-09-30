@@ -17,14 +17,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -529,6 +533,272 @@ func TestSecondFixAdvancesAfterFirstLanded(t *testing.T) {
 	if landedMessageID(t, land2.Messages) != mid2 {
 		t.Fatalf("fix 2's own landed marker names message %d, want %d", landedMessageID(t, land2.Messages), mid2)
 	}
+}
+
+// fixErrorStep builds a scriptedStep whose Response is a minimal
+// ErrorResponse for job build (design section 6.8's own universal "error"
+// outcome; buildSuccessCommit's own last case, the mirror of
+// perimeterErrorStep for job perimeter).
+func fixErrorStep(sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response: &response.ErrorResponse{
+			Job: response.JobBuild, Outcome: response.OutcomeError,
+			Error: response.RunError{Code: response.ErrorCodeOther, What: "could not finish", Why: "the sandbox died mid-run"},
+		},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// withTouchCmd returns deps with ticket's own project TestCmd overridden to
+// write hello.txt and touch every one of paths for real (perimeterScenario's
+// own technique, building_test.go), so CHECK's tree read finds them.
+func withTouchCmd(deps job.Deps, ticket store.Ticket, paths ...string) job.Deps {
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = "printf 'hello, world\\n' > hello.txt && touch " + strings.Join(paths, " ") + " && test -f hello.txt"
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	return deps
+}
+
+// TestFixEscalationOriginFix proves design section 5.4 change 2 (#28 gap
+// 2): every escalation a shared step raises while advancing a fix unit
+// (u.TaskN == 0, D22) carries origin "fix", not the "build" every one of
+// these call sites hardcoded before unitEscalation/originFor replaced
+// buildEscalation's own fixed origin. One subtest per named case: CHECK's
+// own command-infrastructure failure, LAND's own signing failure,
+// DESCRIBE's own unclaimed-extra failure, RESOLVE's own revert failure, a
+// first-turn RUN's own error outcome, and a resume's own exec failure.
+// TestTaskEscalationOriginStillBuild (building_escalation_test.go) is this
+// test's mirror for a task unit: the same call sites still escalate origin
+// "build" now that they derive it from the unit instead of a constant.
+func TestFixEscalationOriginFix(t *testing.T) {
+	assertFixOrigin := func(t *testing.T, commit store.HandlerCommit) {
+		t.Helper()
+		if commit.Escalation == nil {
+			t.Fatal("commit.Escalation = nil, want an escalation")
+		}
+		if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+			t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+		}
+	}
+
+	t.Run("CHECK command failure", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+		ticket := getTicket(t, s, ticketID)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-check-fail-sess")}}
+		deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		apply(t, s, ticket, commit)
+
+		ticket = getTicket(t, s, ticketID)
+		deps2 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		deps2.RequireSandbox = true
+		deps2.Commands = job.NewCommandRunner(sandbox.Off(), true)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: sandbox unavailable
+		if err != nil {
+			t.Fatalf("DriveFix (CHECK): %v", err)
+		}
+		assertFixOrigin(t, checkCommit)
+		if checkCommit.Escalation.Payload.Code != string(response.EscalationCodeSandboxUnavailable) {
+			t.Errorf("escalation code = %q, want %q", checkCommit.Escalation.Payload.Code, response.EscalationCodeSandboxUnavailable)
+		}
+	})
+
+	t.Run("LAND signing failure", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
+		ticket := getTicket(t, s, ticketID)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-sign-fail-sess")}}
+		deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindFailure, Text: "scenario 2 failed: timeout", AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		apply(t, s, ticket, commit)
+
+		ticket = getTicket(t, s, ticketID)
+		deps2 := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		_, wt := buildWorktreeFor(t, deps2, ticket)
+		badKey := filepath.Join(t.TempDir(), "no-such-signing-key")
+		if out, cfgErr := gitfixture.Git(t.Context(), wt.Dir(), "config", "user.signingKey", badKey); cfgErr != nil {
+			t.Fatalf("git config user.signingKey: %v: %s", cfgErr, out)
+		}
+
+		landCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK, clean, LAND: signing fails
+		if err != nil {
+			t.Fatalf("DriveFix (CHECK+LAND): %v", err)
+		}
+		assertFixOrigin(t, landCommit)
+		const wantWhat = "commit signing failed"
+		if !strings.Contains(landCommit.Escalation.Body, wantWhat) {
+			t.Errorf("escalation body = %q, want it to contain %q", landCommit.Escalation.Body, wantWhat)
+		}
+	})
+
+	t.Run("DESCRIBE unclaimed extra", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+		ticket := getTicket(t, s, ticketID)
+
+		claimedExtras := []response.ExtraClaim{{Path: testExtraPath, Reason: testExtraReason}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, 0, 0, claimedExtras, "fix-describe-fail-sess")}}
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // RUN
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		apply(t, s, ticket, commit)
+
+		ticket = getTicket(t, s, ticketID)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // CHECK: claims ok
+		if err != nil {
+			t.Fatalf("DriveFix (CHECK): %v", err)
+		}
+		if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claims ok run ") {
+			t.Fatalf("CHECK commit.Messages = %+v, want a claims-ok marker", checkCommit.Messages)
+		}
+		apply(t, s, ticket, checkCommit)
+
+		ticket = getTicket(t, s, ticketID)
+		deps3 := withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath)
+		_, wt := buildWorktreeFor(t, deps3, ticket)
+		const surprisePath = "aaa_surprise.go" // sorts before testExtraPath ("extra1.go"): the first undescribed extra
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), surprisePath), []byte("surprise\n"), 0o600); writeErr != nil {
+			t.Fatalf("write %s: %v", surprisePath, writeErr)
+		}
+
+		describeCommit, err := job.DriveFix(t.Context(), ticket, deps3, req) // DESCRIBE: unclaimed extra
+		if err != nil {
+			t.Fatalf("DriveFix (DESCRIBE): %v", err)
+		}
+		assertFixOrigin(t, describeCommit)
+	})
+
+	t.Run("RESOLVE revert failure", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+		ticket := getTicket(t, s, ticketID)
+
+		claimedExtras := []response.ExtraClaim{{Path: testExtraPath, Reason: testExtraReason}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, 0, 0, claimedExtras, "fix-resolve-fail-sess")}}
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // RUN
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		apply(t, s, ticket, commit)
+
+		ticket = getTicket(t, s, ticketID)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // CHECK: claims ok
+		if err != nil {
+			t.Fatalf("DriveFix (CHECK): %v", err)
+		}
+		apply(t, s, ticket, checkCommit)
+
+		scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "fix-resolve-perim-sess"))
+		ticket = getTicket(t, s, ticketID)
+		describeCommit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // DESCRIBE + ASK
+		if err != nil {
+			t.Fatalf("DriveFix (DESCRIBE): %v", err)
+		}
+		if len(describeCommit.Messages) != 1 {
+			t.Fatalf("DESCRIBE commit.Messages = %+v, want one perimeter question", describeCommit.Messages)
+		}
+		apply(t, s, ticket, describeCommit)
+
+		q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+		answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionReject})
+
+		ticket = getTicket(t, s, ticketID)
+		deps := withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath)
+		_, wt := buildWorktreeFor(t, deps, ticket)
+		if chmodErr := os.Chmod(wt.Dir(), 0o555); chmodErr != nil {
+			t.Fatalf("chmod worktree dir: %v", chmodErr)
+		}
+		t.Cleanup(func() {
+			if chmodErr := os.Chmod(wt.Dir(), 0o755); chmodErr != nil {
+				t.Logf("restore worktree dir permissions: %v", chmodErr)
+			}
+		})
+
+		// RESOLVE is not reachable through job.DriveFix (fix.go's own doc:
+		// "a fix's own perimeter-kind round has no such check yet"): the
+		// ticket stays in "building" state throughout a fix's own
+		// lifecycle, so the owner's answer to this ASK is picked up by the
+		// same building.Run() entry point a task unit's own RESOLVE uses
+		// (enterFromRounds's perimeter-kind branch does not care whose
+		// unit the round belongs to).
+		resolveCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: revert fails
+		if err != nil {
+			t.Fatalf("RESOLVE: %v", err)
+		}
+		assertFixOrigin(t, resolveCommit)
+	})
+
+	t.Run("build run error outcome", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+		ticket := getTicket(t, s, ticketID)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{fixErrorStep("fix-error-sess")}}
+		deps := claimForBuild(t, s, scriptRT, ticketID)
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: error outcome
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		assertFixOrigin(t, commit)
+	})
+
+	t.Run("resume exec failure", func(t *testing.T) {
+		s, _, ticketID := buildTicketInBuilding(t)
+		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+		ticket := getTicket(t, s, ticketID)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-exec-fail-sess")}}
+		rec := &recordingRuntime{rt: scriptRT}
+		deps := claimForBuild(t, s, rec, ticketID)
+		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+		if err != nil {
+			t.Fatalf("DriveFix (RUN): %v", err)
+		}
+		apply(t, s, ticket, commit)
+
+		ticket = getTicket(t, s, ticketID)
+		deps2 := claimForBuild(t, s, rec, ticketID)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending (test_exit false)
+		if err != nil {
+			t.Fatalf("DriveFix (CHECK): %v", err)
+		}
+		apply(t, s, ticket, checkCommit)
+
+		scriptRT.steps = append(scriptRT.steps, scriptedStep{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrStart})
+		ticket = getTicket(t, s, ticketID)
+		deps3 := claimForBuild(t, s, rec, ticketID)
+		resumeCommit, err := job.DriveFix(t.Context(), ticket, deps3, req) // resume: exec failure
+		if err != nil {
+			t.Fatalf("DriveFix (resume, exec failure): %v", err)
+		}
+		assertFixOrigin(t, resumeCommit)
+		if resumeCommit.Escalation.Payload.Code != string(response.EscalationCodeRuntimeExecFailed) {
+			t.Errorf("escalation code = %q, want %q", resumeCommit.Escalation.Payload.Code, response.EscalationCodeRuntimeExecFailed)
+		}
+	})
 }
 
 // landedMessageID finds the one "fix landed <id> sha ..." marker among
