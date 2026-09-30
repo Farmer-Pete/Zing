@@ -132,10 +132,19 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 		return checkQuestionCardinality(r.Questions)
 	case *BuildResponse:
 		return checkBuildShape(r, present)
+	case *FindingsResponse:
+		if ctx.Job != JobReview {
+			// A planreview document's findings resolve against the plan
+			// instead, checked elsewhere by internal/job/planning.go's
+			// ResolvesInPlan; this package's own Layer 2 has nothing
+			// further to check for it.
+			return nil
+		}
+		return checkReviewFindingsShape(r.Findings, present)
 	case *JudgeResponse:
-		// Layer 1 only; its observation-dependent checks belong to the
-		// judge (Package 9).
-		return nil
+		return checkJudgeDuplicateVerdicts(r.Verdicts, present)
+	case *RespondResponse:
+		return checkRespondThreadsShape(r.Threads, present)
 	default:
 		return nil
 	}
@@ -309,7 +318,7 @@ func checkConstraints(n *node, path string, v reflect.Value) []*PathError {
 	case reflect.String:
 		s := v.String()
 		if n.HasMinLength && len([]rune(s)) < n.MinLength {
-			errs = append(errs, &PathError{Path: path, Msg: "must not be empty"})
+			errs = append(errs, &PathError{Path: path, Msg: msgEmpty})
 		}
 		if n.HasPattern {
 			if msg, bad := checkPattern(n.Pattern, s); bad {

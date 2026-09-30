@@ -1,6 +1,9 @@
 package response
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestParseSeverity_AcceptsExactlyTheFourClosedValues proves ParseSeverity
 // round-trips every valid Severity and errors on anything else, including a
@@ -93,6 +96,40 @@ func TestEscalationOrigin_Values_IncludesPackage8Origins(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("EscalationOrigin.Values() = %v, want it to contain %q", values, want)
+		}
+	}
+}
+
+// TestEscalationCode_Values_IncludesPRClosed proves pr_closed, Package 9's
+// own code (design decision D13), appears in EscalationCode's own Values().
+func TestEscalationCode_Values_IncludesPRClosed(t *testing.T) {
+	t.Parallel()
+
+	values := EscalationCode("").Values()
+	if !slices.Contains(values, string(EscalationCodePRClosed)) {
+		t.Errorf("EscalationCode.Values() = %v, want it to contain %q", values, EscalationCodePRClosed)
+	}
+}
+
+// TestEscalationOrigin_Values_IncludesPackage9Origins proves the four
+// origins Package 9 adds (design section 4.1), review, judge, shipping, and
+// respond, appear in EscalationOrigin's own Values().
+func TestEscalationOrigin_Values_IncludesPackage9Origins(t *testing.T) {
+	t.Parallel()
+
+	values := EscalationOrigin("").Values()
+	want := []EscalationOrigin{
+		EscalationOriginReview, EscalationOriginJudge, EscalationOriginShipping, EscalationOriginRespond,
+	}
+	for _, w := range want {
+		found := false
+		for _, v := range values {
+			if v == string(w) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("EscalationOrigin.Values() = %v, want it to contain %q", values, w)
 		}
 	}
 }

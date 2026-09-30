@@ -42,10 +42,48 @@
       "type": "string",
       "enum": [
         "accept",
-        "reject",
         "drop",
         "discuss"
       ]
+    },
+    "held": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^r[1-9][0-9]*[fh][1-9][0-9]*$"
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "lenses": {
+      "items": {
+        "type": "string",
+        "enum": [
+          "problem",
+          "simplification",
+          "correctness",
+          "security",
+          "fidelity",
+          "tests",
+          "quality",
+          "observability"
+        ]
+      },
+      "type": "array",
+      "maxItems": 7,
+      "minItems": 1
+    },
+    "supersedes": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "additionalProperties": false,
@@ -55,6 +93,10 @@
     "severity",
     "location",
     "text",
-    "fix"
+    "fix",
+    "id",
+    "round",
+    "sha",
+    "lenses"
   ]
 }

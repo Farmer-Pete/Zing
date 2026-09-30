@@ -29,12 +29,47 @@
         ]
       },
       "type": "array",
+      "maxItems": 1000,
+      "minItems": 1
+    },
+    "batch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "seen": {
+      "items": {
+        "properties": {
+          "tid": {
+            "type": "string",
+            "pattern": "^t[0-9a-f]{16}$"
+          },
+          "last_comment": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tid",
+          "last_comment"
+        ]
+      },
+      "type": "array",
+      "maxItems": 1000,
       "minItems": 1
     }
   },
   "additionalProperties": false,
   "type": "object",
   "required": [
-    "threads"
+    "threads",
+    "batch",
+    "sha",
+    "seen"
   ]
 }

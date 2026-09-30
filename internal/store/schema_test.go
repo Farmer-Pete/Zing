@@ -2,11 +2,17 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"zing/internal/response"
 	"zing/internal/schemagen"
 )
+
+// testFortyHexSHA is a stand-in 40-character hex commit SHA, reused across
+// this file's Package 9 schema tests (finding, verdict, and respond
+// artifacts each require one).
+const testFortyHexSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func TestLoadSchemas_CompilesAllRegistered(t *testing.T) {
 	t.Parallel()
@@ -300,11 +306,12 @@ func escalationPayloadJSON(code, origin string) []byte {
 		`{"code":%q,"what":"w","why":"y","tried":"t","options":["retry"],"origin":%q}`, code, origin))
 }
 
-// TestValidate_EscalationCodeAndOrigin proves every one of the sixteen
-// EscalationCode values (fourteen plus Package 8's sandbox_unavailable and
-// replan_unsupported) and the fourteen EscalationOrigin values validates
-// against the committed escalation schema, and an unknown value of either
-// fails (design section 6.7, task 4c; design section 4.1, Package 8).
+// TestValidate_EscalationCodeAndOrigin proves every one of the seventeen
+// EscalationCode values (fourteen, plus Package 8's sandbox_unavailable and
+// replan_unsupported, plus Package 9's pr_closed) and the eighteen
+// EscalationOrigin values validates against the committed escalation
+// schema, and an unknown value of either fails (design section 6.7, task
+// 4c; design section 4.1, Packages 8 and 9).
 func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -314,8 +321,8 @@ func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	}
 
 	codes := response.EscalationCode("").Values()
-	if len(codes) != 16 {
-		t.Fatalf("len(EscalationCode values) = %d, want 16", len(codes))
+	if len(codes) != 17 {
+		t.Fatalf("len(EscalationCode values) = %d, want 17", len(codes))
 	}
 	for _, code := range codes {
 		t.Run("code "+code, func(t *testing.T) {
@@ -328,8 +335,8 @@ func TestValidate_EscalationCodeAndOrigin(t *testing.T) {
 	}
 
 	origins := response.EscalationOrigin("").Values()
-	if len(origins) != 14 {
-		t.Fatalf("len(EscalationOrigin values) = %d, want 14", len(origins))
+	if len(origins) != 18 {
+		t.Fatalf("len(EscalationOrigin values) = %d, want 18", len(origins))
 	}
 	for _, origin := range origins {
 		t.Run("origin "+origin, func(t *testing.T) {
@@ -416,6 +423,245 @@ func TestFileDecisionSchemaIsNarrow(t *testing.T) {
 			}
 			if !tt.wantOK && err == nil {
 				t.Errorf("validate(decision=%s) = nil, want error", tt.decision)
+			}
+		})
+	}
+}
+
+// findingArtifactPayload builds a schema-shaped finding artifact payload
+// with the given id and (when non-empty) decision, so this file's finding
+// artifact tests can each swap just the field under test.
+func findingArtifactPayload(id, decision string) string {
+	extra := ""
+	if decision != "" {
+		extra = `,"decision":"` + decision + `"`
+	}
+	return `{"lens":"tests","severity":"minor","location":"a.go:1","text":"t","fix":"f",` +
+		`"id":"` + id + `","round":1,"sha":"` + testFortyHexSHA + `","lenses":["tests"]` + extra + `}`
+}
+
+// TestFindingArtifactSchema proves the finding artifact schema's decision
+// enum is FindingDecision's own three values, narrower than the four-value
+// Decision enum tag on the wire Finding type would otherwise produce
+// (section 4.1, the same narrowing TestFileDecisionSchemaIsNarrow proves
+// for the file artifact), and that both an ordinary round id (r1f1) and a
+// held row's id (r1h2) validate.
+func TestFindingArtifactSchema(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	const findingID = "r1f1"
+	tests := []struct {
+		name     string
+		id       string
+		decision string
+		wantOK   bool
+	}{
+		{"accept validates", findingID, string(response.FindingAccept), true},
+		{"drop validates", findingID, string(response.FindingDrop), true},
+		{"discuss validates", findingID, string(response.FindingDiscuss), true},
+		{"reject is refused", findingID, "reject", false},
+		{"a held r1h2 id passes", "r1h2", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := findingArtifactPayload(tt.id, tt.decision)
+			err := schemas.validate(testTableArtifacts, "finding", []byte(payload))
+			if tt.wantOK && err != nil {
+				t.Errorf("validate(id=%s, decision=%s) = %v, want nil", tt.id, tt.decision, err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Errorf("validate(id=%s, decision=%s) = nil, want error", tt.id, tt.decision)
+			}
+		})
+	}
+}
+
+// TestFindingDecisionValues proves response.FindingDecision's own Values()
+// holds exactly accept, drop, discuss, in that order (section 4.1): reject
+// cannot be stored, unlike the owner's triage Decision type.
+func TestFindingDecisionValues(t *testing.T) {
+	t.Parallel()
+
+	want := []string{string(response.FindingAccept), string(response.FindingDrop), string(response.FindingDiscuss)}
+	got := response.FindingDecision("").Values()
+	if len(got) != len(want) {
+		t.Fatalf("FindingDecision.Values() = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("FindingDecision.Values()[%d] = %q, want %q", i, got[i], v)
+		}
+	}
+}
+
+// TestRound21Validates proves a finding row and a verdict row with round 21
+// still pass their schemas (section 4.1): Round has no maximum, only the
+// agent budget bounds it.
+func TestRound21Validates(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	finding := `{"lens":"tests","severity":"minor","location":"a.go:1","text":"t","fix":"f",` +
+		`"id":"r21f1","round":21,"sha":"` + testFortyHexSHA + `","lenses":["tests"]}`
+	if err := schemas.validate(testTableArtifacts, "finding", []byte(finding)); err != nil {
+		t.Errorf("validate(finding, round=21) = %v, want nil", err)
+	}
+
+	verdict := `{"scenario_id":"s1","result":"pass","evidence":"e","kind":"behavior","round":21,"sha":"` +
+		testFortyHexSHA + `"}`
+	if err := schemas.validate(testTableArtifacts, "verdict", []byte(verdict)); err != nil {
+		t.Errorf("validate(verdict, round=21) = %v, want nil", err)
+	}
+}
+
+// TestVerdictArtifactSchema proves the verdict artifact schema requires
+// kind, round, and sha alongside the embedded Verdict's scenario_id,
+// result, and evidence (section 4.1), and that the optional check_exit
+// (set only on a row a check re-run wrote) may be -1 (timed out) or absent.
+func TestVerdictArtifactSchema(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	base := `{"scenario_id":"s1","result":"pass","evidence":"e","kind":"behavior","round":1,"sha":"` +
+		testFortyHexSHA + `"}`
+	if err := schemas.validate(testTableArtifacts, "verdict", []byte(base)); err != nil {
+		t.Errorf("validate(no check_exit) = %v, want nil", err)
+	}
+
+	withCheckExit := `{"scenario_id":"s1","result":"pass","evidence":"e","kind":"behavior","round":1,"sha":"` +
+		testFortyHexSHA + `","check_exit":-1}`
+	if err := schemas.validate(testTableArtifacts, "verdict", []byte(withCheckExit)); err != nil {
+		t.Errorf("validate(check_exit=-1) = %v, want nil", err)
+	}
+
+	missingKind := `{"scenario_id":"s1","result":"pass","evidence":"e","round":1,"sha":"` + testFortyHexSHA + `"}`
+	if err := schemas.validate(testTableArtifacts, "verdict", []byte(missingKind)); err == nil {
+		t.Error("validate(no kind) = nil, want error")
+	}
+}
+
+// respondThreadsJSON builds n schema-shaped, uniquely-id'd thread actions
+// as a JSON array, for TestRespondArtifact101Threads.
+func respondThreadsJSON(n int) string {
+	threads := make([]string, n)
+	for i := range n {
+		threads[i] = fmt.Sprintf(`{"id":"t%d","action":"reply","text":"ok"}`, i+1)
+	}
+	return "[" + strings.Join(threads, ",") + "]"
+}
+
+// respondArtifactPayload builds a schema-shaped respond artifact payload
+// with n threads and one seen entry, so this file's respond artifact tests
+// can each swap just the field under test.
+func respondArtifactPayload(n int) string {
+	return fmt.Sprintf(
+		`{"threads":%s,"batch":1,"sha":%q,"seen":[{"tid":"t0123456789abcdef","last_comment":%q}]}`,
+		respondThreadsJSON(n), testFortyHexSHA, strings.Repeat("0123456789abcdef", 4),
+	)
+}
+
+// TestRespondArtifact101Threads proves the respond artifact's threads array
+// keeps its minItems=1,maxItems=1000 bound (section 4.1, the same bound
+// ListThreads enforces on a POLL batch, design section 10.4): 101 and 1000
+// threads both validate, 1001 is refused.
+func TestRespondArtifact101Threads(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	tests := []struct {
+		n      int
+		wantOK bool
+	}{
+		{101, true},
+		{1000, true},
+		{1001, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d threads", tt.n), func(t *testing.T) {
+			t.Parallel()
+			payload := respondArtifactPayload(tt.n)
+			err := schemas.validate(testTableArtifacts, "respond", []byte(payload))
+			if tt.wantOK && err != nil {
+				t.Errorf("validate(%d threads) = %v, want nil", tt.n, err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Errorf("validate(%d threads) = nil, want error", tt.n)
+			}
+		})
+	}
+}
+
+// TestRespondArtifactSeenRequired proves seen is a required array, not
+// omitempty (section 4.1): it is code-read, never model output, so a
+// respond artifact row always carries it, and a payload missing the key
+// entirely is refused the same way a missing threads, batch, or sha is.
+func TestRespondArtifactSeenRequired(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	missingSeen := `{"threads":[{"id":"t1","action":"reply","text":"ok"}],"batch":1,"sha":"` + testFortyHexSHA + `"}`
+	if err := schemas.validate(testTableArtifacts, "respond", []byte(missingSeen)); err == nil {
+		t.Error("validate(no seen) = nil, want error")
+	}
+
+	withSeen := respondArtifactPayload(1)
+	if err := schemas.validate(testTableArtifacts, "respond", []byte(withSeen)); err != nil {
+		t.Errorf("validate(with seen) = %v, want nil", err)
+	}
+}
+
+// TestRespondArtifactSchema proves the respond artifact schema requires
+// threads, batch, and sha alongside seen (section 4.1), each refused on its
+// own when missing, and that a fully populated row validates.
+func TestRespondArtifactSchema(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	if err := schemas.validate(testTableArtifacts, "respond", []byte(respondArtifactPayload(1))); err != nil {
+		t.Errorf("validate(full payload) = %v, want nil", err)
+	}
+
+	seen := `[{"tid":"t0123456789abcdef","last_comment":"` + strings.Repeat("0123456789abcdef", 4) + `"}]`
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{"missing threads", fmt.Sprintf(`{"batch":1,"sha":%q,"seen":%s}`, testFortyHexSHA, seen)},
+		{"missing batch", fmt.Sprintf(`{"threads":%s,"sha":%q,"seen":%s}`, respondThreadsJSON(1), testFortyHexSHA, seen)},
+		{"missing sha", fmt.Sprintf(`{"threads":%s,"batch":1,"seen":%s}`, respondThreadsJSON(1), seen)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := schemas.validate(testTableArtifacts, "respond", []byte(tt.payload)); err == nil {
+				t.Errorf("validate(%s) = nil, want error", tt.name)
 			}
 		})
 	}

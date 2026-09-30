@@ -29,12 +29,6 @@ type planReviewPayload struct {
 	Findings []response.Finding `json:"findings"` // required array; a clean review stores []
 }
 
-// respondPayload is the stored shape of a respond artifact: the threads
-// only, not the RespondResponse wrapper's job/outcome head.
-type respondPayload struct {
-	Threads []response.ThreadAction `json:"threads" jsonschema:"minItems=1"`
-}
-
 // claimsPayload is the stored shape of a claims artifact: []Claim at the
 // document root. JSONSchemaExtend sets the root-array minItems the bare
 // slice reflection cannot carry, preserving ReadyResponse.Claims' constraint.
@@ -91,9 +85,9 @@ func Registry() []Entry {
 		{tableArtifacts, "fence", response.Fence{}},
 		{tableArtifacts, "task", response.TaskArtifact{}},
 		{tableArtifacts, "build_report", response.BuildReport{}},
-		{tableArtifacts, "finding", response.Finding{}},
-		{tableArtifacts, "verdict", response.Verdict{}},
-		{tableArtifacts, "respond", respondPayload{}},
+		{tableArtifacts, "finding", response.FindingArtifact{}},
+		{tableArtifacts, "verdict", response.VerdictArtifact{}},
+		{tableArtifacts, "respond", response.RespondArtifact{}},
 		{tablePushSubscriptions, "keys", pushKeys{}},
 	}
 }

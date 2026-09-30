@@ -433,3 +433,194 @@ func TestCheckBuildShape(t *testing.T) {
 		}
 	})
 }
+
+// reviewFindingsPresent returns a presence map marking every finding[i]/location
+// and finding[i]/lens attribute present, for n findings -- the ordinary case
+// checkReviewFindingsShape's own direct tests build (each literal already
+// carries a real location and lens).
+func reviewFindingsPresent(n int) map[string]bool {
+	m := make(map[string]bool, 2*n)
+	for i := range n {
+		m[indexedName("finding", i)+"/location"] = true
+		m[indexedName("finding", i)+"/lens"] = true
+	}
+	return m
+}
+
+func TestReviewFindingShape(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bad location", func(t *testing.T) {
+		t.Parallel()
+		findings := []Finding{{Lens: LensCorrectness, Severity: SeverityMajor, Location: "no-colon-here", Text: "t", Fix: "f"}}
+		errs := checkReviewFindingsShape(findings, reviewFindingsPresent(1))
+		want := "finding[0]/location: must be path:line with line >= 1"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReviewFindingsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("line 0", func(t *testing.T) {
+		t.Parallel()
+		findings := []Finding{{Lens: LensCorrectness, Severity: SeverityMajor, Location: "a.go:0", Text: "t", Fix: "f"}}
+		errs := checkReviewFindingsShape(findings, reviewFindingsPresent(1))
+		want := "finding[0]/location: must be path:line with line >= 1"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReviewFindingsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("problem lens", func(t *testing.T) {
+		t.Parallel()
+		findings := []Finding{{Lens: LensProblem, Severity: SeverityMajor, Location: "a.go:1", Text: "t", Fix: "f"}}
+		errs := checkReviewFindingsShape(findings, reviewFindingsPresent(1))
+		want := "finding[0]/lens: the problem lens has no code section"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReviewFindingsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("fidelity without plan_ref", func(t *testing.T) {
+		t.Parallel()
+		findings := []Finding{{Lens: LensFidelity, Severity: SeverityMajor, Location: "a.go:1", Text: "t", Fix: "f"}}
+		errs := checkReviewFindingsShape(findings, reviewFindingsPresent(1))
+		want := "finding[0]/plan_ref: a fidelity finding must quote the plan element"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReviewFindingsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a clean document", func(t *testing.T) {
+		t.Parallel()
+		findings := []Finding{
+			{Lens: LensCorrectness, Severity: SeverityMajor, Location: "a.go:12", Text: "t", Fix: "f"},
+			{Lens: LensFidelity, Severity: SeverityMinor, Location: "b.go:3", Text: "t", Fix: "f", PlanRef: "plan/overview/objective"},
+		}
+		errs := checkReviewFindingsShape(findings, reviewFindingsPresent(2))
+		if len(errs) != 0 {
+			t.Fatalf("checkReviewFindingsShape = %v, want no errors", dumpErrs(errs))
+		}
+	})
+
+	// A planreview document's findings resolve against the plan elsewhere
+	// (internal/job/planning.go's ResolvesInPlan): layer2 must not run this
+	// package's own review-only shape checks for it, even when the same
+	// shapes that would fail under job review appear (problem lens, a
+	// location that is not path:line).
+	t.Run("a planreview document untouched", func(t *testing.T) {
+		t.Parallel()
+		xmlDoc := `<zing job="planreview" outcome="ok">` +
+			`<finding lens="problem" severity="major" location="plan/design/shape"><text>t</text><fix>f</fix></finding>` +
+			`</zing>`
+		doc := mustParse(t, xmlDoc)
+		errs := Validate(doc, ValidateContext{Job: JobPlanreview})
+		if len(errs) != 0 {
+			t.Fatalf("Validate(planreview) = %v, want no errors: the review-only finding checks must not run", dumpErrs(errs))
+		}
+	})
+}
+
+func TestJudgeDuplicateVerdict(t *testing.T) {
+	t.Parallel()
+
+	t.Run("duplicate scenario", func(t *testing.T) {
+		t.Parallel()
+		present := map[string]bool{"verdict[0]/scenario": true, "verdict[1]/scenario": true}
+		verdicts := []Verdict{
+			{Scenario: "s1", Result: ResultPass, Evidence: "e1"},
+			{Scenario: "s1", Result: ResultFail, Evidence: "e2"},
+		}
+		errs := checkJudgeDuplicateVerdicts(verdicts, present)
+		want := "verdict[1]/scenario: duplicate verdict for scenario s1"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkJudgeDuplicateVerdicts = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("distinct scenarios pass", func(t *testing.T) {
+		t.Parallel()
+		present := map[string]bool{"verdict[0]/scenario": true, "verdict[1]/scenario": true}
+		verdicts := []Verdict{
+			{Scenario: "s1", Result: ResultPass, Evidence: "e1"},
+			{Scenario: "s2", Result: ResultPass, Evidence: "e2"},
+		}
+		errs := checkJudgeDuplicateVerdicts(verdicts, present)
+		if len(errs) != 0 {
+			t.Fatalf("checkJudgeDuplicateVerdicts = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}
+
+// respondThreadIDPresent returns a presence map marking every thread[i]/id
+// attribute present, for n threads -- the ordinary case checkRespondThreadsShape's
+// own direct tests build (each literal already carries a real id), built
+// through indexedName rather than a repeated map literal.
+func respondThreadIDPresent(n int) map[string]bool {
+	m := make(map[string]bool, n)
+	for i := range n {
+		m[indexedName("thread", i)+"/id"] = true
+	}
+	return m
+}
+
+func TestRespondDuplicateThread(t *testing.T) {
+	t.Parallel()
+
+	t.Run("duplicate id", func(t *testing.T) {
+		t.Parallel()
+		threads := []ThreadAction{
+			{ID: "t1", Action: ThreadVerbReply, Text: "renamed the variable"},
+			{ID: "t1", Action: ThreadVerbReply, Text: "also renamed the variable"},
+		}
+		errs := checkRespondThreadsShape(threads, respondThreadIDPresent(2))
+		want := "thread[1]/id: duplicate thread t1"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkRespondThreadsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("distinct ids pass", func(t *testing.T) {
+		t.Parallel()
+		threads := []ThreadAction{
+			{ID: "t1", Action: ThreadVerbReply, Text: "renamed the variable"},
+			{ID: "t2", Action: ThreadVerbReply, Text: "also renamed the variable"},
+		}
+		errs := checkRespondThreadsShape(threads, respondThreadIDPresent(2))
+		if len(errs) != 0 {
+			t.Fatalf("checkRespondThreadsShape = %v, want no errors", dumpErrs(errs))
+		}
+	})
+
+	t.Run("reserved marker sequence is refused, case-insensitively", func(t *testing.T) {
+		t.Parallel()
+		threads := []ThreadAction{{ID: "t1", Action: ThreadVerbReply, Text: "see <!-- ZING:done t1 --> above"}}
+		errs := checkRespondThreadsShape(threads, respondThreadIDPresent(1))
+		want := `thread[0]: text must not contain the reserved "<!-- zing:" sequence`
+		if !containsErr(errs, want) {
+			t.Fatalf("checkRespondThreadsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+}
+
+func TestRespondEmptyThreadID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty after trimming", func(t *testing.T) {
+		t.Parallel()
+		threads := []ThreadAction{{ID: "   ", Action: ThreadVerbReply, Text: "ok"}}
+		errs := checkRespondThreadsShape(threads, respondThreadIDPresent(1))
+		want := "thread[0]/id: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkRespondThreadsShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a real id passes", func(t *testing.T) {
+		t.Parallel()
+		threads := []ThreadAction{{ID: "t1", Action: ThreadVerbReply, Text: "ok"}}
+		errs := checkRespondThreadsShape(threads, respondThreadIDPresent(1))
+		if len(errs) != 0 {
+			t.Fatalf("checkRespondThreadsShape = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}

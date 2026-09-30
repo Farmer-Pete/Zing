@@ -5,5 +5,13 @@
       "action": "fix",
       "text": "renamed the variable per review"
     }
+  ],
+  "batch": 1,
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "seen": [
+    {
+      "tid": "t0123456789abcdef",
+      "last_comment": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
   ]
 }

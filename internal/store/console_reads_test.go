@@ -529,7 +529,8 @@ func TestListArtifacts_OrderedByTypeVersionDescID(t *testing.T) {
 	scenario := func(id string) []byte {
 		return []byte(`{"id":"` + id + `","kind":"behavior","check_cmd":"go test","given":"g","when":"w","then":"t"}`)
 	}
-	finding := []byte(`{"lens":"tests","severity":"minor","location":"x:1","text":"y","fix":"z"}`)
+	finding := []byte(`{"lens":"tests","severity":"minor","location":"x:1","text":"y","fix":"z",` +
+		`"id":"r1f1","round":1,"sha":"` + testFortyHexSHA + `","lenses":["tests"]}`)
 
 	// scenarioV1First and scenarioV1Second tie on (type, version); each
 	// carries a distinct payload id so the returned order (Artifact has no

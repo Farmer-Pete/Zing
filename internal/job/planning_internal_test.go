@@ -54,7 +54,8 @@ func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 // TestPostRunFailedWhatFor covers postRunFailedWhatFor's own table (design
 // section 4.1): the four origins runAndRoute already threads through
 // postRunFailure, the three origins Package 8 adds ahead of their own
-// callers, and an unknown origin's fallback sentence.
+// callers, the three origins Package 9 adds the same way, and an unknown
+// origin's fallback sentence.
 func TestPostRunFailedWhatFor(t *testing.T) {
 	t.Parallel()
 
@@ -69,6 +70,9 @@ func TestPostRunFailedWhatFor(t *testing.T) {
 		{response.EscalationOriginBuild, "storing or checking the build result"},
 		{response.EscalationOriginFix, "storing or checking the build result"},
 		{response.EscalationOriginPerimeter, "storing the perimeter description"},
+		{response.EscalationOriginReview, "storing the review findings"},
+		{response.EscalationOriginJudge, "storing or checking the verdicts"},
+		{response.EscalationOriginRespond, "storing the thread actions"},
 		{response.EscalationOriginSeal, "storing or checking the agent's result"},
 	}
 	for _, tt := range tests {

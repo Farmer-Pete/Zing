@@ -19,7 +19,8 @@
         "seal_failed",
         "post_run_failed",
         "sandbox_unavailable",
-        "replan_unsupported"
+        "replan_unsupported",
+        "pr_closed"
       ]
     },
     "what": {
@@ -63,7 +64,11 @@
         "nothing_to_do_claims",
         "build",
         "perimeter",
-        "fix"
+        "fix",
+        "review",
+        "judge",
+        "shipping",
+        "respond"
       ]
     }
   },
