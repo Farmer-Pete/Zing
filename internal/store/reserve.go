@@ -27,7 +27,8 @@ type Reserved struct {
 // 4.2).
 type RunSeed struct {
 	Model string
-	TaskN *int // runs.task_n; nil for every job except build and perimeter task units
+	TaskN *int    // runs.task_n; nil for every job except build and perimeter task units
+	Lens  *string // runs.lens; set on a review run, one of the seven code lenses
 }
 
 // Reserve is the one pre-commit write a handler may make under its claim
@@ -102,8 +103,8 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 
 	var runRes sql.Result
 	runRes, err = tx.ExecContext(ctx,
-		`INSERT INTO runs (session_id, turn, model, task_n, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
-		sessionID, turn, seed.Model, seed.TaskN)
+		`INSERT INTO runs (session_id, turn, lens, model, task_n, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+		sessionID, turn, seed.Lens, seed.Model, seed.TaskN)
 	if err != nil {
 		return Reserved{}, fmt.Errorf("reserve: insert run: %w", err)
 	}

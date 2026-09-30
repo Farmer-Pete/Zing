@@ -1,6 +1,211 @@
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"zing/internal/response"
+)
+
+// validFinding, validVerdict, and validRespond build the smallest artifact
+// payload that passes its schema (internal/store/examples/artifacts/*.json
+// carries the same shapes), so Findings, Verdicts, and RespondBatches tests
+// can insert real, schema-valid rows through CommitHandlerResult rather than
+// a hand-written JSON literal.
+func validFinding(id string, round int) response.FindingArtifact {
+	return response.FindingArtifact{
+		Lens: response.LensTests, Severity: response.SeverityMinor,
+		Location: "internal/cart/cart_test.go:10",
+		Text:     "the new test does not assert the order total",
+		Fix:      "assert order.Total == 0 for an empty cart",
+		ID:       id, Round: round, SHA: strings.Repeat("a", 40),
+		Lenses: []response.Lens{response.LensTests},
+	}
+}
+
+func validVerdict(scenario string, round int) response.VerdictArtifact {
+	return response.VerdictArtifact{
+		Scenario: scenario, Result: response.ResultPass, Evidence: "go test ./...: PASS",
+		Kind: response.ScenarioKindBehavior, Round: round, SHA: strings.Repeat("a", 40),
+	}
+}
+
+func validRespond(batch int) response.RespondArtifact {
+	return response.RespondArtifact{
+		Threads: []response.ThreadAction{{ID: "t1", Action: response.ThreadVerbFix, Text: "renamed the variable"}},
+		Batch:   batch, SHA: strings.Repeat("a", 40),
+		Seen: []response.ThreadSeen{{TID: "t0123456789abcdef", LastComment: strings.Repeat("0", 64)}},
+	}
+}
+
+func marshalArtifact(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal artifact: %v", err)
+	}
+	return b
+}
+
+// reserveAndCommitArtifacts reserves one run on ticketID and, in a single
+// commit, writes artifacts, each carrying that run's id. It returns the
+// run id every written row is scoped to.
+func reserveAndCommitArtifacts(t *testing.T, s *Store, ticketID int64, artifactType string, payloads []json.RawMessage) int64 {
+	t.Helper()
+	ctx := t.Context()
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	artifacts := make([]Artifact, len(payloads))
+	for i, p := range payloads {
+		artifacts[i] = Artifact{Type: artifactType, RunID: &reserved.RunID, Payload: p}
+	}
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Artifacts: artifacts,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+	return reserved.RunID
+}
+
+// TestFindingsOrder proves Findings returns every finding artifact of the
+// ticket, decoded, ORDER BY artifacts.id (design section 4.2).
+func TestFindingsOrder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	runID := reserveAndCommitArtifacts(t, s, ticketID, artifactTypeFinding, []json.RawMessage{
+		marshalArtifact(t, validFinding("r1f1", 1)),
+		marshalArtifact(t, validFinding("r1f2", 1)),
+	})
+
+	got, err := s.Findings(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Finding.ID != "r1f1" || got[1].Finding.ID != "r1f2" {
+		t.Errorf("got ids = [%s, %s], want [r1f1, r1f2] (artifacts.id order)", got[0].Finding.ID, got[1].Finding.ID)
+	}
+	if got[0].ArtifactID <= 0 || got[1].ArtifactID <= got[0].ArtifactID {
+		t.Errorf("ArtifactIDs = [%d, %d], want ascending and positive", got[0].ArtifactID, got[1].ArtifactID)
+	}
+	if got[0].RunID == nil || *got[0].RunID != runID {
+		t.Errorf("got[0].RunID = %v, want %d", got[0].RunID, runID)
+	}
+}
+
+// TestVerdictsOrder proves Verdicts returns every judge verdict artifact of
+// the ticket, decoded, ORDER BY artifacts.id (design section 4.2).
+func TestVerdictsOrder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	runID := reserveAndCommitArtifacts(t, s, ticketID, artifactTypeVerdict, []json.RawMessage{
+		marshalArtifact(t, validVerdict("s1", 1)),
+		marshalArtifact(t, validVerdict("s2", 1)),
+	})
+
+	got, err := s.Verdicts(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("Verdicts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Verdict.Scenario != "s1" || got[1].Verdict.Scenario != "s2" {
+		t.Errorf("got scenarios = [%s, %s], want [s1, s2] (artifacts.id order)", got[0].Verdict.Scenario, got[1].Verdict.Scenario)
+	}
+	if got[1].ArtifactID <= got[0].ArtifactID {
+		t.Errorf("ArtifactIDs = [%d, %d], want ascending", got[0].ArtifactID, got[1].ArtifactID)
+	}
+	if got[0].RunID == nil || *got[0].RunID != runID {
+		t.Errorf("got[0].RunID = %v, want %d", got[0].RunID, runID)
+	}
+}
+
+// TestRespondBatchesOrder proves RespondBatches returns every respond
+// artifact of the ticket, decoded, ORDER BY artifacts.id (design section
+// 4.2).
+func TestRespondBatchesOrder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	runID := reserveAndCommitArtifacts(t, s, ticketID, artifactTypeRespond, []json.RawMessage{
+		marshalArtifact(t, validRespond(1)),
+		marshalArtifact(t, validRespond(2)),
+	})
+
+	got, err := s.RespondBatches(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("RespondBatches: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Respond.Batch != 1 || got[1].Respond.Batch != 2 {
+		t.Errorf("got batches = [%d, %d], want [1, 2] (artifacts.id order)", got[0].Respond.Batch, got[1].Respond.Batch)
+	}
+	if got[1].ArtifactID <= got[0].ArtifactID {
+		t.Errorf("ArtifactIDs = [%d, %d], want ascending", got[0].ArtifactID, got[1].ArtifactID)
+	}
+	if got[0].RunID == nil || *got[0].RunID != runID {
+		t.Errorf("got[0].RunID = %v, want %d", got[0].RunID, runID)
+	}
+}
+
+// TestRunByID proves RunByID returns one run of any ticket, by its own id
+// (design section 4.2): not scoped to a caller-known ticket, unlike every
+// other run read in this package.
+func TestRunByID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelOpus48})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	run, err := s.RunByID(ctx, reserved.RunID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if run.ID != reserved.RunID {
+		t.Errorf("run.ID = %d, want %d", run.ID, reserved.RunID)
+	}
+	if run.SessionID != reserved.SessionID {
+		t.Errorf("run.SessionID = %d, want %d", run.SessionID, reserved.SessionID)
+	}
+	if run.Model == nil || *run.Model != testModelOpus48 {
+		t.Errorf("run.Model = %v, want %q", run.Model, testModelOpus48)
+	}
+
+	if _, err := s.RunByID(ctx, reserved.RunID+1000); err == nil {
+		t.Error("RunByID(unknown id): want an error, got nil")
+	}
+}
 
 // TestMarkersWithPrefix proves MarkersWithPrefix matches a marker's first
 // line by prefix, not by exact equality (design section 5.1, D18): a "fix

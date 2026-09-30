@@ -200,6 +200,22 @@ func TestValidateCommitCountsSetBranch(t *testing.T) {
 	}
 }
 
+// TestValidateCommitCountsSessions proves the emptiness check (design
+// section 4.2) grew to cover Sessions too: a commit that sets only Sessions
+// (the review round terminalizing its seven lens sessions, with no single
+// Session field set) is not the wholly empty case ValidateCommit rejects.
+func TestValidateCommitCountsSessions(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	sessionID := int64(7)
+
+	commit := store.HandlerCommit{TicketID: 1, Sessions: []store.SessionUpsert{{ID: &sessionID}}}
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(Sessions only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 

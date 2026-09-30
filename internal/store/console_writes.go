@@ -163,6 +163,10 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionReject {
 				return DraftResult{}, conflict("a perimeter item takes accept or reject")
 			}
+			if payload.Kind == response.QuestionKindReview &&
+				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionDrop && in.Item.Decision != response.DecisionDiscuss {
+				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
+			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
 		default:
 			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)

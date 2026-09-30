@@ -55,6 +55,11 @@ type HandlerCommit struct {
 	Waiting *string // nil clears waiting_on
 
 	Session *SessionUpsert // nil, or create-or-update the run's session
+	// Sessions updates further existing sessions, each with ID set, after
+	// Session (the review round terminalizes seven sessions in one commit,
+	// design section 4.2). An entry with a nil ID is an error: "commit
+	// handler result: extra session needs an id".
+	Sessions []SessionUpsert
 	// Runs is applied entry by entry: ID == 0 inserts a new row under
 	// Session's session id (SessionID filled from Session after upsert);
 	// ID > 0 updates that existing, ticket-owned run's outcome, exit_code,
@@ -172,8 +177,9 @@ type SessionUpsert struct {
 // back and returns applied=false, err=nil.
 //
 // Order inside the transaction (section 6.3, 4.5): verify the fence; upsert
-// the session and learn its id; insert or update the runs and learn their
-// ids; set kind; insert the artifacts; seal the cohort when Seal is set;
+// the session and learn its id; update every further session Sessions
+// names; insert or update the runs and learn their ids; set kind; insert
+// the artifacts; seal the cohort when Seal is set;
 // record the escalation and its linked question when Escalation is set;
 // resolve every question when ResolveAll is set; insert the messages,
 // attaching the single run's id when AttachRunToMsgs is set; resolve each
@@ -222,6 +228,18 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 		haveSession = true
+	}
+
+	for _, su := range c.Sessions {
+		if su.ID == nil {
+			return false, errors.New("commit handler result: extra session needs an id")
+		}
+		if err = verifySessionForTicket(ctx, tx, c.TicketID, *su.ID); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+		if _, err = upsertSessionTx(ctx, tx, c.TicketID, su); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
 	}
 
 	runIDs := make([]int64, 0, len(c.Runs))

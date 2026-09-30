@@ -260,6 +260,55 @@ func TestReserveWritesTaskN(t *testing.T) {
 	})
 }
 
+// TestReserveWritesLens proves RunSeed.Lens lands on the reserved run's own
+// lens column (design section 4.2): nil when the seed carries none, and the
+// exact lens name when one is given, the review round's own per-lens run
+// identity (runs.lens, design section 5.2).
+func TestReserveWritesLens(t *testing.T) {
+	s := newTestStore(t)
+
+	t.Run("nil for a seed with no lens", func(t *testing.T) {
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.Lens != nil {
+			t.Errorf("run.Lens = %v, want nil", run.Lens)
+		}
+	})
+
+	t.Run("set for a review lens run", func(t *testing.T) {
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "2")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		lens := "problem"
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX, Lens: &lens})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.Lens == nil || *run.Lens != lens {
+			t.Errorf("run.Lens = %v, want %q", run.Lens, lens)
+		}
+	})
+}
+
 // TestReserveChargesResume proves Reserve itself charges a resume (design
 // section 4.2): a first turn (su.ID nil) never bumps resumes, and a
 // reserved resume (su.ID set, BumpResumes true) raises it by exactly one.

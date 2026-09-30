@@ -1705,6 +1705,85 @@ func TestCommitSetBranch(t *testing.T) {
 	})
 }
 
+// --- CommitHandlerResult: Sessions ------------------------------------------
+
+// TestCommitExtraSessions proves HandlerCommit.Sessions updates further
+// existing sessions beyond the single Session field, each entry keyed by its
+// own ID -- the review round's own shape, terminalizing seven lens sessions
+// in one commit (design section 4.2) -- and that an entry with a nil ID is
+// refused before anything commits.
+func TestCommitExtraSessions(t *testing.T) {
+	t.Run("seven sessions updated", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		const n = 7
+		ids := make([]int64, n)
+		sessions := make([]SessionUpsert, n)
+		externals := make([]string, n)
+		for i := range n {
+			ids[i] = insertSession(t, s, ticketID, testJobBuild)
+			externals[i] = fmt.Sprintf("ext-lens-%d", i)
+			sessions[i] = SessionUpsert{ID: &ids[i], ExternalID: &externals[i]}
+		}
+
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Sessions: sessions,
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		for i, id := range ids {
+			var externalID sql.NullString
+			if err := s.db.QueryRowContext(ctx, `SELECT external_id FROM sessions WHERE id = ?`, id).Scan(&externalID); err != nil {
+				t.Fatalf("read session %d: %v", id, err)
+			}
+			if !externalID.Valid || externalID.String != externals[i] {
+				t.Errorf("session %d external_id = %v, want %q", id, externalID, externals[i])
+			}
+		}
+	})
+
+	t.Run("a nil id is refused, and nothing commits", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		sessionID := insertSession(t, s, ticketID, testJobBuild)
+		ext := testExternalID1
+
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Sessions: []SessionUpsert{{ID: &sessionID, ExternalID: &ext}, {ExternalID: &ext}},
+		})
+		wantErr := "commit handler result: extra session needs an id"
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("err = %v, want containing %q", err, wantErr)
+		}
+		if applied {
+			t.Error("applied = true, want false")
+		}
+
+		var externalID sql.NullString
+		if err := s.db.QueryRowContext(ctx, `SELECT external_id FROM sessions WHERE id = ?`, sessionID).Scan(&externalID); err != nil {
+			t.Fatalf("read session %d: %v", sessionID, err)
+		}
+		if externalID.Valid {
+			t.Errorf("session external_id = %q after a rejected commit, want NULL (whole commit rolled back)", externalID.String)
+		}
+	})
+}
+
 // --- CommitHandlerResult: Artifacts -----------------------------------------
 
 // TestCommitHandlerResult_ArtifactTicketIDForced proves the same forcing

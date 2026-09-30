@@ -11,9 +11,23 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"zing/internal/response"
+)
+
+// The three per-row artifact types this file reads (design section 4.2):
+// finding and verdict rows the reviewing and judging handlers append one at
+// a time, and respond rows one per babysit batch. migrations/0001_init.sql's
+// artifacts.type CHECK is their source of truth; these constants exist so
+// Findings, Verdicts, and RespondBatches never repeat the string literal.
+const (
+	artifactTypeFinding = "finding"
+	artifactTypeVerdict = "verdict"
+	artifactTypeRespond = "respond"
 )
 
 // MarkersWithPrefix returns every "update" message of the ticket whose
@@ -132,6 +146,137 @@ func (s *Store) SessionRunIDs(ctx context.Context, sessionID int64) ([]int64, er
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("session run ids for session %d: %w", sessionID, err)
+	}
+	return out, nil
+}
+
+// RunByID returns one run by its own id, of any ticket (design section 4.2):
+// unlike every other run read in this package, the caller has not already
+// scoped it to one ticket's sessions.
+func (s *Store) RunByID(ctx context.Context, runID int64) (Run, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE id = ?`, runID)
+	r, err := scanRun(row)
+	if err != nil {
+		return Run{}, fmt.Errorf("run %d: %w", runID, err)
+	}
+	return r, nil
+}
+
+// FindingRow pairs one stored code-review finding with the artifacts row it
+// came from (design section 4.2).
+type FindingRow struct {
+	ArtifactID int64
+	RunID      *int64
+	Finding    response.FindingArtifact
+}
+
+// VerdictRow pairs one stored judge verdict with the artifacts row it came
+// from (design section 4.2).
+type VerdictRow struct {
+	ArtifactID int64
+	RunID      *int64
+	Verdict    response.VerdictArtifact
+}
+
+// RespondRow pairs one stored respond batch with the artifacts row it came
+// from (design section 4.2).
+type RespondRow struct {
+	ArtifactID int64
+	RunID      *int64
+	Respond    response.RespondArtifact
+}
+
+// artifactRow is one raw (id, run_id, payload) row of a per-row artifact
+// type -- finding, verdict, or respond -- undecoded: the shape Findings,
+// Verdicts, and RespondBatches each build their own typed row from, so the
+// query and scan logic lives once.
+type artifactRow struct {
+	ID      int64
+	RunID   *int64
+	Payload json.RawMessage
+}
+
+// artifactRowsByType returns every row of typ for ticketID, ORDER BY
+// artifacts.id (design section 4.2).
+func (s *Store) artifactRowsByType(ctx context.Context, ticketID int64, typ string) ([]artifactRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, run_id, payload FROM artifacts WHERE ticket_id = ? AND type = ? ORDER BY id`,
+		ticketID, typ)
+	if err != nil {
+		return nil, fmt.Errorf("%s artifacts for ticket %d: %w", typ, ticketID, err)
+	}
+	defer rows.Close()
+
+	var out []artifactRow
+	for rows.Next() {
+		var r artifactRow
+		var runID sql.NullInt64
+		var payload string
+		if err := rows.Scan(&r.ID, &runID, &payload); err != nil {
+			return nil, fmt.Errorf("%s artifacts for ticket %d: %w", typ, ticketID, err)
+		}
+		if runID.Valid {
+			r.RunID = &runID.Int64
+		}
+		r.Payload = json.RawMessage(payload)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s artifacts for ticket %d: %w", typ, ticketID, err)
+	}
+	return out, nil
+}
+
+// Findings returns every finding artifact of the ticket, decoded, ORDER BY
+// artifacts.id (design section 4.2).
+func (s *Store) Findings(ctx context.Context, ticketID int64) ([]FindingRow, error) {
+	rows, err := s.artifactRowsByType(ctx, ticketID, artifactTypeFinding)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FindingRow, 0, len(rows))
+	for _, r := range rows {
+		var f response.FindingArtifact
+		if err := json.Unmarshal(r.Payload, &f); err != nil {
+			return nil, fmt.Errorf("decode finding artifact %d: %w", r.ID, err)
+		}
+		out = append(out, FindingRow{ArtifactID: r.ID, RunID: r.RunID, Finding: f})
+	}
+	return out, nil
+}
+
+// Verdicts returns every judge verdict artifact of the ticket, decoded,
+// ORDER BY artifacts.id (design section 4.2).
+func (s *Store) Verdicts(ctx context.Context, ticketID int64) ([]VerdictRow, error) {
+	rows, err := s.artifactRowsByType(ctx, ticketID, artifactTypeVerdict)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VerdictRow, 0, len(rows))
+	for _, r := range rows {
+		var v response.VerdictArtifact
+		if err := json.Unmarshal(r.Payload, &v); err != nil {
+			return nil, fmt.Errorf("decode verdict artifact %d: %w", r.ID, err)
+		}
+		out = append(out, VerdictRow{ArtifactID: r.ID, RunID: r.RunID, Verdict: v})
+	}
+	return out, nil
+}
+
+// RespondBatches returns every respond artifact of the ticket, decoded,
+// ORDER BY artifacts.id (design section 4.2).
+func (s *Store) RespondBatches(ctx context.Context, ticketID int64) ([]RespondRow, error) {
+	rows, err := s.artifactRowsByType(ctx, ticketID, artifactTypeRespond)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RespondRow, 0, len(rows))
+	for _, r := range rows {
+		var rp response.RespondArtifact
+		if err := json.Unmarshal(r.Payload, &rp); err != nil {
+			return nil, fmt.Errorf("decode respond artifact %d: %w", r.ID, err)
+		}
+		out = append(out, RespondRow{ArtifactID: r.ID, RunID: r.RunID, Respond: rp})
 	}
 	return out, nil
 }

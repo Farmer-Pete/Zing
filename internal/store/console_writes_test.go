@@ -147,8 +147,8 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
-	// review, not perimeter: this test exercises drop, which a perimeter
-	// item no longer accepts (design section 4.2).
+	// review, not perimeter: this test exercises drop and discuss, which a
+	// perimeter item no longer accepts (design section 4.2).
 	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
 
 	res1, err := s.SaveDraft(t.Context(), DraftInput{
@@ -167,7 +167,7 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 
 	// A second ref merges in alongside the first.
 	res2, err := s.SaveDraft(t.Context(), DraftInput{
-		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionReject},
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionDiscuss},
 	})
 	if err != nil {
 		t.Fatalf("SaveDraft (second ref): %v", err)
@@ -176,8 +176,8 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 		t.Errorf("second ref MessageID = %d, want the same row %d", res2.MessageID, res1.MessageID)
 	}
 	got = draftPayloadOf(t, s, res1.MessageID)
-	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionAccept || got.Items[testRefBGo] != response.DecisionReject {
-		t.Fatalf("items after second ref = %v, want {a.go: accept, b.go: reject}", got.Items)
+	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionAccept || got.Items[testRefBGo] != response.DecisionDiscuss {
+		t.Fatalf("items after second ref = %v, want {a.go: accept, b.go: discuss}", got.Items)
 	}
 
 	// Replacing the first ref's decision keeps the row, changes only that entry.
@@ -191,8 +191,49 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 		t.Error("replacing a.go's decision: Replaced = false, want true")
 	}
 	got = draftPayloadOf(t, s, res1.MessageID)
-	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionDrop || got.Items[testRefBGo] != response.DecisionReject {
-		t.Fatalf("items after replace one = %v, want {a.go: drop, b.go: reject}", got.Items)
+	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionDrop || got.Items[testRefBGo] != response.DecisionDiscuss {
+		t.Fatalf("items after replace one = %v, want {a.go: drop, b.go: discuss}", got.Items)
+	}
+}
+
+// TestSaveDraftReviewDecision proves the section 4.2 rule: a review item
+// takes accept, drop, or discuss; reject is refused with the conflict "a
+// review item takes accept, drop, or discuss".
+func TestSaveDraftReviewDecision(t *testing.T) {
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
+
+	tests := []struct {
+		name     string
+		key      string
+		decision response.Decision
+		wantErr  string
+	}{
+		{"accept saves", "Q1", response.DecisionAccept, ""},
+		{"drop saves", "Q2", response.DecisionDrop, ""},
+		{"discuss saves", "Q3", response.DecisionDiscuss, ""},
+		{"reject is refused", "Q4", response.DecisionReject, "a review item takes accept, drop, or discuss"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindReview, nil, items)
+			_, err := s.SaveDraft(t.Context(), DraftInput{
+				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SaveDraft(decision=%s): %v, want nil", tc.decision, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("SaveDraft(decision=%s): err = nil, want a ConflictError", tc.decision)
+			}
+			if got := conflictReason(t, err); got != tc.wantErr {
+				t.Errorf("conflict reason = %q, want %q", got, tc.wantErr)
+			}
+		})
 	}
 }
 
