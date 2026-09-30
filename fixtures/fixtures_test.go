@@ -47,8 +47,10 @@ func jobForScript(t *testing.T, name string) response.Job {
 		return response.JobPlanreview
 	case strings.HasPrefix(name, "perimeter/"):
 		return response.JobPerimeter
+	case strings.HasPrefix(name, "review/"):
+		return response.JobReview
 	default:
-		t.Fatalf("script %s is under none of planning/, build/, classify/, planreview/, or perimeter/; add a case to jobForScript", name)
+		t.Fatalf("script %s is under none of planning/, build/, classify/, planreview/, perimeter/, or review/; add a case to jobForScript", name)
 		return ""
 	}
 }

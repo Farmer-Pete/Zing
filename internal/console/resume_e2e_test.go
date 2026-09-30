@@ -175,6 +175,10 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
 			},
 			DataDir: t.TempDir(),
+			// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md
+			// section 4.3, 6.2): zero would block every lens forever, since
+			// this e2e now drives a real review round on its way to done.
+			LensesParallel: 7,
 		}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)

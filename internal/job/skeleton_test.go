@@ -293,6 +293,10 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildJobTestProjects(t, s),
 		DataDir:  t.TempDir(),
+		// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md section
+		// 4.3, 6.2): zero would block every lens forever the moment a test
+		// drives a ticket through "reviewing" for real.
+		LensesParallel: 7,
 	}
 }
 

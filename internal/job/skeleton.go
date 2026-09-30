@@ -38,7 +38,7 @@ func baseCommit(t store.Ticket, d Deps) store.HandlerCommit {
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}
 }
 
-// ---- queued, reviewing, judging, shipping: code-only transitions --------
+// ---- queued, judging, shipping: code-only transitions --------------------
 
 // queuedHandler advances a claimed ticket into planning (design section 6.5).
 type queuedHandler struct{}
@@ -46,16 +46,6 @@ type queuedHandler struct{}
 func (queuedHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c := baseCommit(t, d)
 	c.Next, c.Reason = statePlanning, reasonPickedUp
-	return c, nil
-}
-
-// reviewingHandler advances straight to judging; the skeleton runs no
-// review job (design section 6.5, the early-exit rule in section 0).
-type reviewingHandler struct{}
-
-func (reviewingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateJudging, reasonReviewClean
 	return c, nil
 }
 
@@ -79,8 +69,9 @@ func (shippingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Han
 	return c, nil
 }
 
-// building has its own real handler now (building.go, task 9): the
-// skeleton's buildingHandler, buildLabel, and buildSessionRuntime existed
-// because the walking skeleton needed a building state that advanced on
-// one scripted fake run; that handler now runs the real state machine
-// (design section 6) instead.
+// building and reviewing have their own real handlers now (building.go,
+// task 9; reviewing.go, task 10): the skeleton's own buildingHandler and
+// reviewingHandler existed because the walking skeleton needed both states
+// to advance on nothing more than a scripted fake run, or, for reviewing,
+// no run at all; those handlers now run the real state machine (design
+// section 6) instead.

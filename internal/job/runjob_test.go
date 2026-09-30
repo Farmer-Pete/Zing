@@ -219,7 +219,7 @@ func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{}, nil)
+	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{}, nil, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -250,7 +250,7 @@ func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -279,7 +279,7 @@ func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -312,7 +312,7 @@ func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
 		Budget: 10 * time.Second, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if !errors.Is(err, ErrBudget) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrBudget)", err)
 	}
@@ -358,7 +358,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 		DataDir: t.TempDir(),
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if !errors.Is(err, store.ErrClaimLost) {
 		t.Fatalf("err = %v, want errors.Is(err, store.ErrClaimLost)", err)
 	}
@@ -390,7 +390,7 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 
 	before := time.Now()
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify}, nil)
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	after := time.Now()
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
@@ -532,7 +532,7 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 	// directory here in production (runjob.go's own "Building passes the
 	// worktree directory in req.WorkDir already").
 	rr, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestRunJobErrSandboxWhenRequired(t *testing.T) {
 	deps.Reserve = rec.Reserve
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil, nil)
 	if !errors.Is(err, ErrSandbox) {
 		t.Fatalf("err = %v, want ErrSandbox", err)
 	}
@@ -591,7 +591,7 @@ func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sandbox.Off(), false)
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 	// A real, existing directory: see TestRunJobWrapsWhenAvailable's own
 	// comment on WorkDir.
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestRunJobUsesResolvedWorkDir(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
 	_, err = runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: link}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: link}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestRunJobPicksProfileByName(t *testing.T) {
 	}
 
 	rr, err := runJob(t.Context(), deps, ticket, testJobReadonly, store.SessionUpsert{Job: testJobReadonly, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v (want the readonly profile picked, not the off-and-required build one)", err)
 	}
@@ -770,7 +770,7 @@ func TestRunJobUnknownProfileIsConfigError(t *testing.T) {
 	}
 
 	_, err = runJob(t.Context(), deps, ticket, testJobMystery, store.SessionUpsert{Job: testJobMystery, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -807,7 +807,7 @@ func TestRunJobEmptyDataDirIsConfigError(t *testing.T) {
 		// DataDir deliberately left empty.
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -841,7 +841,7 @@ func TestUnsandboxedRunGetsPrivateTemp(t *testing.T) {
 	}
 
 	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify}, nil)
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -894,7 +894,7 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 
 	n := 3
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify}, &n)
+		runtime.RunRequest{Job: response.JobClassify}, &n, nil)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}

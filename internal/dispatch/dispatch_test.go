@@ -196,6 +196,10 @@ func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, ex
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
 		DataDir:  t.TempDir(),
+		// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md section
+		// 4.3, 6.2): zero would block every lens forever the moment a test
+		// drives a ticket through "reviewing" for real.
+		LensesParallel: 7,
 	}
 }
 
@@ -476,6 +480,12 @@ func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Brok
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = t.TempDir()
+	}
+	if cfg.LensesParallel == 0 {
+		// Bounds ROUND's own semaphore (PKG9-PLAN.md section 4.3, 6.2): zero
+		// would block every lens forever the moment a test drives a ticket
+		// through "reviewing" for real.
+		cfg.LensesParallel = 7
 	}
 	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
@@ -896,6 +906,61 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	claimGraceMax := after.Add(66 * time.Minute)
 	if spy.expires.Before(claimGraceMin) || spy.expires.After(claimGraceMax) {
 		t.Errorf("claim expiry (Deps.Expires) = %v, want within [%v, %v] (~65m: 60m timeout + 5m grace)", spy.expires, claimGraceMin, claimGraceMax)
+	}
+}
+
+// TestClaimTimeoutForReviewing proves design section 6.8 step 6's own
+// timeout lookup for the "reviewing" state (PKG9-PLAN.md section 4.3, 6.2):
+// ROUND's own semaphore-bounded fan-out of up to seven lens runs needs a
+// claim/run deadline of jobs.review.timeout_minutes (30), not
+// defaultCodeTimeout, the 5-minute bound a code-only state like judging or
+// shipping still uses.
+func TestClaimTimeoutForReviewing(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	// Jump the ticket straight to reviewing: this test only cares about
+	// which job timeout the dispatcher looks up for that state, not how a
+	// ticket really gets there, so it skips driving the real pipeline
+	// (dispatch_test.go's own seed-direct shortcut, matching
+	// postbuild_test.go's pbSeedTicketInState, package job).
+	seedOwner := "seed-reviewing-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateReviewing, Reason: "test setup",
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateJudging, reason: "test"}
+	reg := job.Registry()
+	reg[testStateReviewing] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(29 * time.Minute)
+	wantMax := after.Add(31 * time.Minute)
+	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~30m, jobs.review.timeout_minutes, not the 5m defaultCodeTimeout)", spy.deadline, wantMin, wantMax)
 	}
 }
 

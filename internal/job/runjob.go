@@ -43,10 +43,13 @@ type runResult struct {
 // it; the prompt and the raw output are never logged (design section 9,
 // 10). taskN becomes RunSeed.TaskN on the reserved run: &n for a build or
 // perimeter task unit, nil for every other job, including a fix unit.
-// Planning's four callers pass nil.
+// lens becomes RunSeed.Lens: the lens name for a review lens run (ROUND and
+// CONTINUE, PKG9-PLAN.md section 6.2, 6.2a), nil for every other job.
+// runAndRoute's own callers -- planning's four and building's own -- pass
+// nil for both.
 func runJob(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
-	su store.SessionUpsert, req runtime.RunRequest, taskN *int,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string,
 ) (runResult, error) {
 	jobCfg, ok := d.Machine.Jobs[jobName]
 	if !ok {
@@ -133,7 +136,7 @@ func runJob(
 	defer cancel()
 
 	var reserveErr error
-	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN})
+	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN, Lens: lens})
 	if reserveErr != nil {
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, reserveErr)
 	}

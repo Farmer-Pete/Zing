@@ -79,6 +79,10 @@ type Deps struct {
 	// 7.3): the private temp root runJob gives every run whose job names no
 	// sandbox lives under it. Empty is ErrConfig for a run that needs one.
 	DataDir string
+	// LensesParallel bounds how many of ROUND's seven lens runs are ever in
+	// flight at once (PKG9-PLAN.md section 4.3, 6.2): config.Review's own
+	// max_lenses_parallel, 1..7. Wired by dispatch.Config.LensesParallel.
+	LensesParallel int
 }
 
 // Project is what building needs to know about one store project (design

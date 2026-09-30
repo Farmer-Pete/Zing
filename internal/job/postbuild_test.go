@@ -264,6 +264,11 @@ func pbClaim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) D
 		Commands: NewCommandRunner(sandbox.Off(), false),
 		Projects: pbBuildProjects(t, s),
 		DataDir:  t.TempDir(),
+		// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md section
+		// 4.3, 6.2): the config default (7), so a review round test runs
+		// every lens without a test needing to set this itself; a test that
+		// exercises the bound overrides the returned Deps' own field.
+		LensesParallel: 7,
 	}
 }
 

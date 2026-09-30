@@ -284,6 +284,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		RequireSandbox: serveRequireSandbox,
 		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
 		DataDir:        dataDir,
+		LensesParallel: cfg.Review.MaxLensesParallel,
 	}, rts)
 	if err != nil {
 		_ = st.Close()

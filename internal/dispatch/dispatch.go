@@ -26,16 +26,20 @@ import (
 // 3); every ticket starts there.
 const stateQueued = "queued"
 
-// The two machine.toml job names the timeout lookup maps a pipeline state to
-// (design section 6.8 step 6): planning's job is "planning", building's job
-// is "build". Every other candidate state is a code-only handler and uses
-// defaultCodeTimeout.
+// The machine.toml job names the timeout lookup maps a pipeline state to
+// (design section 6.8 step 6, PKG9-PLAN.md section 17.1): planning's job is
+// "planning", building's job is "build", reviewing's job is "review" (ROUND
+// runs up to seven lens runs in parallel under one job.review.timeout_minutes
+// horizon, PKG9-PLAN.md section 6.2). Every other candidate state is a
+// code-only handler and uses defaultCodeTimeout.
 const (
-	statePlanning = "planning"
-	stateBuilding = "building"
+	statePlanning  = "planning"
+	stateBuilding  = "building"
+	stateReviewing = "reviewing"
 
 	jobPlanning = "planning"
 	jobBuild    = "build"
+	jobReview   = "review"
 )
 
 // defaultCodeTimeout is the claim/run timeout a code-only state's handler
@@ -110,6 +114,10 @@ type Config struct {
 	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
 	// 7.3): the private temp root of every unsandboxed run lives under it.
 	DataDir string
+	// LensesParallel is config.Review.MaxLensesParallel, copied into every
+	// job.Deps runAndCommit builds (PKG9-PLAN.md section 4.3, 6.2): the
+	// bound ROUND's own semaphore uses.
+	LensesParallel int
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -363,7 +371,7 @@ func (d *Dispatcher) timeoutFor(state string) time.Duration {
 	return time.Duration(j.TimeoutMinutes) * time.Minute
 }
 
-// jobNameForState maps the two fake-runtime pipeline states to the
+// jobNameForState maps the three real-handler pipeline states to the
 // machine.toml job name that names their timeout.
 func jobNameForState(state string) (string, bool) {
 	switch state {
@@ -371,6 +379,8 @@ func jobNameForState(state string) (string, bool) {
 		return jobPlanning, true
 	case stateBuilding:
 		return jobBuild, true
+	case stateReviewing:
+		return jobReview, true
 	default:
 		return "", false
 	}
@@ -405,7 +415,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
-		DataDir: d.cfg.DataDir,
+		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

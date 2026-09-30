@@ -160,6 +160,14 @@ var (
 	e2eFloor  = response.SeverityMinor
 )
 
+// e2eLensesParallel is the fixture job.Deps.LensesParallel selftestResumeE2E
+// wires the dispatcher with (PKG9-PLAN.md section 4.3, 6.2): the same
+// default internal/config's own applyDefaults would produce from an empty
+// zing.toml (review.max_lenses_parallel 7), so ROUND runs every one of its
+// seven lenses in one tick, the way the real demo (section 19.2 task 10)
+// does.
+const e2eLensesParallel = 7
+
 // e2eModels is the fixture job.Deps.Models alias table selftestResumeE2E
 // wires the dispatcher with: the same model ids internal/config's own
 // applyDefaults would produce from an empty zing.toml's [models] table.
@@ -415,8 +423,9 @@ func selftestResumeE2E(ctx context.Context) error {
 			// RequireSandbox false lets a sandboxed job (build, perimeter)
 			// run unwrapped instead of refusing (design D5, section 10).
 			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
-			Commands: job.NewCommandRunner(sandbox.Off(), false),
-			DataDir:  dir,
+			Commands:       job.NewCommandRunner(sandbox.Off(), false),
+			DataDir:        dir,
+			LensesParallel: e2eLensesParallel,
 			// Projects carries what the real building handler needs for
 			// this one project (PKG8-PLAN.md section 4.3): the fixture
 			// project's own test and lint commands (section 9.4).

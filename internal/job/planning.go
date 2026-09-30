@@ -1552,7 +1552,7 @@ func runAndRoute(
 	success func(rr runResult) (store.HandlerCommit, error),
 	taskN *int, //nolint:unparam // planning's four callers pass nil; the building handler (task 9) passes &n
 ) (store.HandlerCommit, error) {
-	rr, runErr := runJob(ctx, d, t, jobName, su, req, taskN)
+	rr, runErr := runJob(ctx, d, t, jobName, su, req, taskN, nil)
 	sessionCommit := sessionRecord(rr)
 
 	if runErr != nil {
