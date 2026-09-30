@@ -96,16 +96,20 @@ type Config struct {
 	Models      map[string]string // alias -> exact model id (config.Models)
 	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
 	Floor       response.Severity // config.Review.Floor, parsed
-	// Projects, Sandbox, RequireSandbox, and Commands are PKG8-PLAN.md
-	// section 10's own additions, copied straight into every job.Deps
-	// runAndCommit builds: Projects carries what building needs to know
-	// about each store project; Sandbox and RequireSandbox gate every
-	// sandboxed job's run (design section 5.5); Commands runs a build
-	// unit's test and lint re-runs.
+	// Projects, Sandboxes, RequireSandbox, and Commands are PKG8-PLAN.md
+	// section 10's own additions (Sandboxes replacing the single-profile
+	// Sandbox, PKG9-PLAN.md section 4.3, 4.7), copied straight into every
+	// job.Deps runAndCommit builds: Projects carries what building needs to
+	// know about each store project; Sandboxes and RequireSandbox gate
+	// every sandboxed job's run (design section 5.5); Commands runs a
+	// build unit's test and lint re-runs.
 	Projects       map[int64]job.Project
-	Sandbox        sandbox.Sandbox
+	Sandboxes      sandbox.Set
 	RequireSandbox bool
 	Commands       job.CommandRunner
+	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
+	// 7.3): the private temp root of every unsandboxed run lives under it.
+	DataDir string
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -400,7 +404,8 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires,
-		Projects: d.cfg.Projects, Sandbox: d.cfg.Sandbox, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
+		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
+		DataDir: d.cfg.DataDir,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

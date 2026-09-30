@@ -43,6 +43,16 @@ const (
 	testRuntimeCodex  = "codex"
 	testModelAlias    = "sonnet"
 	testModelExact    = "claude-opus-x"
+	// testModelAliasOpus and testModelAliasFable name the other two
+	// model-alias keys this file's own all-aliases Models maps repeat
+	// (goconst); testModelAlias ("sonnet") and pbRuntimeCodex ("codex",
+	// postbuild_test.go, also package job) already cover the other two.
+	testModelAliasOpus  = "opus"
+	testModelAliasFable = "fable"
+	// testClassifyScriptKey is the Fake runtime's own script key for a
+	// classify first turn (runtime/fake.go's scriptKey), shared by every
+	// test in this file that scripts one (goconst).
+	testClassifyScriptKey = "classify/1.xml"
 )
 
 var runJobTestProject = store.Project{
@@ -345,6 +355,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
 	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil)
@@ -364,7 +375,7 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 	ticket := getRunJobTicket(t, s, ticketID)
 	owner, expires := claimRunJobTicket(t, s, ticketID)
 
-	scripts := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
 	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
 	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
 	if err != nil {
@@ -374,6 +385,7 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
 	before := time.Now()
@@ -491,11 +503,12 @@ func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectI
 	}
 	return Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
-		Models: map[string]string{"sonnet": testModelExact, "opus": testModelExact, "fable": testModelExact, "codex": testModelExact},
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
 		Projects:       map[int64]Project{projectID: {RepoGit: t.TempDir()}},
-		Sandbox:        sb,
+		Sandboxes:      sandbox.Set{Build: sb},
 		RequireSandbox: requireSandbox,
+		DataDir:        t.TempDir(),
 	}
 }
 
@@ -670,6 +683,192 @@ func TestRunJobUsesResolvedWorkDir(t *testing.T) {
 	}
 }
 
+// TestRunJobPicksProfileByName proves runJob resolves a job's sandbox
+// profile by the name its own machine.toml entry gives (PKG9-PLAN.md
+// section 4.7: d.Sandboxes.For(jobCfg.Sandbox)), not always "build": a job
+// naming "readonly" runs wrapped in Sandboxes.ReadOnly even though
+// Sandboxes.Build is off and required, which would refuse the run outright
+// if runJob ever picked the wrong profile.
+func TestRunJobPicksProfileByName(t *testing.T) {
+	readonlySB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := runJobTestMachine(t)
+	readonlyJob := m.Jobs[testJobBuild]
+	readonlyJob.Sandbox = "readonly"
+	const testJobReadonly = "readonly-test-job"
+	m.Jobs[testJobReadonly] = readonlyJob
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), ReadOnly: readonlySB},
+		RequireSandbox: true,
+	}
+
+	rr, err := runJob(t.Context(), deps, ticket, testJobReadonly, store.SessionUpsert{Job: testJobReadonly, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v (want the readonly profile picked, not the off-and-required build one)", err)
+	}
+	if counting.calls != 1 {
+		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
+	}
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != "sandbox-exec" {
+		t.Errorf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
+	}
+	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeOk {
+		t.Errorf("outcome = %v, want ok", rr.Res.Response)
+	}
+}
+
+// TestRunJobUnknownProfileIsConfigError proves a job whose machine.toml
+// sandbox name Set.For does not recognize is ErrConfig, with nothing
+// reserved and the runtime never called (PKG9-PLAN.md section 4.7): this
+// can never happen through a real, validated machine.toml (machine.go's
+// own validateJob already refuses any other value), so this test builds
+// its own machine.Machine to reach runJob's own defensive check directly.
+func TestRunJobUnknownProfileIsConfigError(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := runJobTestMachine(t)
+	mysteryJob := m.Jobs[testJobBuild]
+	mysteryJob.Sandbox = "mystery"
+	const testJobMystery = "mystery-test-job"
+	m.Jobs[testJobMystery] = mysteryJob
+
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.OffSet(),
+		RequireSandbox: true,
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJobMystery, store.SessionUpsert{Job: testJobMystery, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0", counting.calls)
+	}
+}
+
+// ---- the private temp root of an unsandboxed run (design section 7.3) ----
+
+// TestRunJobEmptyDataDirIsConfigError proves a job naming no sandbox
+// (classify) refuses to run at all with an empty Deps.DataDir, before any
+// reserve (PKG9-PLAN.md section 7.3): a private temp root needs somewhere
+// to live.
+func TestRunJobEmptyDataDirIsConfigError(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	fake := runtime.NewFake(fstest.MapFS{})
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		// DataDir deliberately left empty.
+	}
+
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+}
+
+// TestUnsandboxedRunGetsPrivateTemp proves a job naming no sandbox
+// (classify) carries TMPDIR and CLAUDE_CODE_TMPDIR pointing under
+// <DataDir>/tmp/run/ in its request env, and that the private temp root is
+// removed once runJob returns (PKG9-PLAN.md section 7.3).
+func TestUnsandboxedRunGetsPrivateTemp(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	dataDir := t.TempDir()
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: dataDir,
+	}
+
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	var tmpDir, claudeTmpDir string
+	for _, kv := range counting.lastReq.Env {
+		if after, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+			tmpDir = after
+		}
+		if after, ok := strings.CutPrefix(kv, "CLAUDE_CODE_TMPDIR="); ok {
+			claudeTmpDir = after
+		}
+	}
+	wantRoot := filepath.Join(dataDir, "tmp", "run")
+	if tmpDir == "" || !strings.HasPrefix(tmpDir, wantRoot) {
+		t.Errorf("TMPDIR = %q, want it under %q", tmpDir, wantRoot)
+	}
+	if claudeTmpDir == "" || !strings.HasPrefix(claudeTmpDir, wantRoot) {
+		t.Errorf("CLAUDE_CODE_TMPDIR = %q, want it under %q", claudeTmpDir, wantRoot)
+	}
+
+	privateRoot := filepath.Dir(tmpDir) // the run-id directory, parent of "tmp"
+	if _, statErr := os.Stat(privateRoot); !os.IsNotExist(statErr) {
+		t.Errorf("private temp root %s still exists after runJob returned (stat err = %v)", privateRoot, statErr)
+	}
+}
+
 // TestRunJobSeedsTaskN proves runJob copies its own taskN parameter into
 // RunSeed.TaskN (design section 6.3): a non-nil taskN lands on the reserved
 // run's own task_n column, and a nil one (planning's own four callers)
@@ -680,7 +879,7 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 	ticket := getRunJobTicket(t, s, ticketID)
 	owner, expires := claimRunJobTicket(t, s, ticketID)
 
-	scripts := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
 	fake := runtime.NewFake(scripts)
 	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
 	if err != nil {
@@ -690,6 +889,7 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
 	n := 3

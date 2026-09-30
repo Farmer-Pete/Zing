@@ -289,9 +289,10 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildJobTestProjects(t, s),
+		DataDir:  t.TempDir(),
 	}
 }
 

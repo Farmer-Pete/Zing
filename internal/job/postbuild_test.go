@@ -72,7 +72,7 @@ const (
 )
 
 var pbModels = map[string]string{
-	"sonnet": "claude-sonnet-5", "opus": "claude-opus-4-8", "fable": "claude-fable-5-1", pbRuntimeCodex: "gpt-5.5",
+	testModelAlias: "claude-sonnet-5", testModelAliasOpus: "claude-opus-4-8", testModelAliasFable: "claude-fable-5-1", pbRuntimeCodex: "gpt-5.5",
 }
 
 const pbBudget = 240 * time.Minute
@@ -260,9 +260,10 @@ func pbClaim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) D
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: NewCommandRunner(sandbox.Off(), false),
 		Projects: pbBuildProjects(t, s),
+		DataDir:  t.TempDir(),
 	}
 }
 

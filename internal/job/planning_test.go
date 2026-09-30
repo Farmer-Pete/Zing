@@ -101,6 +101,7 @@ func claimWithRuntimes(t *testing.T, s *store.Store, rt runtime.Runtime, ticketI
 		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, tid, owner, expires, su, seed)
 		},
+		DataDir: t.TempDir(),
 	}
 }
 

@@ -192,9 +192,10 @@ func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, ex
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
+		DataDir:  t.TempDir(),
 	}
 }
 
@@ -473,6 +474,9 @@ func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Brok
 	if cfg.Budget == 0 {
 		cfg.Budget = testBudget
 	}
+	if cfg.DataDir == "" {
+		cfg.DataDir = t.TempDir()
+	}
 	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
@@ -750,7 +754,7 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil, dispatch.Config{
 		MaxParallel: 2, Owner: testOwner,
-		Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
 	})
 	if err := d.Tick(t.Context()); err != nil {

@@ -37,6 +37,11 @@ const (
 	reasonUserCacheDirNotFound = "user cache directory not found"
 	reasonProfileRejected      = "profile rejected"
 	reasonOff                  = "off"
+	// reasonNotLoaded is NotLoaded's own reason (PKG9-PLAN.md section 4.7):
+	// M1's own Set.Judge, a profile name Set.For recognizes that this build
+	// of serve does not load yet, distinct from Off's "off" (a suite on the
+	// fake runtime that never attempts sandbox-exec at all).
+	reasonNotLoaded = "not loaded"
 )
 
 // Params fills one profile's per-run "-D NAME=value" values (section 5.2).
@@ -70,6 +75,79 @@ func Off() Sandbox {
 	return Sandbox{reason: reasonOff}
 }
 
+// NotLoaded returns an unavailable Sandbox with reason "not loaded", for a
+// Set.For name this build of serve does not load yet (PKG9-PLAN.md section
+// 4.7): M1's own Set.Judge, before M2 task 2 adds judge.sb and its load.
+func NotLoaded() Sandbox {
+	return Sandbox{reason: reasonNotLoaded}
+}
+
+// Set holds the three loaded profiles machine.toml's job.sandbox key can
+// name (PKG9-PLAN.md section 4.7): build, readonly, and, from M2 on, judge.
+// In M1, serve loads Build and ReadOnly and leaves Judge Off() with reason
+// "not loaded".
+type Set struct {
+	Build, ReadOnly, Judge Sandbox
+}
+
+// profileNameBuild, profileNameReadOnly, and profileNameJudge are the three
+// machine.toml job.sandbox values Set.For recognizes (section 4.7), named
+// once so machine.go's own validation and this package's lookup never drift
+// apart.
+const (
+	profileNameBuild    = "build"
+	profileNameReadOnly = "readonly"
+	profileNameJudge    = "judge"
+)
+
+// For returns the profile machine.toml names: "build", "readonly", or
+// "judge". ok is false for any other name (section 4.7).
+func (s Set) For(name string) (Sandbox, bool) {
+	switch name {
+	case profileNameBuild:
+		return s.Build, true
+	case profileNameReadOnly:
+		return s.ReadOnly, true
+	case profileNameJudge:
+		return s.Judge, true
+	default:
+		return Sandbox{}, false
+	}
+}
+
+// OffSet returns a Set of three Off() sandboxes, for a suite that drives
+// the fake runtime and must never attempt sandbox-exec at all (section
+// 4.7, design D5).
+func OffSet() Set {
+	return Set{Build: Off(), ReadOnly: Off(), Judge: Off()}
+}
+
+// setProfileOrder is the order FirstUnavailable reports in (section 4.7):
+// build, readonly, judge.
+var setProfileOrder = []string{profileNameBuild, profileNameReadOnly, profileNameJudge}
+
+// FirstUnavailable returns "<name>: <reason>" for the first profile, in
+// setProfileOrder, that some machine.toml job in used actually names and
+// that did not load, or "" when every used profile is available (section
+// 4.7). A profile no job uses never turns the console indicator red, even
+// when it is Off() (M1's own Set.Judge, for instance).
+func (s Set) FirstUnavailable(used []string) string {
+	usedSet := make(map[string]bool, len(used))
+	for _, name := range used {
+		usedSet[name] = true
+	}
+	for _, name := range setProfileOrder {
+		if !usedSet[name] {
+			continue
+		}
+		sb, ok := s.For(name)
+		if ok && !sb.Available() {
+			return name + ": " + sb.Reason()
+		}
+	}
+	return ""
+}
+
 // Available reports whether s loaded and proved itself.
 func (s Sandbox) Available() bool { return s.available }
 
@@ -83,10 +161,26 @@ const cacheDirPerm = 0o700
 
 // Load resolves the host values, renders profile with readPaths and
 // consolePort, and proves the result loads by running sandbox-exec against
-// a throwaway run directory (section 5.4). It never returns an error: any
-// failure is recorded on the returned Sandbox, unavailable, with one of the
-// four closed reasons.
+// a throwaway run directory (design section 5.4 of PKG8-PLAN.md). It never
+// returns an error: any failure is recorded on the returned Sandbox,
+// unavailable, with one of the four closed reasons. Load is LoadProfile("build",
+// ...) (PKG9-PLAN.md section 4.7): every earlier caller of Load keeps
+// working unchanged now that loading is profile-aware.
 func Load(profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox {
+	return LoadProfile(profileNameBuild, profile, dataDir, readPaths, consolePort)
+}
+
+// LoadProfile resolves the host values, renders profile with readPaths and
+// consolePort, and proves the result loads by running sandbox-exec against
+// a throwaway run directory (PKG9-PLAN.md section 4.7): the same proof
+// every profile shares in M1 (a fresh /usr/bin/true under generic
+// parameters). name is one of Set.For's three names; it names nothing
+// about the proof yet (the judge profile's own scenarios-file proof
+// arrives in M2 task 1) but is threaded through now so every later caller
+// already names which profile it is loading. It never returns an error:
+// any failure is recorded on the returned Sandbox, unavailable, with one
+// of the four closed reasons.
+func LoadProfile(name string, profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox { //nolint:unparam,revive // name is reserved for M2's profile-specific proof (the judge's scenarios file); every M1 caller passes "build" or "readonly" and both take the same proof today
 	if runtime.GOOS != "darwin" {
 		return Sandbox{reason: reasonNotMacOS}
 	}

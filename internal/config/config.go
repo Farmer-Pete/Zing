@@ -23,15 +23,22 @@ type Config struct {
 	// GitHubToken authenticates the orchestrator's go-github client
 	// (internal/orchestrator.NewGitHub). Required; never logged, never
 	// written to another file (PKG5-PLAN.md section 9 and 14).
-	GitHubToken string    `toml:"github_token"`
-	Console     Console   `toml:"console"`
-	Models      Models    `toml:"models"`
-	Dispatch    Dispatch  `toml:"dispatch"`
-	Budget      Budget    `toml:"budget"`
-	Review      Review    `toml:"review"`
-	Merge       Merge     `toml:"merge"`
-	Sandbox     Sandbox   `toml:"sandbox"`
-	Projects    []Project `toml:"projects"`
+	GitHubToken string `toml:"github_token"`
+	// ClaudeOAuthToken authenticates every claude-runtime run (PKG9-PLAN.md
+	// section 4.5, D26): the output of `claude setup-token`, carried to
+	// runtime.NewClaude alone and never logged, matching github_token's own
+	// rule (non-empty, no minimum length). serve requires it, right after
+	// machine.toml loads, when any job's runtime is "claude"; config.Load
+	// itself cannot enforce that, since it never reads machine.toml.
+	ClaudeOAuthToken string    `toml:"claude_oauth_token"`
+	Console          Console   `toml:"console"`
+	Models           Models    `toml:"models"`
+	Dispatch         Dispatch  `toml:"dispatch"`
+	Budget           Budget    `toml:"budget"`
+	Review           Review    `toml:"review"`
+	Merge            Merge     `toml:"merge"`
+	Sandbox          Sandbox   `toml:"sandbox"`
+	Projects         []Project `toml:"projects"`
 }
 
 // Sandbox is the [sandbox] table (PKG8-PLAN.md section 5.4): ReadPaths
@@ -72,6 +79,10 @@ type Budget struct {
 
 type Review struct {
 	Floor string `toml:"floor"`
+	// MaxLensesParallel bounds how many of ROUND's seven lens runs are ever
+	// in flight at once (PKG9-PLAN.md section 4.5): 1 to 7, default 7 (the
+	// lens count; a higher value would only idle).
+	MaxLensesParallel int `toml:"max_lenses_parallel"`
 }
 
 type Merge struct {
@@ -146,6 +157,15 @@ const minPushTokenLen = 16
 const (
 	minBudgetMinutes = 1
 	maxBudgetMinutes = 525600
+)
+
+// minLensesParallel and maxLensesParallel bound
+// review.max_lenses_parallel (design section 4.5): 1 at the floor, 7 at
+// the ceiling -- the number of lenses ROUND runs, above which a higher
+// value would only idle.
+const (
+	minLensesParallel = 1
+	maxLensesParallel = 7
 )
 
 // Load reads and validates the zing.toml at path, in this exact order so the
@@ -398,6 +418,10 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("merge", "method") && !slices.Contains(validMergeMethods, cfg.Merge.Method) {
 		return fmt.Errorf("zing.toml: merge.method: must be one of %s", strings.Join(validMergeMethods, ", "))
 	}
+	if md.IsDefined("review", "max_lenses_parallel") &&
+		(cfg.Review.MaxLensesParallel < minLensesParallel || cfg.Review.MaxLensesParallel > maxLensesParallel) {
+		return fmt.Errorf("zing.toml: review.max_lenses_parallel: must be %d to %d", minLensesParallel, maxLensesParallel)
+	}
 	for i := range cfg.Projects {
 		if p := &cfg.Projects[i]; p.Tracker != "github" {
 			return fmt.Errorf("zing.toml: projects[%d].tracker: must be github", i)
@@ -560,6 +584,9 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 	}
 	if !md.IsDefined("review", "floor") {
 		cfg.Review.Floor = "minor"
+	}
+	if !md.IsDefined("review", "max_lenses_parallel") {
+		cfg.Review.MaxLensesParallel = maxLensesParallel
 	}
 	if !md.IsDefined("merge", "method") {
 		cfg.Merge.Method = "squash"

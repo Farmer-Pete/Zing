@@ -2,14 +2,18 @@ package job
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -84,8 +88,20 @@ func runJob(
 	req.Tools = jobCfg.Tools
 	req.Timeout = time.Duration(jobCfg.TimeoutMinutes) * time.Minute
 
+	// rsv is declared here, ahead of the sandbox/temp-root step's own defer,
+	// so a private temp root's cleanup closure (below) can log the run id
+	// Reserve fixes further down: a deferred closure sees a captured
+	// variable's value as of when it runs, not when it was deferred, as
+	// long as the variable is already in scope (design section 7.3: a
+	// cleanup error is logged at WARN with ticket_id and run_id).
+	var rsv store.Reserved
+
 	if jobCfg.Sandbox != "" {
-		cleanup, sandboxErr := applySandbox(d, t, req.WorkDir, &req)
+		sb, ok := d.Sandboxes.For(jobCfg.Sandbox)
+		if !ok {
+			return runResult{}, fmt.Errorf("%w: job %s: unknown sandbox profile %q", ErrConfig, jobName, jobCfg.Sandbox)
+		}
+		cleanup, sandboxErr := applySandbox(sb, d, t, req.WorkDir, &req)
 		// Deferred unconditionally, even on a returned error: applySandbox
 		// never returns a nil cleanup (noopCleanup stands in when there is
 		// nothing to remove). Runs after rt.Run has returned, below: the run
@@ -95,14 +111,31 @@ func runJob(
 		if sandboxErr != nil {
 			return runResult{}, sandboxErr
 		}
+	} else {
+		// A job naming no sandbox (classify, planning, planreview) still
+		// gets a private temp root under DATA_DIR (PKG9-PLAN.md section
+		// 7.3, D27): build and readonly both deny DATA_DIR whole, so a
+		// planning run's own temp files -- which can quote the sealed
+		// scenarios -- are unreadable to a sandboxed run that could
+		// otherwise see the host's shared TMPDIR.
+		cleanup, tmpErr := applyPrivateTempRoot(d, &req)
+		defer func() {
+			if rmErr := cleanup(); rmErr != nil {
+				slog.Warn("run cleanup failed", "ticket_id", t.ID, "run_id", rsv.RunID, "error", rmErr)
+			}
+		}()
+		if tmpErr != nil {
+			return runResult{}, tmpErr
+		}
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	rsv, err := d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN})
-	if err != nil {
-		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, err)
+	var reserveErr error
+	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN})
+	if reserveErr != nil {
+		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, reserveErr)
 	}
 	req.RunToken = strconv.FormatInt(rsv.RunID, 10)
 
@@ -189,8 +222,8 @@ func noopCleanup() {}
 // configuration error (design section 5.5): a job named a sandbox but this
 // process has no Project row for the ticket, or the sandbox's own run-dir,
 // param, or prefix calls failed.
-func applySandbox(d Deps, t store.Ticket, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
-	if !d.Sandbox.Available() {
+func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
+	if !sb.Available() {
 		if d.RequireSandbox {
 			return noopCleanup, ErrSandbox
 		}
@@ -202,24 +235,80 @@ func applySandbox(d Deps, t store.Ticket, workDir string, req *runtime.RunReques
 		return noopCleanup, fmt.Errorf("%w: no sandbox project for ticket %d (project %d)", ErrConfig, t.ID, t.ProjectID)
 	}
 
-	runDir, cleanup, err := d.Sandbox.NewRunDir()
+	runDir, cleanup, err := sb.NewRunDir()
 	if err != nil {
 		return noopCleanup, fmt.Errorf("%w: sandbox run dir: %v", ErrConfig, err) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
 	}
 
-	p, err := d.Sandbox.ParamsFor(workDir, proj.RepoGit, runDir)
+	p, err := sb.ParamsFor(workDir, proj.RepoGit, runDir)
 	if err != nil {
 		cleanup()
 		return noopCleanup, fmt.Errorf("%w: sandbox params: %v", ErrConfig, err) //nolint:errorlint // see above
 	}
-	prefix, err := d.Sandbox.Prefix(p)
+	prefix, err := sb.Prefix(p)
 	if err != nil {
 		cleanup()
 		return noopCleanup, fmt.Errorf("%w: sandbox prefix: %v", ErrConfig, err) //nolint:errorlint // see above
 	}
 	req.ExecPrefix = prefix
-	req.Env = append(req.Env, d.Sandbox.Env(p, os.Getenv("PATH"))...)
+	req.Env = append(req.Env, sb.Env(p, os.Getenv("PATH"))...)
 	req.WorkDir = p.Worktree
+	return cleanup, nil
+}
+
+// privateTempRootIDBytes is the number of random bytes newPrivateTempRoot
+// reads to build a run id: 8 bytes hex-encode to 16 lowercase hex
+// characters, matching sandbox.NewRunDir's own run-id shape.
+const privateTempRootIDBytes = 8
+
+// noopCleanupErr is applyPrivateTempRoot's own "nothing to clean up"
+// return, the func() error twin of noopCleanup (applyPrivateTempRoot's own
+// cleanup can fail to remove what it created, unlike applySandbox's, so its
+// signature carries an error).
+func noopCleanupErr() error { return nil }
+
+// newPrivateTempRoot creates <dataDir>/tmp/run/<16 hex>/, with "tmp" and
+// "claude-tmp" inside, all mode 0700 (PKG9-PLAN.md section 7.3): the
+// private temp root an unsandboxed run's TMPDIR and CLAUDE_CODE_TMPDIR
+// point at, mirroring sandbox.Sandbox.NewRunDir's own shape so both kinds
+// of run carry the same two subfolders. cleanup removes the whole
+// directory and is safe to call twice.
+func newPrivateTempRoot(dataDir string) (dir string, cleanup func() error, err error) {
+	var b [privateTempRootIDBytes]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", nil, fmt.Errorf("job: generate private temp root id: %w", err)
+	}
+	id := hex.EncodeToString(b[:])
+
+	dir = filepath.Join(dataDir, "tmp", "run", id)
+	for _, sub := range []string{"", "tmp", "claude-tmp"} {
+		p := filepath.Join(dir, sub)
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			return "", nil, fmt.Errorf("job: create private temp root %s: %w", p, err)
+		}
+	}
+	cleanup = func() error { return os.RemoveAll(dir) }
+	return dir, cleanup, nil
+}
+
+// applyPrivateTempRoot is design section 7.3's own step for a job naming no
+// sandbox: it requires d.DataDir (ErrConfig when empty, before any
+// reserve), creates a fresh private temp root under it, and appends TMPDIR
+// and CLAUDE_CODE_TMPDIR pointing at its two subfolders to req.Env, after
+// the allowlisted parent TMPDIR agentEnv already carries, so these win
+// (os/exec keeps the last value for a duplicate name). The returned cleanup
+// removes the root; the caller defers it so it runs once rt.Run has
+// returned, logging any removal failure at WARN rather than losing it
+// (design section 7.3).
+func applyPrivateTempRoot(d Deps, req *runtime.RunRequest) (cleanup func() error, err error) {
+	if d.DataDir == "" {
+		return noopCleanupErr, fmt.Errorf("%w: data directory is not configured", ErrConfig)
+	}
+	dir, cleanup, err := newPrivateTempRoot(d.DataDir)
+	if err != nil {
+		return noopCleanupErr, fmt.Errorf("%w: private temp root: %v", ErrConfig, err) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
+	}
+	req.Env = append(req.Env, "TMPDIR="+filepath.Join(dir, "tmp"), "CLAUDE_CODE_TMPDIR="+filepath.Join(dir, "claude-tmp"))
 	return cleanup, nil
 }
 

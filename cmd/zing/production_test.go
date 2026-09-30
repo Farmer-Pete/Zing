@@ -36,7 +36,7 @@ import (
 func TestProductionRuntimes_ResolvesClaudeAndCodexNotFake(t *testing.T) {
 	t.Parallel()
 
-	rts, err := productionRuntimes()
+	rts, err := productionRuntimes("test-claude-oauth-token")
 	if err != nil {
 		t.Fatalf("productionRuntimes: %v", err)
 	}
@@ -170,6 +170,38 @@ func TestServeRequiresSandbox(t *testing.T) {
 	t.Parallel()
 	if !serveRequireSandbox {
 		t.Error("serveRequireSandbox = false, want true (a real build run must refuse to start without a loaded sandbox)")
+	}
+}
+
+// TestServeLoadsBuildAndReadonly proves serveSandbox loads both the build
+// and readonly profiles (PKG9-PLAN.md section 4.7) and leaves Judge
+// NotLoaded, with reason "not loaded": no M1 job names it, and M2 task 2 is
+// what actually loads judge.sb.
+func TestServeLoadsBuildAndReadonly(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	dataDir := t.TempDir()
+
+	sbSet, err := serveSandbox(cfg, dataDir)
+	if err != nil {
+		t.Fatalf("serveSandbox: %v", err)
+	}
+	if sbSet.Judge.Available() {
+		t.Error("Judge.Available() = true, want false: M1 loads no judge profile")
+	}
+	if got := sbSet.Judge.Reason(); got != "not loaded" {
+		t.Errorf("Judge.Reason() = %q, want %q", got, "not loaded")
+	}
+	// Build and readonly are really attempted here (sandbox.LoadProfile),
+	// proving the wiring reaches them at all; whether this host can run
+	// sandbox-exec at all is internal/sandbox's own suite's concern, not
+	// this one's, so an unavailable result only needs a non-empty reason.
+	if !sbSet.Build.Available() && sbSet.Build.Reason() == "" {
+		t.Error("Build.Reason() is empty for an unavailable sandbox")
+	}
+	if !sbSet.ReadOnly.Available() && sbSet.ReadOnly.Reason() == "" {
+		t.Error("ReadOnly.Reason() is empty for an unavailable sandbox")
 	}
 }
 
@@ -314,7 +346,8 @@ func driveTicketToBuilding(t *testing.T, st *store.Store, m *machine.Machine, rt
 			Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 				return st.Reserve(ctx, tid, owner, expires, su, seed)
 			},
-			Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+			Sandboxes: sandbox.OffSet(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+			DataDir: t.TempDir(),
 		}
 		commit, err := reg[state].Run(t.Context(), ticket, deps)
 		if err != nil {
@@ -450,7 +483,7 @@ func TestProductionBuildNeedsSandbox(t *testing.T) {
 		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return st.Reserve(ctx, tid, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: serveRequireSandbox,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: serveRequireSandbox,
 		Commands: neverCalledCommandRunner{t: t},
 		Projects: map[int64]job.Project{
 			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},

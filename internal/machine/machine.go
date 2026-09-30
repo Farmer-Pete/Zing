@@ -35,8 +35,10 @@ type Job struct {
 	MaxLoops       int       `toml:"max_loops"`
 	Outcomes       []string  `toml:"outcomes"` // default ["ok"] when the key is absent
 	// Sandbox names the seatbelt profile this job's runs are wrapped in
-	// (PKG8-PLAN.md section 4.5): absent, or "build", the only profile this
-	// package ships. machine.toml sets it on jobs.build and jobs.perimeter.
+	// (PKG8-PLAN.md section 4.5; PKG9-PLAN.md section 4.4): absent,
+	// "build", "readonly", or "judge". machine.toml sets it on jobs.build
+	// and jobs.perimeter (build), jobs.review (readonly), and, from M2 on,
+	// jobs.judge (judge).
 	Sandbox string `toml:"sandbox"`
 }
 
@@ -224,8 +226,8 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	if job.Worktree != "" && job.Worktree != "sparse" {
 		return jobErr("worktree", "must be absent or sparse")
 	}
-	if job.Sandbox != "" && job.Sandbox != "build" {
-		return jobErr("sandbox", "must be absent or build")
+	if job.Sandbox != "" && job.Sandbox != "build" && job.Sandbox != "readonly" && job.Sandbox != "judge" {
+		return jobErr("sandbox", "must be absent, build, readonly, or judge")
 	}
 	for _, tool := range job.Tools {
 		if !toolCatalogue[tool] {

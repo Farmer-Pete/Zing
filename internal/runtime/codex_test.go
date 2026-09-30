@@ -206,6 +206,29 @@ func TestCodex_EnvFilter(t *testing.T) {
 	}
 }
 
+// TestCodexEnvHasNoOAuthToken proves a Codex run never carries
+// CLAUDE_CODE_OAUTH_TOKEN, whether set in the parent process or passed
+// through req.Env (PKG9-PLAN.md section 4.6, D26): only Claude.run ever
+// appends it, after agentEnv, which Codex.run also calls but never adds the
+// token to.
+func TestCodexEnvHasNoOAuthToken(t *testing.T) {
+	// t.Setenv cannot combine with t.Parallel.
+	requireUnix(t)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "should-not-reach-a-codex-child")
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "success", "CLAUDE_CODE_OAUTH_TOKEN=should-not-reach-either")
+	c := NewCodex(fakeCodexScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	env := readRecordedEnv(t, dir)
+	if _, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
+		t.Error("CLAUDE_CODE_OAUTH_TOKEN reached a codex child")
+	}
+}
+
 // ---- the -o file: directory and file modes, cleanup ------------------------
 
 func TestCodex_OutputFileModes(t *testing.T) {

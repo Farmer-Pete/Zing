@@ -49,6 +49,7 @@ import (
 
 	zing "zing"
 	"zing/internal/bus"
+	"zing/internal/config"
 	"zing/internal/console"
 	zdispatch "zing/internal/dispatch"
 	"zing/internal/gitfixture"
@@ -197,6 +198,27 @@ func liveBuildSkipReason(goos, liveCLI string) string {
 		return "the live build harness only runs on macOS: the sandbox is darwin-only (PKG8-PLAN.md section 5)"
 	}
 	return ""
+}
+
+// liveClaudeOAuthToken reads claude_oauth_token through the config model
+// (PKG9-PLAN.md section 4.5, 19.2 task 7), the same way serve does: the
+// owner's real ~/.zing/zing.toml, never an environment variable. It skips,
+// with a clear reason, when the config file cannot be loaded or carries no
+// token, rather than failing the live harness outright.
+func liveClaudeOAuthToken(t *testing.T) string {
+	t.Helper()
+	cfgPath, err := config.DefaultPath()
+	if err != nil {
+		t.Skipf("resolve zing.toml path: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Skipf("load %s: %v", cfgPath, err)
+	}
+	if cfg.ClaudeOAuthToken == "" {
+		t.Skip("zing.toml carries no claude_oauth_token")
+	}
+	return cfg.ClaudeOAuthToken
 }
 
 // TestLiveBuildSkipsWithoutGate proves liveBuildSkipReason's own gate: with
@@ -773,7 +795,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 		Projects: map[int64]job.Project{
 			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: liveTestCmd, LintCmd: "go vet ./..."},
 		},
-		Sandbox:        sb,
+		Sandboxes:      sandbox.Set{Build: sb},
 		RequireSandbox: requireSandbox,
 		Commands:       cmds,
 	}, rts)
@@ -1006,6 +1028,8 @@ func TestLiveBuild(t *testing.T) {
 		t.Skip(reason)
 	}
 
+	oauthToken := liveClaudeOAuthToken(t)
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("user home dir: %v", err)
@@ -1028,7 +1052,7 @@ func TestLiveBuild(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	rts, err := runtime.NewSet(map[string]runtime.Runtime{
-		runtimeNameClaude: runtime.NewClaude(""), runtimeNameCodex: runtime.NewCodex(""),
+		runtimeNameClaude: runtime.NewClaude("", oauthToken), runtimeNameCodex: runtime.NewCodex(""),
 	})
 	if err != nil {
 		t.Fatalf("build runtime set: %v", err)

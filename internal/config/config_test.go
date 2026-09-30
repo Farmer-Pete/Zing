@@ -1,9 +1,13 @@
 package config
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -94,7 +98,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 		Dispatch: Dispatch{IntervalSeconds: 30, MaxParallel: 2},
 		Budget:   Budget{AgentMinutesPerTicket: 240, UsageHoldPercent: 80},
-		Review:   Review{Floor: "minor"},
+		Review:   Review{Floor: "minor", MaxLensesParallel: 7},
 		Merge: Merge{
 			Auto:            false,
 			Method:          "squash",
@@ -195,7 +199,7 @@ lint = "golangci-lint run"
 		},
 		Dispatch: Dispatch{IntervalSeconds: 60, MaxParallel: 4},
 		Budget:   Budget{AgentMinutesPerTicket: 120, UsageHoldPercent: 50},
-		Review:   Review{Floor: "blocker"},
+		Review:   Review{Floor: "blocker", MaxLensesParallel: 7},
 		Merge: Merge{
 			Auto:            true,
 			Method:          "merge",
@@ -301,6 +305,117 @@ read_paths = ["/opt/bad\"path"]
 			t.Errorf("Load() = %q, want %q", err.Error(), want)
 		}
 	})
+}
+
+// TestClaudeOAuthTokenParsed proves claude_oauth_token (design section 4.5,
+// D26) round-trips: absent parses empty (config.Load cannot require it, it
+// never reads machine.toml), set parses back unchanged.
+func TestClaudeOAuthTokenParsed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ClaudeOAuthToken != "" {
+			t.Errorf("ClaudeOAuthToken = %q, want empty", cfg.ClaudeOAuthToken)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		const token = "sk-ant-oat01-test-token"
+		// Prepended, not appended: minimalValidTOML ends inside
+		// [[projects]]/[projects.commands], so appending a bare key would
+		// parse as nesting inside that table instead of at the top level.
+		body := "claude_oauth_token = \"" + token + "\"\n" + minimalValidTOML
+		cfg, err := Load(writeTOML(t, body))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ClaudeOAuthToken != token {
+			t.Errorf("ClaudeOAuthToken = %q, want %q", cfg.ClaudeOAuthToken, token)
+		}
+	})
+}
+
+// TestClaudeOAuthTokenNeverLogged proves Load never writes the
+// claude_oauth_token value into a log record, even incidentally: the fixture
+// file here is deliberately left group-readable, so repairFileMode's own
+// "zing.toml is readable by group or other" warning fires, and that warning
+// (the one thing Load logs on this path) is what this test inspects.
+func TestClaudeOAuthTokenNeverLogged(t *testing.T) {
+	const token = "sk-ant-oat01-do-not-log-this-token"
+	// Prepended, not appended: see TestClaudeOAuthTokenParsed's own comment.
+	path := writeTOML(t, "claude_oauth_token = \""+token+"\"\n"+minimalValidTOML)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ClaudeOAuthToken != token {
+		t.Fatalf("ClaudeOAuthToken = %q, want %q", cfg.ClaudeOAuthToken, token)
+	}
+	if strings.Contains(buf.String(), token) {
+		t.Errorf("log output contains the claude_oauth_token value: %s", buf.String())
+	}
+}
+
+// TestReviewMaxLensesParallel proves review.max_lenses_parallel (design
+// section 4.5): absent defaults to 7 (the lens count), 1 and 7 both load,
+// and 0 or 8 are refused with the exact error text.
+func TestReviewMaxLensesParallel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Review.MaxLensesParallel != 7 {
+			t.Errorf("MaxLensesParallel = %d, want 7", cfg.Review.MaxLensesParallel)
+		}
+	})
+
+	for _, n := range []int{1, 7} {
+		t.Run(fmt.Sprintf("valid %d", n), func(t *testing.T) {
+			t.Parallel()
+			body := minimalValidTOML + fmt.Sprintf("\n[review]\nmax_lenses_parallel = %d\n", n)
+			cfg, err := Load(writeTOML(t, body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Review.MaxLensesParallel != n {
+				t.Errorf("MaxLensesParallel = %d, want %d", cfg.Review.MaxLensesParallel, n)
+			}
+		})
+	}
+
+	for _, n := range []int{0, 8} {
+		t.Run(fmt.Sprintf("invalid %d", n), func(t *testing.T) {
+			t.Parallel()
+			body := minimalValidTOML + fmt.Sprintf("\n[review]\nmax_lenses_parallel = %d\n", n)
+			_, err := Load(writeTOML(t, body))
+			if err == nil {
+				t.Fatal("Load: want an error, got nil")
+			}
+			want := "zing.toml: review.max_lenses_parallel: must be 1 to 7"
+			if err.Error() != want {
+				t.Errorf("Load() = %q, want %q", err.Error(), want)
+			}
+		})
+	}
 }
 
 func TestLoad_IntakeAssignedToDefaultsWhenExplicitlyEmpty(t *testing.T) {

@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	zing "zing"
 	"zing/internal/gitfixture"
+	"zing/internal/machine"
 	"zing/internal/store"
 )
 
@@ -135,6 +137,7 @@ func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	doc := fmt.Sprintf(`
 user = "test-user"
 github_token = "test-github-token"
+claude_oauth_token = "test-claude-oauth-token"
 
 [console]
 bind = [%s]
@@ -509,6 +512,80 @@ func TestDispatchFailure(t *testing.T) {
 				t.Errorf("dispatchFailure(%v, %v) = %v, want it to wrap %v", tc.dispTriggered, tc.de, got, boom)
 			}
 		})
+	}
+}
+
+// TestServeRequiresClaudeOAuthToken proves checkClaudeOAuthToken's own gate
+// (PKG9-PLAN.md section 4.5, D26): the real, checked-in machine.toml names
+// several claude-runtime jobs, and "build" sorts first among them, so an
+// empty token is refused with the exact error naming it; a machine with no
+// claude-runtime job at all (every M1 job pointed at codex here) needs no
+// token and returns nil.
+func TestServeRequiresClaudeOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a claude job and no key", func(t *testing.T) {
+		t.Parallel()
+		m, err := machine.Load(zing.Assets, "machine.toml")
+		if err != nil {
+			t.Fatalf("machine.Load: %v", err)
+		}
+		err = checkClaudeOAuthToken(m, "")
+		if err == nil {
+			t.Fatal("checkClaudeOAuthToken: want an error, got nil")
+		}
+		want := "serve: zing.toml: missing required key claude_oauth_token (machine.toml job build uses the claude runtime)"
+		if err.Error() != want {
+			t.Errorf("checkClaudeOAuthToken() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("a claude job and a key", func(t *testing.T) {
+		t.Parallel()
+		m, err := machine.Load(zing.Assets, "machine.toml")
+		if err != nil {
+			t.Fatalf("machine.Load: %v", err)
+		}
+		if err := checkClaudeOAuthToken(m, "a-token"); err != nil {
+			t.Errorf("checkClaudeOAuthToken() = %v, want nil", err)
+		}
+	})
+
+	t.Run("no claude job and no key", func(t *testing.T) {
+		t.Parallel()
+		m := &machine.Machine{Jobs: map[string]machine.Job{
+			"judge": {Runtime: "codex"},
+		}}
+		if err := checkClaudeOAuthToken(m, ""); err != nil {
+			t.Errorf("checkClaudeOAuthToken() = %v, want nil (no job uses the claude runtime)", err)
+		}
+	})
+}
+
+// TestServeRemovesTempRootAtStartup proves removeStartupTempRoots removes
+// <dataDir>/tmp/ whole (PKG9-PLAN.md section 7.3): a stale run directory
+// left behind by a process that died mid-run is gone afterward, and a
+// missing directory is not an error.
+func TestServeRemovesTempRootAtStartup(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	stale := filepath.Join(dataDir, "tmp", "run", "deadbeefdeadbeef", "tmp")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", stale, err)
+	}
+
+	if err := removeStartupTempRoots(dataDir); err != nil {
+		t.Fatalf("removeStartupTempRoots: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "tmp")); !os.IsNotExist(err) {
+		t.Errorf("<dataDir>/tmp still exists after removeStartupTempRoots (stat err = %v)", err)
+	}
+
+	// A second call, against a directory that no longer has a tmp/ subtree,
+	// must not error.
+	if err := removeStartupTempRoots(dataDir); err != nil {
+		t.Errorf("removeStartupTempRoots (already removed): %v", err)
 	}
 }
 

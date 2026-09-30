@@ -59,6 +59,23 @@ func liveModel() string {
 	return "claude-sonnet-5"
 }
 
+// liveOAuthToken is the claude_oauth_token every live test in this file
+// authenticates its own real claude CLI run with (PKG9-PLAN.md section 4.6,
+// D26: the claude runtime refuses to start at all with an empty token, so
+// this file needs one too, now that there is no ambient keychain login to
+// fall back on). It reads ZING_PROBE_CLAUDE_TOKEN, the same environment
+// variable internal/sandbox's own credential probes read: this repo's own
+// zing.toml, if any, is never consulted here, and the token is never
+// logged or printed.
+func liveOAuthToken(t *testing.T) string {
+	t.Helper()
+	token := os.Getenv("ZING_PROBE_CLAUDE_TOKEN")
+	if token == "" {
+		t.Skip("set ZING_PROBE_CLAUDE_TOKEN to run against the real claude CLI")
+	}
+	return token
+}
+
 // fakeRepo returns a temp directory holding one small Go file, standing in
 // for the project checkout a real job's WorkDir would otherwise be. t
 // removes it at test end.
@@ -131,7 +148,7 @@ func runLive(t *testing.T, req RunRequest) (RunResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
-	return NewClaude("").Run(ctx, req)
+	return NewClaude("", liveOAuthToken(t)).Run(ctx, req)
 }
 
 // TestLive_Classify is task 15(a): a real classify turn on a small fixture

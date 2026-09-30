@@ -1654,7 +1654,7 @@ func routeFailure(
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil
 	case errors.Is(runErr, ErrSandbox):
-		return sandboxEscalationCommit(t, d, resolveIDs, origin, d.Sandbox.Reason()), true, nil
+		return sandboxEscalationCommit(t, d, resolveIDs, origin, d.Sandboxes.Build.Reason()), true, nil
 	case errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
 		return store.HandlerCommit{}, true, runErr
 	}

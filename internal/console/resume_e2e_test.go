@@ -169,11 +169,12 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 			Models: resumeE2EModels, Budget: resumeE2EBudget,
 			// This e2e drives the fake runtime, never a real sandboxed
 			// process (design D5, section 10).
-			Sandbox: sandbox.Off(), RequireSandbox: false,
+			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 			Commands: job.NewCommandRunner(sandbox.Off(), false),
 			Projects: map[int64]job.Project{
 				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
 			},
+			DataDir: t.TempDir(),
 		}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)

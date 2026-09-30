@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	zing "zing"
 )
 
 // ---- Prefix -----------------------------------------------------------
@@ -491,6 +493,115 @@ func TestLoadRejectsRepeatedPlaceholder(t *testing.T) {
 	}
 	if sb.Reason() != reasonProfileRejected {
 		t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonProfileRejected)
+	}
+}
+
+// ---- Set: For, OffSet, FirstUnavailable (PKG9-PLAN.md section 4.7) --------
+
+// TestSetFor proves Set.For's own three-name lookup, and that any other
+// name reports ok=false.
+func TestSetFor(t *testing.T) {
+	build := Sandbox{reason: "build-reason"}
+	readonly := Sandbox{reason: "readonly-reason"}
+	judge := Sandbox{reason: "judge-reason"}
+	s := Set{Build: build, ReadOnly: readonly, Judge: judge}
+
+	tests := []struct {
+		name string
+		want Sandbox
+		ok   bool
+	}{
+		{profileNameBuild, build, true},
+		{profileNameReadOnly, readonly, true},
+		{"judge", judge, true},
+		{"bogus", Sandbox{}, false},
+		{"", Sandbox{}, false},
+	}
+	for _, tc := range tests {
+		got, ok := s.For(tc.name)
+		if ok != tc.ok {
+			t.Errorf("For(%q) ok = %v, want %v", tc.name, ok, tc.ok)
+			continue
+		}
+		if ok && got.reason != tc.want.reason {
+			t.Errorf("For(%q) = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestOffSet proves OffSet returns three unavailable sandboxes, each one
+// Off's own contract.
+func TestOffSet(t *testing.T) {
+	s := OffSet()
+	for name, sb := range map[string]Sandbox{"Build": s.Build, "ReadOnly": s.ReadOnly, "Judge": s.Judge} {
+		if sb.Available() {
+			t.Errorf("OffSet().%s: Available() = true, want false", name)
+		}
+		if sb.Reason() == "" {
+			t.Errorf("OffSet().%s: Reason() is empty, want a non-empty reason", name)
+		}
+	}
+}
+
+// TestFirstUnavailable proves Set.FirstUnavailable reports only a profile
+// some job in used actually names, in build/readonly/judge order, and ""
+// when every used profile is available: an unused, unloaded judge (M1's
+// own Set.Judge, NotLoaded()) is never reported, since no M1 job names it.
+func TestFirstUnavailable(t *testing.T) {
+	available := Sandbox{available: true}
+	unavailableBuild := Sandbox{reason: "build broke"}
+	unavailableReadonly := Sandbox{reason: "readonly broke"}
+
+	t.Run("every used profile available", func(t *testing.T) {
+		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
+		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != "" {
+			t.Errorf("FirstUnavailable() = %q, want empty", got)
+		}
+	})
+
+	t.Run("an unused unloaded judge is not reported", func(t *testing.T) {
+		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
+		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != "" {
+			t.Errorf("FirstUnavailable() = %q, want empty (judge is unused)", got)
+		}
+	})
+
+	t.Run("build unavailable and used", func(t *testing.T) {
+		s := Set{Build: unavailableBuild, ReadOnly: available, Judge: NotLoaded()}
+		want := "build: build broke"
+		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != want {
+			t.Errorf("FirstUnavailable() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("build and readonly both unavailable reports build first", func(t *testing.T) {
+		s := Set{Build: unavailableBuild, ReadOnly: unavailableReadonly, Judge: NotLoaded()}
+		want := "build: build broke"
+		if got := s.FirstUnavailable([]string{profileNameReadOnly, profileNameBuild}); got != want {
+			t.Errorf("FirstUnavailable() = %q, want %q (build/readonly/judge order, not used's own order)", got, want)
+		}
+	})
+
+	t.Run("judge used and unavailable", func(t *testing.T) {
+		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
+		want := "judge: not loaded"
+		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly, "judge"}); got != want {
+			t.Errorf("FirstUnavailable() = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestRenderReadonlyPlaceholders proves the checked-in sandbox/readonly.sb
+// carries each placeholder exactly once and renders clean, the same way
+// build.sb already does (section 4.7: "Both files carry the two
+// placeholder lines of build.sb, each exactly once").
+func TestRenderReadonlyPlaceholders(t *testing.T) {
+	profile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/readonly.sb: %v", err)
+	}
+	if _, err := renderProfile(profile, nil, 7420); err != nil {
+		t.Errorf("renderProfile(readonly.sb): %v", err)
 	}
 }
 

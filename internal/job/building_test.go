@@ -75,7 +75,7 @@ func buildTicketInBuilding(t *testing.T) (*store.Store, runtime.Runtime, int64) 
 func claimForBuild(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job.Deps {
 	t.Helper()
 	deps := claimWithRuntimes(t, s, rt, ticketID)
-	deps.Sandbox = sandbox.Off()
+	deps.Sandboxes = sandbox.OffSet()
 	deps.RequireSandbox = false
 	deps.Commands = job.NewCommandRunner(sandbox.Off(), false)
 	deps.Projects = buildJobTestProjects(t, s)

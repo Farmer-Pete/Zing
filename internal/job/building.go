@@ -1721,7 +1721,7 @@ func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrato
 func commandInfraEscalation(t store.Ticket, d Deps, u unit, err error) (store.HandlerCommit, error) {
 	switch {
 	case errors.Is(err, ErrSandbox):
-		return unitEscalation(t, d, u, string(response.EscalationCodeSandboxUnavailable), sandboxUnavailableWhat, d.Sandbox.Reason(), ""), nil
+		return unitEscalation(t, d, u, string(response.EscalationCodeSandboxUnavailable), sandboxUnavailableWhat, d.Sandboxes.Build.Reason(), ""), nil
 	case errors.Is(err, context.Canceled):
 		return store.HandlerCommit{}, runtime.ErrCanceled
 	default:

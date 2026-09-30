@@ -50,7 +50,7 @@ outcomes = ["ok"]
 sandbox = "build"
 
 [jobs.review]
-model = "sonnet"
+model = "opus"
 runtime = "claude"
 per = "lens"                         # one fresh run per lens, in parallel
 tools = ["read", "grep", "glob", "bash_readonly"]
@@ -58,6 +58,8 @@ prompt = "prompts/review.md"
 lenses = ["simplification", "correctness", "security", "fidelity", "tests", "quality", "observability"]
 timeout_minutes = 30
 max_loops = 2
+max_resumes = 2
+sandbox = "readonly"
 
 [jobs.judge]
 model = "codex"

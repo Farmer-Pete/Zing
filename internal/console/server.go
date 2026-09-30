@@ -74,10 +74,11 @@ var keysJSON []byte
 // context region (views.go's loadFindings) keeps only a stored planreview
 // artifact's findings whose severity ranks strictly above it, the same
 // threshold job/planning.go's own floor split uses, without either package
-// importing the other. sandboxReason is the sandbox's own Reason() (design
-// section 9.2, Task 15): empty when the sandbox is available, in which case
-// the nav region renders no indicator; otherwise it renders the sandbox-off
-// span with this as the reason.
+// importing the other. sandboxReason is sandbox.Set.FirstUnavailable's own
+// result (design section 9.2, Task 15; PKG9-PLAN.md section 4.7): empty
+// when every profile some machine.toml job names is available, in which
+// case the nav region renders no indicator; otherwise it renders the
+// sandbox-off span with this "<name>: <reason>" text as the title.
 type console struct {
 	store         *store.Store
 	bus           *bus.Broker
@@ -133,10 +134,12 @@ type console struct {
 // job.Deps.Floor, so the gate's context region and the planning handler's
 // floor split agree on one threshold.
 //
-// sandboxReason is the sandbox's own Reason() (design section 5.4, 9.2,
-// Task 15): empty means available. serve passes sb.Reason() from the real
-// sandbox.Load result it already builds; selftest passes sandbox.Off()'s
-// own reason, since its dispatcher always runs unwrapped.
+// sandboxReason is sandbox.Set.FirstUnavailable(used) (design section 5.4,
+// 9.2, Task 15; PKG9-PLAN.md section 4.7): empty means every profile some
+// machine.toml job names is available. serve passes its real Set's own
+// FirstUnavailable result, over the jobs machine.toml actually names a
+// profile for; selftest passes sandbox.Off().Reason(), since its
+// dispatcher always runs unwrapped.
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware

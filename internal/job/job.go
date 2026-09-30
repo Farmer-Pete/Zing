@@ -62,10 +62,12 @@ type Deps struct {
 	// the repository's common git dir, and the project's test and lint
 	// commands. Wired by dispatch.Config.Projects.
 	Projects map[int64]Project
-	// Sandbox is the seatbelt profile runJob wraps a sandboxed job's run in
-	// (section 5.5). serve loads a real one; selftest and most test suites
-	// use sandbox.Off().
-	Sandbox sandbox.Sandbox
+	// Sandboxes holds the loaded profile set runJob wraps a sandboxed job's
+	// run in, keyed by the name machine.toml's job.sandbox gives it: build,
+	// readonly, or judge (PKG9-PLAN.md section 4.3, 4.7, replacing the
+	// single Sandbox field). serve loads real profiles; selftest and most
+	// test suites use sandbox.OffSet().
+	Sandboxes sandbox.Set
 	// RequireSandbox is true in serve (a real build run refuses to start
 	// without a loaded sandbox, design N9) and false in selftest and every
 	// suite that drives the fake runtime.
@@ -73,6 +75,10 @@ type Deps struct {
 	// Commands runs the test and lint re-runs a build unit's CHECK step
 	// makes (task 9). Wired by dispatch.Config.Commands.
 	Commands CommandRunner
+	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
+	// 7.3): the private temp root runJob gives every run whose job names no
+	// sandbox lives under it. Empty is ErrConfig for a run that needs one.
+	DataDir string
 }
 
 // Project is what building needs to know about one store project (design

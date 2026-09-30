@@ -99,13 +99,35 @@ func TestJobSandboxKey(t *testing.T) {
 		}
 	})
 
+	t.Run("readonly", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"readonly\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "readonly" {
+			t.Errorf("Sandbox = %q, want readonly", got)
+		}
+	})
+
+	t.Run("judge", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"judge\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "judge" {
+			t.Errorf("Sandbox = %q, want judge", got)
+		}
+	})
+
 	t.Run("anything else", func(t *testing.T) {
 		t.Parallel()
 		_, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"bogus\"\n"), machineTOMLPath)
 		if err == nil {
 			t.Fatal("Load() = nil, want an error")
 		}
-		want := "machine.toml: job test: sandbox: must be absent or build"
+		want := "machine.toml: job test: sandbox: must be absent, build, readonly, or judge"
 		if err.Error() != want {
 			t.Errorf("Load() = %q, want %q", err.Error(), want)
 		}

@@ -22,6 +22,10 @@ var (
 	// ErrOutputTooLarge reports stdout or the final-message file exceeding
 	// the 4 MiB cap.
 	ErrOutputTooLarge = errors.New("runtime: output exceeded the 4 MiB cap")
+	// ErrNoOAuthToken reports an empty Claude oauth token (PKG9-PLAN.md
+	// section 4.6, D26): Claude.Run refuses to start the child at all
+	// rather than exec a CLI that can only fail to log in.
+	ErrNoOAuthToken = errors.New("runtime: claude: no oauth token configured")
 )
 
 // ExecError reports a process that ran and exited non-zero with no

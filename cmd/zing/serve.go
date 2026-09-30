@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -194,11 +195,19 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// claude_oauth_token (PKG9-PLAN.md section 4.5, D26): checked right
+	// after machine.toml loads, since config.Load itself never reads
+	// machine.toml and so cannot require this on its own.
+	if err = checkClaudeOAuthToken(m, cfg.ClaudeOAuthToken); err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// Production wires the two real runtimes, claude and codex, and nothing
 	// else: no fake in production (design D2, section 4.1; task 14).
 	// selftest and the dispatch/console e2e suites are the only remaining
 	// callers that build a Fake, under all three machine.toml runtime names.
-	rts, err := productionRuntimes()
+	rts, err := productionRuntimes(cfg.ClaudeOAuthToken)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -220,14 +229,25 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 
-	// The seatbelt sandbox every build and perimeter run is wrapped in
-	// (design section 5.5, 10, task 8): loaded once, here, and shared by
-	// every sandboxed job through job.Deps.Sandbox. serve always sets
-	// RequireSandbox true (serveRequireSandbox, N9): an unavailable sandbox
-	// never runs a real build unwrapped, it fails every sandboxed tick
-	// closed instead (routeFailure's own ErrSandbox case).
-	sb, err := serveSandbox(cfg, dbPath) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
+	// The seatbelt sandbox set every sandboxed job's run is wrapped in
+	// (design section 5.5, 10, task 8; PKG9-PLAN.md section 4.7): loaded
+	// once, here, and shared by every sandboxed job through
+	// job.Deps.Sandboxes. serve always sets RequireSandbox true
+	// (serveRequireSandbox, N9): an unavailable sandbox never runs a real
+	// build or review unwrapped, it fails every sandboxed tick closed
+	// instead (routeFailure's own ErrSandbox case).
+	dataDir := filepath.Dir(dbPath)
+	sbSet, err := serveSandbox(cfg, dataDir) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
 	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	// The private temp root of every unsandboxed run (classify, planning,
+	// planreview) lives under <DATA_DIR>/tmp/ (PKG9-PLAN.md section 7.3): a
+	// process that died mid-run leaves its own run directory behind, so
+	// serve sweeps the whole tree once, here, before the dispatcher starts.
+	if err = removeStartupTempRoots(dataDir); err != nil {
 		_ = st.Close()
 		return err
 	}
@@ -237,7 +257,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		_ = st.Close()
 		return fmt.Errorf("serve: %w", err)
 	}
-	projects, err := buildJobProjects(ctx, cfg.Projects, bindings, gh, sb)
+	projects, err := buildJobProjects(ctx, cfg.Projects, bindings, gh, sbSet.Build)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -260,9 +280,10 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Budget:         time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
 		Floor:          floor,
 		Projects:       projects,
-		Sandbox:        sb,
+		Sandboxes:      sbSet,
 		RequireSandbox: serveRequireSandbox,
-		Commands:       job.NewCommandRunner(sb, serveRequireSandbox),
+		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
+		DataDir:        dataDir,
 	}, rts)
 	if err != nil {
 		_ = st.Close()
@@ -300,7 +321,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sb.Reason())
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)))
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -346,24 +367,102 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 // (cmd/zing/selftest.go), never this constant.
 const serveRequireSandbox = true
 
-// serveSandbox loads the seatbelt profile every build and perimeter run is
-// wrapped in (design section 5.1, 5.5, 10): the checked-in, embedded
-// sandbox/build.sb, cfg.Sandbox.ReadPaths, and cfg.Console.Port. Load never
-// errors -- a failure is recorded as unavailable, with one of section 5.4's
-// four reasons -- so the only error this can return is reading the embedded
-// profile itself, which would mean the binary was built without it.
-func serveSandbox(cfg *config.Config, dbPath string) (sandbox.Sandbox, error) {
-	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+// serveSandbox loads the seatbelt profile set every sandboxed job's run is
+// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7): the
+// checked-in, embedded sandbox/build.sb and sandbox/readonly.sb, each with
+// cfg.Sandbox.ReadPaths and cfg.Console.Port. LoadProfile never errors -- a
+// failure is recorded as unavailable, with one of section 5.4's four closed
+// reasons -- so the only error this can return is reading an embedded
+// profile itself, which would mean the binary was built without it. Judge
+// is NotLoaded() in M1: M2 task 2 adds judge.sb and its own load.
+func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
+	buildProfile, err := zing.Assets.ReadFile("sandbox/build.sb")
 	if err != nil {
-		return sandbox.Sandbox{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
 	}
-	sb := sandbox.Load(profile, filepath.Dir(dbPath), cfg.Sandbox.ReadPaths, cfg.Console.Port)
+	readonlyProfile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
+
+	build := loadNamedSandbox("build", buildProfile, cfg, dataDir)
+	readonly := loadNamedSandbox("readonly", readonlyProfile, cfg, dataDir)
+
+	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: sandbox.NotLoaded()}, nil
+}
+
+// loadNamedSandbox loads one profile through sandbox.LoadProfile and logs
+// whether it came up, naming the profile so serveSandbox's two calls (and,
+// from M2 on, a third for judge) are told apart in the log.
+func loadNamedSandbox(name string, profile []byte, cfg *config.Config, dataDir string) sandbox.Sandbox {
+	sb := sandbox.LoadProfile(name, profile, dataDir, cfg.Sandbox.ReadPaths, cfg.Console.Port)
 	if sb.Available() {
-		slog.Info("sandbox loaded")
+		slog.Info("sandbox loaded", "profile", name)
 	} else {
-		slog.Error("sandbox unavailable", "reason", sb.Reason())
+		slog.Error("sandbox unavailable", "profile", name, "reason", sb.Reason())
 	}
-	return sb, nil
+	return sb
+}
+
+// usedSandboxProfiles returns the distinct, non-empty job.Sandbox names
+// m.Jobs actually names, for Set.FirstUnavailable: a profile no job uses
+// must never turn the console's sandbox indicator red (PKG9-PLAN.md
+// section 4.7).
+func usedSandboxProfiles(m *machine.Machine) []string {
+	seen := make(map[string]bool, len(m.Jobs))
+	var names []string
+	for _, jobName := range sortedJobNames(m) {
+		name := m.Jobs[jobName].Sandbox
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// sortedJobNames returns m.Jobs's keys in sorted order, so
+// usedSandboxProfiles (and checkClaudeOAuthToken, below) walk machine.toml's
+// jobs in a deterministic order rather than Go's randomized map order.
+func sortedJobNames(m *machine.Machine) []string {
+	names := make([]string, 0, len(m.Jobs))
+	for name := range m.Jobs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// checkClaudeOAuthToken enforces claude_oauth_token's own requirement
+// (PKG9-PLAN.md section 4.5, D26): when any machine.toml job uses the
+// claude runtime and token is empty, it names the first such job in
+// sorted order; nil otherwise. config.Load cannot make this check itself,
+// since it never reads machine.toml.
+func checkClaudeOAuthToken(m *machine.Machine, token string) error {
+	if token != "" {
+		return nil
+	}
+	for _, name := range sortedJobNames(m) {
+		if m.Jobs[name].Runtime == runtimeNameClaude {
+			return fmt.Errorf("serve: zing.toml: missing required key claude_oauth_token (machine.toml job %s uses the claude runtime)", name)
+		}
+	}
+	return nil
+}
+
+// removeStartupTempRoots removes <dataDir>/tmp/ whole, before the
+// dispatcher starts (PKG9-PLAN.md section 7.3): the private temp root an
+// unsandboxed run's TMPDIR and CLAUDE_CODE_TMPDIR point at lives under it,
+// and a process that died mid-run leaves its own run directory behind
+// (runJob's own deferred cleanup only runs when rt.Run actually returns). A
+// missing directory is not an error.
+func removeStartupTempRoots(dataDir string) error {
+	tmpRoot := filepath.Join(dataDir, "tmp")
+	if err := os.RemoveAll(tmpRoot); err != nil {
+		return fmt.Errorf("serve: remove %s: %w", tmpRoot, err)
+	}
+	return nil
 }
 
 // buildJobProjects builds one orchestrator.Orchestrator per configured
@@ -431,12 +530,13 @@ func sandboxBuildWritableRoots(sb sandbox.Sandbox) []string {
 // productionRuntimes builds the runtime.Set serve wires the dispatcher with:
 // the two real runtimes, claude and codex, resolved by their bare bin names
 // (an empty bin argument to runtime.NewClaude/NewCodex resolves through
-// PATH), and nothing else (design D2, section 4.1; task 14). Production
-// never maps the fake name; only selftest and the test suites still build a
-// runtime.Fake.
-func productionRuntimes() (runtime.Set, error) {
+// PATH), and nothing else (design D2, section 4.1; task 14). oauthToken is
+// cfg.ClaudeOAuthToken, the only credential the claude runtime ever carries
+// to its child (PKG9-PLAN.md section 4.6, D26). Production never maps the
+// fake name; only selftest and the test suites still build a runtime.Fake.
+func productionRuntimes(oauthToken string) (runtime.Set, error) {
 	rts, err := runtime.NewSet(map[string]runtime.Runtime{
-		runtimeNameClaude: runtime.NewClaude(""),
+		runtimeNameClaude: runtime.NewClaude("", oauthToken),
 		runtimeNameCodex:  runtime.NewCodex(""),
 	})
 	if err != nil {

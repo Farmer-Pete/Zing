@@ -411,11 +411,12 @@ func selftestResumeE2E(ctx context.Context) error {
 			Interval: time.Millisecond, MaxParallel: 2, Owner: e2eOwner,
 			Models: e2eModels, Budget: e2eBudget, Floor: e2eFloor,
 			// selftest drives the fake runtime, never a real sandboxed
-			// process: sandbox.Off() is always unavailable, and
+			// process: sandbox.OffSet() is always unavailable, and
 			// RequireSandbox false lets a sandboxed job (build, perimeter)
 			// run unwrapped instead of refusing (design D5, section 10).
-			Sandbox: sandbox.Off(), RequireSandbox: false,
+			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			DataDir:  dir,
 			// Projects carries what the real building handler needs for
 			// this one project (PKG8-PLAN.md section 4.3): the fixture
 			// project's own test and lint commands (section 9.4).

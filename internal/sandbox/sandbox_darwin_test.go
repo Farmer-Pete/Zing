@@ -583,6 +583,162 @@ func TestDeniesLaunchctlSubmit(t *testing.T) {
 	}
 }
 
+// ---- the readonly profile (PKG9-PLAN.md section 4.7, 7.3) -----------------
+
+// newLoadedReadonlySandbox reads the real, checked-in sandbox/readonly.sb
+// through zing.Assets and loads it with no extra read paths, on port 7421
+// (distinct from newLoadedSandbox's 7420, so a test using both at once
+// never collides), failing the test if the profile does not load on this
+// machine.
+func newLoadedReadonlySandbox(t *testing.T) Sandbox {
+	t.Helper()
+	requireNotSandboxed(t)
+
+	profile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/readonly.sb: %v", err)
+	}
+	sb := LoadProfile(profileNameReadOnly, profile, t.TempDir(), nil, 7421)
+	if !sb.Available() {
+		t.Fatalf("LoadProfile(readonly): unavailable, reason %q", sb.Reason())
+	}
+	return sb
+}
+
+func TestReadonlyProfileLoads(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	if !sb.Available() {
+		t.Fatalf("sandbox unavailable: %s", sb.Reason())
+	}
+}
+
+// TestReadonlyDeniesWorktreeWrite proves the readonly profile's write block
+// carries no WORKTREE allow at all (section 7.3: "A review or respond run
+// writes nothing in the worktree, D4"), unlike build.sb.
+func TestReadonlyDeniesWorktreeWrite(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	dirs := newTestDirs(t)
+	target := filepath.Join(dirs.worktree, "hello.txt")
+
+	if exitCode, out := runSandboxed(t, sb, dirs.params(), "/usr/bin/touch", target); exitCode == 0 {
+		t.Errorf("touch a worktree file under the readonly profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Error("worktree file was created despite the readonly profile's deny")
+	}
+}
+
+// TestReadonlyAllowsRunDirWrite proves the readonly profile still allows a
+// write into RUN_DIR (section 7.3's own write block).
+func TestReadonlyAllowsRunDirWrite(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	dirs := newTestDirs(t)
+	target := filepath.Join(dirs.runDir, "hello.txt")
+
+	if exitCode, out := runSandboxed(t, sb, dirs.params(), "/usr/bin/touch", target); exitCode != 0 {
+		t.Fatalf("touch a run-dir file under the readonly profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("run-dir file was not created: %v", err)
+	}
+}
+
+// TestReadonlyAllowsTranscriptWrite proves the readonly profile allows a
+// write into TRANSCRIPTS (section 7.3's own write block: the Claude CLI
+// must still be able to write its own transcript).
+func TestReadonlyAllowsTranscriptWrite(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.params()
+	if err := os.MkdirAll(p.Transcripts, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", p.Transcripts, err)
+	}
+	target := filepath.Join(p.Transcripts, "hello.txt")
+
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/touch", target); exitCode != 0 {
+		t.Fatalf("touch a transcripts file under the readonly profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("transcripts file was not created: %v", err)
+	}
+}
+
+// TestReadonlyDeniesDataDir proves the readonly profile denies DATA_DIR
+// whole, the same as build.sb (section 7.3: "No profile reads zing.db").
+func TestReadonlyDeniesDataDir(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	dirs := newTestDirs(t)
+	f := filepath.Join(dirs.dataDir, "zing.db")
+	if err := os.WriteFile(f, []byte("scenario data"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", f, err)
+	}
+
+	if exitCode, out := runSandboxed(t, sb, dirs.params(), "/bin/cat", f); exitCode == 0 {
+		t.Errorf("cat a file in DATA_DIR under the readonly profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestReadonlyDeniesKeychainRead proves the readonly profile no longer
+// allows ~/Library/Keychains (PKG9-PLAN.md D26, N2): the Claude CLI logs in
+// with CLAUDE_CODE_OAUTH_TOKEN instead.
+func TestReadonlyDeniesKeychainRead(t *testing.T) {
+	sb := newLoadedReadonlySandbox(t)
+	dirs := newTestDirs(t)
+	keychainFile := filepath.Join(dirs.home, "Library", "Keychains", "login.keychain-db")
+	if err := os.MkdirAll(filepath.Dir(keychainFile), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(keychainFile, []byte("not a real keychain"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", keychainFile, err)
+	}
+
+	if exitCode, out := runSandboxed(t, sb, dirs.params(), "/bin/cat", keychainFile); exitCode == 0 {
+		t.Errorf("cat ~/Library/Keychains/... under the readonly profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestBuildDeniesKeychainRead proves build.sb also no longer allows
+// ~/Library/Keychains (PKG9-PLAN.md D26, N2), mirroring
+// TestReadonlyDeniesKeychainRead for the build profile.
+func TestBuildDeniesKeychainRead(t *testing.T) {
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	keychainFile := filepath.Join(dirs.home, "Library", "Keychains", "login.keychain-db")
+	if err := os.MkdirAll(filepath.Dir(keychainFile), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(keychainFile, []byte("not a real keychain"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", keychainFile, err)
+	}
+
+	if exitCode, out := runSandboxed(t, sb, dirs.params(), "/bin/cat", keychainFile); exitCode == 0 {
+		t.Errorf("cat ~/Library/Keychains/... under the build profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestBuildDeniesGitCredentialHelperExec proves build.sb's process-exec
+// deny on git-credential-* helpers (D26, N2): a fake helper script that
+// would otherwise print a password is refused before it can ever run.
+func TestBuildDeniesGitCredentialHelperExec(t *testing.T) {
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+
+	helperDir := t.TempDir()
+	helper := filepath.Join(helperDir, "git-credential-fake")
+	script := "#!/bin/sh\necho password=stolen\n"
+	if err := os.WriteFile(helper, []byte(script), 0o755); err != nil { //nolint:gosec // 0755: must be executable
+		t.Fatalf("write %s: %v", helper, err)
+	}
+
+	exitCode, out := runSandboxed(t, sb, dirs.params(), helper)
+	if exitCode == 0 {
+		t.Errorf("exec a git-credential-* helper under the profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if strings.Contains(out, "password=") {
+		t.Errorf("the denied helper's output leaked a password= line: %q", out)
+	}
+}
+
 // TestAllowsTLSDownload proves outbound TLS still works (design section
 // 12), skipping when this machine has no route to the public internet
 // rather than failing the suite over an environment limitation.
