@@ -129,23 +129,24 @@ func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
 // LOGNAME alone does not stand in for it.
 var allowedParentEnv = []string{"PATH", "HOME", "LANG", "GOPATH", "GOCACHE", "TMPDIR", "USER"}
 
-// agentEnv builds the filtered environment (design section 4.1), shared by
-// both Claude and Codex: the allowlisted parent variables, then req.Env,
-// then the two variables every run needs, then a drop pass that removes
-// anything shaped like a secret except ZING_RUN_TOKEN by its exact name --
-// so a GITHUB_TOKEN or an AWS_SECRET_ACCESS_KEY riding in on req.Env can
-// never reach the child. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a
-// codex run: it is an environment variable, not a flag, and codex ignores
-// names it does not read.
-func agentEnv(req RunRequest) []string {
-	merged := make([]string, 0, len(allowedParentEnv)+len(req.Env)+2)
+// FilteredEnv builds the filtered environment two callers share (review
+// F051): agentEnv below (Claude and Codex runs) and runShellCommand in
+// internal/job/commands.go (the sandbox-probe, git, and lint/test commands
+// a build or fix unit runs). It is the allowlisted parent variables, then
+// extra, then a drop pass that removes anything shaped like a secret except
+// ZING_RUN_TOKEN by its exact name -- so a GITHUB_TOKEN or an
+// AWS_SECRET_ACCESS_KEY, whether inherited from the calling process's own
+// environment or riding in on extra, can never reach the child. Duplicate
+// names: os/exec keeps the last value for a repeated name, so a value in
+// extra always wins over the same name from the parent allowlist.
+func FilteredEnv(extra []string) []string {
+	merged := make([]string, 0, len(allowedParentEnv)+len(extra))
 	for _, name := range allowedParentEnv {
 		if v, ok := os.LookupEnv(name); ok {
 			merged = append(merged, name+"="+v)
 		}
 	}
-	merged = append(merged, req.Env...)
-	merged = append(merged, "CLAUDE_CODE_PROMPT_CACHE_TTL=1h", "ZING_RUN_TOKEN="+req.RunToken)
+	merged = append(merged, extra...)
 
 	out := make([]string, 0, len(merged))
 	for _, kv := range merged {
@@ -155,6 +156,15 @@ func agentEnv(req RunRequest) []string {
 		}
 	}
 	return out
+}
+
+// agentEnv builds the filtered environment (design section 4.1), shared by
+// both Claude and Codex: FilteredEnv over req.Env plus the two variables
+// every run needs. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a codex run:
+// it is an environment variable, not a flag, and codex ignores names it
+// does not read.
+func agentEnv(req RunRequest) []string {
+	return FilteredEnv(append(req.Env, "CLAUDE_CODE_PROMPT_CACHE_TTL=1h", "ZING_RUN_TOKEN="+req.RunToken))
 }
 
 // envNameBlocked reports whether name is shaped like a secret (design

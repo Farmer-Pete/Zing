@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -113,10 +114,12 @@ func Load(profile []byte, dataDir string, readPaths []string, consolePort int) S
 
 // resolveHost resolves every Host field section 5.2's table names: the
 // user's home and this binary's own path, both with symlinks resolved; the
-// data directory, taken as given; the cache root and its "shared"
-// subdirectory, created 0700; and the per-user cache folder's "mds" child,
-// found through getconf (host_darwin.go) and symlink-resolved when it
-// already exists.
+// data directory, also symlink-resolved (review F044: seatbelt's
+// "(subpath ...)" match runs against the kernel-resolved path, so a data
+// directory reached through a symlink would otherwise escape the DATA_DIR
+// deny rule); the cache root and its "shared" subdirectory, created 0700;
+// and the per-user cache folder's "mds" child, found through getconf
+// (host_darwin.go) and symlink-resolved when it already exists.
 func resolveHost(dataDir string) (Host, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -133,6 +136,18 @@ func resolveHost(dataDir string) (Host, error) {
 	if resolved, evalErr := filepath.EvalSymlinks(zingBin); evalErr == nil {
 		zingBin = resolved
 	}
+
+	// filepath.EvalSymlinks("") returns "." with no error, which would
+	// silently turn an empty data dir into the current directory, so the
+	// empty check runs first and fails closed on its own.
+	if dataDir == "" {
+		return Host{}, errors.New("sandbox: data dir is empty")
+	}
+	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return Host{}, fmt.Errorf("sandbox: resolve data dir: %w", err)
+	}
+	dataDir = resolvedDataDir
 
 	userCacheDir, err := darwinUserCacheDir()
 	if err != nil || userCacheDir == "" {

@@ -69,6 +69,9 @@ fork_delay_write)
   # this grandchild before it ever runs.
   canary="${FAKE_CLAUDE_CANARY:?FAKE_CLAUDE_CANARY not set}"
   ( sleep 2; touch "$canary" ) >/dev/null 2>&1 &
+  # The grandchild's pid, so the test can poll for its death instead of
+  # waiting a fixed time (review F031).
+  printf '%s' "$!" > "$dir/grandchild_pid"
   disown
   printf '%s' "$default_result"
   exit 0

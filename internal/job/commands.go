@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"zing/internal/runtime"
 	"zing/internal/sandbox"
 )
 
@@ -67,7 +68,11 @@ func (c sandboxedCommands) Run(ctx context.Context, dir, repoGit, shellCmd strin
 // runShellCommand runs "/bin/sh -c shellCmd" (behind execPrefix, when set),
 // in its own process group, the whole group killed after Wait returns on
 // every path (design section 5.5, mirroring runtime.Claude.run's own
-// process-group discipline), bounded by timeout.
+// process-group discipline), bounded by timeout. The environment is
+// runtime.FilteredEnv(extraEnv) (review F051), not os.Environ() plus
+// extraEnv: the plan's own section 5.5 says the command runner uses the
+// same filtered environment an agent run does, so an inherited token or key
+// in this process's own environment cannot reach agent-written test code.
 func runShellCommand(ctx context.Context, dir, shellCmd string, execPrefix, extraEnv []string, timeout time.Duration) (int, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -75,7 +80,7 @@ func runShellCommand(ctx context.Context, dir, shellCmd string, execPrefix, extr
 	name, args := shellCommandNameArgs(execPrefix, shellCmd)
 	cmd := exec.CommandContext(runCtx, name, args...) //nolint:gosec // G204: shellCmd is an operator-configured project command (config.Project.Commands.Test/Lint), never model-influenced argv; execPrefix is the sandbox's own prefix
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = runtime.FilteredEnv(extraEnv)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {

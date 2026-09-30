@@ -245,6 +245,59 @@ func TestDeniesDataDir(t *testing.T) {
 	}
 }
 
+// TestDeniesDataDirThroughSymlink proves the DATA_DIR deny rule still holds
+// when the data directory is reached through a symlinked parent (review
+// F044): seatbelt's "(subpath ...)" match runs against the kernel-resolved
+// path, so a Sandbox loaded with dataDir behind a symlink must still deny a
+// read inside the real directory. Unlike the sibling tests in this file,
+// this one drives Load itself (not a hand-built Params), since the fix
+// under test lives in resolveHost.
+func TestDeniesDataDirThroughSymlink(t *testing.T) {
+	requireNotSandboxed(t)
+
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(realDir, "data"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	dataDir := filepath.Join(link, "data")
+	secret := filepath.Join(realDir, "data", "zing.db")
+	if err := os.WriteFile(secret, []byte("scenario data"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", secret, err)
+	}
+
+	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/build.sb: %v", err)
+	}
+	sb := Load(profile, dataDir, nil, 7420)
+	if !sb.Available() {
+		t.Fatalf("Load: unavailable, reason %q", sb.Reason())
+	}
+
+	dirs := newTestDirs(t)
+	p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+	if err != nil {
+		t.Fatalf("ParamsFor: %v", err)
+	}
+	p.Home = dirs.home
+	p.ZingBin = dirs.zingBin
+	p.CacheRoot = dirs.cacheRoot
+	p.CacheShared = dirs.cacheShared
+	p.MDSCache = dirs.mdsCache
+
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", secret); exitCode == 0 {
+		t.Errorf("cat a file in DATA_DIR reached through a symlinked parent: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
 // TestRunsZingBinFromDataDir proves the ZING_BIN literal is readable and
 // executable even though its own DATA_DIR sits behind a blanket
 // file-read*/file-write* deny (section 5.1's "allow file-read*

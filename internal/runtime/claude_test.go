@@ -9,7 +9,9 @@ import (
 	"regexp"
 	goruntime "runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -297,6 +299,29 @@ func TestAgentEnvOmitsLogname(t *testing.T) {
 	}
 }
 
+// TestFilteredEnvExtraOverridesAllowlist proves FilteredEnv (review F051)
+// lets a value in extra override the same name from the parent allowlist --
+// os/exec keeps the last value for a duplicate name, so extra's own value
+// must sort after the allowlisted one in the returned slice -- and drops a
+// secret-shaped name in extra the same way it drops one inherited from the
+// parent. Not parallel: t.Setenv cannot combine with t.Parallel.
+func TestFilteredEnvExtraOverridesAllowlist(t *testing.T) {
+	t.Setenv("PATH", "/parent/path")
+
+	env := FilteredEnv([]string{"PATH=/extra/path", "EVIL_TOKEN=x"})
+
+	parentIdx := slices.Index(env, "PATH=/parent/path")
+	extraIdx := slices.Index(env, "PATH=/extra/path")
+	if parentIdx == -1 || extraIdx == -1 || extraIdx < parentIdx {
+		t.Errorf("FilteredEnv() = %v, want both PATH values present with extra's own value last (os/exec keeps the last duplicate)", env)
+	}
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "EVIL_TOKEN" {
+			t.Errorf("FilteredEnv() = %v, want no EVIL_TOKEN entry", env)
+		}
+	}
+}
+
 // ---- fixture parse ----------------------------------------------------------
 
 func TestClaude_FixtureParse_FirstTurn(t *testing.T) {
@@ -578,11 +603,12 @@ func TestClaudeArgvWithExecPrefix(t *testing.T) {
 	}
 }
 
-// TestClaudeKillsGroupAfterExit proves Run kills the whole process group
-// after Wait returns even on a clean exit (design section 5.5): the fake
-// CLI's fork_delay_write mode forks a grandchild, in the same process group,
-// that would touch a canary file two seconds later; Run must reap the group
-// before that ever happens, not only on cancellation.
+// TestClaudeKillsGroupAfterExit proves Run's process-group kill reaches a
+// grandchild the CLI forked and disowned (design section 5.5): the fixture
+// records the grandchild's pid, the test polls until that pid is gone, and
+// only then checks that the canary the grandchild would have written two
+// seconds in is absent. Polling for the death, not sleeping past the
+// write, is what makes the negative assertion mean something (review F031).
 func TestClaudeKillsGroupAfterExit(t *testing.T) {
 	t.Parallel()
 	requireUnix(t)
@@ -596,7 +622,21 @@ func TestClaudeKillsGroupAfterExit(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	time.Sleep(3 * time.Second)
+	raw, err := os.ReadFile(filepath.Join(dir, "grandchild_pid"))
+	if err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse grandchild pid %q: %v", raw, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild %d still alive 5s after Run returned", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if _, err := os.Stat(canary); err == nil {
 		t.Error("the canary file exists: the forked grandchild survived Run and wrote it")
 	}

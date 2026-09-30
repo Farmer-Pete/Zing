@@ -21,6 +21,14 @@ const testMinimalRenderedProfile = "(version 1)\n"
 // by testParams and the ParamsFor tests below).
 const testHomeDir = "/Users/test/home"
 
+// testReadPathEntry is the read_paths example every renderReadPaths and
+// renderProfile test in this file reuses (goconst).
+const testReadPathEntry = "/opt/homebrew/bin"
+
+// testGOOSDarwin is the GOOS value every Load test in this file compares
+// runtime.GOOS against, in its own not-macOS branch (goconst).
+const testGOOSDarwin = "darwin"
+
 // testParams is a Params literal every absolute-field test in this file
 // starts from and overrides one field of, so a test failure names exactly
 // the field it changed.
@@ -114,7 +122,7 @@ func TestRenderReadPaths(t *testing.T) {
 		t.Errorf("renderReadPaths(nil) = %q, want empty", got)
 	}
 
-	got := renderReadPaths([]string{"/opt/homebrew/bin", "/Users/test/.local/share/mise"})
+	got := renderReadPaths([]string{testReadPathEntry, "/Users/test/.local/share/mise"})
 	want := "(allow file-read-data (subpath \"/opt/homebrew/bin\"))\n" +
 		"(allow file-read-data (subpath \"/Users/test/.local/share/mise\"))"
 	if got != want {
@@ -148,7 +156,7 @@ func TestRenderConsoleDeny(t *testing.T) {
 // 65535 makes Load record the sandbox as unavailable with the reason
 // 'profile rejected'").
 func TestLoadRejectsBadPort(t *testing.T) {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != testGOOSDarwin {
 		sb := Load([]byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n"), t.TempDir(), nil, 0)
 		if sb.Available() {
 			t.Fatal("Load with a bad port: want unavailable")
@@ -233,13 +241,38 @@ func TestNewRunDirIsPrivate(t *testing.T) {
 	cleanup2()
 }
 
+// TestLoadRejectsEmptyDataDir proves Load records the sandbox unavailable
+// with the reason it already produces for any host-resolve failure when
+// dataDir is empty (review F044: resolveHost must fail closed rather than
+// let filepath.EvalSymlinks("") silently resolve to the current directory).
+func TestLoadRejectsEmptyDataDir(t *testing.T) {
+	profile := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+	if runtime.GOOS != testGOOSDarwin {
+		sb := Load(profile, "", nil, 7420)
+		if sb.Available() {
+			t.Fatal("Load with an empty data dir: want unavailable")
+		}
+		if sb.Reason() != reasonNotMacOS {
+			t.Errorf("Reason() = %q, want %q (GOOS check runs first)", sb.Reason(), reasonNotMacOS)
+		}
+		return
+	}
+	sb := Load(profile, "", nil, 7420)
+	if sb.Available() {
+		t.Fatal("Load with an empty data dir: want unavailable")
+	}
+	if sb.Reason() != reasonUserCacheDirNotFound {
+		t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonUserCacheDirNotFound)
+	}
+}
+
 // ---- Reason -------------------------------------------------------------
 
 // TestReasonNotMacOS proves Load reports reasonNotMacOS off darwin; it
 // skips on darwin, where GOOS really is "darwin" and this branch cannot be
 // observed.
 func TestReasonNotMacOS(t *testing.T) {
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == testGOOSDarwin {
 		t.Skip("this machine's GOOS is darwin; the not-macOS reason cannot be observed here")
 	}
 	sb := Load([]byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n"), t.TempDir(), nil, 7420)
@@ -394,14 +427,14 @@ func TestDarwinTestsSkipWhenSandboxed(t *testing.T) {
 // against a typo in the placeholder constants.
 func TestRenderProfilePlaceholders(t *testing.T) {
 	base := "(version 1)\n(allow default)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n(deny mach-lookup)\n"
-	got, err := renderProfile([]byte(base), []string{"/opt/homebrew/bin"}, 7420)
+	got, err := renderProfile([]byte(base), []string{testReadPathEntry}, 7420)
 	if err != nil {
 		t.Fatalf("renderProfile: %v", err)
 	}
 	if strings.Contains(got, readPathsPlaceholder) || strings.Contains(got, consoleDenyPlaceholder) {
 		t.Errorf("renderProfile left a placeholder unreplaced:\n%s", got)
 	}
-	if !strings.Contains(got, `(allow file-read-data (subpath "/opt/homebrew/bin"))`) {
+	if !strings.Contains(got, `(allow file-read-data (subpath "`+testReadPathEntry+`"))`) {
 		t.Errorf("renderProfile did not render the read path:\n%s", got)
 	}
 	if !strings.Contains(got, `(deny network-outbound (remote tcp "*:7420"))`) {
@@ -409,5 +442,71 @@ func TestRenderProfilePlaceholders(t *testing.T) {
 	}
 	if !strings.Contains(got, "(deny mach-lookup)") {
 		t.Errorf("renderProfile dropped unrelated profile text:\n%s", got)
+	}
+}
+
+// TestLoadRejectsMissingPlaceholder proves Load records the sandbox
+// unavailable with reason "profile rejected" when base is missing
+// ;;CONSOLE_DENY;; (review F024: strings.Replace(..., 1) would otherwise
+// silently no-op the replacement and render a profile with no console
+// deny), on every platform.
+func TestLoadRejectsMissingPlaceholder(t *testing.T) {
+	base := []byte("(version 1)\n;;READ_PATHS;;\n")
+	if runtime.GOOS != testGOOSDarwin {
+		sb := Load(base, t.TempDir(), nil, 7420)
+		if sb.Available() {
+			t.Fatal("Load with a missing placeholder: want unavailable")
+		}
+		if sb.Reason() != reasonNotMacOS {
+			t.Errorf("Reason() = %q, want %q (GOOS check runs first)", sb.Reason(), reasonNotMacOS)
+		}
+		return
+	}
+	sb := Load(base, t.TempDir(), nil, 7420)
+	if sb.Available() {
+		t.Fatal("Load with a missing placeholder: want unavailable")
+	}
+	if sb.Reason() != reasonProfileRejected {
+		t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonProfileRejected)
+	}
+}
+
+// TestLoadRejectsRepeatedPlaceholder proves the same for a base that carries
+// ;;CONSOLE_DENY;; twice (review F024).
+func TestLoadRejectsRepeatedPlaceholder(t *testing.T) {
+	base := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n;;CONSOLE_DENY;;\n")
+	if runtime.GOOS != testGOOSDarwin {
+		sb := Load(base, t.TempDir(), nil, 7420)
+		if sb.Available() {
+			t.Fatal("Load with a repeated placeholder: want unavailable")
+		}
+		if sb.Reason() != reasonNotMacOS {
+			t.Errorf("Reason() = %q, want %q (GOOS check runs first)", sb.Reason(), reasonNotMacOS)
+		}
+		return
+	}
+	sb := Load(base, t.TempDir(), nil, 7420)
+	if sb.Available() {
+		t.Fatal("Load with a repeated placeholder: want unavailable")
+	}
+	if sb.Reason() != reasonProfileRejected {
+		t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonProfileRejected)
+	}
+}
+
+// TestRenderProfileEachPlaceholderOnce proves a base carrying each
+// placeholder exactly once still renders, and that its output matches
+// renderReadPaths and renderConsoleDeny byte-for-byte (review F024's
+// require-exactly-one check must not change the successful-render output).
+func TestRenderProfileEachPlaceholderOnce(t *testing.T) {
+	base := "(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n"
+	got, err := renderProfile([]byte(base), []string{testReadPathEntry}, 7420)
+	if err != nil {
+		t.Fatalf("renderProfile: %v", err)
+	}
+	want := "(version 1)\n" + renderReadPaths([]string{testReadPathEntry}) + "\n" +
+		`(deny network-outbound (remote tcp "*:7420"))` + "\n"
+	if got != want {
+		t.Errorf("renderProfile() =\n%q\nwant\n%q", got, want)
 	}
 }
