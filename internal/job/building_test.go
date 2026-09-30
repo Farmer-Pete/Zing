@@ -12,6 +12,7 @@ package job_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1639,5 +1640,714 @@ func TestPerimeterQuestionDroppedWhenPathGone(t *testing.T) {
 	}
 	if len(commit.ResolveQuestions) == 0 {
 		t.Error("commit.ResolveQuestions is empty, want the round's question ids resolved")
+	}
+}
+
+// ---- build questions and resumes (task 12) ---------------------------------
+
+// withHelloAlwaysProject returns deps with ticket's own project rewired so
+// its test command creates and finds hello.txt on every re-run,
+// deterministically, whatever a scripted run's own claim says: the
+// resume-pool tests below need CHECK's own claim-vs-observed mismatch to
+// come only from a false lint_exit claim, never from a missing file, so
+// several resumes can be driven off one project without the fixture's
+// fake-runtime file effects.
+func withHelloAlwaysProject(deps job.Deps, ticket store.Ticket) job.Deps {
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = "printf 'hello, world\\n' > hello.txt && test -f hello.txt"
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	return deps
+}
+
+// TestBuildQuestionWaitsAndResumes proves design section 6.2's round.Job==
+// "build" branch: a build run's own question waits, and the owner's answer
+// resumes that same session with one answer input (answerInputsForRound),
+// charging exactly one resume (design section 4.2's own "a resume is
+// charged in Reserve" rule, task 4).
+func TestBuildQuestionWaitsAndResumes(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		questionResult(response.JobBuild, "build-q-sess"),
+		buildStep([]string{helloTxt}, 0, 0, nil, "build-q-sess"),
+	}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: question
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Fatalf("commit.Waiting = %v, want %q", commit.Waiting, testWaitingQuestions)
+	}
+	apply(t, s, ticket, commit)
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use SQLite."}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 0 {
+		t.Fatalf("sessions.resumes before the resume = %d, want 0", sess.Resumes)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // resume: answer
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(resumeCommit.Runs) != 1 {
+		t.Fatalf("resumeCommit.Runs = %+v, want exactly one", resumeCommit.Runs)
+	}
+	if len(resumeCommit.ResolveQuestions) == 0 {
+		t.Error("resumeCommit.ResolveQuestions is empty, want the round resolved")
+	}
+
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "Use SQLite.") {
+		t.Errorf("resume prompt = %q, want the owner's own reply text", lastReq.Prompt)
+	}
+	if lastReq.SessionID != "build-q-sess" {
+		t.Errorf("resume request SessionID = %q, want %q (the build run's own session)", lastReq.SessionID, "build-q-sess")
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the resume = %d, want 1", sess.Resumes)
+	}
+}
+
+// TestClaimErrorsResumeAndDelivered proves design section 6.4's own claims
+// resume (example 13.3): the next tick after "claim errors pending run
+// <rid>" resumes that run's session with the "claims" input, fenced, and
+// the same commit writes "claim errors delivered run <rid>". sessions.
+// resumes goes from 0 to 1.
+func TestClaimErrorsResumeAndDelivered(t *testing.T) {
+	s, rt, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, rt, ticketID)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
+	}
+	pendingBody := checkCommit.Messages[0].Body
+	apply(t, s, ticket, checkCommit)
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 0 {
+		t.Fatalf("sessions.resumes before the resume = %d, want 0", sess.Resumes)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	pendingHead, _, _ := strings.Cut(pendingBody, "\n")
+	rid := strings.TrimPrefix(pendingHead, "claim errors pending run ")
+	wantDelivered := "claim errors delivered run " + rid
+	found := false
+	for _, m := range resumeCommit.Messages {
+		if m.Body == wantDelivered {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resumeCommit.Messages = %+v, want %q among them", resumeCommit.Messages, wantDelivered)
+	}
+
+	lastReq := resumeRT.reqs[len(resumeRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "claims/files_changed") {
+		t.Errorf("resume prompt = %q, want the claim errors, fenced", lastReq.Prompt)
+	}
+	if lastReq.SessionID != "mismatch-sess" {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "mismatch-sess")
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the resume = %d, want 1", sess.Resumes)
+	}
+}
+
+// TestBuildInvalidOutputChain proves D14 applies to build the same way it
+// does to classify and planning (design section 6.10): a first invalid
+// output leaves no escalation and resumes with the raw "invalid" input,
+// and a second invalid output in a row -- on that same resume -- escalates
+// response_invalid.
+func TestBuildInvalidOutputChain(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{invalidResult("not well-formed", "invalid-sess-1")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	firstCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: invalid, first strike
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if firstCommit.Escalation != nil {
+		t.Fatalf("first invalid commit.Escalation = %+v, want nil (first strike)", firstCommit.Escalation)
+	}
+	apply(t, s, ticket, firstCommit)
+
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "invalid-sess-1"))
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	retryCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // resume: invalid
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "not well-formed") {
+		t.Errorf("resume prompt = %q, want the invalid reason", lastReq.Prompt)
+	}
+	if lastReq.SessionID != "invalid-sess-1" {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "invalid-sess-1")
+	}
+	apply(t, s, ticket, retryCommit)
+
+	// A second, independent ticket proves the second-in-a-row escalation:
+	// the retry above already succeeded ("ok"), so it cannot itself be the
+	// second strike.
+	s2, _, ticketID2 := buildTicketInBuilding(t)
+	ticket2 := getTicket(t, s2, ticketID2)
+	scriptRT2 := &scriptedRuntime{t: t, steps: []scriptedStep{invalidResult("not well-formed", "invalid-sess-2")}}
+	deps3 := claimForBuild(t, s2, scriptRT2, ticketID2)
+	c1, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket2, deps3) // RUN: invalid, first strike
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s2, ticket2, c1)
+
+	scriptRT2.steps = append(scriptRT2.steps, invalidResult("still not well-formed", "invalid-sess-2"))
+	ticket2 = getTicket(t, s2, ticketID2)
+	deps4 := claimForBuild(t, s2, scriptRT2, ticketID2)
+	c2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket2, deps4) // resume: invalid again, second strike
+	if err != nil {
+		t.Fatalf("second resume: %v", err)
+	}
+	if c2.Escalation == nil {
+		t.Fatal("second invalid commit.Escalation = nil, want response_invalid")
+	}
+	if c2.Escalation.Payload.Code != testCodeResponseInvalid {
+		t.Errorf("second invalid escalation code = %q, want %q", c2.Escalation.Payload.Code, testCodeResponseInvalid)
+	}
+}
+
+// TestInterruptedRunResumes proves design section 6.3/6.10's own
+// "interrupted" resume (design D13, section 14's "the process dies during
+// a build run" row): a claims resume that runtime.ErrCanceled interrupts
+// leaves the session's newest run reserved with no outcome; ExpireClaims
+// reconciles it to "error" with no escalation and no invalid-output marker,
+// and the next tick resumes the same session with the raw "interrupted"
+// input, charging a further resume (the crashed resume's own charge, plus
+// this one: sessions.resumes ends one higher than a resume that simply
+// completed would have left it, design section 4.2).
+func TestInterruptedRunResumes(t *testing.T) {
+	s, rt, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, rt, ticketID)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims, interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute)); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.ExternalID == nil {
+		t.Fatal("session has no external id after the canceled resume")
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled resume = %d, want 1 (charged at Reserve, design section 4.2)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps4 := claimForBuild(t, s, resumeRT, ticketID)
+	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps4) // resume: interrupted
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(resumeCommit.Runs) != 1 {
+		t.Fatalf("resumeCommit.Runs = %+v, want exactly one", resumeCommit.Runs)
+	}
+	lastReq := resumeRT.reqs[len(resumeRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "the previous run was interrupted") {
+		t.Errorf("resume prompt = %q, want the interrupted input", lastReq.Prompt)
+	}
+	if lastReq.SessionID != *sess.ExternalID {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, *sess.ExternalID)
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 2 {
+		t.Errorf("sessions.resumes after the interrupted resume = %d, want 2 (one higher than a completed resume would leave it)", sess.Resumes)
+	}
+}
+
+// exhaustBuildResumePool drives ticketID's task-1 build session through
+// design D15's own resume pool exactly to machine.toml's max_resumes for
+// "build" (3): a first turn, then one claim-errors CHECK/resume cycle per
+// resume, each falsely claiming lint_exit 1 against the project's own
+// always-0 lint command, so CHECK marks it pending again every time. resumes
+// is sessions.resumes read fresh after each of the maxResumes resumes, in
+// order (the value this task's own report names).
+func exhaustBuildResumePool(t *testing.T) (s *store.Store, ticketID int64, maxResumes int, resumes []int) {
+	t.Helper()
+	s, _, ticketID = buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "pool-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	maxResumes = deps.Machine.Jobs["build"].MaxResumes
+	for i := range maxResumes {
+		ticket = getTicket(t, s, ticketID)
+		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		checkCommit, checkErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // CHECK: pending
+		if checkErr != nil {
+			t.Fatalf("CHECK %d: %v", i+1, checkErr)
+		}
+		apply(t, s, ticket, checkCommit)
+
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "pool-sess"))
+		ticket = getTicket(t, s, ticketID)
+		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: claims
+		if resumeErr != nil {
+			t.Fatalf("resume %d: %v", i+1, resumeErr)
+		}
+		apply(t, s, ticket, resumeCommit)
+
+		sess, _, sessErr := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+		if sessErr != nil {
+			t.Fatalf("LatestSession after resume %d: %v", i+1, sessErr)
+		}
+		resumes = append(resumes, sess.Resumes)
+	}
+	return s, ticketID, maxResumes, resumes
+}
+
+// TestResumePoolExhaustsAtThree proves design D15's own build pool
+// (machine.toml's max_resumes=3 for "build"): three consecutive
+// claim-errors resumes exhaust the session, sessions.resumes climbing by
+// exactly one per resume.
+func TestResumePoolExhaustsAtThree(t *testing.T) {
+	s, ticketID, maxResumes, resumes := exhaustBuildResumePool(t)
+	if maxResumes != 3 {
+		t.Fatalf("machine.toml build max_resumes = %d, want 3 (design D15)", maxResumes)
+	}
+	want := []int{1, 2, 3}
+	if len(resumes) != len(want) {
+		t.Fatalf("sessions.resumes per resume = %v, want %v", resumes, want)
+	}
+	for i, w := range want {
+		if resumes[i] != w {
+			t.Errorf("sessions.resumes after resume %d = %d, want %d", i+1, resumes[i], w)
+		}
+	}
+
+	_, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Errorf("session state after %d resumes = %v, want SessionExhausted", maxResumes, state)
+	}
+}
+
+// TestExhaustedEscalatesOnce proves design section 6.9's own
+// "resumes_exhausted is written once per session": once the build pool is
+// exhausted, a further claims-pending tick escalates resumes_exhausted
+// (SessionID set, no run), and a second such tick returns job.ErrNoAction
+// rather than escalating again.
+func TestExhaustedEscalatesOnce(t *testing.T) {
+	s, ticketID, _, _ := exhaustBuildResumePool(t)
+
+	// exhaustBuildResumePool's own last resume (the third) is not yet
+	// checked: one more CHECK tick writes its own pending marker (CHECK
+	// never consults the cap) before the next tick needs a fourth resume.
+	ticket := getTicket(t, s, ticketID)
+	deps := withHelloAlwaysProject(claimForBuild(t, s, fakeRuntime(t), ticketID), ticket)
+	checkCommit, checkErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if checkErr != nil {
+		t.Fatalf("CHECK: %v", checkErr)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps = withHelloAlwaysProject(claimForBuild(t, s, fakeRuntime(t), ticketID), ticket) // escalation makes no runtime call
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	}
+	if commit.Escalation.RunID != nil {
+		t.Errorf("commit.Escalation.RunID = %v, want nil (the cap raised it, not a run)", *commit.Escalation.RunID)
+	}
+	if commit.Escalation.Payload.Code != testCodeResumesExhausted || commit.Escalation.Payload.Origin != testOriginCapResumes {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", commit.Escalation.Payload.Code, commit.Escalation.Payload.Origin)
+	}
+	if commit.Escalation.Payload.SessionID == nil {
+		t.Error("commit.Escalation.Payload.SessionID = nil, want the exhausted session's id")
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, fakeRuntime(t), ticketID), ticket)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	}
+}
+
+// TestLastResumeReturningOkLands proves "completed work comes first"
+// (design section 6's own decision tree): a run that returns ok on the
+// last permitted resume is checked and landed like any other, the cap
+// never consulted, even though sessions.resumes now equals max_resumes.
+func TestLastResumeReturningOkLands(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "last-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	if maxResumes != 3 {
+		t.Fatalf("machine.toml build max_resumes = %d, want 3", maxResumes)
+	}
+
+	for i := 0; i < maxResumes-1; i++ {
+		ticket = getTicket(t, s, ticketID)
+		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		checkCommit, checkErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // CHECK: pending
+		if checkErr != nil {
+			t.Fatalf("CHECK %d: %v", i+1, checkErr)
+		}
+		apply(t, s, ticket, checkCommit)
+
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "last-sess"))
+		ticket = getTicket(t, s, ticketID)
+		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: still wrong
+		if resumeErr != nil {
+			t.Fatalf("resume %d: %v", i+1, resumeErr)
+		}
+		apply(t, s, ticket, resumeCommit)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, checkErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // CHECK before the last resume
+	if checkErr != nil {
+		t.Fatalf("CHECK before last resume: %v", checkErr)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	// The third (last permitted) resume claims correctly.
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "last-sess"))
+	ticket = getTicket(t, s, ticketID)
+	deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	lastResumeCommit, lastErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume 3: ok, true claim
+	if lastErr != nil {
+		t.Fatalf("last resume: %v", lastErr)
+	}
+	apply(t, s, ticket, lastResumeCommit)
+
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != maxResumes || state != store.SessionExhausted {
+		t.Fatalf("session after the last resume = (resumes=%d, state=%v), want (%d, SessionExhausted)", sess.Resumes, state, maxResumes)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	landCommit, landErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // CHECK + LAND, session exhausted
+	if landErr != nil {
+		t.Fatalf("CHECK/LAND: %v", landErr)
+	}
+	if landCommit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want none (completed work lands regardless of the cap)", landCommit.Escalation)
+	}
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if unmarshalErr := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); unmarshalErr != nil {
+		t.Fatalf("unmarshal landed build_report: %v", unmarshalErr)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+}
+
+// TestResolveExhaustedEscalatesOnceAndKeepsRound proves design section 6.6
+// step 5, in place of task 11's ErrNoAction: RESOLVE, finding the build
+// session exhausted while a rejected decision needs a resume, escalates
+// resumes_exhausted once (SessionID the build session, no run), and a
+// second tick -- finding that escalation already recorded -- returns
+// job.ErrNoAction rather than escalating again.
+//
+// Deviation from PKG8-PLAN.md section 18's task 12 paragraph: the plan
+// names this test for internal/prompt/jobs_test.go, but it exercises
+// building.go's own RESOLVE (job.Registry, a real store and worktree),
+// which the prompt package cannot reach (it imports neither internal/job
+// nor internal/store). It lives here, in internal/job/building_test.go,
+// alongside its sibling TestPerimeterQuestionExhaustedEscalates.
+func TestResolveExhaustedEscalatesOnceAndKeepsRound(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionReject})
+
+	const maxResumes = 3
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	owner := "resolve-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: exhausted
+	if err != nil {
+		t.Fatalf("RESOLVE: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	}
+	if commit.Escalation.RunID != nil {
+		t.Errorf("commit.Escalation.RunID = %v, want nil (the cap raised it, not a run)", *commit.Escalation.RunID)
+	}
+	if commit.Escalation.Payload.Code != testCodeResumesExhausted || commit.Escalation.Payload.Origin != testOriginCapResumes {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", commit.Escalation.Payload.Code, commit.Escalation.Payload.Origin)
+	}
+	if commit.Escalation.Payload.SessionID == nil || *commit.Escalation.Payload.SessionID != sess.ID {
+		t.Errorf("payload.SessionID = %v, want %d", commit.Escalation.Payload.SessionID, sess.ID)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	}
+}
+
+// TestExhaustedKeepsRejectedDecision proves design section 6.6 step 5's own
+// preservation half: once RESOLVE escalates resumes_exhausted instead of
+// applying a rejected decision, that decision is not lost. The round stays
+// answered (AnsweredRounds still returns it) and the rejected path stays in
+// the tree, exactly as the escalation left it, ready for a later retry to
+// apply.
+//
+// Deviation from PKG8-PLAN.md section 18's task 12 paragraph: its own gloss
+// for this test ("the fresh session after the cap retry receives the
+// perimeter notice, the file is reverted, and both rounds are resolved")
+// describes design section 6.9's cap_resumes retry row -- resolving an
+// escalation, which the task's own "Boundaries" section assigns to task 13
+// (its TestCapResumesRetryCarriesAnswers exercises exactly that). This test
+// instead proves the half of that story task 12 owns: what RESOLVE itself
+// leaves behind for that later retry to find.
+func TestExhaustedKeepsRejectedDecision(t *testing.T) {
+	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionReject})
+
+	const maxResumes = 3
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	owner := "exhaust-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: exhausted
+	if err != nil {
+		t.Fatalf("RESOLVE: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	}
+	if len(commit.Artifacts) != 0 {
+		t.Errorf("commit.Artifacts = %+v, want none (nothing stored while capped)", commit.Artifacts)
+	}
+	if len(commit.ResolveQuestions) != 0 {
+		t.Errorf("commit.ResolveQuestions = %v, want none (the round stays answered)", commit.ResolveQuestions)
+	}
+	apply(t, s, ticket, commit)
+
+	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), testExtraPath)); statErr != nil {
+		t.Errorf("stat %s after the capped RESOLVE: err=%v, want the rejected path still in the tree", testExtraPath, statErr)
+	}
+
+	rounds, err := s.AnsweredRounds(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("AnsweredRounds: %v", err)
+	}
+	found := false
+	for _, r := range rounds {
+		if r.RunID != nil && *r.RunID == rid {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AnsweredRounds after the capped RESOLVE = %+v, want the rejected round of run %d still answered", rounds, rid)
+	}
+}
+
+// TestPerimeterQuestionExhaustedEscalates proves design section 6.2's
+// round.Job=="perimeter" branch's own exhaustion case, in place of task
+// 11's ErrNoAction: the owner's answer to a perimeter run's own question,
+// found with that perimeter session already exhausted (machine.toml's own
+// pool of 1 for "perimeter"), escalates resumes_exhausted once naming the
+// perimeter session, with no runtime call, and a second tick returns
+// job.ErrNoAction.
+func TestPerimeterQuestionExhaustedEscalates(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-cap-sess"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use a hyphen."}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	const perimeterMaxResumes = 1
+	perimSess, _, err := s.LatestSession(t.Context(), ticketID, "perimeter", perimeterMaxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession(perimeter): %v", err)
+	}
+	owner := "perim-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, perimSess.ID, perimeterMaxResumes, owner, expires)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resolvePerimeterQuestion: exhausted
+	if err != nil {
+		t.Fatalf("resolve perimeter round: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none (no runtime call while capped)", commit.Runs)
+	}
+	if commit.Escalation.Payload.Code != testCodeResumesExhausted || commit.Escalation.Payload.Origin != testOriginCapResumes {
+		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", commit.Escalation.Payload.Code, commit.Escalation.Payload.Origin)
+	}
+	if commit.Escalation.Payload.SessionID == nil || *commit.Escalation.Payload.SessionID != perimSess.ID {
+		t.Errorf("payload.SessionID = %v, want %d (the perimeter session)", commit.Escalation.Payload.SessionID, perimSess.ID)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
 	}
 }

@@ -397,25 +397,35 @@ const (
 // so this copy and job's must change together.
 const msgTypeUpdate = "update"
 
-// updateMarker* mirror the literal prefixes internal/job/planning.go writes
-// into type="update" message bodies -- planreviewPendingMarker and
-// planreviewDeliveredMarker's "planreview v<N> pending"/"...delivered",
-// validationErrorsPendingPrefix and validationErrorsDeliveredPrefix's
-// "validation errors pending/delivered run <id>[...]",
-// invalidOutputCommit's "response invalid run <id>\n<reason>", and
-// store.CountSealMismatches' "seal mismatch cohort <id>" -- so displayBody
-// can recognize them and render an owner-facing sentence instead of the raw
-// bookkeeping body (F012). console cannot import job's own unexported
-// literals -- there is no shared package for the two to depend on -- so
-// this copy and planning.go's originals must change together.
+// updateMarker* mirror the literal prefixes internal/job/planning.go and
+// internal/job/building.go write into type="update" message bodies --
+// planreviewPendingMarker and planreviewDeliveredMarker's "planreview v<N>
+// pending"/"...delivered", validationErrorsPendingPrefix and
+// validationErrorsDeliveredPrefix's "validation errors pending/delivered
+// run <id>[...]", invalidOutputCommit's "response invalid run
+// <id>\n<reason>", store.CountSealMismatches' "seal mismatch cohort <id>",
+// and building.go's own markerClaimsOkFmt, markerClaimErrorsPendingFmt,
+// markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, the escalation
+// resolution's "retry requested", and markerPerimeterQuestionDroppedFmt --
+// so displayBody can recognize them and render an owner-facing sentence
+// instead of the raw bookkeeping body (F012, design section 9.2). console
+// cannot import job's own unexported literals -- there is no shared
+// package for the two to depend on -- so this copy and its originals must
+// change together.
 const (
-	updateMarkerPlanreviewPrefix          = "planreview v"
-	updateMarkerPlanreviewPendingSuffix   = " pending"
-	updateMarkerPlanreviewDeliveredSuffix = " delivered"
-	updateMarkerValidationPendingPrefix   = "validation errors pending run "
-	updateMarkerValidationDeliveredPrefix = "validation errors delivered run "
-	updateMarkerResponseInvalidPrefix     = "response invalid run "
-	updateMarkerSealMismatchPrefix        = "seal mismatch cohort "
+	updateMarkerPlanreviewPrefix               = "planreview v"
+	updateMarkerPlanreviewPendingSuffix        = " pending"
+	updateMarkerPlanreviewDeliveredSuffix      = " delivered"
+	updateMarkerValidationPendingPrefix        = "validation errors pending run "
+	updateMarkerValidationDeliveredPrefix      = "validation errors delivered run "
+	updateMarkerResponseInvalidPrefix          = "response invalid run "
+	updateMarkerSealMismatchPrefix             = "seal mismatch cohort "
+	updateMarkerClaimsOkPrefix                 = "claims ok run "
+	updateMarkerClaimErrorsPendingPrefix       = "claim errors pending run "
+	updateMarkerClaimErrorsDeliveredPrefix     = "claim errors delivered run "
+	updateMarkerPerimeterResolvedPrefix        = "perimeter resolved run "
+	updateMarkerRetryRequested                 = "retry requested"
+	updateMarkerPerimeterQuestionDroppedPrefix = "perimeter question dropped run "
 )
 
 // draftMessageState mirrors store's own unexported draft-state literal
@@ -621,9 +631,37 @@ func updateLine(m *store.MessageRow) string {
 		return "The agent's last response could not be used. Zing retries once."
 	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
 		return "The scenario set changed before approval. Zing re-reads it on the next tick."
+	case strings.HasPrefix(body, updateMarkerClaimsOkPrefix):
+		return "Claims checked for run " + strings.TrimPrefix(body, updateMarkerClaimsOkPrefix) + "."
+	case strings.HasPrefix(body, updateMarkerClaimErrorsPendingPrefix):
+		return claimErrorsPendingLine(body)
+	case strings.HasPrefix(body, updateMarkerClaimErrorsDeliveredPrefix):
+		return "Claim errors sent back to run " + strings.TrimPrefix(body, updateMarkerClaimErrorsDeliveredPrefix) + "."
+	case strings.HasPrefix(body, updateMarkerPerimeterResolvedPrefix):
+		return "Perimeter decided for run " + strings.TrimPrefix(body, updateMarkerPerimeterResolvedPrefix) + "."
+	case body == updateMarkerRetryRequested:
+		return "Retry requested."
+	case strings.HasPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix):
+		return "Perimeter question dropped for run " + strings.TrimPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix) + "."
 	default:
 		return body
 	}
+}
+
+// claimErrorsPendingLine renders a "claim errors pending run <rid>" body's
+// first line as one owner-facing sentence, then the marker's own error
+// lines unchanged (design section 9.2): unlike validationErrorsLine's own
+// "Field <path>: <message>" rewrite, a claim error's own path (for example
+// "claims/test_exit: observed 1, want 0") is already the owner-facing
+// shape CheckBuildClaims and CheckCommandsPassed produce.
+func claimErrorsPendingLine(body string) string {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	rid := strings.TrimPrefix(first, updateMarkerClaimErrorsPendingPrefix)
+	header := "Claim check failed for run " + rid + ":"
+	if !hasRest {
+		return header
+	}
+	return header + "\n" + rest
 }
 
 // validationErrorsLine renders a "validation errors pending run <id>"

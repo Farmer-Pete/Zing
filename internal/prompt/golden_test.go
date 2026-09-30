@@ -207,6 +207,20 @@ func goldenCases() []goldenCase {
 				return in
 			},
 		},
+		{
+			// Carries one answer (plan section 6.2's resume input for the
+			// owner's answer to a perimeter run's own question).
+			name: "perimeter-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForPerimeterResume([]NamedInput{
+					Answer("Which style fits the repo? -> a (hyphen): matches the style guide."),
+				})
+				in.Schemas = schemasFor(t, response.JobPerimeter,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
 	}
 }
 

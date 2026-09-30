@@ -50,6 +50,11 @@ const (
 	// 5.4), shared across classify, planning, and perimeter invalid-output
 	// tests.
 	testCodeResponseInvalid = "response_invalid"
+	// testCodeResumesExhausted and testOriginCapResumes are the
+	// resumes_exhausted escalation's own code and origin (design D17,
+	// section 6.9), shared across planning's and building's own cap tests.
+	testCodeResumesExhausted = "resumes_exhausted"
+	testOriginCapResumes     = "cap_resumes"
 
 	testReasonPickedUp  = "picked up"
 	testPlanningScript1 = "planning/1.xml"

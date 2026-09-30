@@ -1,19 +1,18 @@
 // building.go is the real "building" state handler (design section 6): step
 // 0 (plan, worktree, branch reconcile, with verified adoption of an
-// unrecorded commit), step 2 (the next unit to build), RUN (first turn
-// only), CHECK, LAND, and the transition to "reviewing" once every task has
-// landed. It replaces the skeleton's fake, fixture-driven buildingHandler
-// (skeleton.go carried it through task 8, which routed it through runJob so
-// every building tick already passed the sandbox rule).
+// unrecorded commit), step 2 (the next unit to build), RUN (first turn and
+// every resume: an owner's answer, claim errors, an interrupted run, or an
+// invalid output), CHECK, DESCRIBE and ASK, RESOLVE, LAND, the resume cap
+// (design section 6.9's "resumes_exhausted is written once per session"),
+// and the transition to "reviewing" once every task has landed. It replaces
+// the skeleton's fake, fixture-driven buildingHandler (skeleton.go carried
+// it through task 8, which routed it through runJob so every building tick
+// already passed the sandbox rule).
 //
-// Later tasks own the rest of design section 6: an answered round (task 12,
-// 13), DESCRIBE and ASK over an extra in the tree after a passing first
-// check (task 10), RESOLVE (task 11), and any resume -- a claim-errors
-// pending run, an interrupted run, or an invalid-output retry (task 12).
-// This file returns ErrNoAction, logged at debug naming the step, whenever
-// the state machine reaches one of those. CHECK still writes the "claims ok
-// run <rid>" and "claim errors pending run <rid>" markers on every tick it
-// runs, because those later tasks read them.
+// Task 13 owns the rest of design section 6: resolving an escalation once
+// the owner has answered it (retry, back to planning, abandon). When the
+// handler finds an answered escalation round, it returns ErrNoAction,
+// logged at debug naming the step.
 package job
 
 import (
@@ -69,9 +68,16 @@ const (
 const (
 	markerClaimsOkFmt                 = "claims ok run %d"
 	markerClaimErrorsPendingFmt       = "claim errors pending run %d"
+	markerClaimErrorsDeliveredFmt     = "claim errors delivered run %d"
 	markerPerimeterResolvedFmt        = "perimeter resolved run %d"
 	markerPerimeterQuestionDroppedFmt = "perimeter question dropped run %d"
 )
+
+// interruptedResumeText is the fixed wording of the "interrupted" resume
+// input (design section 6.3): the raw, never-fenced sentence a build resume
+// carries when ExpireClaims marked its previous run "error" with no
+// escalation and no invalid-output marker of its own.
+const interruptedResumeText = "the previous run was interrupted; continue and return your document"
 
 // The section 6.1/6.4/6.7 escalation What texts, byte for byte from the
 // plan. Why is this file's own plain-sentence gloss on each one: the plan
@@ -134,6 +140,18 @@ func buildEscalation(t store.Ticket, d Deps, code, what, why, tried string) stor
 	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginBuild)
 }
 
+// buildCapResumesEscalation is capResumesEscalation (planning.go) plus this
+// file's own "escalation written" log (design section 11): every
+// resumes_exhausted escalation this file raises -- an answered build
+// question, a claims/interrupted/invalid resume, RESOLVE's own revert, or a
+// perimeter-question resume -- carries origin cap_resumes and the exhausted
+// session's own id, never a run id (the cap raised it, not a run).
+func buildCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
+	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
+		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
+	return capResumesEscalation(t, d, sessionID)
+}
+
 // unit is what one build session builds: task N of the plan, or a fix
 // (design section 4.3). Building never builds a fix unit (task 14 does);
 // TaskN is always 1..12 here.
@@ -150,30 +168,14 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	// Step (E)/1: an answered round (design section 6.2). The newest
 	// question's kind decides the branch before round.Job does: a
 	// perimeter-kind question is always RESOLVE (section 6.6), whichever
-	// run's own id it was posted against. A build question resume and its
-	// resume-cap handling are task 12's job; escalation resolution is task
-	// 13's.
+	// run's own id it was posted against. Escalation resolution is task
+	// 13's job.
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: answered rounds: %w", err)
 	}
 	if len(rounds) > 0 {
-		round := rounds[0]
-		kind, kindErr := newestQuestionKind(round)
-		if kindErr != nil {
-			return store.HandlerCommit{}, kindErr
-		}
-		switch {
-		case kind == response.QuestionKindPerimeter:
-			return h.resolve(ctx, t, d, round)
-		case round.Job == jobBuildName:
-			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "answered_round_build", "session_state", "n/a")
-			return store.HandlerCommit{}, ErrNoAction
-		case round.Job == jobPerimeterName:
-			return h.resolvePerimeterQuestion(ctx, t, d, round)
-		default:
-			return store.HandlerCommit{}, fmt.Errorf("job: building: answered round of job %s", round.Job)
-		}
+		return h.enterFromRounds(ctx, t, d, rounds)
 	}
 
 	// Step 0: plan, worktree, branch.
@@ -243,7 +245,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	}
 
 	maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
-	_, state, newestRun, ok, err := d.Store.UnitSession(ctx, t.ID, taskN, maxResumes)
+	sess, state, newestRun, ok, err := d.Store.UnitSession(ctx, t.ID, taskN, maxResumes)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: unit session: %w", err)
 	}
@@ -263,13 +265,31 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 	switch outcome {
 	case string(response.OutcomeOk):
 		rid := newestRun.ID
-		_, pending, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
+		markerRow, pending, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
 		if markerErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: building: claim errors marker: %w", markerErr)
 		}
 		if pending {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "needs_resume_claims", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, ErrNoAction
+			capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
+			if !mayResume {
+				return withBranchResult(capCommit, capErr, wt)
+			}
+			// The claims input is exactly the marker's own error lines
+			// (design section 6.4): priorInvalid is 0, not computed, since
+			// this session's newest run is the "ok" one CHECK just wrote a
+			// pending marker for -- ConsecutiveInvalidOutputs' own walk
+			// stops at the first non-"error" outcome, so it can only ever
+			// read 0 here.
+			_, errsText, _ := strings.Cut(markerRow.Body, "\n")
+			claimsInput := prompt.NamedInput{Label: "claims", Text: errsText, Untrusted: true}
+			resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput})
+			if resumeErr == nil && len(resumeCommit.Runs) > 0 {
+				resumeCommit.Messages = append(resumeCommit.Messages, store.Message{
+					TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+					Body: fmt.Sprintf(markerClaimErrorsDeliveredFmt, rid),
+				})
+			}
+			return withBranchResult(resumeCommit, resumeErr, wt)
 		}
 
 		_, checked, okMarkerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimsOkFmt, rid))
@@ -306,13 +326,195 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return withBranchResult(commit, describeErr, wt)
 
 	case string(response.OutcomeError):
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "needs_resume_error", "session_state", sessionStateName(state))
-		return store.HandlerCommit{}, ErrNoAction
+		// One of two "needs a resume" cases design section 6.3/6.10 group
+		// under a single error outcome: n==1 means the newest run of this
+		// session carries a "response invalid run <rid>" marker of its own
+		// (D14's first-strike case; a second consecutive invalid output
+		// would already have escalated response_invalid, which this
+		// invocation could never reach, the tick's own "not waiting"
+		// precondition). n==0, with the ticket not waiting and the same
+		// session's newest run still error, is exactly what ExpireClaims
+		// leaves behind: an interrupted run.
+		n, reason, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobBuildName, &sess.ID)
+		if invErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: consecutive invalid outputs: %w", invErr)
+		}
+		input := prompt.NamedInput{Label: "interrupted", Text: interruptedResumeText, Untrusted: false}
+		if n == 1 {
+			input = prompt.Invalid(invalidRetryText(reason))
+		}
+		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
+		if !mayResume {
+			return withBranchResult(capCommit, capErr, wt)
+		}
+		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, n, nil, []prompt.NamedInput{input})
+		return withBranchResult(resumeCommit, resumeErr, wt)
 
 	default:
 		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "unrecognized", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, ErrNoAction
 	}
+}
+
+// ---- answered rounds: build question resume, resume cap ------------------
+
+// enterFromRounds is design section 6.2's answered-round dispatch, applied
+// in order over every answered round, not just the newest: the only branch
+// that ever moves past rounds[0] is a build-job round whose session is
+// already exhausted and already carries a cap_resumes escalation of its own
+// (the preserved round is consumed later, by task 13's cap resolution);
+// every other branch resolves or escalates from the first round alone.
+func (h buildingHandler) enterFromRounds(ctx context.Context, t store.Ticket, d Deps, rounds []store.Round) (store.HandlerCommit, error) {
+	for _, round := range rounds {
+		// The newest question's own parent id, not round.ParentID (the
+		// same distinction planning.go's enterFromRound draws): a
+		// run-caused escalation's linked question carries the same run_id
+		// as the escalation itself, so AnsweredRounds groups it by run,
+		// same as an ordinary build/perimeter question batch, and
+		// round.ParentID (only ever filled for the no-run grouping) stays
+		// nil. Resolving an escalation round is task 13's job (design
+		// section 6.1, 6.9); this file stops here.
+		newest := round.Questions[len(round.Questions)-1]
+		if newest.ParentID != nil {
+			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "escalation_resolution", "session_state", "n/a")
+			return store.HandlerCommit{}, ErrNoAction
+		}
+
+		kind, kindErr := newestQuestionKind(round)
+		if kindErr != nil {
+			return store.HandlerCommit{}, kindErr
+		}
+		switch {
+		case kind == response.QuestionKindPerimeter:
+			return h.resolve(ctx, t, d, round)
+		case round.Job == jobBuildName:
+			commit, again, err := h.resumeBuildRound(ctx, t, d, round)
+			if again {
+				continue
+			}
+			return commit, err
+		case round.Job == jobPerimeterName:
+			return h.resolvePerimeterQuestion(ctx, t, d, round)
+		default:
+			return store.HandlerCommit{}, fmt.Errorf("job: building: answered round of job %s", round.Job)
+		}
+	}
+	return store.HandlerCommit{}, ErrNoAction
+}
+
+// resumeBuildRound is design section 6.2's round.Job=="build" branch: the
+// owner's answer to a build run's own question resumes that session with
+// one answer input per question (answerInputsForRound), resolving the
+// round. When the session is exhausted, this either escalates
+// resumes_exhausted once (again=false) or, when that escalation already
+// exists, tells enterFromRounds to try the next answered round in turn
+// (again=true): the preserved round is consumed by the cap resolution
+// (design section 6.9, task 13).
+func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (commit store.HandlerCommit, again bool, err error) {
+	maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
+	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobBuildName, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: latest session: %w", err)
+	}
+
+	if state == store.SessionExhausted {
+		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+		if hasErr != nil {
+			return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: has escalation: %w", hasErr)
+		}
+		if has {
+			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
+			return store.HandlerCommit{}, true, nil
+		}
+		return buildCapResumesEscalation(t, d, sess.ID), false, nil
+	}
+
+	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: stored plan: %w", err)
+	}
+	if !havePlan {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), false, nil
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: build reports: %w", err)
+	}
+	// The unit still awaiting the owner's answer is always the one step 2
+	// would pick next: a question outcome never inserts a build_report, so
+	// nextTaskN still names this same task.
+	taskN, hasNext := nextTaskN(response.Tasks(plan), reports)
+	if !hasNext {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: ticket %d: no unit awaiting an answer", t.ID)
+	}
+	u, foundUnit := unitFor(response.Tasks(plan), taskN)
+	if !foundUnit {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: ticket %d: plan has no task %d", t.ID, taskN)
+	}
+
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, false, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), false, nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+
+	answers, ansErr := answerInputsForRound(round)
+	if ansErr != nil {
+		return store.HandlerCommit{}, false, ansErr
+	}
+
+	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers)
+	result, resultErr := withBranchResult(runCommit, runErr, wt)
+	return result, false, resultErr
+}
+
+// resumeCapGate is the decision tree's shared "needs a resume" gate (design
+// section 6): an open session leaves the resume itself to the caller
+// (mayResume=true, no commit produced here); an exhausted one either
+// escalates resumes_exhausted once (mayResume=false, a real commit) or,
+// when that escalation already exists for this session, returns
+// ErrNoAction (mayResume=false, no commit) -- design section 6.9's own
+// "written once per session" rule.
+func (h buildingHandler) resumeCapGate(ctx context.Context, t store.Ticket, d Deps, taskN int, sess store.Session, state store.SessionState) (store.HandlerCommit, bool, error) {
+	if state != store.SessionExhausted {
+		return store.HandlerCommit{}, true, nil
+	}
+	has, err := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: has escalation: %w", err)
+	}
+	if has {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, false, ErrNoAction
+	}
+	return buildCapResumesEscalation(t, d, sess.ID), false, nil
+}
+
+// runBuildResume is the RUN resume request every "needs a resume" branch
+// sends (design section 6.3): BuildResumeHeader plus inputs, sess's own
+// external id, u's own label, routed through buildSuccessCommit.
+// resolveIDs is nil for a claims/invalid/interrupted resume (none of them
+// resolve a round) and the round's own question ids for an answered
+// build-question resume.
+func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, u unit, sess store.Session, priorInvalid int, resolveIDs []int64, inputs []prompt.NamedInput) (store.HandlerCommit, error) {
+	if sess.ExternalID == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resume: session %d has no external id", sess.ID)
+	}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	req := runtime.RunRequest{
+		Job: response.JobBuild, Label: strconv.Itoa(u.TaskN), WorkDir: wt.Dir(),
+		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),
+	}
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	n := u.TaskN
+	return runAndRoute(ctx, d, t, jobBuildName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginBuild,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
+		}, &n)
 }
 
 // ---- helpers: branch, prefix, adoption -------------------------------------
@@ -1402,12 +1604,21 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: latest session: %w", err)
 	}
 	if state == store.SessionExhausted {
-		// Task 12 owns the resumes_exhausted escalation and the cap
-		// resolution that re-applies a preserved perimeter round; this task
-		// only needs to leave the round answered and unresolved, storing
-		// nothing and reverting nothing (design section 6.6 step 5).
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
-		return store.HandlerCommit{}, ErrNoAction
+		// The cap is consulted before anything is stored or reverted
+		// (design section 6.6 step 5): the round stays answered and
+		// unresolved, no file artifact is written, and no path is
+		// reverted, whichever way the escalation check comes out. The cap
+		// resolution that re-applies this preserved round is task 13's job
+		// (design section 6.9).
+		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+		if hasErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: has escalation: %w", hasErr)
+		}
+		if has {
+			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: session %d has no external id", sess.ID)
@@ -1505,10 +1716,18 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: latest session: %w", err)
 	}
 	if state == store.SessionExhausted {
-		// As above (resolve): task 12 owns raising resumes_exhausted for a
-		// perimeter session and folding this round back in.
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
-		return store.HandlerCommit{}, ErrNoAction
+		// As above (resolve): the perimeter session's own cap escalates
+		// once, origin cap_resumes, naming the perimeter session; folding
+		// this round back in is task 13's job (design section 6.9).
+		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+		if hasErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: has escalation: %w", hasErr)
+		}
+		if has {
+			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session %d has no external id", sess.ID)
@@ -1539,7 +1758,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	assembled := prompt.Assemble(prompt.ForBuildResume(answers))
+	assembled := prompt.Assemble(prompt.ForPerimeterResume(answers))
 
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-answer", taskN), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}

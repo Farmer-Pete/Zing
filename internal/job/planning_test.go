@@ -1023,7 +1023,7 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 	if unmarshalErr := json.Unmarshal(mustEscalationPayload(t, commit), &payload); unmarshalErr != nil {
 		t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
 	}
-	if payload.Code != "resumes_exhausted" || payload.Origin != "cap_resumes" {
+	if payload.Code != testCodeResumesExhausted || payload.Origin != testOriginCapResumes {
 		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", payload.Code, payload.Origin)
 	}
 	if payload.SessionID == nil || *payload.SessionID != sess.ID {

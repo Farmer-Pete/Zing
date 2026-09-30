@@ -313,3 +313,21 @@ func TestForPerimeterFencesPathAndHunk(t *testing.T) {
 	assertFenced(t, got, "path", path)
 	assertFenced(t, got, "hunk", hunk)
 }
+
+// TestForPerimeterResumeHeader pins ForPerimeterResume's own fixed header
+// and its answer input (design section 6.2): the perimeter resume carries
+// PerimeterResumeHeader, not BuildResumeHeader, and the answer arrives
+// fenced.
+func TestForPerimeterResumeHeader(t *testing.T) {
+	t.Parallel()
+
+	const answer = "Which style fits the repo? -> a (hyphen): matches the style guide."
+	in := ForPerimeterResume([]NamedInput{Answer(answer)})
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if got[:len(PerimeterResumeHeader)] != PerimeterResumeHeader {
+		t.Errorf("ForPerimeterResume did not lead with PerimeterResumeHeader; got:\n%s", got)
+	}
+	assertFenced(t, got, "answer", answer)
+}

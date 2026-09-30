@@ -288,3 +288,20 @@ func ForPerimeter(jobPrompt, path, hunk string, extra []NamedInput) Input {
 	inputs = append(inputs, extra...)
 	return Input{JobPrompt: jobPrompt, Inputs: inputs}
 }
+
+// PerimeterResumeHeader replaces the prompt file on a perimeter resume
+// turn: there is no fresh job prompt to load, only this fixed instruction
+// to continue describing the file after the owner's answer (plan section
+// 6.2), byte-for-byte from the plan.
+const PerimeterResumeHeader = "Continue describing this file. The owner's answer follows. Return the next document."
+
+// ForPerimeterResume builds a perimeter resume turn's Input:
+// PerimeterResumeHeader in place of a prompt file, inputs passed through
+// unchanged -- built by the caller with Answer, so it carries the fencing
+// plan section 4.2's table assigns it. Called by internal/job's
+// perimeter-question resume (plan section 6.2); calls Assemble once
+// Schemas is set from response.RenderTemplate(JobPerimeter, ...) in
+// perimeter schema order.
+func ForPerimeterResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: PerimeterResumeHeader, Inputs: inputs}
+}
