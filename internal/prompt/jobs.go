@@ -16,6 +16,10 @@ const ResumeHeader = "Continue this planning session. The owner's answers, the r
 // that carries one (ForClassify, ForPlanningFirst, ForPlanReview).
 const labelTicket = "ticket"
 
+// labelPlan is the plan input's label, shared by every constructor that
+// carries one (ForPlanReview, buildInputs, ForReview).
+const labelPlan = "plan"
+
 // ForClassify builds the classify job's Input: the ticket fenced, then any
 // carried inputs (an invalid-output reason, or an escalation's notes and
 // error, or preserved answers), in that order. Called by internal/job's
@@ -70,7 +74,7 @@ func ForPlanReview(jobPrompt string, lensSections []string, ticket, scenarios, p
 	inputs = append(inputs,
 		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
 		NamedInput{Label: "scenarios", Text: scenarios, Untrusted: true},
-		NamedInput{Label: "plan", Text: plan, Untrusted: true},
+		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
 	)
 	inputs = append(inputs, extra...)
 
@@ -152,31 +156,32 @@ const BuildResumeHeader = "Continue this build task in the same worktree. The in
 // or title to fill them with (plan section 9.1).
 const buildTaskLine = "Task {n} of {total}: {task title}"
 
-// buildPlaceholder pairs one of the five tokens prompts/build.md must
-// carry with the value ForBuild fills it with (plan section 12.1,
-// section 9.1).
-type buildPlaceholder struct {
+// placeholderPair pairs one token a job prompt must carry with the value
+// fillPlaceholders fills it with: the five of prompts/build.md (plan
+// section 12.1, section 9.1), or the two of prompts/review.md, {lens} and
+// {sha} (plan section 12.1).
+type placeholderPair struct {
 	token, value string
 }
 
 // fillPlaceholder replaces the single occurrence of token in text with
 // value. A job prompt missing the token is the fixed error the plan
-// names: a caller-supplied build prompt is expected to name each
-// placeholder exactly once, so fillPlaceholder does not check for a
-// second occurrence.
-func fillPlaceholder(text, token, value string) (string, error) {
+// names, kind naming the prompt ("build", "review"): a caller-supplied
+// job prompt is expected to name each placeholder exactly once, so
+// fillPlaceholder does not check for a second occurrence.
+func fillPlaceholder(text, kind, token, value string) (string, error) {
 	if !strings.Contains(text, token) {
-		return "", fmt.Errorf("prompt: build prompt lacks placeholder %s", token)
+		return "", fmt.Errorf("prompt: %s prompt lacks placeholder %s", kind, token)
 	}
 	return strings.Replace(text, token, value, 1), nil
 }
 
 // fillPlaceholders applies fillPlaceholder for each pair in order,
 // stopping at the first missing placeholder.
-func fillPlaceholders(text string, pairs []buildPlaceholder) (string, error) {
+func fillPlaceholders(text, kind string, pairs []placeholderPair) (string, error) {
 	var err error
 	for _, p := range pairs {
-		text, err = fillPlaceholder(text, p.token, p.value)
+		text, err = fillPlaceholder(text, kind, p.token, p.value)
 		if err != nil {
 			return "", err
 		}
@@ -201,7 +206,7 @@ func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput
 	inputs := make([]NamedInput, 0, 3+len(extra))
 	inputs = append(inputs,
 		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
-		NamedInput{Label: "plan", Text: planXML},
+		NamedInput{Label: labelPlan, Text: planXML},
 	)
 	if len(accepted) > 0 {
 		inputs = append(inputs, NamedInput{Label: "accepted", Text: strings.Join(accepted, "\n")})
@@ -221,7 +226,7 @@ func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput
 // Schemas is set from response.RenderTemplate(JobBuild, ...) in build
 // schema order.
 func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
-	filled, err := fillPlaceholders(jobPrompt, []buildPlaceholder{
+	filled, err := fillPlaceholders(jobPrompt, "build", []placeholderPair{
 		{"{n}", strconv.Itoa(task.N)},
 		{"{total}", strconv.Itoa(task.Total)},
 		{"{task title}", task.Title},
@@ -251,7 +256,7 @@ func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML s
 	}
 	filled := strings.Replace(jobPrompt, buildTaskLine, "Fix run: "+subject, 1)
 
-	filled, err := fillPlaceholders(filled, []buildPlaceholder{
+	filled, err := fillPlaceholders(filled, "build", []placeholderPair{
 		{"{test_cmd}", testCmd},
 		{"{lint_cmd}", lintCmd},
 	})
@@ -304,4 +309,88 @@ const PerimeterResumeHeader = "Continue describing this file. The owner's answer
 // perimeter schema order.
 func ForPerimeterResume(inputs []NamedInput) Input {
 	return Input{JobPrompt: PerimeterResumeHeader, Inputs: inputs}
+}
+
+// CodeLensSection extracts one lens file's "## In code" section (plan
+// section 12.1): the piece ForReview's caller (internal/job's review
+// round) appends to the review prompt for each lens. Not every lens file
+// carries one; problem has no "## In code" section, since it applies only
+// to a plan. Mirrors PlanLensSection's search, trimmed at the next "## "
+// heading when one follows, though in practice "## In code" is always the
+// last section of a lens file.
+func CodeLensSection(text string) (string, error) {
+	const marker = "## In code"
+	start := strings.Index(text, marker)
+	if start < 0 {
+		return "", fmt.Errorf("prompt: lens file has no %q section", marker)
+	}
+	rest := text[start:]
+	if next := strings.Index(rest[len(marker):], "\n## "); next >= 0 {
+		rest = rest[:len(marker)+next]
+	}
+	return strings.TrimRight(rest, "\n"), nil
+}
+
+// ForReview builds one lens's review job Input: the job prompt with
+// {lens} and {sha} filled, the lens file's "## In code" section appended
+// (blank line between), then plan and diff, both fenced, then extra (D15)
+// — notes (fenced) among them on a retry that carries them (plan section
+// 6.2). A jobPrompt missing either placeholder is the fixed error
+// `prompt: review prompt lacks placeholder <name>`. Called once per lens
+// by internal/job's review round (plan section 6.2); calls Assemble once
+// Schemas is set from response.RenderTemplate(JobReview, ...) in review
+// schema order.
+func ForReview(jobPrompt, lensName, sha, codeSection, plan, diff string, extra []NamedInput) (Input, error) {
+	filled, err := fillPlaceholders(jobPrompt, "review", []placeholderPair{
+		{"{lens}", lensName},
+		{"{sha}", sha},
+	})
+	if err != nil {
+		return Input{}, err
+	}
+	filled = strings.TrimRight(filled, "\n") + "\n\n" + strings.TrimRight(codeSection, "\n")
+
+	inputs := make([]NamedInput, 0, 2+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
+		NamedInput{Label: "diff", Text: diff, Untrusted: true},
+	)
+	inputs = append(inputs, extra...)
+
+	return Input{JobPrompt: filled, Inputs: inputs}, nil
+}
+
+// ReviewResumeHeader replaces the prompt file on a review round's CONTINUE
+// turn: there is no fresh job prompt to load, only this fixed instruction
+// to continue the lens session that asked (plan section 6.2a),
+// byte-for-byte from the plan.
+const ReviewResumeHeader = "Continue this review. The owner's answers follow. Return the next document."
+
+// ForReviewResume builds a review CONTINUE turn's Input: ReviewResumeHeader
+// in place of a prompt file, inputs passed through unchanged -- built by
+// the caller with Answers, carrying that lens's own answered round,
+// fenced (plan section 6.2a). Called by internal/job's review round
+// CONTINUE step; calls Assemble once Schemas is set from
+// response.RenderTemplate(JobReview, ...) in review schema order.
+func ForReviewResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: ReviewResumeHeader, Inputs: inputs}
+}
+
+// ReviewDiscussHeader replaces the prompt file on a review DISCUSS resume:
+// there is no fresh job prompt to load, only this fixed instruction to
+// revise or withdraw a finding from the owner's note (plan section 6.6),
+// byte-for-byte from the plan.
+const ReviewDiscussHeader = "The owner wants to discuss one of your findings. The finding and the owner's " +
+	"note follow. Return ok with the finding revised, or with no finding if you withdraw it. " +
+	"Return the next document."
+
+// ForReviewDiscuss builds a review DISCUSS resume's Input:
+// ReviewDiscussHeader in place of a prompt file, inputs passed through
+// unchanged -- built by the caller with Findings (every finding of the
+// group) and Notes (the owner's note per finding), both fenced (plan
+// section 6.6). Called by internal/job's DISCUSS step; calls Assemble once
+// Schemas is set from response.RenderTemplate(JobReview, ...) in review
+// schema order.
+func ForReviewDiscuss(inputs []NamedInput) Input {
+	return Input{JobPrompt: ReviewDiscussHeader, Inputs: inputs}
 }

@@ -50,6 +50,11 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 			path:   "prompts/perimeter.md",
 			sha256: "78b4863acf309085bc37f8f33cfea8f430d08b57d44102023eea1f3c03ef00b6",
 		},
+		{
+			name:   "review",
+			path:   "prompts/review.md",
+			sha256: "d4c75ff8d43b49fd59a273c8b1badc7dec2f2d913851a1a0f7e6ccc0bb725c49",
+		},
 	}
 
 	for _, tc := range cases {
@@ -89,6 +94,26 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 	for _, p := range placeholders {
 		if n := strings.Count(text, p); n != 1 {
 			t.Errorf("prompts/build.md contains %s %d times, want 1", p, n)
+		}
+	}
+}
+
+// TestReviewPromptPlaceholders checks that prompts/review.md carries
+// {lens} and {sha} exactly once each (plan section 12.1), so ForReview's
+// single replacement of each cannot silently miss or double up.
+func TestReviewPromptPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	got, err := zing.Assets.ReadFile("prompts/review.md")
+	if err != nil {
+		t.Fatalf("ReadFile(prompts/review.md): %v", err)
+	}
+	text := string(got)
+
+	placeholders := []string{"{lens}", "{sha}"}
+	for _, p := range placeholders {
+		if n := strings.Count(text, p); n != 1 {
+			t.Errorf("prompts/review.md contains %s %d times, want 1", p, n)
 		}
 	}
 }

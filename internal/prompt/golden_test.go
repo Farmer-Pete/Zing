@@ -14,6 +14,10 @@ var update = flag.Bool("update", false, "update the committed golden prompts in 
 
 const goldenDir = "testdata"
 
+// healthCheckPlan is the stored-plan XML shared by every golden case that
+// needs one: build-first, build-fix, and review-first.
+const healthCheckPlan = "<plan><objective>Add a health check endpoint.</objective></plan>"
+
 // readAsset reads one file through zing.Assets, the same embed.FS
 // production code reads prompt and style files from, so these goldens
 // track the pinned prompt text (internal/machine/prompts_test.go pins the
@@ -148,7 +152,7 @@ func goldenCases() []goldenCase {
 				}
 				ticket := "Title: Add a health check\n\n" +
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
-				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				plan := healthCheckPlan
 				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
 				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
 				if err != nil {
@@ -182,7 +186,7 @@ func goldenCases() []goldenCase {
 				jobPrompt := readAsset(t, "prompts/build.md")
 				ticket := "Title: Add a health check\n\n" +
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
-				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				plan := healthCheckPlan
 				findings := "problem: internal/health/ping.go returns 500 on success."
 				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
 					"go test ./...", "make lint", ticket, plan, nil, nil)
@@ -217,6 +221,42 @@ func goldenCases() []goldenCase {
 					Answer("Which style fits the repo? -> a (hyphen): matches the style guide."),
 				})
 				in.Schemas = schemasFor(t, response.JobPerimeter,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			name: "review-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/review.md")
+				codeSection, err := CodeLensSection(readAsset(t, "prompts/lenses/correctness.md"))
+				if err != nil {
+					t.Fatalf("CodeLensSection: %v", err)
+				}
+				plan := healthCheckPlan
+				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
+					"+func Ping() string { return \"pong\" }\n"
+				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, plan, diff, nil)
+				if err != nil {
+					t.Fatalf("ForReview: %v", err)
+				}
+				in.Schemas = schemasFor(t, response.JobReview,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one findings block and one notes block (design section
+			// 6.6's discuss-resume inputs).
+			name: "review-discuss",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForReviewDiscuss([]NamedInput{
+					Findings("r1f1: internal/health/ping.go:12 returns 500 on success."),
+					Notes("r1f1: the handler is supposed to degrade, not fail."),
+				})
+				in.Schemas = schemasFor(t, response.JobReview,
 					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
 				return in
 			},

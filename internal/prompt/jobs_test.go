@@ -314,6 +314,113 @@ func TestForPerimeterFencesPathAndHunk(t *testing.T) {
 	assertFenced(t, got, "hunk", hunk)
 }
 
+// reviewJobPrompt is a minimal review-shaped job prompt carrying the two
+// placeholders ForReview must fill (plan section 12.1), standing in for
+// prompts/review.md so these tests do not depend on its exact prose.
+const reviewJobPrompt = "You are the {lens} reviewer for one diff. You have the plan and the diff at {sha}."
+
+// TestForReviewFillsPlaceholders pins the fixed error a job prompt missing
+// one of the two placeholders returns (plan section 12.1): here the prompt
+// lacks {sha}.
+func TestForReviewFillsPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	jobPrompt := "You are the {lens} reviewer for one diff."
+	_, err := ForReview(jobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "<plan/>", "diff body", nil)
+	if err == nil {
+		t.Fatal("ForReview returned no error for a prompt missing {sha}")
+	}
+	want := "prompt: review prompt lacks placeholder {sha}"
+	if err.Error() != want {
+		t.Errorf("ForReview error = %q, want %q", err.Error(), want)
+	}
+
+	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "<plan/>", "diff body", nil)
+	if err != nil {
+		t.Fatalf("ForReview: %v", err)
+	}
+	if strings.Contains(in.JobPrompt, "{lens}") || strings.Contains(in.JobPrompt, "{sha}") {
+		t.Errorf("ForReview left a placeholder unfilled:\n%s", in.JobPrompt)
+	}
+	if !strings.Contains(in.JobPrompt, "correctness reviewer") || !strings.Contains(in.JobPrompt, "abc123") {
+		t.Errorf("ForReview did not fill {lens} and {sha}:\n%s", in.JobPrompt)
+	}
+	if !strings.Contains(in.JobPrompt, "## In code\nFind logic errors.") {
+		t.Errorf("ForReview did not append the code lens section:\n%s", in.JobPrompt)
+	}
+}
+
+// TestForReviewFencesPlanAndDiff pins the plan and diff rows: both arrive
+// fenced (design section 6.2, D15).
+func TestForReviewFencesPlanAndDiff(t *testing.T) {
+	t.Parallel()
+
+	planXML := "<plan><objective>Add a ping handler.</objective></plan>"
+	diff := "diff --git a/a.go b/a.go\n+added line"
+	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", planXML, diff, nil)
+	if err != nil {
+		t.Fatalf("ForReview: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "plan", planXML)
+	assertFenced(t, got, "diff", diff)
+}
+
+// TestCodeLensSectionProblemHasNone pins CodeLensSection's fixed error for
+// a lens file with no "## In code" section, as problem.md has (plan
+// section 12.1).
+func TestCodeLensSectionProblemHasNone(t *testing.T) {
+	t.Parallel()
+
+	_, err := CodeLensSection("## In a plan\nAsk, in this order:\n- Is this worth doing?\n")
+	if err == nil {
+		t.Fatal("CodeLensSection returned no error for a lens file with no \"## In code\" section")
+	}
+	want := `prompt: lens file has no "## In code" section`
+	if err.Error() != want {
+		t.Errorf("CodeLensSection error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestForReviewDiscussHeader pins ForReviewDiscuss's own fixed header and
+// its findings and notes inputs (design section 6.6): the discuss turn
+// carries ReviewDiscussHeader, not BuildResumeHeader or ReviewResumeHeader,
+// and both inputs arrive fenced.
+func TestForReviewDiscussHeader(t *testing.T) {
+	t.Parallel()
+
+	const findings = "r1f1: internal/health/ping.go:12 returns 500 on success."
+	const notes = "r1f1: please reconsider; the handler is supposed to degrade, not fail."
+	in := ForReviewDiscuss([]NamedInput{Findings(findings), Notes(notes)})
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if got[:len(ReviewDiscussHeader)] != ReviewDiscussHeader {
+		t.Errorf("ForReviewDiscuss did not lead with ReviewDiscussHeader; got:\n%s", got)
+	}
+	assertFenced(t, got, "findings", findings)
+	assertFenced(t, got, "notes", notes)
+}
+
+// TestForReviewResumeHeader pins ForReviewResume's own fixed header and its
+// answers input (design section 6.2a): the round-continue turn carries
+// ReviewResumeHeader, and the answers arrive fenced.
+func TestForReviewResumeHeader(t *testing.T) {
+	t.Parallel()
+
+	const answers = "Q1: keep the 503 -> a: keep it simple."
+	in := ForReviewResume([]NamedInput{Answers(answers)})
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if got[:len(ReviewResumeHeader)] != ReviewResumeHeader {
+		t.Errorf("ForReviewResume did not lead with ReviewResumeHeader; got:\n%s", got)
+	}
+	assertFenced(t, got, "answers", answers)
+}
+
 // TestForPerimeterResumeHeader pins ForPerimeterResume's own fixed header
 // and its answer input (design section 6.2): the perimeter resume carries
 // PerimeterResumeHeader, not BuildResumeHeader, and the answer arrives
