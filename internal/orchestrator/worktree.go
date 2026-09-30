@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,9 +120,10 @@ func checkRefFormat(ctx context.Context, name string) error {
 // wt.Dir at a repository the orchestrator never prepared. It is defense in
 // depth on top of Worktree's unexported fields, run by every content-
 // mutating or content-reading method (ChangedPaths, RevertPaths, Hunk,
-// BranchCommits, CommitTask) before it touches git state, so a wrong,
-// stale, or tampered worktree never commits, reverts, diffs, or lists
-// commits. RemoveWorktree does not call this: a half-removed worktree may
+// BranchCommits, CommitTask, CommitChanges, CommitSubject, the exported
+// SignedStatus) before it touches git state, so a wrong, stale, or
+// tampered worktree never commits, reverts, diffs, or lists commits.
+// RemoveWorktree does not call this: a half-removed worktree may
 // no longer have a checked-out HEAD to read, so it validates only the
 // branch-shape condition (see RemoveWorktree).
 func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
@@ -144,14 +146,25 @@ func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
 	return nil
 }
 
-// checkGitPointer confirms wt.Dir/.git is a regular file whose trimmed
-// content is exactly "gitdir: <git-common-dir>/worktrees/<basename of
-// wt.Dir>" -- the pointer git itself writes for a linked worktree
-// (PKG8-PLAN.md section 7.2). A symlink, a directory, a missing file, or
-// content that names any other path all fail the same way: the sandbox
-// (a later task) denies writing this file, so a mismatch here means either
-// the write happened before the sandbox existed or something else is wrong,
-// and every later git call in this worktree is refused rather than trusted.
+// checkGitPointer confirms wt.Dir/.git is a regular file naming a real
+// admin directory under this repository's common gitdir's "worktrees/"
+// folder, whose own reverse link (git's "gitdir" file inside that admin
+// directory) names wt.Dir/.git right back (PKG8-PLAN.md section 7.2, review
+// finding F018). The pointer used to have to match
+// "gitdir: <git-common-dir>/worktrees/<basename of wt.Dir>" exactly, but
+// git appends a numeric suffix to that admin directory's name when another
+// registered worktree already has the same basename (a user worktree at
+// "../other/5" makes ticket 5's own admin dir "worktrees/51"), which the
+// exact-match form rejected forever after. Checking the reverse link
+// instead of the admin dir's name tolerates that suffix while still
+// catching a pointer rewritten to name a different, unrelated worktree's
+// admin dir (its own reverse link would name that other worktree, not this
+// one). A symlink, a directory, a missing file, content that isn't
+// "gitdir: <path>", a path outside worktrees/, or a reverse link that
+// points elsewhere all fail the same way: the sandbox (a later task) denies
+// writing this file, so a mismatch here means either the write happened
+// before the sandbox existed or something else is wrong, and every later
+// git call in this worktree is refused rather than trusted.
 func (o *Orchestrator) checkGitPointer(ctx context.Context, wt Worktree) error {
 	unexpected := fmt.Errorf("orchestrator: worktree %s has an unexpected .git pointer", wt.dir)
 
@@ -166,16 +179,57 @@ func (o *Orchestrator) checkGitPointer(ctx context.Context, wt Worktree) error {
 		return unexpected
 	}
 
+	p, ok := strings.CutPrefix(strings.TrimSpace(string(raw)), "gitdir: ")
+	if !ok {
+		return unexpected
+	}
+
 	commonDir, err := o.GitCommonDir(ctx)
 	if err != nil {
 		return fmt.Errorf("orchestrator: worktree %s: %w", wt.dir, err)
 	}
 
-	want := "gitdir: " + filepath.Join(commonDir, "worktrees", filepath.Base(wt.dir))
-	if strings.TrimSpace(string(raw)) != want {
+	adminDir := filepath.Clean(p)
+	worktreesRoot := filepath.Join(commonDir, "worktrees")
+	if adminDir != worktreesRoot && !strings.HasPrefix(adminDir, worktreesRoot+string(filepath.Separator)) {
+		return unexpected
+	}
+	if hasDotDotElement(adminDir) {
+		return unexpected
+	}
+
+	reverseRaw, reverseErr := os.ReadFile(filepath.Join(adminDir, "gitdir"))
+	if reverseErr != nil {
+		return unexpected
+	}
+
+	want := resolveOrClean(pointerPath)
+	got := resolveOrClean(filepath.Clean(strings.TrimSpace(string(reverseRaw))))
+	if got != want {
 		return unexpected
 	}
 	return nil
+}
+
+// hasDotDotElement reports whether p, split on the OS path separator,
+// contains a literal ".." component. filepath.Clean already resolves ".."
+// lexically for an absolute path, so this is defense in depth (mirroring
+// validateRevertPath's style in perimeter.go) rather than the primary guard
+// against an admin dir path escaping worktreesRoot.
+func hasDotDotElement(p string) bool {
+	return slices.Contains(strings.Split(p, string(filepath.Separator)), "..")
+}
+
+// resolveOrClean returns filepath.EvalSymlinks(p) when p exists on disk, or
+// filepath.Clean(p) when it does not (or cannot be resolved), so
+// checkGitPointer can compare a path that might not exist -- a forged
+// reverse link naming a directory that was never real -- without treating
+// that resolution failure as anything other than an ordinary mismatch.
+func resolveOrClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // GitCommonDir returns the repository's common git dir, absolute:
@@ -915,9 +969,22 @@ func (o *Orchestrator) reattachWorktree(ctx context.Context, dir, branch string)
 
 // ensureWorktreePresent implements EnsureWorktree's last two table rows, for
 // a ticketID whose worktree directory already exists: it must be a live,
-// registered worktree (not a stale registration) checked out to a branch
+// registered worktree (not a stale registration), its ".git" pointer must
+// check out (review finding F001, checked here before any other git call
+// touches dir -- see below), and it must be checked out to a branch
 // matching ticketID's zing/ pattern, or EnsureWorktree refuses rather than
 // touch a directory it cannot confirm is this ticket's.
+//
+// checkGitPointer runs right after the worktreePresent check and before
+// "git symbolic-ref" or readWorktreeGitConfig's "git config" calls, on a
+// bare Worktree{dir: dir} with no branch set yet: revalidate itself already
+// checks the pointer before it reads HEAD, on purpose, but this path used
+// to run symbolic-ref and read dir's config first, so a rewritten pointer
+// still had two git commands run against whatever it now names before
+// being refused. A pointer-check failure is refused without leaking its
+// content; the final revalidate call below re-checks it anyway (cheaply)
+// and adds the HEAD == branch check, so this early check is pure
+// defense-in-depth on top of it, not a replacement for it.
 func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64, dir string) (Worktree, error) {
 	refused := fmt.Errorf("orchestrator: worktree directory exists but is not ticket %d's worktree: %s", ticketID, dir)
 
@@ -926,6 +993,11 @@ func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
 	if !present {
+		return Worktree{}, refused
+	}
+
+	bare := Worktree{dir: dir}
+	if err := o.checkGitPointer(ctx, bare); err != nil {
 		return Worktree{}, refused
 	}
 
@@ -940,7 +1012,7 @@ func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64
 
 	wt := Worktree{dir: dir, branch: branch}
 	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
-		return Worktree{}, err
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
 	if err := o.revalidate(ctx, wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)

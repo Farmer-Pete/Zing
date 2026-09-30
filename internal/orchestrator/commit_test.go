@@ -859,6 +859,60 @@ func TestCommitSubject(t *testing.T) {
 	}
 }
 
+// TestContentMethodsRevalidateRewrittenGitPointer proves review findings
+// F007 and F008: CommitChanges, CommitSubject, and the exported
+// SignedStatus used to run git in wt.dir with no o.revalidate(ctx, wt)
+// guard first, unlike every sibling content method. Extending
+// TestRevalidateRejectsRewrittenGitPointer's pattern, a worktree whose
+// ".git" pointer file was rewritten must be rejected by all three, with the
+// same "unexpected .git pointer" error revalidate itself already produces.
+func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 900, "revalidate", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), approvedTestFile), "x\n")
+	runGit(ctx, t, wt.Dir(), "add", approvedTestFile)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "a commit to read back")
+	sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	pointerPath := filepath.Join(wt.Dir(), ".git")
+	if err := os.WriteFile(pointerPath, []byte("gitdir: /somewhere/else\n"), 0o644); err != nil {
+		t.Fatalf("rewrite .git pointer: %v", err)
+	}
+
+	const wantErrSubstr = "unexpected .git pointer"
+
+	t.Run("CommitChanges", func(t *testing.T) {
+		if _, err := o.CommitChanges(ctx, wt, sha); err == nil {
+			t.Fatal("CommitChanges: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("CommitChanges error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+
+	t.Run("CommitSubject", func(t *testing.T) {
+		if _, err := o.CommitSubject(ctx, wt, sha); err == nil {
+			t.Fatal("CommitSubject: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("CommitSubject error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+
+	t.Run("SignedStatus", func(t *testing.T) {
+		if _, err := o.SignedStatus(ctx, wt, sha); err == nil {
+			t.Fatal("SignedStatus: expected an error for a rewritten .git pointer, got nil")
+		} else if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("SignedStatus error = %q, want it to contain %q", err.Error(), wantErrSubstr)
+		}
+	})
+}
+
 func TestSignedStatusExported(t *testing.T) {
 	t.Run("a signed commit", func(t *testing.T) {
 		fixture := newSigningFixture(t, true)

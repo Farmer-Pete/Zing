@@ -325,7 +325,13 @@ func (o *Orchestrator) signedStatusFallback(ctx context.Context, dir, rev string
 // it reports whether sha carries a valid signature, without the local-
 // verifiability distinction signedStatus itself makes (see signedStatus's
 // own doc for why "not locally verifiable" is not the same as "unsigned").
+// It first calls revalidate (review F007), the same guard every sibling
+// content method opens with; the unexported signedStatus does not repeat it,
+// since CommitTask (its other caller) has already revalidated wt.
 func (o *Orchestrator) SignedStatus(ctx context.Context, wt Worktree, sha string) (signed bool, err error) {
+	if err = o.revalidate(ctx, wt); err != nil {
+		return false, fmt.Errorf("orchestrator: signed status: %w", err)
+	}
 	signed, _, err = o.signedStatus(ctx, wt.dir, sha)
 	return signed, err
 }
@@ -355,8 +361,15 @@ func commitStatusFromLetter(letter string) (Status, error) {
 //
 // The -z form pairs a NUL-terminated status letter with a NUL-terminated
 // path, repeating; commitStatusFromLetter maps the letter to Change's
-// closed set. Any other status letter is an error, naming the path.
+// closed set. Any other status letter is an error, naming the path. It
+// first calls revalidate (review F007): every sibling content method
+// (ChangedPaths, Hunk, BranchCommits, CommitTask) already opens with this
+// guard, so a wrong, stale, or tampered worktree is never read here either.
 func (o *Orchestrator) CommitChanges(ctx context.Context, wt Worktree, sha string) ([]Change, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return nil, fmt.Errorf("orchestrator: commit changes: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
 	out, err := run.Output(ctx, wt.dir, "git", "diff-tree", "--no-commit-id", "--name-status", "-r", "--no-renames", "-z", sha)
 	if err != nil {
@@ -382,8 +395,13 @@ func (o *Orchestrator) CommitChanges(ctx context.Context, wt Worktree, sha strin
 }
 
 // CommitSubject returns the first line of the commit message:
-// git show -s --format=%s <sha>.
+// git show -s --format=%s <sha>. It first calls revalidate (review F007),
+// the same guard every sibling content method opens with.
 func (o *Orchestrator) CommitSubject(ctx context.Context, wt Worktree, sha string) (string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: commit subject: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
 	out, err := run.Output(ctx, wt.dir, "git", "show", "-s", "--format=%s", sha)
 	if err != nil {

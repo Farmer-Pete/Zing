@@ -8,10 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	branch7MySlug = "zing/7-my-slug"
 	gitName       = "git"
 	statusArg     = "status"
+	configArg     = "config"
 	ownDriverName = "own"
 	gpgProgramKey = "gpg.program"
 	hooksPathArg  = "core.hooksPath=/dev/null"
@@ -177,8 +179,8 @@ func TestNew(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: unexpected error: %v", err)
 		}
-		if !reflect.DeepEqual(o.proj, valid) {
-			t.Errorf("proj = %+v, want %+v", o.proj, valid)
+		if diff := cmp.Diff(valid, o.proj); diff != "" {
+			t.Errorf("proj mismatch (-want +got):\n%s", diff)
 		}
 	})
 
@@ -483,7 +485,7 @@ func TestPrepareWorktree(t *testing.T) {
 		failing := failingRunner{
 			inner: execRunner{},
 			fail: func(args []string) bool {
-				return len(args) > 0 && args[0] == "config"
+				return len(args) > 0 && args[0] == configArg
 			},
 		}
 		o := newTestOrchestrator(t, repo, failing)
@@ -850,7 +852,7 @@ func TestPrepareWorktree_CleanupSurvivesCancelledContext(t *testing.T) {
 	failing := cancelingFailingRunner{
 		inner: execRunner{},
 		fail: func(args []string) bool {
-			return len(args) > 0 && args[0] == "config"
+			return len(args) > 0 && args[0] == configArg
 		},
 		cancel: cancel,
 	}
@@ -1246,6 +1248,69 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Fatal("EnsureWorktree: expected an error for a directory git does not recognize as a worktree, got nil")
 		}
 	})
+
+	// PR review finding F001: ensureWorktreePresent used to run
+	// "git symbolic-ref" and "git config" (readWorktreeGitConfig) in dir
+	// before ever checking the .git pointer, so a pre-existing worktree
+	// whose pointer was rewritten still ran git commands against whatever
+	// it now names before being refused. checkGitPointer must run first, on
+	// the bare dir alone, so a rewritten pointer is refused before any git
+	// call reads dir's HEAD or config: forbiddenArgsRunner fails the test
+	// outright the instant a "symbolic-ref" or "config" call is attempted,
+	// and the refused error text (not a config- or HEAD-read error) is the
+	// second, independent proof.
+	t.Run("a rewritten .git pointer is refused before git symbolic-ref or git config ever runs in the worktree", func(t *testing.T) {
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		wt, err := o.PrepareWorktree(ctx, 203, "present", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), ".git"), []byte("gitdir: /somewhere/else\n"), 0o644); writeErr != nil {
+			t.Fatalf("rewrite .git pointer: %v", writeErr)
+		}
+
+		spy := forbiddenArgsRunner{t: t, inner: execRunner{}, forbidden: map[string]bool{"symbolic-ref": true, configArg: true}}
+		spyOrch := newTestOrchestrator(t, repo, spy)
+
+		_, _, err = spyOrch.EnsureWorktree(ctx, 203, "present")
+		if err == nil {
+			t.Fatal("EnsureWorktree: expected an error for a rewritten .git pointer, got nil")
+		}
+		wantSubstr := fmt.Sprintf("not ticket %d's worktree", 203)
+		if !strings.Contains(err.Error(), wantSubstr) {
+			t.Errorf("EnsureWorktree error = %q, want it to contain %q (the refused error)", err.Error(), wantSubstr)
+		}
+	})
+}
+
+// forbiddenArgsRunner wraps a real Runner and fails the test outright if any
+// call's first argument is one forbidden names, delegating every other call
+// to inner. It proves ensureWorktreePresent's ordering fix (review finding
+// F001): checkGitPointer must refuse a rewritten .git pointer before
+// "git symbolic-ref" or "git config" (readWorktreeGitConfig) ever run
+// against a pre-existing worktree directory.
+type forbiddenArgsRunner struct {
+	t         *testing.T
+	inner     Runner
+	forbidden map[string]bool
+}
+
+func (r forbiddenArgsRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if len(args) > 0 && r.forbidden[args[0]] {
+		r.t.Fatalf("unexpected %s call: %s %s", args[0], name, strings.Join(args, " "))
+	}
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+func (r forbiddenArgsRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if len(args) > 0 && r.forbidden[args[0]] {
+		r.t.Fatalf("unexpected %s call: %s %s", args[0], name, strings.Join(args, " "))
+	}
+	return r.inner.Output(ctx, dir, name, args...)
 }
 
 // TestEnsureWorktreeReattachesAfterDeletion proves EnsureWorktree's second
@@ -1680,6 +1745,70 @@ func TestRevalidateRejectsRewrittenGitPointer(t *testing.T) {
 
 	if err := o.revalidate(ctx, wt); err == nil {
 		t.Fatal("revalidate: expected an error for a rewritten .git pointer, got nil")
+	}
+}
+
+// TestCheckGitPointerToleratesNumericSuffix proves review finding F018:
+// when another registered worktree already claims a directory with the
+// same basename as this ticket's own worktree dir, git appends a numeric
+// suffix to this worktree's admin dir under worktrees/ (for example "51"
+// instead of "5"). checkGitPointer must still accept the pointer, since it
+// is git's own real pointer for this worktree, not a rewritten one.
+func TestCheckGitPointerToleratesNumericSuffix(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+
+	// Register an unrelated worktree elsewhere whose directory shares
+	// ticket 900's own worktree basename ("900"), so that when
+	// PrepareWorktree adds <repo>/.zing/wt/900, git must suffix that
+	// admin dir's name under worktrees/ to avoid colliding with the one
+	// already registered under this basename.
+	otherParent := t.TempDir()
+	otherDir := filepath.Join(otherParent, "900")
+	runGit(ctx, t, repo, "worktree", "add", "-b", "unrelated-900", otherDir, mainBranch)
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	wt, err := o.PrepareWorktree(ctx, 900, "suffix", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	if _, err := o.ChangedPaths(ctx, wt); err != nil {
+		t.Errorf("ChangedPaths: unexpected error for a worktree whose admin dir git suffixed: %v", err)
+	}
+}
+
+// TestCheckGitPointerRejectsAnotherTicketsAdminDir proves checkGitPointer's
+// reverse-link check: a pointer naming a real admin dir under worktrees/ --
+// so it passes the prefix check -- but belonging to a different, unrelated
+// worktree (its own "gitdir" reverse link names that other worktree, not
+// this one) must still be rejected. Otherwise a pointer rewritten to name
+// any other registered worktree's admin dir would slip past the F018 fix.
+func TestCheckGitPointerRejectsAnotherTicketsAdminDir(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	other, err := o.PrepareWorktree(ctx, 901, "other", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree(901): %v", err)
+	}
+	wt, err := o.PrepareWorktree(ctx, 902, "victim", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree(902): %v", err)
+	}
+
+	otherPointer, err := os.ReadFile(filepath.Join(other.Dir(), ".git"))
+	if err != nil {
+		t.Fatalf("read other worktree's .git pointer: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(wt.Dir(), ".git"), otherPointer, 0o644); err != nil {
+		t.Fatalf("rewrite .git pointer: %v", err)
+	}
+
+	if err := o.revalidate(ctx, wt); err == nil {
+		t.Fatal("revalidate: expected an error for a pointer naming another ticket's admin dir, got nil")
 	}
 }
 

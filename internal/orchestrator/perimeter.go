@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Status is one of the four git status shapes a Change carries, closed to
@@ -497,6 +498,23 @@ const hunkCutSuffix = "\n[hunk cut at 64 KiB]\n"
 // place of the diff itself.
 const binaryDiffMarker = "Binary files "
 
+// isBinaryDiff reports whether out is git's binary-diff form: a line
+// starting with binaryDiffMarker in place of the diff body (review finding
+// F023). Hunk used to test strings.Contains(out, binaryDiffMarker) over the
+// whole diff, so a text file whose content happens to contain that literal
+// text anywhere -- a real hunk line, not git's own marker -- was
+// misreported as binary, hiding the real hunk from the perimeter review.
+// Anchoring the check to a line start (the precedent for scanning a diff
+// line by line is signedStatusFallback in commit.go) fixes that.
+func isBinaryDiff(out string) bool {
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, binaryDiffMarker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Hunk returns the unified diff of one changed path against HEAD, cut to
 // 64 KiB (PKG8-PLAN.md section 7.3). It first calls revalidate: a wrong,
 // stale, or tampered worktree is never diffed. The command depends on c's
@@ -534,13 +552,27 @@ func (o *Orchestrator) Hunk(ctx context.Context, wt Worktree, c Change) (string,
 		return "", fmt.Errorf("orchestrator: hunk: %s: unrecognized status %v", c.Path, c.Code)
 	}
 
-	if strings.Contains(out, binaryDiffMarker) {
+	if isBinaryDiff(out) {
 		return "binary file", nil
 	}
-	if len(out) > hunkMaxBytes {
-		return out[:hunkMaxBytes] + hunkCutSuffix, nil
+	return cutHunk(out), nil
+}
+
+// cutHunk returns out unchanged when it fits within hunkMaxBytes, or out cut
+// to hunkMaxBytes with hunkCutSuffix appended (review finding F020). A cut
+// at exactly hunkMaxBytes can land in the middle of a multi-byte rune, so
+// the cut index backs off byte by byte until it sits on a rune start
+// (utf8.RuneStart), which can only shift the cut a few bytes short of
+// hunkMaxBytes, never past it.
+func cutHunk(out string) string {
+	if len(out) <= hunkMaxBytes {
+		return out
 	}
-	return out, nil
+	cut := hunkMaxBytes
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return out[:cut] + hunkCutSuffix
 }
 
 // BranchCommits returns the shas on the ticket branch that are not on the

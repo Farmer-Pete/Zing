@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Path literals reused across this file's cases, pulled out as constants
@@ -662,6 +663,33 @@ func TestHunk(t *testing.T) {
 		}
 	})
 
+	// PR review finding F023: Hunk used to test
+	// strings.Contains(out, binaryDiffMarker) over the whole diff, so a
+	// text file whose content happens to contain the literal text
+	// "Binary files " anywhere -- a real hunk line, not git's own binary
+	// marker -- was misreported as "binary file", hiding the real hunk
+	// from the perimeter review. The fix anchors the marker to a line
+	// start, so a content line containing that text mid-diff no longer
+	// matches.
+	t.Run("a text file whose content contains the binary marker text is not mistaken for binary", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 7040)
+
+		const content = "Binary files a/x and b/x differ\n"
+		writeTestFile(t, filepath.Join(wt.Dir(), "notbinary.txt"), content)
+		runGit(ctx, t, wt.Dir(), "add", "notbinary.txt")
+
+		got, err := o.Hunk(ctx, wt, Change{Path: "notbinary.txt", Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if got == "binary file" {
+			t.Fatal("Hunk: reported binary file for a text file, want the real hunk")
+		}
+		if !strings.Contains(got, "Binary files a/x and b/x differ") {
+			t.Errorf("Hunk = %q, want it to contain the real hunk text", got)
+		}
+	})
+
 	t.Run("a hunk larger than 64 KiB is cut", func(t *testing.T) {
 		o, wt, ctx := preparePerimeterWorktree(t, 705)
 
@@ -679,8 +707,72 @@ func TestHunk(t *testing.T) {
 		if !strings.HasSuffix(got, hunkCutSuffix) {
 			t.Errorf("Hunk does not end with the cut suffix %q, got suffix %q", hunkCutSuffix, got[max(0, len(got)-60):])
 		}
-		if len(got) != hunkMaxBytes+len(hunkCutSuffix) {
-			t.Errorf("len(Hunk) = %d, want %d", len(got), hunkMaxBytes+len(hunkCutSuffix))
+		// PR review finding F020: the cut used to always land at exactly
+		// hunkMaxBytes, which can split a multi-byte rune. The fix backs
+		// the cut index off to the nearest rune start, so the cut can now
+		// land a few bytes short of hunkMaxBytes; <= (not ==) is the
+		// correct assertion for ASCII content too, where no backing off is
+		// ever needed and the two still coincide.
+		if len(got) > hunkMaxBytes+len(hunkCutSuffix) {
+			t.Errorf("len(Hunk) = %d, want <= %d", len(got), hunkMaxBytes+len(hunkCutSuffix))
+		}
+	})
+
+	// PR review finding F020: Hunk used to cut with out[:hunkMaxBytes],
+	// which can split a multi-byte rune straddling that exact byte offset,
+	// producing invalid UTF-8. This calibrates the real diff header length
+	// for one file (through Hunk itself, so it tracks whatever git actually
+	// produces, not a guessed constant), then rewrites the same path with
+	// repeating 2-byte runes phase-shifted so the byte at hunkMaxBytes
+	// falls on a continuation byte, and proves the fix backs off to the
+	// rune boundary instead of splitting it.
+	t.Run("a hunk cut is backed off to a rune boundary", func(t *testing.T) {
+		o, wt, ctx := preparePerimeterWorktree(t, 7050)
+		const path = "multiboundary.txt"
+
+		writeTestFile(t, filepath.Join(wt.Dir(), path), "~\n")
+		runGit(ctx, t, wt.Dir(), "add", path)
+		calib, err := o.Hunk(ctx, wt, Change{Path: path, Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk (calibration): %v", err)
+		}
+		marker := strings.LastIndex(calib, "+~")
+		if marker < 0 {
+			t.Fatalf("calibration: could not find the content marker in %q", calib)
+		}
+		contentStart := marker + 1 // the byte right after "+"
+
+		// R is where hunkMaxBytes falls relative to the start of this
+		// file's content. A 2-byte rune repeated from contentStart has rune
+		// starts at even relative offsets; padding by one extra ASCII byte
+		// when R is already even flips the parity so the rune straddling
+		// hunkMaxBytes is guaranteed split, deterministically, whatever
+		// this header's exact length turns out to be.
+		r := hunkMaxBytes - contentStart
+		pad := ""
+		if r%2 == 0 {
+			pad = "_"
+		}
+
+		runeCount := hunkMaxBytes/2 + 100
+		var b strings.Builder
+		b.WriteString(pad)
+		for range runeCount {
+			b.WriteRune('é') // U+00E9, 2 bytes in UTF-8
+		}
+		b.WriteString("\n")
+		writeTestFile(t, filepath.Join(wt.Dir(), path), b.String())
+		runGit(ctx, t, wt.Dir(), "add", path)
+
+		got, err := o.Hunk(ctx, wt, Change{Path: path, Code: Added})
+		if err != nil {
+			t.Fatalf("Hunk: %v", err)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("Hunk cut a multi-byte rune in half, result is not valid UTF-8: %q", got[max(0, len(got)-40):])
+		}
+		if len(got) > hunkMaxBytes+len(hunkCutSuffix) {
+			t.Errorf("len(Hunk) = %d, want <= %d", len(got), hunkMaxBytes+len(hunkCutSuffix))
 		}
 	})
 
