@@ -49,11 +49,6 @@ type FixInput struct {
 	Text string
 }
 
-// fixRunLabel is runtime.RunRequest's own Label for every fix run (design
-// section 6.3's own table: "the decimal task number, or fix for a fix
-// unit"), first turn and every resume alike.
-const fixRunLabel = "fix"
-
 // fixSubjectFor and fixInputLabelFor are design section 8's own table: the
 // commit subject a landed fix carries (unit.Title) and the prompt input
 // label its own text carries, one pair per FixKind. The input label

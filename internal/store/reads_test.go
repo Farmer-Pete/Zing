@@ -504,6 +504,79 @@ func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
 	}
 }
 
+// TestSessionByID_OpenReturnsSessionOpen proves SessionByID reads a session
+// directly by its own id, classified the same way LatestSession classifies
+// its newest session (review F045: a build or perimeter round resumes
+// round.SessionID directly, not necessarily the ticket's newest session for
+// the job).
+func TestSessionByID_OpenReturnsSessionOpen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	setSessionExternalID(t, s, sessionID, testExternalID1)
+	setSessionResumes(t, s, sessionID, 1)
+
+	got, state, err := s.SessionByID(ctx, sessionID, 3)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != SessionOpen {
+		t.Errorf("SessionByID state = %v, want SessionOpen", state)
+	}
+	if got.ID != sessionID {
+		t.Errorf("SessionByID.ID = %d, want %d", got.ID, sessionID)
+	}
+}
+
+// TestSessionByID_ExhaustedReturnsSessionExhausted proves the exhausted
+// case: resumes at or past maxResumes classifies as SessionExhausted.
+func TestSessionByID_ExhaustedReturnsSessionExhausted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+	setSessionExternalID(t, s, sessionID, testExternalID1)
+	setSessionResumes(t, s, sessionID, 3)
+
+	_, state, err := s.SessionByID(ctx, sessionID, 3)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != SessionExhausted {
+		t.Errorf("SessionByID state = %v, want SessionExhausted", state)
+	}
+}
+
+// TestSessionByID_IdlessReturnsSessionIdless proves the idless case: a
+// session whose external_id is still NULL classifies as SessionIdless.
+func TestSessionByID_IdlessReturnsSessionIdless(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sessionID := insertSession(t, s, ticketID, testStatePlanning)
+
+	_, state, err := s.SessionByID(ctx, sessionID, 3)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != SessionIdless {
+		t.Errorf("SessionByID state = %v, want SessionIdless", state)
+	}
+}
+
+// TestSessionByID_UnknownIDIsAnError proves an id naming no session returns
+// a wrapped sql.ErrNoRows, not a zero-value SessionNone success.
+func TestSessionByID_UnknownIDIsAnError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	_, _, err := s.SessionByID(ctx, 999999, 3)
+	if err == nil {
+		t.Fatal("SessionByID with an unknown id: want an error, got nil")
+	}
+}
+
 func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()

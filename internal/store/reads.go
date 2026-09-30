@@ -166,7 +166,7 @@ const (
 //
 // A scanned external_id of "" is impossible in a healthy database (F035:
 // migration 0003's triggers forbid it, and upsertSessionTx rejects it before
-// any commit can write one), so LatestSession treats it as a store error
+// any commit can write one), so classifySession treats it as a store error
 // rather than silently classifying it as idless, open, or exhausted.
 func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, maxResumes int) (Session, SessionState, error) {
 	row := s.db.QueryRowContext(ctx,
@@ -184,19 +184,61 @@ func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, m
 		return Session{}, SessionNone, fmt.Errorf("latest session for ticket %d job %s: %w", ticketID, job, err)
 	}
 	if externalID.Valid {
-		if externalID.String == "" {
-			return Session{}, SessionNone, fmt.Errorf("store: session %d has an empty external_id", sess.ID)
-		}
 		sess.ExternalID = &externalID.String
 	}
 
+	state, err := classifySession(sess, maxResumes)
+	if err != nil {
+		return Session{}, SessionNone, err
+	}
+	return sess, state, nil
+}
+
+// SessionByID returns the session with id, classified against maxResumes
+// the same way LatestSession classifies its own newest session (review
+// F045): a build or perimeter round resumes round.SessionID directly (plan
+// section 6.2), not necessarily the ticket's newest session for the job,
+// since an older round's own session need not still be the newest one on
+// the ticket by the time the owner answers it. err wraps sql.ErrNoRows when
+// id names no session.
+func (s *Store) SessionByID(ctx context.Context, id int64, maxResumes int) (Session, SessionState, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, ticket_id, job, runtime, external_id, resumes FROM sessions WHERE id = ?`, id)
+
+	var sess Session
+	var externalID sql.NullString
+	err := row.Scan(&sess.ID, &sess.TicketID, &sess.Job, &sess.Runtime, &externalID, &sess.Resumes)
+	if err != nil {
+		return Session{}, SessionNone, fmt.Errorf("session %d: %w", id, err)
+	}
+	if externalID.Valid {
+		sess.ExternalID = &externalID.String
+	}
+
+	state, err := classifySession(sess, maxResumes)
+	if err != nil {
+		return Session{}, SessionNone, err
+	}
+	return sess, state, nil
+}
+
+// classifySession is the state classification LatestSession and SessionByID
+// both apply to an already-scanned session row (design D17): SessionIdless
+// when ExternalID is still nil (a first turn that never got far enough for
+// the runtime to echo one back), SessionExhausted when Resumes is at or
+// past maxResumes, SessionOpen otherwise. It also carries the empty-
+// external-id case, a store error rather than a silent misclassification
+// (see the doc above LatestSession).
+func classifySession(sess Session, maxResumes int) (SessionState, error) {
 	switch {
+	case sess.ExternalID != nil && *sess.ExternalID == "":
+		return SessionNone, fmt.Errorf("store: session %d has an empty external_id", sess.ID)
 	case sess.ExternalID == nil:
-		return sess, SessionIdless, nil
+		return SessionIdless, nil
 	case sess.Resumes >= maxResumes:
-		return sess, SessionExhausted, nil
+		return SessionExhausted, nil
 	default:
-		return sess, SessionOpen, nil
+		return SessionOpen, nil
 	}
 }
 

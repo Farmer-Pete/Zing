@@ -382,6 +382,44 @@ func TestCheckBuildShape(t *testing.T) {
 		}
 	})
 
+	t.Run("a reason carrying the reserved separator", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA}},
+			Extras: []ExtraClaim{{Path: testFileA, Reason: testNeededIt + " Change: FAKE"}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 0))
+		want := `extra[0]/reason: reason must not contain the reserved " Change: " separator`
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a multiline reason", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA}},
+			Extras: []ExtraClaim{{Path: testFileA, Reason: "needed it\nfor real"}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 0))
+		want := "extra[0]/reason: must be a single line"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkBuildShape = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("a clean reason passes", func(t *testing.T) {
+		t.Parallel()
+		r := &BuildResponse{
+			Claims: BuildClaims{FilesChanged: []string{testFileA}},
+			Extras: []ExtraClaim{{Path: testFileA, Reason: testNeededIt}},
+		}
+		errs := checkBuildShape(r, buildShapePresent(1, 0))
+		if len(errs) != 0 {
+			t.Fatalf("checkBuildShape = %v, want no errors", dumpErrs(errs))
+		}
+	})
+
 	t.Run("a clean document", func(t *testing.T) {
 		t.Parallel()
 		r := &BuildResponse{

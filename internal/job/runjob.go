@@ -126,6 +126,45 @@ func runJob(
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
 }
 
+// seedTaskN is store.RunSeed.TaskN's own value for a build or perimeter
+// unit run (review F003, F005): nil for a fix unit (task 0), so a fix's own
+// runs never carry the task_n a real task 0 would otherwise be confused
+// with; a pointer to taskN for every other unit.
+func seedTaskN(taskN int) *int {
+	if taskN == 0 {
+		return nil
+	}
+	n := taskN
+	return &n
+}
+
+// buildLabel is runtime.RunRequest.Label for a build run of taskN (design
+// section 6.3's own table: "the decimal task number, or fix for a fix
+// unit"): fixRunLabel for a fix unit (task 0), the decimal task number
+// otherwise.
+func buildLabel(taskN int) string {
+	if taskN == 0 {
+		return fixRunLabel
+	}
+	return strconv.Itoa(taskN)
+}
+
+// perimeterLabel is runtime.RunRequest.Label for a DESCRIBE run: the same
+// fix-versus-task split as buildLabel, with i (the extra's own 1-based
+// position among the unit's undescribed extras) appended: "fix-<i>" for a
+// fix unit, "<n>-<i>" otherwise.
+func perimeterLabel(taskN, i int) string {
+	if taskN == 0 {
+		return fmt.Sprintf("fix-%d", i)
+	}
+	return fmt.Sprintf("%d-%d", taskN, i)
+}
+
+// fixRunLabel is runtime.RunRequest's own Label for every fix run (design
+// section 6.3's own table: "the decimal task number, or fix for a fix
+// unit"), first turn and every resume alike (fix.go's own StartFix).
+const fixRunLabel = "fix"
+
 // noopCleanup is applySandbox's own "nothing to clean up" return: a real
 // closure rather than a nil func, so its (cleanup, error) result is never
 // the (nil, nil) shape (nilnil), and runJob can defer it unconditionally.

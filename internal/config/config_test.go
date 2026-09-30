@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 const testUser = "peter"
@@ -266,8 +268,8 @@ func TestSandboxReadPaths(t *testing.T) {
 			t.Fatalf("Load: %v", err)
 		}
 		want := []string{"/opt/homebrew/bin", "/Users/peter/.local/share/mise"}
-		if !reflect.DeepEqual(cfg.Sandbox.ReadPaths, want) {
-			t.Errorf("Sandbox.ReadPaths = %v, want %v", cfg.Sandbox.ReadPaths, want)
+		if diff := cmp.Diff(want, cfg.Sandbox.ReadPaths); diff != "" {
+			t.Errorf("Sandbox.ReadPaths mismatch (-want +got):\n%s", diff)
 		}
 	})
 

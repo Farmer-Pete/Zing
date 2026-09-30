@@ -16,6 +16,15 @@ import (
 // text) so the wording never drifts between them.
 const msgSingleLine = "must be a single line"
 
+// itemChangeSeparator is this package's own copy of Item.Text's wire
+// literal (design section 6.5, review F059): internal/job/building.go's
+// itemText packs it into "Builder: <reason> Change: <description>", and
+// internal/console/templates/thread.templ's splitItemText cuts the stored
+// text back apart on its first occurrence. This package cannot import job
+// or console, so the literal is declared here too, the same convention
+// checkBuildShape's own doc already notes for validateSingleLine.
+const itemChangeSeparator = " Change: "
+
 // checkNoneUnion enforces the none/list union that Migrations and
 // Deletions both carry: either none="true" and an empty list, or no none
 // attribute and a non-empty list. path is the containing element's own
@@ -193,6 +202,20 @@ func checkBuildShape(r *BuildResponse, present map[string]bool) []*PathError {
 		seenExtra[e.Path] = true
 		if strings.ContainsAny(e.Path, "\n\r") {
 			errs = append(errs, &PathError{Path: path, Msg: msgSingleLine})
+		}
+
+		// F059: the builder is the adversary that owns e.Reason, and
+		// itemText (internal/job/building.go) packs it into the same
+		// Item.Text as the perimeter run's own trusted description,
+		// splitItemText's own boundary being the first " Change: ". A
+		// reason that itself carries that literal, or a line break, pushes
+		// builder text across the boundary the owner reads as trusted.
+		reasonPath := indexedName("extra", i) + "/reason"
+		switch {
+		case strings.ContainsAny(e.Reason, "\n\r"):
+			errs = append(errs, &PathError{Path: reasonPath, Msg: msgSingleLine})
+		case strings.Contains(e.Reason, itemChangeSeparator):
+			errs = append(errs, &PathError{Path: reasonPath, Msg: `reason must not contain the reserved " Change: " separator`})
 		}
 	}
 

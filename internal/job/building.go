@@ -116,6 +116,15 @@ const (
 	revertFailedWhat = "a rejected file could not be reverted"
 	revertFailedWhy  = "orchestrator.RevertPaths could not restore or remove the rejected path"
 
+	// treeExtraUnclaimedWhat and treeExtraUnclaimedWhy are review F046's own
+	// escalation text: the tree changed after the unit's own "claims ok"
+	// marker (a D19 survivor), so a tree extra now exists that the build
+	// report's own Extras never claimed. A bare handler error here would
+	// make the dispatcher release the claim and retry every tick with no
+	// escalation at all (a livelock).
+	treeExtraUnclaimedWhat = "the worktree holds a changed path the build never claimed"
+	treeExtraUnclaimedWhy  = "the tree changed after the unit's own claims were checked, so the build report carries no claim for this path"
+
 	// replanUnsupportedWhat and replanUnsupportedWhy are design D14's own
 	// fixed text for an escalation round's choice "b" (back to planning),
 	// or a reply with no option at all: back-to-planning on a building
@@ -174,9 +183,37 @@ func buildCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.Ha
 	return capResumesEscalation(t, d, sessionID)
 }
 
-// unit is what one build session builds: task N of the plan, or a fix
-// (design section 4.3). Building never builds a fix unit (task 14 does);
-// TaskN is always 1..12 here.
+// ensureUnitWorktree is design section 6's own repeated step, shared by
+// every entry point that needs a unit's worktree before it can do anything
+// else (review F026, CLAUDE.md's "three repetitions before an
+// abstraction"): resolve t's project, ensure its worktree, and log
+// "worktree ensured" exactly as every call site did inline. A non-nil
+// *store.HandlerCommit is the "worktree could not be prepared" escalation
+// the caller returns as its own commit, with a nil error; err is ErrConfig
+// when t.ProjectID names no project in d.Projects. No behaviour change:
+// every caller's own return shape is unchanged, only where these four
+// lines live.
+func ensureUnitWorktree(ctx context.Context, t store.Ticket, d Deps) (Project, orchestrator.Worktree, *store.HandlerCommit, error) {
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return Project{}, orchestrator.Worktree{}, nil, ErrConfig
+	}
+	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	if err != nil {
+		c := buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error())
+		return Project{}, orchestrator.Worktree{}, &c, nil
+	}
+	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	return proj, wt, nil, nil
+}
+
+// unit is what one build session builds: task N of the plan (1..12), or
+// task 0, a fix (design section 4.3, 8). Building's own Run entry point
+// never builds a fix unit (task 14's StartFix and AdvanceFix do), but
+// advanceCheckedRun and every step it shares with them (check, land,
+// describeOrAsk, describeOne, resolve) treat TaskN 0 as a real value, not a
+// building-only invariant: seedTaskN and buildLabel/perimeterLabel
+// (runjob.go) are what tell the two apart.
 type unit struct {
 	TaskN int
 	Title string // the commit subject
@@ -212,16 +249,13 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), misnumberedTasksWhat, misnumberedTasksWhy, ""), nil
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, ErrConfig
-	}
-
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+		return store.HandlerCommit{}, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, nil
+	}
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
@@ -445,10 +479,13 @@ func (h buildingHandler) enterFromRounds(ctx context.Context, t store.Ticket, d 
 // (again=true): the preserved round is consumed by the cap resolution
 // (design section 6.9, task 13).
 func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (commit store.HandlerCommit, again bool, err error) {
+	if round.SessionID == nil {
+		return store.HandlerCommit{}, false, errors.New("job: building: answered round: round has no session id")
+	}
 	maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
-	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobBuildName, maxResumes)
+	sess, state, err := d.Store.SessionByID(ctx, *round.SessionID, maxResumes)
 	if err != nil {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: latest session: %w", err)
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: session by id: %w", err)
 	}
 
 	if state == store.SessionExhausted {
@@ -486,15 +523,13 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: ticket %d: plan has no task %d", t.ID, taskN)
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, false, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	_, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), false, nil
+		return store.HandlerCommit{}, false, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, false, nil
+	}
 
 	answers, ansErr := answerInputsForRound(round)
 	if ansErr != nil {
@@ -540,15 +575,14 @@ func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d D
 	}
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{
-		Job: response.JobBuild, Label: strconv.Itoa(u.TaskN), WorkDir: wt.Dir(),
+		Job: response.JobBuild, Label: buildLabel(u.TaskN), WorkDir: wt.Dir(),
 		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),
 	}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
-	n := u.TaskN
 	return runAndRoute(ctx, d, t, jobBuildName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginBuild,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
-		}, &n)
+		}, seedTaskN(u.TaskN))
 }
 
 // ---- escalation resolution (task 13, design section 6.9) ------------------
@@ -671,15 +705,13 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: ticket %d: plan has no task %d", t.ID, taskN)
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+		return store.HandlerCommit{}, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, nil
+	}
 
 	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 	commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks), extra, resolveIDs)
@@ -760,15 +792,13 @@ func (h buildingHandler) retryCapResumesBuild(ctx context.Context, t store.Ticke
 		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: plan has no task %d", t.ID, taskN)
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, 0, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), 0, nil
+		return store.HandlerCommit{}, 0, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, 0, nil
+	}
 
 	allResolveIDs := append([]int64{}, resolveIDs...)
 	var answerParts []string
@@ -951,15 +981,13 @@ func (h buildingHandler) retryCapResumesPerimeter(ctx context.Context, t store.T
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), 0, nil
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, 0, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), 0, nil
+		return store.HandlerCommit{}, 0, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, 0, nil
+	}
 
 	changed, err := proj.Orch.ChangedPaths(ctx, wt)
 	if err != nil {
@@ -1682,11 +1710,11 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 	extra := extras[i]
 	change, ok := changeFor(changed, extra.Path)
 	if !ok {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %q not found in changed paths", extra.Path)
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeExtraUnclaimedWhat, treeExtraUnclaimedWhy, extra.Path), nil
 	}
 	claim, ok := extraClaimFor(report.Report.Extras, extra.Path)
 	if !ok {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: describe: %q has no extra claim in build_report", extra.Path)
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeExtraUnclaimedWhat, treeExtraUnclaimedWhy, extra.Path), nil
 	}
 
 	hunk, err := proj.Orch.Hunk(ctx, wt, change)
@@ -1714,8 +1742,7 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 	}
 
 	su := store.SessionUpsert{Job: jobPerimeterName, Runtime: jobCfg.Runtime}
-	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-%d", taskN, i+1), WorkDir: wt.Dir(), Prompt: assembled}
-	n := taskN
+	req := runtime.RunRequest{Job: response.JobPerimeter, Label: perimeterLabel(taskN, i+1), WorkDir: wt.Dir(), Prompt: assembled}
 	return runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, freshSessionRecord, resolveIDs, response.EscalationOriginPerimeter,
 		func(rr runResult) (store.HandlerCommit, error) {
 			c, err := perimeterSuccessCommit(t, d, rr, extra, change, claim, taskN, rid, isLast, extras, described)
@@ -1724,7 +1751,7 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 			}
 			c.ResolveQuestions = resolveIDs
 			return c, nil
-		}, &n)
+		}, seedTaskN(taskN))
 }
 
 // perimeterSuccessCommit routes a perimeter run's parsed response (design
@@ -1969,14 +1996,17 @@ func fileEventForRun(events []store.FileEventRow, runID int64) (store.FileEventR
 	return store.FileEventRow{}, false
 }
 
-// extraFor finds path's own Extra in extras.
-func extraFor(extras []orchestrator.Extra, path string) (orchestrator.Extra, bool) {
-	for _, e := range extras {
+// extraFor finds path's own Extra in extras, and its index: the position
+// resolvePerimeterQuestion's own resume label (perimeterLabel) must match
+// the position describeOne originally minted that path's own session label
+// from (review F052 class).
+func extraFor(extras []orchestrator.Extra, path string) (orchestrator.Extra, int, bool) {
+	for i, e := range extras {
 		if e.Path == path {
-			return e, true
+			return e, i, true
 		}
 	}
-	return orchestrator.Extra{}, false
+	return orchestrator.Extra{}, -1, false
 }
 
 // resolve is design section 6.6's RESOLVE: entered from step 1 when the
@@ -2001,15 +2031,13 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: unmarshal question payload: %w", err)
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+		return store.HandlerCommit{}, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, nil
+	}
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
@@ -2134,12 +2162,11 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	notice := orchestrator.PerimeterNotice(revertExtras)
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{
-		Job: response.JobBuild, Label: strconv.Itoa(report.Report.TaskN), WorkDir: wt.Dir(),
+		Job: response.JobBuild, Label: buildLabel(report.Report.TaskN), WorkDir: wt.Dir(),
 		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: labelPerimeter, Text: notice}})),
 	}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	u := unit{TaskN: report.Report.TaskN, Title: report.Report.Title}
-	n := report.Report.TaskN
 	commit, runErr := runAndRoute(ctx, d, t, jobBuildName, su, req, 0, sessionRecord, resolveIDs, response.EscalationOriginBuild,
 		func(rr runResult) (store.HandlerCommit, error) {
 			c, successErr := buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
@@ -2148,7 +2175,7 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 			}
 			c.Artifacts = append(artifacts, c.Artifacts...)
 			return c, nil
-		}, &n)
+		}, seedTaskN(report.Report.TaskN))
 	return withBranchResult(commit, runErr, wt)
 }
 
@@ -2186,15 +2213,13 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), nil
 	}
 
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return store.HandlerCommit{}, ErrConfig
-	}
-	wt, created, err := proj.Orch.EnsureWorktree(ctx, t.ID, t.Title)
+	proj, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
 	if err != nil {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), worktreeNotPreparedWhat, worktreeNotPreparedWhy, err.Error()), nil
+		return store.HandlerCommit{}, err
 	}
-	slog.Info("worktree ensured", "ticket_id", t.ID, "branch", wt.Branch(), "created", created)
+	if escalation != nil {
+		return *escalation, nil
+	}
 
 	changed, err := proj.Orch.ChangedPaths(ctx, wt)
 	if err != nil {
@@ -2203,7 +2228,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	declaredNow := declaredPaths(plan, events, nil)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
-	extra, stillExtra := extraFor(extras, path)
+	extra, extraIndex, stillExtra := extraFor(extras, path)
 	if !stillExtra {
 		c := baseCommit(t, d)
 		c.ResolveQuestions = resolveIDs
@@ -2212,10 +2237,13 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 		return withBranch(c, wt), nil
 	}
 
+	if round.SessionID == nil {
+		return store.HandlerCommit{}, errors.New("job: building: resolve perimeter round: round has no session id")
+	}
 	maxResumes := d.Machine.Jobs[jobPerimeterName].MaxResumes
-	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPerimeterName, maxResumes)
+	sess, state, err := d.Store.SessionByID(ctx, *round.SessionID, maxResumes)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: latest session: %w", err)
+		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session by id: %w", err)
 	}
 	if state == store.SessionExhausted {
 		// As above (resolve): the perimeter session's own cap escalates
@@ -2249,7 +2277,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	}
 	claim, foundClaim := extraClaimFor(report.Report.Extras, path)
 	if !foundClaim {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: %q has no extra claim in build_report", path)
+		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), treeExtraUnclaimedWhat, treeExtraUnclaimedWhy, path), nil
 	}
 
 	priorInvalid, _, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPerimeterName, nil)
@@ -2263,9 +2291,8 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	assembled := prompt.Assemble(prompt.ForPerimeterResume(answers))
 
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
-	req := runtime.RunRequest{Job: response.JobPerimeter, Label: fmt.Sprintf("%d-answer", taskN), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}
+	req := runtime.RunRequest{Job: response.JobPerimeter, Label: perimeterLabel(taskN, extraIndex+1), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
-	n := taskN
 	commit, runErr := runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPerimeter,
 		func(rr runResult) (store.HandlerCommit, error) {
 			// perimeterSuccessCommit sets no ResolveQuestions of its own (its
@@ -2278,7 +2305,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 			}
 			c.ResolveQuestions = resolveIDs
 			return c, nil
-		}, &n)
+		}, seedTaskN(taskN))
 	return withBranchResult(commit, runErr, wt)
 }
 
@@ -2295,11 +2322,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 
 	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "test", proj.TestCmd)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: test command: %w", err)
+		return commandInfraEscalation(t, d, err)
 	}
 	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "lint", proj.LintCmd)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: building: adopt: lint command: %w", err)
+		return commandInfraEscalation(t, d, err)
 	}
 	if testExit != 0 || lintExit != 0 || testTimedOut || lintTimedOut {
 		return fail("commands failed"), nil

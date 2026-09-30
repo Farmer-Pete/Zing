@@ -792,6 +792,29 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	})
 }
 
+// TestBuildAdoptRoutesSandboxUnavailable proves review F014: adopt's own
+// test/lint command calls route a CommandRunner infrastructure failure
+// through commandInfraEscalation, the same table check() already uses,
+// rather than returning it as a bare Go error. RequireSandbox true with the
+// sandbox off makes every d.Commands.Run call return ErrSandbox.
+func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
+	s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+	deps.RequireSandbox = true
+	deps.Commands = job.NewCommandRunner(sandbox.Off(), true)
+
+	ticket := getTicket(t, s, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("adopt tick: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a sandbox_unavailable escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeSandboxUnavailable) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeSandboxUnavailable)
+	}
+}
+
 // orchestratorHeadSHA reads dir's own HEAD sha directly, so a test can learn
 // what prepareUnrecordedCommit just committed without re-deriving it from
 // BranchCommits.
@@ -1083,6 +1106,40 @@ func TestPerimeterRunQuestionStoresPath(t *testing.T) {
 	}
 	if events[0].RunID == nil {
 		t.Fatal("file event RunID = nil, want the perimeter run's id")
+	}
+}
+
+// TestDescribeUnclaimedExtraEscalates proves review F046: a tree extra the
+// build report never claimed escalates (environment) rather than returning
+// a bare handler error, which would make the dispatcher release the claim
+// and retry every tick with no escalation (a livelock). This can happen
+// when the tree changes after the "claims ok" marker (a D19 survivor):
+// here, a file appears in the worktree after CHECK has already written
+// that marker, so the next DESCRIBE tick finds an extra its own
+// build_report's Extras never claimed.
+func TestDescribeUnclaimedExtraEscalates(t *testing.T) {
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	_, wt := buildWorktreeFor(t, deps, ticket)
+	const surprisePath = "aaa_surprise.go" // sorts before testExtraPath ("extra1.go"): the first undescribed extra
+	if writeErr := os.WriteFile(filepath.Join(wt.Dir(), surprisePath), []byte("surprise\n"), 0o600); writeErr != nil {
+		t.Fatalf("write %s: %v", surprisePath, writeErr)
+	}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // DESCRIBE: unclaimed extra
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an environment escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeEnvironment) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeEnvironment)
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none (an unclaimed extra makes no runtime call)", commit.Runs)
 	}
 }
 
@@ -1525,14 +1582,37 @@ func TestResolveNoEmptyQuestionAfterAccept(t *testing.T) {
 // perimeter run's own question resumes that same session (BumpResumes, the
 // same external session id), rather than starting a fresh one, and the
 // resumed run's own description lands as the path's file event.
+// TestPerimeterRunAnswerResumesItsSession also proves review F052's own
+// resume-label rule (Codex finding): it drives the perimeter side through
+// runtime.Fake (fixtures/scripts/perimeter/1-1/{1,2}.xml, the single-extra
+// scenario's own task-1/first-extra label) instead of the custom runtime
+// planning_test.go's own scriptedRuntime offers, which only ever checked
+// SessionID. Fake's own resolveSessionLocked additionally requires a
+// resume's Label to match the session's first-turn Label
+// (internal/runtime/fake.go), so a resume that reused DESCRIBE's own label
+// incorrectly (the bug: "<n>-answer" instead of "<n>-<i>") would fail here
+// with "fake: session ... resume asked for (perimeter, ...)" rather than
+// silently passing.
 func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	const wantDescription = "Uses a hyphen, matching the style guide."
-	scriptRT.steps = append(scriptRT.steps,
-		perimeterQuestionStep("perim-q-sess"),
-		perimeterStep(wantDescription, "perim-q-sess"),
-	)
-	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
+
+	fakeRT := fakeRuntime(t) // serves fixtures/scripts/perimeter/1-1/{1,2}.xml
+	byJob := byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{response.JobBuild: scriptRT, response.JobPerimeter: fakeRT}}
+
+	tick := func() store.HandlerCommit {
+		t.Helper()
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, byJob, ticketID)
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("describe tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		return commit
+	}
+
+	tick() // DESCRIBE returns a question (perimeter/1-1/1.xml)
 
 	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
 	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use a hyphen."}); err != nil {
@@ -1547,7 +1627,7 @@ func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
 		t.Fatalf("SessionsForTicket: %v", err)
 	}
 
-	commit := describeTick(t, s, scriptRT, ticketID) // resolvePerimeterQuestion: resume
+	commit := tick() // resolvePerimeterQuestion: resume (perimeter/1-1/2.xml)
 
 	if len(commit.Artifacts) != 1 {
 		t.Fatalf("commit.Artifacts = %+v, want exactly one file artifact (the description)", commit.Artifacts)
@@ -1562,14 +1642,6 @@ func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
 	}
 	if len(sessionsAfter) != len(sessionsBefore) {
 		t.Errorf("sessions after answering = %d, want %d (a resume, not a fresh session)", len(sessionsAfter), len(sessionsBefore))
-	}
-
-	if len(scriptRT.reqs) == 0 {
-		t.Fatal("scriptRT recorded no requests")
-	}
-	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
-	if lastReq.SessionID != "perim-q-sess" {
-		t.Errorf("resume request SessionID = %q, want %q (the perimeter run's own external id)", lastReq.SessionID, "perim-q-sess")
 	}
 
 	events, err := s.FileEvents(t.Context(), ticketID)
@@ -1729,6 +1801,84 @@ func TestBuildQuestionWaitsAndResumes(t *testing.T) {
 	if sess.Resumes != 1 {
 		t.Errorf("sessions.resumes after the resume = %d, want 1", sess.Resumes)
 	}
+}
+
+// TestBuildRoundResumesItsOwnSession proves review F045: a build round
+// resumes round.SessionID, not simply the ticket's newest build session.
+// Two build-job sessions exist on the ticket at once here -- task 1's own
+// build question (the older session) and a fix's own build question
+// (started afterward, so its session is the ticket's newest) -- and
+// AnsweredRounds' own newest-first order (design section 4.5) means the
+// first tick resolves the fix's round regardless of which session a
+// LatestSession-based resume would pick (its session and the ticket's
+// newest happen to be the same one there). The second tick's only
+// remaining answered round is task 1's own, older than the ticket's now
+// newest build-job session (the fix's, already resolved but still on
+// record): only round.SessionID, not LatestSession, resumes the right one.
+func TestBuildRoundResumesItsOwnSession(t *testing.T) {
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		questionResult(response.JobBuild, "task-q-sess"),
+		questionResult(response.JobBuild, "fix-q-sess"),
+	}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // task 1 RUN: question
+	if err != nil {
+		t.Fatalf("task RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	taskQ := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &taskQ.ID, Text: "Use SQLite."}); draftErr != nil {
+		t.Fatalf("SaveDraft (task): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch (task): %v", sendErr)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	fixDeps := claimForBuild(t, s, scriptRT, ticketID)
+	fixCommit, err := job.StartFix(t.Context(), ticket, fixDeps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	if err != nil {
+		t.Fatalf("StartFix: %v", err)
+	}
+	apply(t, s, ticket, fixCommit)
+
+	fixQ := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &fixQ.ID, Text: "Retry with a smaller batch."}); draftErr != nil {
+		t.Fatalf("SaveDraft (fix): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch (fix): %v", sendErr)
+	}
+
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-q-sess"))
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	firstResumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // resumes the newest round (fix's)
+	if err != nil {
+		t.Fatalf("first resume (fix round): %v", err)
+	}
+	apply(t, s, ticket, firstResumeCommit)
+
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "task-q-sess"))
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, scriptRT, ticketID)
+	secondResumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resumes the only round left (task's)
+	if err != nil {
+		t.Fatalf("second resume (task round): %v", err)
+	}
+
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if lastReq.SessionID != "task-q-sess" {
+		t.Errorf("resume request SessionID = %q, want %q (task 1's own build session, the round being resolved, not the fix's newer one)", lastReq.SessionID, "task-q-sess")
+	}
+	if !strings.Contains(lastReq.Prompt, "Use SQLite.") {
+		t.Errorf("resume prompt = %q, want task 1's own answer text", lastReq.Prompt)
+	}
+	apply(t, s, ticket, secondResumeCommit)
 }
 
 // TestClaimErrorsResumeAndDelivered proves design section 6.4's own claims
