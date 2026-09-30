@@ -217,6 +217,11 @@ func ensureUnitWorktree(ctx context.Context, t store.Ticket, d Deps) (Project, o
 type unit struct {
 	TaskN int
 	Title string // the commit subject
+
+	// FixRequestID is the fix request marker's own message id (design D22,
+	// section 5.2, 5.3): nil for a task unit, set for a fix unit, whose LAND
+	// commit then also carries "fix landed <id> sha <sha>".
+	FixRequestID *int64
 }
 
 // buildingHandler runs the real building state (design section 6): it
@@ -308,8 +313,26 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 
 	slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "unit_session", "session_state", sessionStateName(state))
 
-	if !ok || state == store.SessionIdless {
-		commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(tasks), nil, nil)
+	return h.advanceUnit(ctx, t, d, proj, wt, plan, u, sess, state, newestRun, ok, reports)
+}
+
+// advanceUnit is the unit-session switch shared by a task unit (building's
+// own Run, above) and a fix unit (the fix driver, fix.go's DriveFix; design
+// D22, #28 gap 1): first turn (no session found, or a session whose
+// external_id never got far enough to be set) runs h.runFirst; outcome
+// "ok" hands off to advanceCheckedRun (the claims-pending resume, CHECK,
+// DESCRIBE, ASK, LAND); outcome "error" resumes with the "invalid" or
+// "interrupted" input, through the resume cap gate; anything else is
+// ErrNoAction. found is the caller's own UnitSession/SessionAfter ok: the
+// fix driver never calls this with found true and state SessionIdless --
+// its own "no usable session yet" case is folded into its own first-turn
+// RUN before advanceUnit is ever reached, since a fix unit's first turn
+// needs the fix's own prompt (prompt.ForFix), not h.runFirst's
+// plan-and-task-text one -- so that branch below only ever fires for a
+// task unit in practice.
+func (h buildingHandler) advanceUnit(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, sess store.Session, state store.SessionState, newestRun store.Run, found bool, reports []store.BuildReportRow) (store.HandlerCommit, error) {
+	if !found || state == store.SessionIdless {
+		commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(response.Tasks(plan)), nil, nil)
 		return withBranchResult(commit, runErr, wt)
 	}
 
@@ -320,7 +343,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 
 	switch outcome {
 	case string(response.OutcomeOk):
-		commit, runErr := h.advanceCheckedRun(ctx, t, d, proj, wt, plan, taskN, sess, state, newestRun.ID, reports)
+		commit, runErr := h.advanceCheckedRun(ctx, t, d, proj, wt, plan, u, sess, state, newestRun.ID, reports)
 		return withBranchResult(commit, runErr, wt)
 
 	case string(response.OutcomeError):
@@ -341,7 +364,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if n == 1 {
 			input = prompt.Invalid(invalidRetryText(reason))
 		}
-		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
+		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, u.TaskN, sess, state)
 		if !mayResume {
 			return withBranchResult(capCommit, capErr, wt)
 		}
@@ -349,7 +372,7 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return withBranchResult(resumeCommit, resumeErr, wt)
 
 	default:
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "unrecognized", "session_state", sessionStateName(state))
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", u.TaskN, "step", "unrecognized", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, ErrNoAction
 	}
 }
@@ -357,28 +380,29 @@ func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 // advanceCheckedRun is the unit session's outcome=="ok" branch (design
 // section 6.4, 6.5, 6.6, 6.7): the claims-pending resume, the not-yet-
 // checked CHECK, and -- once checked -- the tree read into DESCRIBE/ASK or
-// the check-before-landing recheck that itself reaches LAND. Task 14
-// generalizes this out of Run() so a fix unit (taskN 0, no plan task of
-// its own) shares it verbatim with a task unit (AdvanceFix, fix.go): the
+// the check-before-landing recheck that itself reaches LAND. advanceUnit
+// shares it verbatim between a task unit and a fix unit (design D22): the
 // resuming unit's own title is read from its own build_report
 // (report.Report.Title) rather than from the plan, since runBuildResume
 // only ever needs u.TaskN and u.Title, and both are always recoverable
 // from the report by the time a claims-pending resume can exist at all --
 // CHECK itself required a report to write that marker in the first place.
-// rid is the unit session's newest ok run.
-func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, taskN int, sess store.Session, state store.SessionState, rid int64, reports []store.BuildReportRow) (store.HandlerCommit, error) {
+// u carries the caller's own FixRequestID through to LAND unchanged; only
+// its Title is overwritten from the report. rid is the unit session's
+// newest ok run.
+func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, sess store.Session, state store.SessionState, rid int64, reports []store.BuildReportRow) (store.HandlerCommit, error) {
 	report, foundReport := findUnitReport(reports, rid)
 	if !foundReport {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: ticket %d: no build_report for run %d", t.ID, rid)
 	}
-	u := unit{TaskN: taskN, Title: report.Report.Title}
+	u.Title = report.Report.Title
 
 	markerRow, pending, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
 	if markerErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: claim errors marker: %w", markerErr)
 	}
 	if pending {
-		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, taskN, sess, state)
+		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, u.TaskN, sess, state)
 		if !mayResume {
 			return capCommit, capErr
 		}
@@ -405,7 +429,7 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 	}
 
 	if !checked {
-		return h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, true)
+		return h.check(ctx, t, d, proj, wt, plan, u, rid, report, true)
 	}
 
 	events, evErr := d.Store.FileEvents(ctx, t.ID)
@@ -419,10 +443,10 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 	}
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 	if len(extras) == 0 {
-		return h.check(ctx, t, d, proj, wt, plan, taskN, rid, report, false)
+		return h.check(ctx, t, d, proj, wt, plan, u, rid, report, false)
 	}
 
-	return h.describeOrAsk(ctx, t, d, proj, wt, taskN, rid, report, events, changed, extras)
+	return h.describeOrAsk(ctx, t, d, proj, wt, u.TaskN, rid, report, events, changed, extras)
 }
 
 // ---- answered rounds: build question resume, resume cap ------------------
@@ -456,7 +480,14 @@ func (h buildingHandler) enterFromRounds(ctx context.Context, t store.Ticket, d 
 		case kind == response.QuestionKindPerimeter:
 			return h.resolve(ctx, t, d, round)
 		case round.Job == jobBuildName:
-			commit, again, err := h.resumeBuildRound(ctx, t, d, round)
+			u, escalation, uErr := unitForBuildRound(ctx, t, d, round)
+			if uErr != nil {
+				return store.HandlerCommit{}, uErr
+			}
+			if escalation != nil {
+				return *escalation, nil
+			}
+			commit, again, err := h.resumeBuildRound(ctx, t, d, round, u)
 			if again {
 				continue
 			}
@@ -470,15 +501,72 @@ func (h buildingHandler) enterFromRounds(ctx context.Context, t store.Ticket, d 
 	return store.HandlerCommit{}, ErrNoAction
 }
 
+// unitForBuildRound derives the unit an answered build-job round belongs
+// to (design D22, section 6.2, generalized for #28 gap 1's own "resumes
+// that session through resumeBuildRound"): an open fix request whose own
+// session (SessionAfter, the watermark rule of D18) is round's own session
+// is the fix's round; otherwise it is buildTaskUnitInFlight's task, the
+// unit still awaiting the owner's answer (a question outcome never inserts
+// a build_report, so nextTaskN still names it).
+func unitForBuildRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (unit, *store.HandlerCommit, error) {
+	if round.SessionID == nil {
+		return unit{}, nil, errors.New("job: building: answered round: round has no session id")
+	}
+	req, open, err := openFixRequest(ctx, d, t)
+	if err != nil {
+		return unit{}, nil, fmt.Errorf("job: building: answered round: open fix request: %w", err)
+	}
+	if open {
+		maxResumes := d.Machine.Jobs[jobBuildName].MaxResumes
+		fixSess, _, _, ok, sessErr := d.Store.SessionAfter(ctx, t.ID, jobBuildName, req.AfterRunID, maxResumes)
+		if sessErr != nil {
+			return unit{}, nil, fmt.Errorf("job: building: answered round: session after: %w", sessErr)
+		}
+		if ok && fixSess.ID == *round.SessionID {
+			mid := req.MessageID
+			return unit{TaskN: 0, Title: fixSubjectFor[req.Kind], FixRequestID: &mid}, nil, nil
+		}
+	}
+	return buildTaskUnitInFlight(ctx, t, d)
+}
+
+// buildTaskUnitInFlight is unitForBuildRound's own task-unit case (design
+// section 6.2): the plan's lowest unlanded task, the unit still awaiting
+// the owner's answer.
+func buildTaskUnitInFlight(ctx context.Context, t store.Ticket, d Deps) (unit, *store.HandlerCommit, error) {
+	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return unit{}, nil, fmt.Errorf("job: building: answered round: stored plan: %w", err)
+	}
+	if !havePlan {
+		c := buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, "")
+		return unit{}, &c, nil
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return unit{}, nil, fmt.Errorf("job: building: answered round: build reports: %w", err)
+	}
+	taskN, hasNext := nextTaskN(response.Tasks(plan), reports)
+	if !hasNext {
+		return unit{}, nil, fmt.Errorf("job: building: answered round: ticket %d: no unit awaiting an answer", t.ID)
+	}
+	u, foundUnit := unitFor(response.Tasks(plan), taskN)
+	if !foundUnit {
+		return unit{}, nil, fmt.Errorf("job: building: answered round: ticket %d: plan has no task %d", t.ID, taskN)
+	}
+	return u, nil, nil
+}
+
 // resumeBuildRound is design section 6.2's round.Job=="build" branch: the
 // owner's answer to a build run's own question resumes that session with
 // one answer input per question (answerInputsForRound), resolving the
-// round. When the session is exhausted, this either escalates
-// resumes_exhausted once (again=false) or, when that escalation already
-// exists, tells enterFromRounds to try the next answered round in turn
-// (again=true): the preserved round is consumed by the cap resolution
-// (design section 6.9, task 13).
-func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (commit store.HandlerCommit, again bool, err error) {
+// round. u is the round's own unit (design D22: unitForBuildRound for
+// building's own caller, known directly by the fix driver). When the
+// session is exhausted, this either escalates resumes_exhausted once
+// (again=false) or, when that escalation already exists, tells the caller
+// to try the next answered round in turn (again=true): the preserved round
+// is consumed by the cap resolution (design section 6.9, task 13).
+func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d Deps, round store.Round, u unit) (commit store.HandlerCommit, again bool, err error) {
 	if round.SessionID == nil {
 		return store.HandlerCommit{}, false, errors.New("job: building: answered round: round has no session id")
 	}
@@ -498,29 +586,6 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 			return store.HandlerCommit{}, true, nil
 		}
 		return buildCapResumesEscalation(t, d, sess.ID), false, nil
-	}
-
-	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: stored plan: %w", err)
-	}
-	if !havePlan {
-		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), noStoredPlanWhat, noStoredPlanWhy, ""), false, nil
-	}
-	reports, err := d.Store.BuildReports(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: build reports: %w", err)
-	}
-	// The unit still awaiting the owner's answer is always the one step 2
-	// would pick next: a question outcome never inserts a build_report, so
-	// nextTaskN still names this same task.
-	taskN, hasNext := nextTaskN(response.Tasks(plan), reports)
-	if !hasNext {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: ticket %d: no unit awaiting an answer", t.ID)
-	}
-	u, foundUnit := unitFor(response.Tasks(plan), taskN)
-	if !foundUnit {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: ticket %d: plan has no task %d", t.ID, taskN)
 	}
 
 	_, wt, escalation, err := ensureUnitWorktree(ctx, t, d)
@@ -1000,7 +1065,7 @@ func (h buildingHandler) retryCapResumesPerimeter(ctx context.Context, t store.T
 	if err != nil {
 		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: build reports: %w", err)
 	}
-	report, foundReport := findUnlandedReportForTask(reports, taskN)
+	report, foundReport := findUnlandedReportForUnit(reports, unit{TaskN: taskN}, nil)
 	if !foundReport {
 		return store.HandlerCommit{}, 0, fmt.Errorf("job: building: cap_resumes retry: ticket %d: no unlanded build_report for task %d", t.ID, taskN)
 	}
@@ -1502,7 +1567,7 @@ func commandInfraEscalation(t store.Ticket, d Deps, err error) (store.HandlerCom
 // check-before-landing recheck (firstCheck tells them apart only for the
 // "claims ok" marker write). rid is the unit's newest ok run; report is
 // that run's own build_report row.
-func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, taskN int, rid int64, report store.BuildReportRow, firstCheck bool) (store.HandlerCommit, error) {
+func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, rid int64, report store.BuildReportRow, firstCheck bool) (store.HandlerCommit, error) {
 	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, &rid, "test", proj.TestCmd)
 	if err != nil {
 		return commandInfraEscalation(t, d, err)
@@ -1560,7 +1625,7 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 	errs = append(errs, treeErrs...)
 
-	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", taskN, "errors", len(errs), "changed", len(changed), "extras", len(extras))
+	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras))
 
 	switch {
 	case len(errs) > 0:
@@ -1580,18 +1645,20 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		// A command changed the tree since the first check, after the
 		// owner had already decided every earlier extra (task 11's
 		// RESOLVE). Describing the new one is task 10's job.
-		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "describe_new_extra", "session_state", "n/a")
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", u.TaskN, "step", "describe_new_extra", "session_state", "n/a")
 		return store.HandlerCommit{}, ErrNoAction
 	default:
 		approved := changedPathList(changed)
-		return h.land(ctx, t, d, proj, wt, plan, taskN, rid, report, approved)
+		return h.land(ctx, t, d, proj, wt, plan, u, rid, report, approved)
 	}
 }
 
 // land is design section 6.7's LAND: commit exactly approved, record the
 // landed build_report, and transition to reviewing when this was the last
-// task.
-func (h buildingHandler) land(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, taskN int, rid int64, report store.BuildReportRow, approved []string) (store.HandlerCommit, error) {
+// task. When u is a fix unit (u.FixRequestID set), the commit also carries
+// "fix landed <id> sha <sha>" (design D22, section 5.1, 5.3): the marker
+// openFixRequest reads to know this request's own unit has landed.
+func (h buildingHandler) land(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, rid int64, report store.BuildReportRow, approved []string) (store.HandlerCommit, error) {
 	msg := orchestrator.CommitMessage{Title: report.Report.Title, FuncLines: funcLines(plan, approved), Fences: report.Report.Fences}
 	sha, err := proj.Orch.CommitTask(ctx, wt, approved, msg)
 	if err != nil {
@@ -1602,13 +1669,19 @@ func (h buildingHandler) land(ctx context.Context, t store.Ticket, d Deps, proj 
 		return buildEscalation(t, d, string(response.EscalationCodeEnvironment), what, why, err.Error()), nil
 	}
 
-	c, err := landCommit(t, d, plan, taskN, rid, report.Report, sha)
+	c, err := landCommit(t, d, plan, u.TaskN, rid, report.Report, sha)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	slog.Info("unit landed", "ticket_id", t.ID, "run_id", rid, "task_n", taskN, "commit_sha", sha, "files", len(approved))
+	if u.FixRequestID != nil {
+		c.Messages = append(c.Messages, store.Message{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("fix landed %d sha %s", *u.FixRequestID, sha),
+		})
+	}
+	slog.Info("unit landed", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "commit_sha", sha, "files", len(approved))
 	if c.Next != "" {
-		slog.Info("build done", "ticket_id", t.ID, "tasks", len(response.Tasks(plan)), "commits", taskN)
+		slog.Info("build done", "ticket_id", t.ID, "tasks", len(response.Tasks(plan)), "commits", u.TaskN)
 	}
 	return c, nil
 }
@@ -1974,13 +2047,30 @@ func markerForFile(fa response.FileArtifact) string {
 	}
 }
 
-// findUnlandedReportForTask returns reports' unlanded (no CommitSHA) row for
-// taskN, the unit currently in flight for that task.
-func findUnlandedReportForTask(reports []store.BuildReportRow, taskN int) (store.BuildReportRow, bool) {
-	for i := range slices.Backward(reports) {
-		if reports[i].Report.TaskN == taskN && reports[i].Report.CommitSHA == nil {
-			return reports[i], true
+// findUnlandedReportForUnit returns reports' unlanded (no CommitSHA) row
+// for u, the unit currently in flight (design D22, #28 gap 1). A nil
+// runIDs matches on u.TaskN alone, unchanged from before this rename: a
+// task's own number is never reused, so no row of a different unit can
+// share it. A non-nil runIDs (SessionRunIDs of a session after the
+// watermark, design section 5.3) also requires the row's own RunID to
+// belong to it, the scoping a fix unit needs since its TaskN is always 0,
+// shared by every fix that ever ran on the ticket.
+func findUnlandedReportForUnit(reports []store.BuildReportRow, u unit, runIDs []int64) (store.BuildReportRow, bool) {
+	var runSet map[int64]bool
+	if runIDs != nil {
+		runSet = make(map[int64]bool, len(runIDs))
+		for _, id := range runIDs {
+			runSet[id] = true
 		}
+	}
+	for i := range slices.Backward(reports) {
+		if reports[i].Report.TaskN != u.TaskN || reports[i].Report.CommitSHA != nil {
+			continue
+		}
+		if runSet != nil && !runSet[reports[i].RunID] {
+			continue
+		}
+		return reports[i], true
 	}
 	return store.BuildReportRow{}, false
 }
@@ -2271,7 +2361,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: build reports: %w", err)
 	}
-	report, foundReport := findUnlandedReportForTask(reports, taskN)
+	report, foundReport := findUnlandedReportForUnit(reports, unit{TaskN: taskN}, nil)
 	if !foundReport {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: ticket %d: no unlanded build_report for task %d", t.ID, taskN)
 	}

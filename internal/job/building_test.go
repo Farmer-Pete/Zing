@@ -1838,11 +1838,17 @@ func TestBuildRoundResumesItsOwnSession(t *testing.T) {
 		t.Fatalf("SendBatch (task): %v", sendErr)
 	}
 
+	watermark, err := s.MaxRunID(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, watermark)
 	ticket = getTicket(t, s, ticketID)
 	fixDeps := claimForBuild(t, s, scriptRT, ticketID)
-	fixCommit, err := job.StartFix(t.Context(), ticket, fixDeps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	fixReq := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: watermark}
+	fixCommit, err := job.DriveFix(t.Context(), ticket, fixDeps, fixReq)
 	if err != nil {
-		t.Fatalf("StartFix: %v", err)
+		t.Fatalf("DriveFix: %v", err)
 	}
 	apply(t, s, ticket, fixCommit)
 
