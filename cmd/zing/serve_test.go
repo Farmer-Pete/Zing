@@ -852,6 +852,36 @@ func TestServeRemovesTempRootAtStartup(t *testing.T) {
 	}
 }
 
+// TestServeRemovesJudgeDirAtStartup proves removeStartupJudgeDir removes
+// <dataDir>/judge/ whole (PKG9-PLAN.md section 7.3, D19): a stale run's own
+// scenarios folder, left behind by a process that died mid-run, is gone
+// afterward, and a missing directory is not an error.
+func TestServeRemovesJudgeDirAtStartup(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	stale := filepath.Join(dataDir, "judge", "17")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", stale, err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "scenarios.xml"), []byte("<scenario/>\n"), 0o600); err != nil {
+		t.Fatalf("write scenarios.xml: %v", err)
+	}
+
+	if err := removeStartupJudgeDir(dataDir); err != nil {
+		t.Fatalf("removeStartupJudgeDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "judge")); !os.IsNotExist(err) {
+		t.Errorf("<dataDir>/judge still exists after removeStartupJudgeDir (stat err = %v)", err)
+	}
+
+	// A second call, against a directory that no longer has a judge/
+	// subtree, must not error.
+	if err := removeStartupJudgeDir(dataDir); err != nil {
+		t.Errorf("removeStartupJudgeDir (already removed): %v", err)
+	}
+}
+
 // TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured
 // proves the design section 6.13 precedence rule end to end against a real
 // store: with no explicit console.push_token, the first call generates and

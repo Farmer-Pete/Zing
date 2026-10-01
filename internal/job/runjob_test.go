@@ -1,8 +1,10 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -472,6 +474,11 @@ const testBuildLabel = "1"
 // every sandbox test below that needs a scripted build turn.
 const testBuildScriptKey = "build/1/1.xml"
 
+// testSandboxExecArg is Sandbox.Prefix's own argv[0] (internal/sandbox),
+// reused by every test below that just checks a request was wrapped at all
+// (goconst: three or more call sites compared this literal).
+const testSandboxExecArg = "sandbox-exec"
+
 // testSandboxProfile is a minimal, always-loadable seatbelt profile (no
 // rule beyond the two placeholders every real profile carries): these tests
 // are about runJob's own wrapping logic, not about proving the checked-in
@@ -546,7 +553,7 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 	if counting.calls != 1 {
 		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
 	}
-	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != "sandbox-exec" {
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
 		t.Fatalf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
 	}
 	if !slices.ContainsFunc(counting.lastReq.Env, func(kv string) bool { return strings.HasPrefix(kv, "TMPDIR=") }) {
@@ -739,7 +746,7 @@ func TestRunJobPicksProfileByName(t *testing.T) {
 	if counting.calls != 1 {
 		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
 	}
-	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != "sandbox-exec" {
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
 		t.Errorf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
 	}
 	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeOk {
@@ -1034,5 +1041,217 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 	}
 	if run.TaskN == nil || *run.TaskN != 3 {
 		t.Errorf("run.TaskN = %v, want 3", run.TaskN)
+	}
+}
+
+// ---- runJobWith's afterReserve hook (PKG9-PLAN.md section 7.3, D19) ------
+
+// recordingHook is an afterReserve (runjob.go) that records the exact
+// store.Reserved it was called with and whether req already carried the
+// sandbox's own ExecPrefix (it must not: runJobWith only builds the prefix
+// after the hook returns, since the prefix may need to name a file the
+// hook just wrote under the run's own id). It returns scenariosFile and a
+// cleanup that counts its own calls and can be made to fail, plus hookErr.
+type recordingHook struct {
+	calls         int
+	gotRunID      int64
+	hadExecPrefix bool
+	scenariosFile string
+	cleanupCalls  int
+	cleanupErr    error
+	hookErr       error
+}
+
+func (h *recordingHook) hook(_ context.Context, rsv store.Reserved, req *runtime.RunRequest) (scenariosFile string, cleanup func() error, err error) {
+	h.calls++
+	h.gotRunID = rsv.RunID
+	h.hadExecPrefix = len(req.ExecPrefix) != 0
+	return h.scenariosFile, func() error {
+		h.cleanupCalls++
+		return h.cleanupErr
+	}, h.hookErr
+}
+
+// stubRunResult is a fixed-result runtime.Runtime: every call returns res
+// and err unconditionally, regardless of req or ctx. It stands in for the
+// real Fake in the hook tests below that only care how runJobWith's own
+// bookkeeping reacts to rt.Run's outcome (ok, a plain error, or a
+// cancellation), not about a scripted turn.
+type stubRunResult struct {
+	res runtime.RunResult
+	err error
+}
+
+func (s stubRunResult) Run(context.Context, runtime.RunRequest) (runtime.RunResult, error) {
+	return s.res, s.err
+}
+
+// TestRunJobWithHookRunsAfterReserve proves runJobWith calls its
+// afterReserve hook once, after Reserve has already fixed the run (the
+// hook sees the same run id runResult.Reserved carries) and before the
+// sandbox prefix is built (the hook's own req snapshot carries no
+// ExecPrefix yet), and that the sandbox prefix is still built, from the
+// params the hook had a chance to fill, before rt.Run (PKG9-PLAN.md section
+// 7.3).
+func TestRunJobWithHookRunsAfterReserve(t *testing.T) {
+	t.Parallel()
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	h := &recordingHook{}
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, h.hook)
+	if err != nil {
+		t.Fatalf("runJobWith: %v", err)
+	}
+
+	if h.calls != 1 {
+		t.Fatalf("hook calls = %d, want 1", h.calls)
+	}
+	if h.gotRunID != rr.Reserved.RunID {
+		t.Errorf("hook saw rsv.RunID = %d, want %d (the run Reserve fixed)", h.gotRunID, rr.Reserved.RunID)
+	}
+	if h.hadExecPrefix {
+		t.Error("hook's own req already carried an ExecPrefix; want it called before the sandbox prefix is built")
+	}
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
+		t.Errorf("ExecPrefix = %v, want it built (after the hook returned) before rt.Run", counting.lastReq.ExecPrefix)
+	}
+	if counting.calls != 1 {
+		t.Errorf("runtime Run calls = %d, want 1", counting.calls)
+	}
+}
+
+// TestRunJobWithHookCleanupAfterRun proves the hook's own cleanup always
+// runs once rt.Run has returned, whatever it returned: ok, a plain error,
+// or a cancellation (PKG9-PLAN.md section 7.3, matching runJob's own
+// sandbox and private-temp-root cleanups, which already run on every
+// path).
+func TestRunJobWithHookCleanupAfterRun(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"ok", runtime.NewFake(fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}})},
+		{"error", runtime.NewFake(fstest.MapFS{})}, // no script for the build label: rt.Run errors
+		{"canceled", stubRunResult{err: runtime.ErrCanceled}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			sb := loadTestSandboxOrSkip(t)
+
+			s := newRunJobTestStore(t)
+			ticketID := seedRunJobTicket(t, s)
+			ticket := getRunJobTicket(t, s, ticketID)
+			owner, expires := claimRunJobTicket(t, s, ticketID)
+
+			deps := buildSandboxDeps(t, s, c.rt, ticket.ProjectID, owner, expires, sb, true)
+
+			h := &recordingHook{}
+			if _, runErr := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+				runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, h.hook); runErr != nil {
+				t.Logf("runJobWith: %v (expected for the %s case)", runErr, c.name)
+			}
+
+			if h.cleanupCalls != 1 {
+				t.Errorf("hook cleanup calls = %d, want 1 (rt.Run outcome: %s)", h.cleanupCalls, c.name)
+			}
+		})
+	}
+}
+
+// TestRunJobWithHookErrorTerminalizes proves a hook error still returns the
+// reserved run (Reserved.RunID set), the same shape a runtime failure
+// returns, since Reserve has already fixed this call's turn by the time the
+// hook runs: a caller like runAndRoute needs Reserved.RunID != 0 to route
+// the error into postRunFailure rather than leaving the run's outcome NULL
+// forever (PKG9-PLAN.md section 7.3). rt.Run itself is never called: the
+// hook's own error comes before it.
+func TestRunJobWithHookErrorTerminalizes(t *testing.T) {
+	t.Parallel()
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	wantErr := errors.New("write scenarios file: boom")
+	h := &recordingHook{hookErr: wantErr}
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, h.hook)
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if rr.Reserved.RunID == 0 {
+		t.Error("Reserved.RunID = 0, want the run Reserve already fixed")
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0 (the hook errored before rt.Run)", counting.calls)
+	}
+	if h.cleanupCalls != 1 {
+		t.Errorf("hook cleanup calls = %d, want 1 (still run on a hook error)", h.cleanupCalls)
+	}
+}
+
+// TestRunJobWithHookCleanupFailureLogged proves a cleanup error the hook
+// returns is logged at WARN as "run cleanup failed" with ticket_id and
+// run_id, and never replaces the run's own (successful) result (PKG9-PLAN.md
+// section 7.3). Not parallel: it calls slog.SetDefault to capture a log
+// line, which swaps the process-wide default logger.
+func TestRunJobWithHookCleanupFailureLogged(t *testing.T) {
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	cleanupErr := errors.New("remove scenarios dir: boom")
+	h := &recordingHook{cleanupErr: cleanupErr}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, h.hook)
+	if err != nil {
+		t.Fatalf("runJobWith: %v", err)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "run cleanup failed") {
+		t.Fatalf("log missing \"run cleanup failed\"; got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "ticket_id="+strconv.FormatInt(ticket.ID, 10)) {
+		t.Errorf("log missing ticket_id=%d; got:\n%s", ticket.ID, logged)
+	}
+	if !strings.Contains(logged, "run_id="+strconv.FormatInt(rr.Reserved.RunID, 10)) {
+		t.Errorf("log missing run_id=%d; got:\n%s", rr.Reserved.RunID, logged)
+	}
+	if !strings.Contains(logged, cleanupErr.Error()) {
+		t.Errorf("log missing the cleanup error text; got:\n%s", logged)
 	}
 }

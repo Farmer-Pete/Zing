@@ -51,6 +51,38 @@ func runJob(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
 	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string,
 ) (runResult, error) {
+	return runJobWith(ctx, d, t, jobName, su, req, taskN, lens, nil)
+}
+
+// afterReserve runs after Reserve and before rt.Run (PKG9-PLAN.md section
+// 7.3, D19): it may add to req and returns the path the judge profile's
+// SCENARIOS_FILE parameter takes (or "" for a job that needs none) and a
+// cleanup runJobWith defers so it runs after rt.Run returns, ahead of the
+// sandbox run directory's own cleanup (LIFO: the hook's own cleanup first,
+// then the run directory it was written alongside). A cleanup error is
+// logged at WARN as "run cleanup failed" with ticket_id and run_id; it
+// never replaces the run's own result. hook runs only for a sandboxed job
+// (one whose sandbox profile is available); runJobWith never calls it for
+// an unsandboxed job.
+type afterReserve func(ctx context.Context, rsv store.Reserved, req *runtime.RunRequest) (scenariosFile string, cleanup func() error, err error)
+
+// runJobWith is runJob with an afterReserve hook (PKG9-PLAN.md section
+// 7.3): runJob itself calls this with a nil hook, which reproduces its
+// exact former behavior byte for byte. For a job whose profile is
+// sandboxed, the sandbox's availability is still checked before Reserve (as
+// a hookless run always has), but with a non-nil hook, the sandbox's
+// command prefix is built only after Reserve and the hook both return,
+// because the prefix may need to name a file the hook just wrote under the
+// run's own id (judging.go's writeScenariosFile, M2 task 7). A hook error
+// surfaces after Reserve has already fixed this call's turn, so runJobWith
+// still returns the reserved run (Reserved.RunID set) alongside it, the
+// same shape a runtime failure returns, letting a caller like runAndRoute
+// terminalize the run (postRunFailure) rather than orphaning it.
+func runJobWith(
+	ctx context.Context, d Deps, t store.Ticket, jobName string,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string,
+	hook afterReserve,
+) (runResult, error) {
 	jobCfg, ok := d.Machine.Jobs[jobName]
 	if !ok {
 		return runResult{}, fmt.Errorf("%w: unknown job %q", ErrConfig, jobName)
@@ -77,7 +109,7 @@ func runJob(
 		return runResult{}, ErrBudget
 	}
 
-	proj, err := d.Store.ProjectForTicket(ctx, t.ID)
+	storeProj, err := d.Store.ProjectForTicket(ctx, t.ID)
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: project for ticket %d: %w", jobName, t.ID, err)
 	}
@@ -85,35 +117,84 @@ func runJob(
 	// other caller leaves it empty, and falls back to the ticket's project
 	// checkout (design section 5.5).
 	if req.WorkDir == "" {
-		req.WorkDir = proj.LocalPath
+		req.WorkDir = storeProj.LocalPath
 	}
 
 	req.Tools = jobCfg.Tools
 	req.Timeout = time.Duration(jobCfg.TimeoutMinutes) * time.Minute
 
 	// rsv is declared here, ahead of the sandbox/temp-root step's own defer,
-	// so a private temp root's cleanup closure (below) can log the run id
-	// Reserve fixes further down: a deferred closure sees a captured
-	// variable's value as of when it runs, not when it was deferred, as
-	// long as the variable is already in scope (design section 7.3: a
-	// cleanup error is logged at WARN with ticket_id and run_id).
+	// so a cleanup closure (below) can log the run id Reserve fixes further
+	// down: a deferred closure sees a captured variable's value as of when
+	// it runs, not when it was deferred, as long as the variable is already
+	// in scope (design section 7.3: a cleanup error is logged at WARN with
+	// ticket_id and run_id).
 	var rsv store.Reserved
 
+	// sb and params are filled by the sandboxed branch below and read again,
+	// after Reserve, only when a hook defers the sandbox prefix (the judge
+	// profile, PKG9-PLAN.md section 7.3).
+	var sb sandbox.Sandbox
+	var params sandbox.Params
+	sandboxed := false
+
 	if jobCfg.Sandbox != "" {
-		sb, ok := d.Sandboxes.For(jobCfg.Sandbox)
-		if !ok {
+		var sandboxOK bool
+		sb, sandboxOK = d.Sandboxes.For(jobCfg.Sandbox)
+		if !sandboxOK {
 			return runResult{}, fmt.Errorf("%w: job %s: unknown sandbox profile %q", ErrConfig, jobName, jobCfg.Sandbox)
 		}
-		cleanup, sandboxErr := applySandbox(sb, d, t, jobCfg.Sandbox, req.WorkDir, &req)
-		// Deferred unconditionally, even on a returned error: applySandbox
-		// never returns a nil cleanup (noopCleanup stands in when there is
-		// nothing to remove). Runs after rt.Run has returned, below: the run
-		// directory must stay in place for the whole life of the sandboxed
-		// process (design section 5.5).
-		defer cleanup()
-		if sandboxErr != nil {
-			return runResult{}, sandboxErr
+		switch {
+		case sb.Available():
+			sandboxed = true
+			jobProj, projOK := d.Projects[t.ProjectID]
+			if !projOK {
+				return runResult{}, fmt.Errorf("%w: no sandbox project for ticket %d (project %d)", ErrConfig, t.ID, t.ProjectID)
+			}
+
+			runDir, runDirCleanup, dirErr := sb.NewRunDir()
+			if dirErr != nil {
+				return runResult{}, fmt.Errorf("%w: sandbox run dir: %v", ErrConfig, dirErr) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
+			}
+			// Deferred unconditionally, even on a later error: it must stay
+			// in place for the whole life of the sandboxed process (design
+			// section 5.5), and os.RemoveAll is safe to call more than once.
+			defer runDirCleanup()
+
+			params, err = sb.ParamsFor(req.WorkDir, jobProj.RepoGit, runDir)
+			if err != nil {
+				return runResult{}, fmt.Errorf("%w: sandbox params: %v", ErrConfig, err) //nolint:errorlint // see above
+			}
+
+			if jobCfg.Sandbox == sandboxProfileJudge {
+				if d.JudgeCodexHome == "" {
+					return runResult{}, fmt.Errorf("%w: judge codex home is not configured", ErrConfig)
+				}
+				params.CodexHome = d.JudgeCodexHome
+				// Codex's own TLS stack needs com.apple.SecurityServer
+				// unless told to use rustls and a CA bundle instead; D26
+				// denies that Mach service, so CODEX_CA_CERTIFICATE must
+				// point codex at one (M1 task 7's host probes: without it,
+				// Codex under the judge profile fails TLS with
+				// "SecurityServer" denied).
+				req.Env = append(req.Env, "CODEX_CA_CERTIFICATE=/etc/ssl/cert.pem")
+			}
+
+			// With no hook, the prefix is built now, exactly as every
+			// sandboxed job has always had it: Reserve below only fixes
+			// the run id, which nothing here needs yet.
+			if hook == nil {
+				if finishErr := finishSandboxRequest(sb, params, &req); finishErr != nil {
+					return runResult{}, finishErr
+				}
+			}
+		case d.RequireSandbox:
+			return runResult{}, ErrSandbox
 		}
+		// Unavailable and not required: the fake-runtime-suite case (design
+		// D5). The job runs unwrapped, exactly like today, with no private
+		// temp root either (a job that names a sandbox profile never falls
+		// back to one, whether or not that profile loaded).
 	} else {
 		// A job naming no sandbox (classify, planning, planreview) still
 		// gets a private temp root under DATA_DIR (PKG9-PLAN.md section
@@ -141,6 +222,30 @@ func runJob(
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, reserveErr)
 	}
 	req.RunToken = strconv.FormatInt(rsv.RunID, 10)
+
+	if sandboxed && hook != nil {
+		scenariosFile, hookCleanup, hookErr := hook(runCtx, rsv, &req)
+		if hookCleanup != nil {
+			// Deferred ahead of rt.Run below, so it runs after rt.Run
+			// returns but before the run directory's own cleanup above
+			// (LIFO): the scenarios file lives inside the run's own
+			// process tree reach, not the run directory, so the order
+			// between the two never matters in practice, but this is the
+			// one that matches 7.3's own step-by-step removal story.
+			defer func() {
+				if rmErr := hookCleanup(); rmErr != nil {
+					slog.Warn("run cleanup failed", "ticket_id", t.ID, "run_id", rsv.RunID, "error", rmErr)
+				}
+			}()
+		}
+		if hookErr != nil {
+			return runResult{Reserved: rsv}, hookErr
+		}
+		params.ScenariosFile = scenariosFile
+		if finishErr := finishSandboxRequest(sb, params, &req); finishErr != nil {
+			return runResult{Reserved: rsv}, finishErr
+		}
+	}
 
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
@@ -201,91 +306,34 @@ func perimeterLabel(taskN, i int) string {
 // unit"), first turn and every resume alike (fix.go's own StartFix).
 const fixRunLabel = "fix"
 
-// noopCleanup is applySandbox's own "nothing to clean up" return: a real
-// closure rather than a nil func, so its (cleanup, error) result is never
-// the (nil, nil) shape (nilnil), and runJob can defer it unconditionally.
-func noopCleanup() {}
-
 // sandboxProfileJudge is the one machine.toml job.sandbox value that takes
 // Deps.JudgeCodexHome (PKG9-PLAN.md section 4.3, 4.7, 7.3, D27):
 // machine.go's own validateJob already refuses any job.sandbox value but
 // "", "build", "readonly", or "judge", so this is the one of those four
-// applySandbox ever treats specially.
+// runJobWith ever treats specially.
 const sandboxProfileJudge = "judge"
 
-// applySandbox is design section 5.5's sandbox step, run after WorkDir,
-// Tools, and Timeout are filled and before Reserve, for any job whose
-// machine.toml entry names a sandbox (profileName, jobCfg.Sandbox). With
-// the sandbox available, it reserves a fresh run directory, builds req's
-// ExecPrefix and appends its Env, all from d.Projects[t.ProjectID]'s own
-// RepoGit, and returns the run directory's cleanup for the caller to defer
-// (nothing is reserved yet, so runJob's own defer chain, not this
-// function, decides when it runs). It also overwrites req.WorkDir with
-// the sandbox's own resolved worktree (ParamsFor's Worktree), so the CLI
-// runs with its working directory equal to the path the profile's
-// WORKTREE rule and TRANSCRIPTS folder actually name, not a path that
-// reaches the same directory through a symlink (task 16a: a worktree
-// under macOS's own /var -> /private/var symlink otherwise fails every
-// write with EPERM, since seatbelt matches subpath against the resolved
-// path). For profileName == "judge" (PKG9-PLAN.md section 7.3, D27), it
-// also fills Params.CodexHome from d.JudgeCodexHome, itself ErrConfig
-// ("job: judge codex home is not configured") when empty, checked before
-// Prefix's own deeper, profile-agnostic "both or neither" rule
-// (sandbox.errJudgeParamsIncomplete) so a misconfigured zing.toml is
-// reported with this clearer text. With the sandbox unavailable, it
-// returns ErrSandbox when d.RequireSandbox, or noopCleanup and no error
-// for a suite on the fake runtime. Every failure short of an
-// unavailable-and-required sandbox is a configuration error (design
-// section 5.5): a job named a sandbox but this process has no Project row
-// for the ticket, or the sandbox's own run-dir, param, or prefix calls
-// failed.
-func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, profileName, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
-	if !sb.Available() {
-		if d.RequireSandbox {
-			return noopCleanup, ErrSandbox
-		}
-		return noopCleanup, nil
-	}
-
-	proj, ok := d.Projects[t.ProjectID]
-	if !ok {
-		return noopCleanup, fmt.Errorf("%w: no sandbox project for ticket %d (project %d)", ErrConfig, t.ID, t.ProjectID)
-	}
-
-	runDir, cleanup, err := sb.NewRunDir()
-	if err != nil {
-		return noopCleanup, fmt.Errorf("%w: sandbox run dir: %v", ErrConfig, err) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
-	}
-
-	p, err := sb.ParamsFor(workDir, proj.RepoGit, runDir)
-	if err != nil {
-		cleanup()
-		return noopCleanup, fmt.Errorf("%w: sandbox params: %v", ErrConfig, err) //nolint:errorlint // see above
-	}
-
-	if profileName == sandboxProfileJudge {
-		if d.JudgeCodexHome == "" {
-			cleanup()
-			return noopCleanup, fmt.Errorf("%w: judge codex home is not configured", ErrConfig)
-		}
-		p.CodexHome = d.JudgeCodexHome
-		// Codex's own TLS stack needs com.apple.SecurityServer unless told
-		// to use rustls and a CA bundle instead; D26 denies that Mach
-		// service, so CODEX_CA_CERTIFICATE must point codex at one (M1 task
-		// 7's host probes: without it, Codex under the judge profile fails
-		// TLS with "SecurityServer" denied).
-		req.Env = append(req.Env, "CODEX_CA_CERTIFICATE=/etc/ssl/cert.pem")
-	}
-
+// finishSandboxRequest is design section 5.5's own last sandbox step: build
+// the sandbox-exec prefix from p and append it to req, append the
+// sandbox's own Env, and overwrite req.WorkDir with the sandbox's resolved
+// worktree (ParamsFor's Worktree), so the CLI runs with its working
+// directory equal to the path the profile's WORKTREE rule and TRANSCRIPTS
+// folder actually name, not a path that reaches the same directory through
+// a symlink (task 16a: a worktree under macOS's own /var -> /private/var
+// symlink otherwise fails every write with EPERM, since seatbelt matches
+// subpath against the resolved path). runJobWith calls this before Reserve
+// for every sandboxed job but a hooked judge run (PKG9-PLAN.md section
+// 7.3), where it waits until the hook has filled p.ScenariosFile from the
+// run id Reserve just returned.
+func finishSandboxRequest(sb sandbox.Sandbox, p sandbox.Params, req *runtime.RunRequest) error {
 	prefix, err := sb.Prefix(p)
 	if err != nil {
-		cleanup()
-		return noopCleanup, fmt.Errorf("%w: sandbox prefix: %v", ErrConfig, err) //nolint:errorlint // see above
+		return fmt.Errorf("%w: sandbox prefix: %v", ErrConfig, err) //nolint:errorlint // ErrConfig is the sentinel this wraps; err's own type carries nothing a caller matches on
 	}
 	req.ExecPrefix = prefix
 	req.Env = append(req.Env, sb.Env(p, os.Getenv("PATH"))...)
 	req.WorkDir = p.Worktree
-	return cleanup, nil
+	return nil
 }
 
 // privateTempRootIDBytes is the number of random bytes newPrivateTempRoot
@@ -294,9 +342,9 @@ func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, profileName, workD
 const privateTempRootIDBytes = 8
 
 // noopCleanupErr is applyPrivateTempRoot's own "nothing to clean up"
-// return, the func() error twin of noopCleanup (applyPrivateTempRoot's own
-// cleanup can fail to remove what it created, unlike applySandbox's, so its
-// signature carries an error).
+// return: a real closure rather than a nil func, so its (cleanup, error)
+// result is never the (nil, nil) shape (nilnil), and runJobWith can defer
+// it unconditionally.
 func noopCleanupErr() error { return nil }
 
 // newPrivateTempRoot creates <dataDir>/tmp/run/<16 hex>/, with "tmp" and

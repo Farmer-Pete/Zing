@@ -2,298 +2,96 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
-
-	"zing/internal/store"
 )
 
-// scenariosTestOwner is the fixed claim owner every scenarios_test.go
-// fixture uses, so a single expires instant fences every Reserve call the
-// same way InsertTicket fenced the ticket (store.Reserve, design section
-// 4.5).
-const scenariosTestOwner = "scenarios-test"
+// scenariosTokenEnv and scenariosFileEnv name the two env vars scenarios
+// reads, so every fixture's getenv stub agrees with them (goconst).
+const (
+	scenariosTokenEnv = "ZING_RUN_TOKEN"
+	scenariosFileEnv  = "ZING_SCENARIOS_FILE"
+)
 
-// scenariosTokenEnv is the env var name scenarios reads ZING_RUN_TOKEN
-// from, named once here so every fixture's getenv stub agrees with it
-// (goconst).
-const scenariosTokenEnv = "ZING_RUN_TOKEN"
-
-// planExample is internal/store/examples/artifacts/plan.json, verbatim: a
-// fully valid "plan" artifact payload (design section 4.5's InsertArtifact
-// validates every artifact against its schema on insert). Its content is
-// irrelevant to zing scenarios, which never reads the plan artifact's
-// payload -- only its run_id and version (store.CurrentCohort) -- so any
-// schema-valid plan works as the cohort's producing artifact.
-const planExample = `{
-  "overview": {
-    "objective": "Stop checkout from crashing on an empty cart.",
-    "context": "internal/cart handles cart state; internal/checkout reads it at payment time.",
-    "problem": {
-      "text": "checkout panics when cart.Items is nil instead of an empty slice.",
-      "loop": {
-        "cmd": "go test ./internal/cart/... -run TestEmptyCart",
-        "text": "fails: nil pointer dereference in checkout.Total"
-      },
-      "repro": "create a cart, call Checkout without adding items",
-      "hypotheses": [
-        {
-          "rank": 1,
-          "cause": "NewCart never initializes Items",
-          "prediction": "initializing Items to []Item{} makes the loop pass"
-        }
-      ]
-    },
-    "goals": ["checkout never panics on an empty cart"],
-    "nongoals": ["changing the checkout API"]
-  },
-  "design": {
-    "demo": {
-      "cmd": "go run ./cmd/demo -empty-cart",
-      "text": "an empty cart checks out for zero dollars instead of crashing"
-    },
-    "shape": "NewCart initializes Items to an empty slice; checkout reads it unchanged.",
-    "changes": [
-      {
-        "path": "internal/cart/cart.go",
-        "symbol": "NewCart",
-        "kind": "modified",
-        "callers": "checkout.New",
-        "callees": "none",
-        "before": "Items field left at its zero value (nil)",
-        "after": "Items: make([]Item, 0)"
-      }
-    ],
-    "types": [],
-    "migrations": { "migrations": [] }
-  },
-  "delivery": {
-    "files": [
-      { "path": "internal/cart/cart.go", "action": "modify", "reason": "initialize Items to an empty slice" }
-    ],
-    "deletions": { "deletions": [] },
-    "tests": [
-      {
-        "name": "TestEmptyCart_ReturnsEmptyOrder",
-        "seam": "cart.NewCart",
-        "kind": "regression",
-        "mocks": "",
-        "asserts": "checkout of a freshly created cart returns a zero-item order, no panic"
-      }
-    ],
-    "tasks": [
-      { "n": 1, "test": "TestEmptyCart_ReturnsEmptyOrder", "demo": true, "text": "Initialize cart.Items to an empty slice in NewCart." }
-    ]
-  },
-  "review": {
-    "trust_root": "none",
-    "alternatives": ["guard checkout.Total with a nil check instead of fixing the source"],
-    "risks": ["other constructors that build a Cart by struct literal still skip this initializer"]
-  }
-}`
-
-// newScenariosTestStore opens a fresh, migrated store in a temp directory,
-// closed on test cleanup.
-func newScenariosTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := st.Close(); err != nil {
-			t.Fatalf("store.Close: %v", err)
-		}
-	})
-	return st
+// scenariosGetenv builds a getenv stub serving exactly the env vars in vals
+// (ZING_RUN_TOKEN, ZING_SCENARIOS_FILE, or anything else a test wants to
+// probe), "" for every other name.
+func scenariosGetenv(vals map[string]string) func(string) string {
+	return func(k string) string { return vals[k] }
 }
 
-// seedClaimedTicket inserts one project and one queued ticket already
-// claimed by scenariosTestOwner with a one-hour lease, returning the ticket
-// id and the exact expires instant every Reserve call on it must fence
-// against.
-func seedClaimedTicket(t *testing.T, st *store.Store) (ticketID int64, expires time.Time) {
+// writeScenariosFixture writes content at <dir>/judge/<runID>/scenarios.xml
+// (dir 0700, file 0600, internal/job/judging.go's own writeScenariosFile
+// shape) and returns the file's path.
+func writeScenariosFixture(t *testing.T, dir string, runID int64, content string) string {
 	t.Helper()
-	ctx := t.Context()
-
-	expires = time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	owner := scenariosTestOwner
-
-	projectID, err := st.EnsureProject(ctx, store.Project{
-		Name: "scenarios-test-project", RepoURL: "https://example.com/x", LocalPath: t.TempDir(), Tracker: testServeTracker,
-	})
-	if err != nil {
-		t.Fatalf("EnsureProject: %v", err)
+	runDir := filepath.Join(dir, "judge", strconv.FormatInt(runID, 10))
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runDir, err)
 	}
-
-	ticketID, err = st.InsertTicket(ctx, store.Ticket{
-		ProjectID: projectID, TrackerRef: "1", Title: "t", State: "queued",
-		ClaimOwner: &owner, ClaimExpiresAt: &expires,
-	})
-	if err != nil {
-		t.Fatalf("InsertTicket: %v", err)
+	path := filepath.Join(runDir, "scenarios.xml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
-	return ticketID, expires
+	return path
 }
 
-// reserveRun reserves and returns the run id of a fresh session of job job
-// on ticketID, under the claim seedClaimedTicket already took.
-func reserveRun(t *testing.T, st *store.Store, ticketID int64, expires time.Time, job string) int64 {
-	t.Helper()
-	rsv, err := st.Reserve(t.Context(), ticketID, scenariosTestOwner, expires,
-		store.SessionUpsert{Job: job, Runtime: "fake"}, store.RunSeed{Model: "fake-model"})
-	if err != nil {
-		t.Fatalf("Reserve(%s): %v", job, err)
-	}
-	return rsv.RunID
-}
-
-// scenarioPayload builds a schema-valid "scenario" artifact payload
-// (internal/store/schemas/artifacts/scenario.json requires check_cmd
-// present, even as an empty string).
-func scenarioPayload(t *testing.T, id, kind, checkCmd, given, when, then string) []byte {
-	t.Helper()
-	payload := struct {
-		ID       string `json:"id"`
-		Kind     string `json:"kind"`
-		CheckCmd string `json:"check_cmd"`
-		Given    string `json:"given"`
-		When     string `json:"when"`
-		Then     string `json:"then"`
-	}{id, kind, checkCmd, given, when, then}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal scenario payload: %v", err)
-	}
-	return b
-}
-
-// insertPlan inserts a schema-valid "plan" artifact for ticketID at
-// version, produced by runID (nil for a legacy plan with no producing run).
-func insertPlan(t *testing.T, st *store.Store, ticketID int64, runID *int64, version int) {
-	t.Helper()
-	if _, err := st.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, RunID: runID, Type: "plan", Version: version, Payload: []byte(planExample),
-	}); err != nil {
-		t.Fatalf("InsertArtifact(plan): %v", err)
-	}
-}
-
-// insertScenario inserts a schema-valid "scenario" artifact for ticketID,
-// produced by runID, sealed at sealedAt (nil for unsealed).
-func insertScenario(t *testing.T, st *store.Store, ticketID, runID int64, sealedAt *time.Time, id, kind, checkCmd, given, when, then string) {
-	t.Helper()
-	if _, err := st.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, RunID: &runID, Type: "scenario", Version: 1,
-		Payload: scenarioPayload(t, id, kind, checkCmd, given, when, then), SealedAt: sealedAt,
-	}); err != nil {
-		t.Fatalf("InsertArtifact(scenario %s): %v", id, err)
-	}
-}
-
-// TestScenarios_JudgeFixturePrintsSealedScenariosInInsertionOrder pins the
-// exact bytes zing scenarios prints for a judge run reading a ticket's
-// current, sealed cohort (design section 8): three sealed scenarios, in
-// insertion order, one XML element per line; the empty check_cmd on s1 omits
-// the check attribute (Scenario.Check's omitempty tag); s2's check_cmd
-// carries '&' and '<', escaped the standard way; the fourth, unsealed
-// scenario (s4) never appears.
-func TestScenarios_JudgeFixturePrintsSealedScenariosInInsertionOrder(t *testing.T) {
+// TestScenariosPrintsFile proves the happy path (PKG9-PLAN.md section 7.3):
+// a ZING_RUN_TOKEN naming a positive decimal run id and a ZING_SCENARIOS_FILE
+// ending in "/judge/<token>/scenarios.xml" is copied to stdout byte for
+// byte, with nothing on stderr.
+func TestScenariosPrintsFile(t *testing.T) {
 	t.Parallel()
-	st := newScenariosTestStore(t)
-	ticketID, expires := seedClaimedTicket(t, st)
-
-	planRunID := reserveRun(t, st, ticketID, expires, "planning")
-	insertPlan(t, st, ticketID, &planRunID, 1)
-
-	sealedAt := time.Now().UTC().Truncate(time.Second)
-	insertScenario(t, st, ticketID, planRunID, &sealedAt, "s1", "behavior", "", "a signed-out user", "they open the dashboard", "they are redirected to sign in")
-	insertScenario(t, st, ticketID, planRunID, &sealedAt, "s2", "negative", `go test -run "A && B < C"`, "a malformed token", "the middleware checks it", "the request is rejected")
-	insertScenario(t, st, ticketID, planRunID, &sealedAt, "s3", "performance", "go test -bench BenchDashboard", "a warm cache", "the dashboard renders", "it renders under 200ms")
-	insertScenario(t, st, ticketID, planRunID, nil, "s4", "behavior", "", "an unsealed scenario", "it is never reviewed", "it never ships")
-
-	judgeRunID := reserveRun(t, st, ticketID, expires, "judge")
+	const runID = int64(42)
+	const content = `<scenario id="s1" kind="behavior"><given>g</given><when>w</when><then>t</then></scenario>` + "\n" +
+		`<scenario id="s2" kind="negative" check="go test -run &#34;A &amp;&amp; B &lt; C&#34;"><given>g2</given><when>w2</when><then>t2</then></scenario>` + "\n"
+	path := writeScenariosFixture(t, t.TempDir(), runID, content)
 
 	var out, errOut bytes.Buffer
-	getenv := func(k string) string {
-		if k == scenariosTokenEnv {
-			return strconv.FormatInt(judgeRunID, 10)
-		}
-		return ""
-	}
-	code := scenarios(t.Context(), st, getenv, &out, &errOut)
+	code := scenarios(scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  path,
+	}), &out, &errOut)
 
 	if code != 0 {
 		t.Errorf("code = %d, want 0 (stderr: %q)", code, errOut.String())
 	}
-	want := `<scenario id="s1" kind="behavior"><given>a signed-out user</given><when>they open the dashboard</when><then>they are redirected to sign in</then></scenario>` + "\n" +
-		`<scenario id="s2" kind="negative" check="go test -run &#34;A &amp;&amp; B &lt; C&#34;"><given>a malformed token</given><when>the middleware checks it</when><then>the request is rejected</then></scenario>` + "\n" +
-		`<scenario id="s3" kind="performance" check="go test -bench BenchDashboard"><given>a warm cache</given><when>the dashboard renders</when><then>it renders under 200ms</then></scenario>` + "\n"
-	if out.String() != want {
-		t.Errorf("stdout =\n%q\nwant\n%q", out.String(), want)
+	if out.String() != content {
+		t.Errorf("stdout = %q, want %q", out.String(), content)
 	}
 	if errOut.String() != "" {
 		t.Errorf("stderr = %q, want empty", errOut.String())
 	}
 }
 
-// TestScenarios_NonJudgeRunExitsTwo proves a build (or any other non-judge)
-// session's run is refused with the exact stderr text and nothing on
-// stdout, even though the ticket has a perfectly good sealed cohort (design
-// section 8 step 3).
-func TestScenarios_NonJudgeRunExitsTwo(t *testing.T) {
+// TestScenariosNoRunToken covers every "no run context" trigger (PKG9-PLAN.md
+// section 7.3 step 1): a missing ZING_RUN_TOKEN, a non-numeric one, zero, a
+// negative one, and one with a leading zero (parseRunToken's own exact
+// round-trip check) -- each exits 2 with the exact stderr text and nothing
+// on stdout, regardless of ZING_SCENARIOS_FILE.
+func TestScenariosNoRunToken(t *testing.T) {
 	t.Parallel()
-	st := newScenariosTestStore(t)
-	ticketID, expires := seedClaimedTicket(t, st)
-	buildRunID := reserveRun(t, st, ticketID, expires, "build")
-
-	var out, errOut bytes.Buffer
-	getenv := func(k string) string {
-		if k == scenariosTokenEnv {
-			return strconv.FormatInt(buildRunID, 10)
-		}
-		return ""
-	}
-	code := scenarios(t.Context(), st, getenv, &out, &errOut)
-
-	if code != 2 {
-		t.Errorf("code = %d, want 2", code)
-	}
-	if want := scenariosNotJudge + "\n"; errOut.String() != want {
-		t.Errorf("stderr = %q, want %q", errOut.String(), want)
-	}
-	if out.String() != "" {
-		t.Errorf("stdout = %q, want empty", out.String())
-	}
-}
-
-// TestScenarios_NoRunContext covers every "no run context" trigger (design
-// section 8 step 1-2): a missing ZING_RUN_TOKEN, a non-numeric one, and one
-// naming a run that does not exist -- each exits 2 with the exact stderr
-// text.
-func TestScenarios_NoRunContext(t *testing.T) {
-	t.Parallel()
-	st := newScenariosTestStore(t)
+	dir := t.TempDir()
+	path := writeScenariosFixture(t, dir, 1, "<scenario></scenario>\n")
 
 	cases := map[string]string{
-		"missing token":     "",
-		"non-numeric token": "abc",
-		"unknown run id":    "999999",
+		"missing token":  "",
+		"non-numeric":    "abc",
+		"zero":           "0",
+		"negative":       "-1",
+		"leading zero":   "01",
+		"trailing space": "1 ", // not a clean decimal round-trip
 	}
 	for name, token := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var out, errOut bytes.Buffer
-			getenv := func(k string) string {
-				if k == scenariosTokenEnv {
-					return token
-				}
-				return ""
-			}
-			code := scenarios(t.Context(), st, getenv, &out, &errOut)
+			code := scenarios(scenariosGetenv(map[string]string{
+				scenariosTokenEnv: token,
+				scenariosFileEnv:  path,
+			}), &out, &errOut)
 
 			if code != 2 {
 				t.Errorf("code = %d, want 2", code)
@@ -308,97 +106,86 @@ func TestScenarios_NoRunContext(t *testing.T) {
 	}
 }
 
-// TestScenarios_RunContextInfraErrorExitsOne proves an operational
-// RunContext failure (here, a closed store) is reported as exit 1, not the
-// exit-2 "no run context" path a missing or unknown token takes (design
-// section 8 step 2): only sql.ErrNoRows is a user-input problem.
-func TestScenarios_RunContextInfraErrorExitsOne(t *testing.T) {
+// TestScenariosFileTokenMismatch proves ZING_SCENARIOS_FILE naming a run id
+// other than ZING_RUN_TOKEN's own is refused with the exact stderr text
+// (PKG9-PLAN.md section 7.3 step 2), even though the file exists and is
+// perfectly readable: the path's own token is the check, not whether a read
+// would succeed.
+func TestScenariosFileTokenMismatch(t *testing.T) {
 	t.Parallel()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	if closeErr := st.Close(); closeErr != nil {
-		t.Fatalf("store.Close: %v", closeErr)
-	}
+	dir := t.TempDir()
+	path := writeScenariosFixture(t, dir, 7, "<scenario></scenario>\n")
 
 	var out, errOut bytes.Buffer
-	getenv := func(k string) string {
-		if k == scenariosTokenEnv {
-			return "1"
-		}
-		return ""
-	}
-	code := scenarios(t.Context(), st, getenv, &out, &errOut)
+	code := scenarios(scenariosGetenv(map[string]string{
+		scenariosTokenEnv: "8", // the run token names a different run than the file's own path
+		scenariosFileEnv:  path,
+	}), &out, &errOut)
 
-	if code != 1 {
-		t.Errorf("code = %d, want 1 (operational error, not a bad token)", code)
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
 	}
-	if got := errOut.String(); got == scenariosNoRunContext+"\n" {
-		t.Errorf("stderr = %q, want an operational error, not the no-run-context text", got)
+	if want := scenariosNotJudge + "\n"; errOut.String() != want {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
 	}
 	if out.String() != "" {
 		t.Errorf("stdout = %q, want empty", out.String())
 	}
 }
 
-// TestScenarios_NoSealedRowsPrintsNothing proves a cohort whose scenarios
-// are none of them sealed yet prints nothing and exits 0 (design section 8
-// step 5): the gate has not sealed it, so the judge sees no scenarios,
-// never a partial cohort.
-func TestScenarios_NoSealedRowsPrintsNothing(t *testing.T) {
+// TestScenariosFileRelative proves a relative ZING_SCENARIOS_FILE is
+// refused with the exact "only a judge run" stderr text (PKG9-PLAN.md
+// section 7.3 step 2: "must be ... absolute"), even when its own suffix
+// would otherwise match the run token.
+func TestScenariosFileRelative(t *testing.T) {
 	t.Parallel()
-	st := newScenariosTestStore(t)
-	ticketID, expires := seedClaimedTicket(t, st)
-
-	planRunID := reserveRun(t, st, ticketID, expires, "planning")
-	insertPlan(t, st, ticketID, &planRunID, 1)
-	insertScenario(t, st, ticketID, planRunID, nil, "s1", "behavior", "", "g", "w", "t")
-
-	judgeRunID := reserveRun(t, st, ticketID, expires, "judge")
+	const runID = int64(3)
+	relative := filepath.Join("judge", strconv.FormatInt(runID, 10), "scenarios.xml")
 
 	var out, errOut bytes.Buffer
-	getenv := func(k string) string {
-		if k == scenariosTokenEnv {
-			return strconv.FormatInt(judgeRunID, 10)
-		}
-		return ""
-	}
-	code := scenarios(t.Context(), st, getenv, &out, &errOut)
+	code := scenarios(scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  relative,
+	}), &out, &errOut)
 
-	if code != 0 {
-		t.Errorf("code = %d, want 0 (stderr: %q)", code, errOut.String())
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+	if want := scenariosNotJudge + "\n"; errOut.String() != want {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
 	}
 	if out.String() != "" {
 		t.Errorf("stdout = %q, want empty", out.String())
 	}
 }
 
-// TestScenarios_NullCohortRunIDPrintsNothing proves a legacy plan artifact
-// stored with no run_id (design section 4.5's Cohort.RunID doc comment)
-// prints nothing and exits 0, rather than erroring: CurrentCohort still
-// reports ok=true, but a nil RunID short-circuits before ScenariosForRun.
-func TestScenarios_NullCohortRunIDPrintsNothing(t *testing.T) {
-	t.Parallel()
-	st := newScenariosTestStore(t)
-	ticketID, expires := seedClaimedTicket(t, st)
-	insertPlan(t, st, ticketID, nil, 1)
+// TestScenariosOpensNoDatabase proves scenarios never touches a database,
+// let alone the default one (PKG9-PLAN.md section 7.3: "zing scenarios no
+// longer opens the database"): with HOME set to an empty value --
+// store.DefaultPath's own os.UserHomeDir call would fail outright, so this
+// would fail loudly here too if scenarios still resolved and opened the
+// default store path -- the command still reads its file and succeeds. Not
+// parallel: it calls t.Setenv on the real process environment.
+func TestScenariosOpensNoDatabase(t *testing.T) {
+	t.Setenv("HOME", "")
 
-	judgeRunID := reserveRun(t, st, ticketID, expires, "judge")
+	const runID = int64(9)
+	const content = "<scenario id=\"s1\" kind=\"behavior\"><given>g</given><when>w</when><then>t</then></scenario>\n"
+	path := writeScenariosFixture(t, t.TempDir(), runID, content)
 
 	var out, errOut bytes.Buffer
-	getenv := func(k string) string {
-		if k == scenariosTokenEnv {
-			return strconv.FormatInt(judgeRunID, 10)
-		}
-		return ""
-	}
-	code := scenarios(t.Context(), st, getenv, &out, &errOut)
+	code := scenarios(scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  path,
+	}), &out, &errOut)
 
 	if code != 0 {
 		t.Errorf("code = %d, want 0 (stderr: %q)", code, errOut.String())
 	}
-	if out.String() != "" {
-		t.Errorf("stdout = %q, want empty", out.String())
+	if out.String() != content {
+		t.Errorf("stdout = %q, want %q", out.String(), content)
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want empty", errOut.String())
 	}
 }

@@ -269,6 +269,15 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// The per-run scenarios file every judge run writes (PKG9-PLAN.md
+	// section 7.3, D19) lives under <DATA_DIR>/judge/: swept the same way,
+	// before the dispatcher starts, since a dead process's own run id
+	// folder is otherwise never cleaned up.
+	if err = removeStartupJudgeDir(dataDir); err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	gh, err := orchestrator.NewGitHub(cfg.GitHubToken)
 	if err != nil {
 		_ = st.Close()
@@ -573,6 +582,22 @@ func removeStartupTempRoots(dataDir string) error {
 	tmpRoot := filepath.Join(dataDir, "tmp")
 	if err := os.RemoveAll(tmpRoot); err != nil {
 		return fmt.Errorf("serve: remove %s: %w", tmpRoot, err)
+	}
+	return nil
+}
+
+// removeStartupJudgeDir removes <dataDir>/judge/ whole, before the
+// dispatcher starts (PKG9-PLAN.md section 7.3, D19): each judge run's own
+// afterReserve hook (internal/job/judging.go's writeScenariosFile) removes
+// its own <run id> folder when rt.Run returns, but a process that dies
+// mid-run skips that, so serve sweeps the whole tree here instead, the same
+// way removeStartupTempRoots clears <dataDir>/tmp/. No judge run exists at
+// startup, so nothing live is ever removed out from under it. A missing
+// directory is not an error.
+func removeStartupJudgeDir(dataDir string) error {
+	judgeRoot := filepath.Join(dataDir, "judge")
+	if err := os.RemoveAll(judgeRoot); err != nil {
+		return fmt.Errorf("serve: remove %s: %w", judgeRoot, err)
 	}
 	return nil
 }
