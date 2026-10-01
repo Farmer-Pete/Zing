@@ -519,7 +519,8 @@ var errNothingToDoClaimNotFalse = errors.New("nothing_to_do code claim not verif
 // claim it names is false by the time a real runtime's response reaches
 // here; naming no code claim at all cannot prove there is nothing to build,
 // and escalates instead. Acceptance terminalizes the run, transitions the
-// ticket straight to done, and sets TrackerEffect so the dispatcher posts
+// ticket straight to done, and sets TrackerEffect, Kind
+// store.TrackerEffectKindNothingToDo, so the dispatcher posts
 // tracker.NothingToDoComment after the commit lands (design D12); the
 // escalation carries RunID and SessionID (a run did cause this) and leaves
 // the ticket waiting on the owner's retry/planning/abandon choice, exactly
@@ -543,7 +544,7 @@ func nothingToDoCommit(t store.Ticket, d Deps, rr runResult, resp *response.Noth
 		c.ResolveQuestions = resolveIDs
 		c.Next = stateDone
 		c.Reason = reasonNothingToDo
-		c.TrackerEffect = &store.TrackerEffect{Ref: t.TrackerRef, Notes: resp.Notes}
+		c.TrackerEffect = &store.TrackerEffect{Kind: store.TrackerEffectKindNothingToDo, Ref: t.TrackerRef, Notes: resp.Notes}
 		return c, nil
 	}
 

@@ -48,6 +48,7 @@ const (
 	testOwner       = "test-host-1"
 	testFixtureRef  = "fake#1" // fixtures/tickets.toml's one ticket
 	testTicketTitle = "a ticket"
+	testBindingUser = "peter" // the Binding.User most tests here share (goconst)
 
 	// testSeedReason and testSpyReason are the fixed Reason strings every
 	// direct-to-state seed commit and spyHandler in this file shares
@@ -807,6 +808,14 @@ func (f *failingIntakeTracker) FileTicket(context.Context, string, tracker.NewTi
 
 func (f *failingIntakeTracker) Collaborators(context.Context, string) ([]string, error) {
 	panic("failingIntakeTracker: Collaborators is unused by this test")
+}
+
+func (f *failingIntakeTracker) Close(context.Context, string, string) error {
+	panic("failingIntakeTracker: Close is unused by this test")
+}
+
+func (f *failingIntakeTracker) CommentContains(context.Context, string, string, string) (bool, error) {
+	panic("failingIntakeTracker: CommentContains is unused by this test")
 }
 
 var _ tracker.Tracker = (*failingIntakeTracker)(nil)
@@ -1817,7 +1826,6 @@ func TestTick_IntakePostsPickupCommentForEachNewTicket(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	const testBindingUser = "peter"
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := newTwoTicketFixture(t)
@@ -1878,7 +1886,7 @@ func TestTick_IntakePickupCommentFailureIsBestEffort(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := newTwoTicketFixture(t)
 	rec.failFirst = true
@@ -1970,6 +1978,271 @@ func (c *commentingFixture) attemptCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.attempts
+}
+
+// --- PostPRLink / PostDone (design section 8.2 step 5, 8.6 step 1, 11, 10.5) ---
+
+// markedComment is one comment shipTrackerDouble tracks under a ref: author
+// is who it was "posted" by, so a test can seed a comment under any author
+// and prove CommentContains only ever counts the double's own login.
+type markedComment struct {
+	author, body string
+}
+
+// shipTrackerDouble is a Tracker test double for PostPRLink and PostDone:
+// it embeds a *tracker.Fixture for every method they do not touch, and
+// implements Comment, CommentContains, and Close itself so a test can seed
+// a comment under an arbitrary author (seedMarked), inject an error from
+// any of the three calls, and read back exactly what was posted, closed,
+// and in what order.
+type shipTrackerDouble struct {
+	*tracker.Fixture
+
+	mu       sync.Mutex
+	ownLogin string
+	marked   map[string][]markedComment // ref -> comments, in arrival order
+	posted   []recordedComment          // every successful Comment call
+	closed   []string                   // every successful Close call's ref
+	sequence []string                   // "comment:<ref>" then "close:<ref>", call order
+
+	failComment, failContains, failClose error
+}
+
+func newShipTrackerDouble(t *testing.T, login string) *shipTrackerDouble {
+	t.Helper()
+	return &shipTrackerDouble{Fixture: newFixtureTracker(t), ownLogin: login, marked: map[string][]markedComment{}}
+}
+
+// seedMarked records a comment under testFixtureRef, the one ref every
+// PostPRLink/PostDone test here uses, as if it were already posted before
+// the call runs: author == the double's own login simulates a real earlier
+// post surviving a crash; any other author simulates a spoofed marker
+// CommentContains must ignore.
+func (s *shipTrackerDouble) seedMarked(author, body string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marked[testFixtureRef] = append(s.marked[testFixtureRef], markedComment{author: author, body: body})
+}
+
+func (s *shipTrackerDouble) Comment(_ context.Context, project, ref, body string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failComment != nil {
+		return s.failComment
+	}
+	s.posted = append(s.posted, recordedComment{project: project, ref: ref, body: body})
+	s.marked[ref] = append(s.marked[ref], markedComment{author: s.ownLogin, body: body})
+	s.sequence = append(s.sequence, "comment:"+ref)
+	return nil
+}
+
+func (s *shipTrackerDouble) CommentContains(_ context.Context, _, ref, needle string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failContains != nil {
+		return false, s.failContains
+	}
+	for _, c := range s.marked[ref] {
+		if c.author == s.ownLogin && strings.Contains(c.body, needle) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *shipTrackerDouble) Close(_ context.Context, _, ref string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failClose != nil {
+		return s.failClose
+	}
+	s.closed = append(s.closed, ref)
+	s.sequence = append(s.sequence, "close:"+ref)
+	return nil
+}
+
+func (s *shipTrackerDouble) postedComments() []recordedComment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]recordedComment(nil), s.posted...)
+}
+
+func (s *shipTrackerDouble) callSequence() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sequence...)
+}
+
+var _ tracker.Tracker = (*shipTrackerDouble)(nil)
+
+// shipTestFixture builds a *store.Store, one ticket under testFixtureRef
+// (state is irrelevant to PostPRLink/PostDone, which never read it), and a
+// *shipTrackerDouble, all under one project id. It returns the project id,
+// the ticket's own store id (the ticket id the marker is scoped to), and
+// the double; each test builds its own binding.
+func shipTestFixture(t *testing.T) (s *store.Store, projectID, ticketID int64, tr *shipTrackerDouble) {
+	t.Helper()
+	s = newDispatchTestStore(t)
+	projectID = seedProject(t, s)
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: testTicketTitle, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	tr = newShipTrackerDouble(t, "zing-bot")
+	return s, projectID, ticketID, tr
+}
+
+const testPRURL = "https://github.com/o/r/pull/1"
+
+// TestPostPRLinkSkipsMarkedComment proves PostPRLink skips posting once its
+// own marker is already on the issue, including when CommentContains found
+// it on a later page (design section 8.2 step 5, 11): the real tracker's
+// own pagination is proved by tracker.TestCommentContainsPagesAll;
+// shipTrackerDouble stands in for "found it somewhere" here.
+func TestPostPRLinkSkipsMarkedComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:pr t%d -->", ticketID)
+	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostPRLink: %v", err)
+	}
+	if got := tr.postedComments(); len(got) != 0 {
+		t.Errorf("posted comments = %+v, want none (the marker was already there)", got)
+	}
+}
+
+// TestPostPRLinkIgnoresSpoofedMarker proves a marker from any login but the
+// tracker's own never suppresses the real post (design section 10.5).
+func TestPostPRLinkIgnoresSpoofedMarker(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:pr t%d -->", ticketID)
+	tr.seedMarked("impostor", marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostPRLink: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1 (a spoofed marker must not suppress the real post)", got)
+	}
+	if !strings.Contains(got[0].body, marker) {
+		t.Errorf("posted comment body = %q, want it to carry %q", got[0].body, marker)
+	}
+}
+
+// TestPostPRLinkErrorReturned proves a Comment failure propagates (design
+// section 8.2 step 4, 11): the next tick must see the error and retry.
+func TestPostPRLinkErrorReturned(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+	tr.failComment = errors.New("boom: comment failed")
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+		t.Error("PostPRLink err = nil, want an error")
+	}
+}
+
+// TestPostDoneSkipsMarkedComment proves PostDone skips the comment once its
+// own marker is already posted, but still calls Close every time (design
+// section 8.6 step 1, 11): a crash between the post and the close must
+// still converge on the next tick.
+func TestPostDoneSkipsMarkedComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:done t%d -->", ticketID)
+	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	if got := tr.postedComments(); len(got) != 0 {
+		t.Errorf("posted comments = %+v, want none (the marker was already there)", got)
+	}
+	want := []string{"close:" + testFixtureRef}
+	if got := tr.callSequence(); !slices.Equal(got, want) {
+		t.Errorf("call sequence = %v, want %v (Close still runs when the comment is skipped)", got, want)
+	}
+}
+
+// TestPostDoneIgnoresSpoofedMarker is PostPRLink's spoofed-marker proof,
+// for PostDone (design section 10.5).
+func TestPostDoneIgnoresSpoofedMarker(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:done t%d -->", ticketID)
+	tr.seedMarked("impostor", marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1 (a spoofed marker must not suppress the real post)", got)
+	}
+	if !strings.Contains(got[0].body, marker) {
+		t.Errorf("posted comment body = %q, want it to carry %q", got[0].body, marker)
+	}
+}
+
+// TestPostDoneClosesAfterComment proves PostDone posts the done comment
+// before it closes the issue (design section 8.6 step 1).
+func TestPostDoneClosesAfterComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
+	if got := tr.callSequence(); !slices.Equal(got, want) {
+		t.Errorf("call sequence = %v, want %v", got, want)
+	}
+}
+
+// TestPostDoneErrorReturned proves a Close failure propagates (design
+// section 11: "the next tick sees it merged and runs DONE" only holds once
+// Close actually succeeds).
+func TestPostDoneErrorReturned(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+	tr.failClose = errors.New("boom: close failed")
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+		t.Error("PostDone err = nil, want an error")
+	}
 }
 
 // cancelingHandler is a job.Handler test double that cancels a captured
@@ -2757,8 +3030,53 @@ type trackerEffectHandler struct{}
 func (trackerEffectHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
 	return store.HandlerCommit{
 		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
-		TrackerEffect: &store.TrackerEffect{Ref: testFixtureRef, Notes: "already handled elsewhere"},
+		TrackerEffect: &store.TrackerEffect{
+			Kind: store.TrackerEffectKindNothingToDo, Ref: testFixtureRef, Notes: "already handled elsewhere",
+		},
 	}, nil
+}
+
+// trackerEffectUnknownKindHandler proposes a commit carrying a
+// TrackerEffect whose Kind postCommitTrackerEffect does not recognize
+// (design section 4.5): an unrecognized Kind must never guess which
+// comment to send.
+type trackerEffectUnknownKindHandler struct{}
+
+func (trackerEffectUnknownKindHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		TrackerEffect: &store.TrackerEffect{Kind: "mystery", Ref: testFixtureRef, Notes: "should never post"},
+	}, nil
+}
+
+// TestTrackerEffectUnknownKindPostsNothing proves postCommitTrackerEffect's
+// fail-safe default (design section 4.5): a Kind it does not recognize
+// posts no comment at all, rather than guessing one.
+func TestTrackerEffectUnknownKindPostsNothing(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectUnknownKindHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := rec.recorded(); len(got) != 0 {
+		t.Errorf("tracker comments = %+v, want none (an unrecognized kind must post nothing)", got)
+	}
 }
 
 // TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit proves the D12
@@ -2770,7 +3088,7 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	const bindingUser = "peter"
+	const bindingUser = testBindingUser
 	if _, err := s.InsertTicket(t.Context(), store.Ticket{
 		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
 	}); err != nil {
@@ -2909,7 +3227,7 @@ func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
 
 	reg := job.Registry()
 	reg[testStateQueued] = trackerEffectHandler{}
-	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
 	rec.failFirst = true

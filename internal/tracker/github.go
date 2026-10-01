@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v92/github"
@@ -35,10 +36,16 @@ type repo struct{ owner, name string }
 
 // GitHubTracker implements Tracker against go-github v92. repos maps a
 // project NAME (the value passed to every Tracker method) to its repo, so
-// one tracker serves many projects with one client and one token.
+// one tracker serves many projects with one client and one token. login is
+// the authenticated user's login, read once by authLogin and cached here
+// (design section 10.5): every project shares the one token, so one cached
+// login serves all of them.
 type GitHubTracker struct {
 	c     *github.Client
 	repos map[string]repo
+
+	mu    sync.Mutex
+	login string
 }
 
 // Guarantee the concrete type satisfies the interface without returning the
@@ -261,4 +268,85 @@ func (g *GitHubTracker) Collaborators(ctx context.Context, project string) ([]st
 	}
 
 	return logins, nil
+}
+
+// Close closes ref within project with state reason "completed" (design
+// section 10.5, PKG9-PLAN.md section 8.6): GitHub succeeds the same call
+// against an issue that is already closed, so a repeated DONE tick after a
+// crash closes it again for free.
+func (g *GitHubTracker) Close(ctx context.Context, project, ref string) error {
+	r, err := g.repoFor(project)
+	if err != nil {
+		return err
+	}
+	n, err := canonicalRef(ref)
+	if err != nil {
+		return err
+	}
+
+	state, reason := "closed", "completed"
+	if _, _, err := g.c.Issues.Update(ctx, r.owner, r.name, n, github.UpdateIssueRequest{State: &state, StateReason: &reason}); err != nil {
+		return fmt.Errorf("tracker: close: %w", err)
+	}
+	return nil
+}
+
+// authLogin returns the tracker's own authenticated login, read once with
+// Users.Get(ctx, "") and cached on the GitHubTracker (design section 10.5).
+// An error here is never cached, so the next call -- and so the next tick --
+// tries again.
+func (g *GitHubTracker) authLogin(ctx context.Context) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.login != "" {
+		return g.login, nil
+	}
+	u, _, err := g.c.Users.Get(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("tracker: viewer: %w", err)
+	}
+	g.login = u.GetLogin()
+	return g.login, nil
+}
+
+// CommentContains reports whether ref already carries a comment containing
+// needle, authored by the tracker's own authenticated login, reading every
+// page of the issue's comments (design section 10.5): a comment from any
+// other account never counts, so a spoofed marker cannot suppress a comment
+// Zing must post at most once (PKG9-PLAN.md section 8.2, 8.6, 11).
+func (g *GitHubTracker) CommentContains(ctx context.Context, project, ref, needle string) (bool, error) {
+	r, err := g.repoFor(project)
+	if err != nil {
+		return false, err
+	}
+	n, err := canonicalRef(ref)
+	if err != nil {
+		return false, err
+	}
+	login, err := g.authLogin(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	opts := &github.IssueListCommentsOptions{}
+	opts.PerPage = perPage
+	for {
+		comments, resp, err := g.c.Issues.ListComments(ctx, r.owner, r.name, n, opts)
+		if err != nil {
+			return false, fmt.Errorf("tracker: comment contains: %w", err)
+		}
+		for _, c := range comments {
+			if c.GetUser().GetLogin() != login {
+				continue
+			}
+			if strings.Contains(c.GetBody(), needle) {
+				return true, nil
+			}
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return false, nil
 }

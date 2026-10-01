@@ -39,3 +39,13 @@ func (Linear) FileTicket(context.Context, string, NewTicket) (string, error) {
 func (Linear) Collaborators(context.Context, string) ([]string, error) {
 	return nil, errLinearNotImplemented
 }
+
+// Close always fails: see errLinearNotImplemented.
+func (Linear) Close(context.Context, string, string) error {
+	return errLinearNotImplemented
+}
+
+// CommentContains always fails: see errLinearNotImplemented.
+func (Linear) CommentContains(context.Context, string, string, string) (bool, error) {
+	return false, errLinearNotImplemented
+}

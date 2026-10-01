@@ -596,3 +596,185 @@ func TestGitHubTrackerCollaborators(t *testing.T) {
 		}
 	})
 }
+
+func TestCloseIssue(t *testing.T) {
+	t.Run("sends state closed and reason completed", func(t *testing.T) {
+		var gotMethod, gotPath string
+		var gotBody map[string]any
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+				return
+			}
+			fmt.Fprint(w, `{"number":42,"state":"closed"}`)
+		})
+		g := newDefaultTracker(t, mux)
+
+		if err := g.Close(t.Context(), testProject, "42"); err != nil {
+			t.Fatalf("Close: unexpected error: %v", err)
+		}
+		if gotMethod != http.MethodPatch {
+			t.Errorf("Close: method = %q, want %q", gotMethod, http.MethodPatch)
+		}
+		if gotPath != "/repos/o/r/issues/42" {
+			t.Errorf("Close: path = %q, want %q", gotPath, "/repos/o/r/issues/42")
+		}
+		if gotBody["state"] != "closed" {
+			t.Errorf("Close: request state = %v, want %q", gotBody["state"], "closed")
+		}
+		if gotBody["state_reason"] != "completed" {
+			t.Errorf("Close: request state_reason = %v, want %q", gotBody["state_reason"], "completed")
+		}
+	})
+
+	t.Run("an already-closed issue still succeeds", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"state":"closed"}`)
+		})
+		g := newDefaultTracker(t, mux)
+
+		if err := g.Close(t.Context(), testProject, "42"); err != nil {
+			t.Fatalf("Close on an already-closed issue: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("a 500 is an error", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		g := newDefaultTracker(t, mux)
+
+		err := g.Close(t.Context(), testProject, "42")
+		if err == nil {
+			t.Fatal("Close: expected an error for a 500, got nil")
+		}
+		if !strings.Contains(err.Error(), "tracker: close:") {
+			t.Errorf("Close error = %q, want it to carry the %q prefix", err.Error(), "tracker: close:")
+		}
+		assertErrorsAsGitHubErrorResponse(t, err)
+	})
+
+	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if err := g.Close(t.Context(), "no-such-project", "42"); err == nil {
+			t.Fatal("Close: expected an error for an unknown project, got nil")
+		}
+	})
+
+	t.Run("a non-canonical ref errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if err := g.Close(t.Context(), testProject, "+1"); err == nil {
+			t.Fatal("Close: expected an error for a non-canonical ref, got nil")
+		}
+	})
+}
+
+// testViewerLoginGH is the authenticated login Users.Get reports across
+// this file's CommentContains tests, named once so goconst has nothing to
+// flag.
+const testViewerLoginGH = "zing-bot"
+
+func TestCommentContainsPagesAll(t *testing.T) {
+	const needle = "<!-- zing:pr t9 -->"
+
+	t.Run("finds a needle on the third page", func(t *testing.T) {
+		var hits int
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"login":%q}`, testViewerLoginGH)
+		})
+		mux.HandleFunc("/repos/o/r/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/o/r/issues/42/comments?page=2>; rel="next"`)
+				fmt.Fprintf(w, `[{"user":{"login":%q},"body":"unrelated 1"}]`, testViewerLoginGH)
+			case "2":
+				w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/o/r/issues/42/comments?page=3>; rel="next"`)
+				fmt.Fprintf(w, `[{"user":{"login":%q},"body":"unrelated 2"}]`, testViewerLoginGH)
+			case "3":
+				fmt.Fprintf(w, `[{"user":{"login":%q},"body":"the link is here: %s"}]`, testViewerLoginGH, needle)
+			default:
+				t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
+			}
+		})
+		g := newDefaultTracker(t, mux)
+
+		found, err := g.CommentContains(t.Context(), testProject, "42", needle)
+		if err != nil {
+			t.Fatalf("CommentContains: unexpected error: %v", err)
+		}
+		if !found {
+			t.Error("CommentContains = false, want true (the needle is on page 3)")
+		}
+		if hits != 3 {
+			t.Errorf("CommentContains made %d requests, want 3 (all three pages read)", hits)
+		}
+	})
+
+	t.Run("a needle nowhere is not found, after reading every page", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"login":%q}`, testViewerLoginGH)
+		})
+		mux.HandleFunc("/repos/o/r/issues/42/comments", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `[{"user":{"login":%q},"body":"nothing to see here"}]`, testViewerLoginGH)
+		})
+		g := newDefaultTracker(t, mux)
+
+		found, err := g.CommentContains(t.Context(), testProject, "42", needle)
+		if err != nil {
+			t.Fatalf("CommentContains: unexpected error: %v", err)
+		}
+		if found {
+			t.Error("CommentContains = true, want false")
+		}
+	})
+
+	t.Run("a 500 on Users.Get is an error", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		g := newDefaultTracker(t, mux)
+
+		if _, err := g.CommentContains(t.Context(), testProject, "42", needle); err == nil {
+			t.Fatal("CommentContains: expected an error when Users.Get fails, got nil")
+		}
+	})
+
+	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if _, err := g.CommentContains(t.Context(), "no-such-project", "42", needle); err == nil {
+			t.Fatal("CommentContains: expected an error for an unknown project, got nil")
+		}
+	})
+}
+
+func TestCommentContainsIgnoresOtherAuthors(t *testing.T) {
+	const needle = "<!-- zing:done t9 -->"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"login":%q}`, testViewerLoginGH)
+	})
+	mux.HandleFunc("/repos/o/r/issues/42/comments", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `[{"user":{"login":"impostor"},"body":%q}]`, needle)
+	})
+	g := newDefaultTracker(t, mux)
+
+	found, err := g.CommentContains(t.Context(), testProject, "42", needle)
+	if err != nil {
+		t.Fatalf("CommentContains: unexpected error: %v", err)
+	}
+	if found {
+		t.Error("CommentContains = true, want false (the marker is from a spoofed author, not the tracker's own login)")
+	}
+}

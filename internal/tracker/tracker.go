@@ -18,6 +18,16 @@ type Tracker interface {
 	FileTicket(ctx context.Context, project string, t NewTicket) (ref string, err error)
 	// Collaborators returns project's collaborator names.
 	Collaborators(ctx context.Context, project string) ([]string, error)
+	// Close closes ref within project, with reason "completed" (design
+	// section 10.5, PKG9-PLAN.md section 8.6): closing an already-closed
+	// issue succeeds, so a repeated call after a crash costs nothing.
+	Close(ctx context.Context, project, ref string) error
+	// CommentContains reports whether ref already carries a comment
+	// containing needle, posted by the tracker's own authenticated login
+	// (design section 10.5): a comment from any other account never
+	// counts, so a spoofed marker cannot suppress a comment Zing must post
+	// at most once (PKG9-PLAN.md section 8.2, 8.6, 11).
+	CommentContains(ctx context.Context, project, ref, needle string) (bool, error)
 }
 
 // Ticket is a tracker ticket, not the store row.

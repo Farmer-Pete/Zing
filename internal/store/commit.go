@@ -155,11 +155,23 @@ type EscalationCommit struct {
 
 // TrackerEffect is a tracker comment a handler wants posted after its commit
 // lands (design D12): Ref names the tracker issue, Notes is the comment
-// text. CommitHandlerResult carries this value through unread; only the
-// dispatcher, after a successful commit, resolves Ref and posts Notes.
+// text, and Kind picks which comment builder the dispatcher's
+// postCommitTrackerEffect applies to Notes before posting. CommitHandlerResult
+// carries this value through unread; only the dispatcher, after a successful
+// commit, resolves Ref and posts the built comment. PUBLISH's PR-link
+// comment and DONE's done comment are posted before their own commits
+// instead (PKG9-PLAN.md section 8.2, 8.6, 11) and never go through
+// TrackerEffect.
 type TrackerEffect struct {
+	Kind       string
 	Ref, Notes string
 }
+
+// TrackerEffectKindNothingToDo is TrackerEffect.Kind's value for design
+// section 6.8's nothing_to_do row: the dispatcher responds to it with
+// tracker.NothingToDoComment. An empty or unrecognized Kind posts nothing
+// rather than guessing which comment to send.
+const TrackerEffectKindNothingToDo = "nothing_to_do"
 
 // ErrSealMismatch is the sentinel every *SealMismatchError unwraps to, so a
 // caller that only needs to know "was this a seal mismatch" can use

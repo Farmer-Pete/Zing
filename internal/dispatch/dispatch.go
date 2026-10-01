@@ -592,10 +592,15 @@ func (d *Dispatcher) releaseAfterSealMismatch(
 // postCommitTrackerEffect runs commit.TrackerEffect, if any, only after
 // CommitHandlerResult has already applied cleanly (design D12, section 4.5,
 // 6.8): it resolves the binding for ticket.ProjectID the same way intake
-// (above) resolves one for its pickup comment, builds the nothing_to_do
-// comment body, and posts it best-effort -- a failure only warns, since the
+// (above) resolves one for its pickup comment, builds the comment body
+// e.Kind names, and posts it best-effort -- a failure only warns, since the
 // ticket's own state has already committed and must not be undone by a
-// tracker-side failure.
+// tracker-side failure. An unrecognized Kind posts nothing: every kind this
+// dispatcher knows is named below, and guessing at an unknown one risks
+// posting the wrong comment under the ticket's own name. PUBLISH's PR-link
+// comment and DONE's done comment never reach here -- PostPRLink and
+// PostDone (below) post those before their own commits (PKG9-PLAN.md
+// section 8.2, 8.6, 11).
 func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.Ticket, commit store.HandlerCommit) {
 	if commit.TrackerEffect == nil {
 		return
@@ -608,7 +613,15 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 		return
 	}
 
-	body := tracker.NothingToDoComment(b.User, e.Notes)
+	var body string
+	switch e.Kind {
+	case store.TrackerEffectKindNothingToDo:
+		body = tracker.NothingToDoComment(b.User, e.Notes)
+	default:
+		slog.Warn("tracker comment skipped", "ticket_id", ticket.ID, "ref", e.Ref, "kind", e.Kind, "err", "unrecognized tracker effect kind")
+		return
+	}
+
 	// Unlike the store writes above (which detach with WithoutCancel so they
 	// still land after a cancel), this comment is best-effort and the commit
 	// has already succeeded, so it derives from ctx and is cancelled by a
@@ -619,6 +632,80 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 	if err := d.tracker.Comment(commentCtx, b.TrackerProject, e.Ref, body); err != nil {
 		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
 	}
+}
+
+// shipMarkerFmt is the hidden marker PostPRLink and PostDone each search
+// for, then post, scoped to one ticket by its own store id (PKG9-PLAN.md
+// section 8.2 step 5, 8.6 step 1, 11): "pr" before the draft PR's link
+// comment, "done" before the done comment.
+const shipMarkerFmt = "<!-- zing:%s t%d -->"
+
+// postMarkedOnce is PostPRLink and PostDone's shared shape (PKG9-PLAN.md
+// section 11): resolve the ticket this (projectID, ref) pair names, so the
+// hidden marker is scoped to its own store id (neither method is handed the
+// ticket id directly), search the issue's comments for that marker through
+// CommentContains, which counts only one from the tracker's own
+// authenticated login (design 10.5, so a spoofed marker from anyone else
+// never suppresses the real post), and post bodyFor's comment, the marker
+// appended after a blank line, only when no such comment exists yet. It
+// returns the resolved binding so PostDone can reuse it for Close without a
+// second lookup.
+func (d *Dispatcher) postMarkedOnce(ctx context.Context, projectID int64, ref, kind string, bodyFor func(Binding) string) (Binding, error) {
+	b, ok := d.bindingForProject(projectID)
+	if !ok {
+		return Binding{}, fmt.Errorf("dispatch: no tracker binding for project %d", projectID)
+	}
+	t, found, err := d.store.TicketByRef(ctx, projectID, ref)
+	if err != nil {
+		return Binding{}, fmt.Errorf("dispatch: ticket by ref: %w", err)
+	}
+	if !found {
+		return Binding{}, fmt.Errorf("dispatch: no ticket for project %d ref %q", projectID, ref)
+	}
+
+	marker := fmt.Sprintf(shipMarkerFmt, kind, t.ID)
+	already, err := d.tracker.CommentContains(ctx, b.TrackerProject, ref, marker)
+	if err != nil {
+		return Binding{}, fmt.Errorf("dispatch: comment contains: %w", err)
+	}
+	if already {
+		return b, nil
+	}
+
+	body := bodyFor(b) + "\n\n" + marker
+	if err := d.tracker.Comment(ctx, b.TrackerProject, ref, body); err != nil {
+		return Binding{}, fmt.Errorf("dispatch: post comment: %w", err)
+	}
+	return b, nil
+}
+
+// PostPRLink implements job.ShipTracker's PostPRLink (PKG9-PLAN.md section
+// 8.2 step 5, section 11): posts tracker.PRComment at most once per ticket,
+// guarded by postMarkedOnce's hidden marker.
+func (d *Dispatcher) PostPRLink(ctx context.Context, projectID int64, ref, prURL string) error {
+	_, err := d.postMarkedOnce(ctx, projectID, ref, "pr", func(b Binding) string {
+		return tracker.PRComment(b.User, prURL)
+	})
+	return err
+}
+
+// PostDone implements job.ShipTracker's PostDone (PKG9-PLAN.md section 8.6
+// step 1, section 11): posts tracker.DoneComment the same marked-once way
+// PostPRLink posts the PR link, then closes the tracker issue. Closing an
+// already-closed issue succeeds (design 10.5), so a crash between the two
+// calls, or a retried tick, never fails on the second one -- PostDone always
+// calls Close, even when the comment step itself was a skip.
+func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL string) error {
+	b, err := d.postMarkedOnce(ctx, projectID, ref, "done", func(b Binding) string {
+		return tracker.DoneComment(b.User, prURL)
+	})
+	if err != nil {
+		return err
+	}
+	if err := d.tracker.Close(ctx, b.TrackerProject, ref); err != nil {
+		return fmt.Errorf("dispatch: close issue: %w", err)
+	}
+	return nil
 }
 
 // bindingForProject returns the Binding whose StoreProjectID matches

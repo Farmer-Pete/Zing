@@ -532,10 +532,11 @@ func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) 
 		t.Errorf("commit.ResolveQuestions = %v, want the resolved round's one question id", commit.ResolveQuestions)
 	}
 	if commit.TrackerEffect == nil {
-		t.Fatal("commit.TrackerEffect is nil, want {Ref: t.TrackerRef, Notes: resp.Notes}")
+		t.Fatal("commit.TrackerEffect is nil, want {Kind: nothing_to_do, Ref: t.TrackerRef, Notes: resp.Notes}")
 	}
-	if commit.TrackerEffect.Ref != testRefFake1 || commit.TrackerEffect.Notes != notes {
-		t.Errorf("commit.TrackerEffect = %+v, want {Ref: %q, Notes: %q}", commit.TrackerEffect, testRefFake1, notes)
+	if commit.TrackerEffect.Kind != store.TrackerEffectKindNothingToDo || commit.TrackerEffect.Ref != testRefFake1 || commit.TrackerEffect.Notes != notes {
+		t.Errorf("commit.TrackerEffect = %+v, want {Kind: %q, Ref: %q, Notes: %q}",
+			commit.TrackerEffect, store.TrackerEffectKindNothingToDo, testRefFake1, notes)
 	}
 
 	apply(t, s, getTicket(t, s, ticketID), commit)
