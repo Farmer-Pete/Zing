@@ -78,6 +78,11 @@ const (
 // escalation and no invalid-output marker of its own.
 const interruptedResumeText = "the previous run was interrupted; continue and return your document"
 
+// labelInterrupted is the NamedInput.Label every "interrupted" resume input
+// carries (building.go, judging.go, respond.go): a shared constant, not a
+// literal repeated at each call site (goconst).
+const labelInterrupted = "interrupted"
+
 // The section 6.1/6.4/6.7 escalation What texts, byte for byte from the
 // plan. Why is this file's own plain-sentence gloss on each one: the plan
 // gives no exact Why for these, only What and (for the adoption checks)
@@ -414,7 +419,7 @@ func (h buildingHandler) advanceUnit(ctx context.Context, t store.Ticket, d Deps
 		if invErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: building: consecutive invalid outputs: %w", invErr)
 		}
-		input := prompt.NamedInput{Label: "interrupted", Text: interruptedResumeText, Untrusted: false}
+		input := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
 		if n == 1 {
 			input = prompt.Invalid(invalidRetryText(reason))
 		}
@@ -901,6 +906,8 @@ func (h buildingHandler) retryCapResumes(ctx context.Context, t store.Ticket, d 
 		return reviewingHandler{}.retryCapResumesReview(ctx, t, d, resolveIDs, notes, sessionID)
 	case jobJudgeName:
 		return judgeHandler{}.retryCapResumesJudge(ctx, t, d, resolveIDs, sessionID, preservedRounds)
+	case jobRespondName:
+		return shipHandler{}.retryCapResumesRespond(ctx, t, d, resolveIDs, sessionID, preservedRounds)
 	default:
 		return h.retryCapResumesBuild(ctx, t, d, resolveIDs, notes, preservedRounds)
 	}

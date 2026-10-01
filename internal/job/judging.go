@@ -586,7 +586,7 @@ func (h judgeHandler) enterErrorResume(ctx context.Context, t store.Ticket, d De
 	case 1:
 		input = prompt.Invalid(invalidRetryText(reason))
 	case 0:
-		input = prompt.NamedInput{Label: "interrupted", Text: interruptedResumeText, Untrusted: false}
+		input = prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
 	default:
 		return store.HandlerCommit{}, ErrNoAction
 	}

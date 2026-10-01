@@ -12,14 +12,17 @@
 // resolvePostBuildEscalation (5.6, postbuild.go): job.go's Registry()["shipping"]
 // now points at shipHandler, skeleton.go's own shippingHandler is gone (the
 // same swap task 7a, M2 task 8, made for judging.go's judgeHandler).
-// Decision tree rows (1) to (3) and 8.5's rows 1 to 3, 5, 6, 6a, 8, and 9
-// (the answered merge and respond rounds, FIX-REPLIES, RE-REQUEST, the
-// actionable/leftover/unclassified thread rows, the ready flip, and MERGE
-// itself) stay M4's: in M3 the thread list POLL reads is always empty
-// (8.3), so a green CI is an idle poll, never a merge, until M4 wires
-// Project.Threads and Project.Flips in. Reaching one of those unbuilt rows
-// is ErrNoAction, not a silent no-op, since nothing in M3 can write the
-// marker or round shape that would route there.
+//
+// M4 task 4 (respond.go) wires Project.Threads in for real: POLL's own
+// fingerprint and its row 5 (an actionable thread starts a respond batch),
+// decision tree step (1)'s "job respond" branch, step (2) (RESPOND's first
+// turn and every resume), and the respond rows of resolvePostBuildEscalation.
+// Decision tree step (3) (APPLY, M4 task 5) and 8.5's rows 1 to 3, 6, 6a, 8,
+// and 9 (FIX-REPLIES, RE-REQUEST, the draft/ready flip, the leftover
+// resolve, the unclassified blocking marker, and MERGE) stay later M4
+// tasks'. Reaching one of those unbuilt rows is ErrNoAction, not a silent
+// no-op, since nothing before them can write the marker or round shape that
+// would route there.
 package job
 
 import (
@@ -95,16 +98,55 @@ type ShipTracker interface {
 type shipHandler struct{}
 
 // Run is the shipping state's own decision tree (design section 8.1): the
-// prelude (P), step (4) PUBLISH when pr_url is still NULL, and step (5)
-// POLL otherwise. Steps (1) to (3) -- an answered merge or respond round --
-// can never fire in M3: nothing in this milestone ever writes a "merge
-// asked"/"merge held" marker, a "respond batch " marker, or a respond
-// artifact, so reaching one here would be a bug this returns ErrNoAction
-// for rather than silently ignoring.
+// prelude (P), step (1)'s own "job respond" branch (RESPOND resume with
+// answers, M4 task 4), step (2) (RESPOND's first turn and every resume, M4
+// task 4), step (3) (APPLY, M4 task 5), step (4) PUBLISH when pr_url is
+// still NULL, and step (5) POLL otherwise. Step (1)'s own "merge" branch
+// (MERGE-ANSWER) is M4 task 8's: nothing before it ever writes a "merge
+// asked" or "merge held" marker, so an answered round of any other job or
+// kind is a bug this reports loudly rather than guessing at. Step (3)
+// (APPLY) is M4 task 5's: reaching a respond artifact with no "respond
+// applied <aid>" marker here returns ErrNoAction, not a silent no-op,
+// until that task lands.
 func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginShipping)
 	if handled || err != nil {
 		return c, err
+	}
+
+	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered rounds: %w", err)
+	}
+	if len(rounds) > 0 {
+		round := rounds[0]
+		kind, kindErr := newestQuestionKind(round)
+		if kindErr != nil {
+			return store.HandlerCommit{}, kindErr
+		}
+		if kind != response.QuestionKindQuestion || round.Job != jobRespondName {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: unexpected answered round (job %q kind %q)", round.Job, kind)
+		}
+		return h.resumeRespondAnswered(ctx, t, d, round)
+	}
+
+	if commit, handled2, err2 := h.enterRespondBatch(ctx, t, d); handled2 || err2 != nil {
+		return commit, err2
+	}
+
+	respondRows, err := d.Store.RespondBatches(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond batches: %w", err)
+	}
+	if len(respondRows) > 0 {
+		newest := respondRows[len(respondRows)-1]
+		_, appliedMarked, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond applied %d", newest.ArtifactID))
+		if markerErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond applied marker: %w", markerErr)
+		}
+		if !appliedMarked {
+			return store.HandlerCommit{}, ErrNoAction
+		}
 	}
 
 	if t.PRURL == nil {
@@ -507,23 +549,43 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: required check rules: %w", err)
 	}
+	threadsRaw, err := proj.Threads.ListThreads(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		if c, handled := pollReadFailure(t, d, false, err); handled {
+			return c, nil
+		}
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: list threads: %w", err)
+	}
+	login, err := proj.Threads.Viewer(ctx)
+	if err != nil {
+		if c, handled := pollReadFailure(t, d, false, err); handled {
+			return c, nil
+		}
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: viewer: %w", err)
+	}
+	// classifyThreads and pollThreadsFrom are threadrules.go's and respond.go's
+	// own pure helpers (design section 9.1, 8.3): every class feeds the
+	// fingerprint (pollThreadsFrom), but only actionable threads drive row 5
+	// below (M4 task 4). Rows 3, 6, 6a, 8, and 9 -- the draft/ready flip, the
+	// leftover resolve, the unclassified blocking marker, and the merge
+	// question -- are M4 tasks 7 and 8's own reads of resolved/leftover/
+	// unclassified; this task only wires the real thread list through.
+	_, actionable, _, _ := classifyThreads(threadsRaw, login)
+	pollThreads := pollThreadsFrom(threadsRaw)
 
-	// M3: the thread list is always empty (design section 8.3's own note);
-	// M4 task 1's own caller computes real PollThread rows from
-	// proj.Threads.ListThreads and threadrules.go's commentDigest.
-	var threads []PollThread
-
-	fp := pollFingerprint(pr, runs, statuses, required, threads)
+	fp := pollFingerprint(pr, runs, statuses, required, pollThreads)
 	result := EvaluateCI(runs, statuses, required)
 
-	switch result.State {
-	case CIUnprotected:
+	switch {
+	case result.State == CIUnprotected:
 		c := shipEscalation(t, d, unprotectedWhat, unprotectedWhy, "")
 		c.ClearPoll = true
 		return c, nil
-	case CIFailed:
+	case result.State == CIFailed:
 		return h.pollCIFailed(ctx, t, d, proj, result)
-	default: // CIPending, CIGreen: M3 has no ready flip or merge (8.5 rows 8, 9); both idle.
+	case len(actionable) > 0:
+		return h.startRespondBatch(ctx, t, d, local, actionable, login)
+	default: // CIPending, CIGreen with no actionable thread: M4 tasks 7, 8 add the ready flip and merge (8.5 rows 8, 9).
 		return h.pollIdle(ctx, t, d, fp, result.Missing)
 	}
 }

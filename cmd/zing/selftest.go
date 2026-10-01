@@ -196,6 +196,40 @@ func (*selftestShipGitHub) JobLogTail(context.Context, string, string, int64, in
 	return "", nil
 }
 
+// ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
+// ListReviews, RequestReviewers, and Viewer give selftestShipGitHub
+// job.ReviewThreads too (M4 task 4): this suite's own fixture ticket never
+// opens a real review thread, so every GET returns empty and every write is
+// unreachable -- the same shape ListStatuses and JobLogTail above already
+// give POLL's other unused reads.
+func (*selftestShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
+	return nil, nil
+}
+
+func (*selftestShipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
+	return false, errors.New("selftestShipGitHub: not implemented")
+}
+
+func (*selftestShipGitHub) ReplyToThread(context.Context, string, string) error {
+	return errors.New("selftestShipGitHub: not implemented")
+}
+
+func (*selftestShipGitHub) ResolveThread(context.Context, string) error {
+	return errors.New("selftestShipGitHub: not implemented")
+}
+
+func (*selftestShipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
+	return nil, nil
+}
+
+func (*selftestShipGitHub) RequestReviewers(context.Context, string, string, int, string) error {
+	return errors.New("selftestShipGitHub: not implemented")
+}
+
+func (*selftestShipGitHub) Viewer(context.Context) (string, error) {
+	return "zing-selftest-bot", nil
+}
+
 // runSelftest proves the foundation on an empty machine: it migrates a fresh
 // temporary database and checks it. It prints "selftest: OK" and returns 0
 // when every step passes, or prints "selftest: <detail>" for the first
@@ -643,7 +677,8 @@ func selftestResumeE2E(ctx context.Context) error {
 			Projects: map[int64]job.Project{
 				projectID: {
 					Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
-					Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner, PullRequests: selftestShipGH, Checks: selftestShipGH,
+					Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner,
+					PullRequests: selftestShipGH, Checks: selftestShipGH, Threads: selftestShipGH,
 				},
 			},
 		}, rts)

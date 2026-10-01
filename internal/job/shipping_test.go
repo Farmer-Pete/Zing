@@ -114,7 +114,31 @@ type shipGitHub struct {
 	// logTail, when set, backs JobLogTail; nil returns "", nil (ciLogText's
 	// own tests, shiprules_test.go, cover JobLogTail's real shape).
 	logTail func(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error)
+
+	// The fields below are respond.go's own configurable reads (M4 task 4):
+	// threads backs ListThreads (nil is "no threads", every pre-task-4 POLL
+	// test's own implicit expectation); viewerLogin backs Viewer, defaulting
+	// to shipViewerLogin so isZingReply has a login to compare against
+	// without every test configuring one. replies, resolves, and
+	// requestedReviewers record ReplyToThread, ResolveThread, and
+	// RequestReviewers calls respectively, for a later task's own tests.
+	threads     []orchestrator.Thread
+	threadsErr  error
+	viewerLogin string
+	viewerErr   error
+	reviews     []orchestrator.Review
+	reviewsErr  error
+
+	replies             []string // threadID+"|"+body, in call order
+	resolves            []string // threadID, in call order
+	requestedReviewers  []string // login, in call order
+	requestReviewersErr map[string]error
 }
+
+// shipViewerLogin is shipGitHub's own default Viewer() result (M4 task 4):
+// distinct from any login a test's own comment author uses, so isZingReply
+// only matches a comment this package's own tests build with it on purpose.
+const shipViewerLogin = "zing-bot"
 
 var (
 	errShipGitHub         = errors.New("shipGitHub: not implemented")
@@ -199,6 +223,57 @@ func (g *shipGitHub) JobLogTail(ctx context.Context, owner, repo string, jobID i
 	return "", nil
 }
 
+// ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
+// ListReviews, RequestReviewers, and Viewer give shipGitHub job.ReviewThreads
+// too (M4 task 4): respond.go's own tests configure threads/threadsErr and
+// viewerLogin/viewerErr directly on the struct literal, the same way every
+// other read above is configured.
+func (g *shipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
+	if g.threadsErr != nil {
+		return nil, g.threadsErr
+	}
+	return g.threads, nil
+}
+
+func (g *shipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
+	return false, errShipGitHub
+}
+
+func (g *shipGitHub) ReplyToThread(_ context.Context, threadID, body string) error {
+	g.replies = append(g.replies, threadID+"|"+body)
+	return nil
+}
+
+func (g *shipGitHub) ResolveThread(_ context.Context, threadID string) error {
+	g.resolves = append(g.resolves, threadID)
+	return nil
+}
+
+func (g *shipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
+	if g.reviewsErr != nil {
+		return nil, g.reviewsErr
+	}
+	return g.reviews, nil
+}
+
+func (g *shipGitHub) RequestReviewers(_ context.Context, _, _ string, _ int, login string) error {
+	if err, ok := g.requestReviewersErr[login]; ok {
+		return err
+	}
+	g.requestedReviewers = append(g.requestedReviewers, login)
+	return nil
+}
+
+func (g *shipGitHub) Viewer(context.Context) (string, error) {
+	if g.viewerErr != nil {
+		return "", g.viewerErr
+	}
+	if g.viewerLogin != "" {
+		return g.viewerLogin, nil
+	}
+	return shipViewerLogin, nil
+}
+
 // shipTracker is a configurable ShipTracker double: PostPRLink posts at
 // most once, mirroring the dispatcher's own hidden-marker guard
 // (internal/dispatch/dispatch.go's postMarkedOnce), so a test can call
@@ -270,6 +345,7 @@ func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map
 	}
 	prs, hasPRs := gh.(PullRequests)
 	checks, hasChecks := gh.(Checks)
+	threads, hasThreads := gh.(ReviewThreads)
 
 	out := make(map[int64]Project, len(projects))
 	for _, p := range projects {
@@ -281,6 +357,9 @@ func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map
 		if hasPRs && hasChecks {
 			proj.Owner, proj.Repo = pbFixtureOwner, pbFixtureOwner
 			proj.PullRequests, proj.Checks = prs, checks
+		}
+		if hasThreads {
+			proj.Threads = threads
 		}
 		out[p.ID] = proj
 	}
@@ -1823,4 +1902,614 @@ func TestShippingEscalationRetries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// -----------------------------------------------------------------------
+// RESPOND (M4 task 4)
+// -----------------------------------------------------------------------
+
+// shipRespondThreadID and shipRespondTID are one actionable thread's own
+// raw GraphQL id and its tid (threadrules.go's tid, sha256 of the raw id):
+// computed once here rather than inline, since every test below that
+// starts or drives a batch needs them to agree with each other and with
+// fixtures/scripts/respond/1/1.xml, which answers this exact tid.
+const (
+	shipRespondThreadID = "RT_thread_1"
+	shipRespondTID      = "t9d07af1e65f013d5"
+)
+
+// shipThread builds one orchestrator.Thread for a respond test: unresolved,
+// at the given path and line, carrying comments in order.
+func shipThread(rawID, path string, line int, comments ...orchestrator.ThreadComment) orchestrator.Thread {
+	return orchestrator.Thread{ID: rawID, Path: path, Line: line, Comments: comments}
+}
+
+// shipHumanComment builds one orchestrator.ThreadComment authored by
+// someone other than shipGitHub's own Viewer login, so classifyThreads
+// (threadrules.go) counts it as the thread's own last human comment.
+func shipHumanComment(id, author, body string, at time.Time) orchestrator.ThreadComment {
+	return orchestrator.ThreadComment{ID: id, Author: author, Body: body, CreatedAt: at, UpdatedAt: at}
+}
+
+// respondScriptsFS builds an in-memory fs.FS carrying one or more batch-1
+// respond turns, keyed "respond/1/<turn>.xml" (runtime.Fake's own
+// scriptKey, design section 9.2): scripts[0] is turn 1, scripts[1] turn 2,
+// and so on, judgeScriptsFS's own twin for job "respond". Every test below
+// drives batch 1, a cap_resumes retry of batch 1 included (design section
+// 5.6: a retry reruns the same batch number), so this never needs a batch
+// parameter of its own.
+func respondScriptsFS(scripts ...string) fstest.MapFS {
+	m := make(fstest.MapFS, len(scripts))
+	for i, text := range scripts {
+		m[fmt.Sprintf("respond/1/%d.xml", i+1)] = &fstest.MapFile{Data: []byte(text)}
+	}
+	return m
+}
+
+// shipRespondReplyScript is a minimal respond "ok" document (design
+// section 9.2) that answers shipRespondTID with a reply, the same shape
+// fixtures/scripts/respond/1/1.xml gives it.
+const shipRespondReplyScript = `<zing job="respond" outcome="ok">
+  <thread id="` + shipRespondTID + `" action="reply">Thanks for flagging this -- fixed as described.</thread>
+</zing>`
+
+// shipRespondWrongThreadScript is an "ok" document that answers a thread id
+// outside the batch instead of shipRespondTID, so CheckRespondCoverage
+// (threadrules.go) reports both "thread <wrong id> is not in this batch"
+// and "missing action for thread <shipRespondTID>" -- RESPOND's own
+// coverage-failed branch (design section 9.2).
+const shipRespondWrongThreadScript = `<zing job="respond" outcome="ok">
+  <thread id="tnotinthisbatch0" action="reply">Wrong thread entirely.</thread>
+</zing>`
+
+// shipRespondQuestionScript is a minimal respond "question" document
+// (design section 9.2, N1: a plain agent question, the same universal
+// shape every other job's own first-turn question takes).
+const shipRespondQuestionScript = `<zing job="respond" outcome="question">
+  <question key="Q1">
+    <title>Should this reply mention the follow-up ticket?</title>
+    <body>The thread references a separate cleanup; say whether to link it.</body>
+    <option key="a">Yes, link it</option>
+    <recommended>a</recommended>
+  </question>
+</zing>`
+
+// shipRespondReady drives a published ticket (shipPublished) through POLL
+// once with green CI and one actionable thread (shipRespondThreadID at
+// greet.go:3), so its own "respond batch 1 started sha <local> after run
+// <R>" marker lands via startRespondBatch (design section 8.5 row 5).
+// commentAt lets a caller control the thread's own last-human-comment time,
+// since UpdatedAt feeds commentDigest.
+func shipRespondReady(t *testing.T, commentAt time.Time) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, local string) {
+	t.Helper()
+	s, ticket, gh, tr = shipPublished(t)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	local = shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.threads = []orchestrator.Thread{
+		shipThread(shipRespondThreadID, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", commentAt)),
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("shipRespondReady: poll: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("shipRespondReady: poll escalated: %+v", commit.Escalation.Payload)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "respond batch 1 started sha "+local+" after run ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("shipRespondReady: commit.Messages = %+v, want a respond batch 1 started marker", commit.Messages)
+	}
+	pbApply(t, s, ticket, commit)
+	return s, pbGetTicket(t, s, ticket.ID), gh, tr, local
+}
+
+// TestPollStartsRespondBatch proves design section 8.5 row 5: an actionable
+// thread writes "respond batch 1 started sha <local> after run <R>", its
+// own tids sorted on line 2 and their seen digests on line 3, and no run.
+func TestPollStartsRespondBatch(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, _, _, local := shipRespondReady(t, when)
+
+	rows, err := s.MarkersWithPrefix(t.Context(), ticket.ID, respondBatchMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("respond batch markers = %d, want 1", len(rows))
+	}
+	lines := strings.Split(rows[0].Body, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("marker has %d lines, want 3: %q", len(lines), rows[0].Body)
+	}
+	wantPrefix := "respond batch 1 started sha " + local + " after run "
+	if !strings.HasPrefix(lines[0], wantPrefix) {
+		t.Errorf("first line = %q, want it to start %q", lines[0], wantPrefix)
+	}
+	if lines[1] != shipRespondTID {
+		t.Errorf("tids line = %q, want %q", lines[1], shipRespondTID)
+	}
+	if !strings.HasPrefix(lines[2], "seen "+shipRespondTID+"=") {
+		t.Errorf("seen line = %q, want it to start %q", lines[2], "seen "+shipRespondTID+"=")
+	}
+}
+
+// TestRespondRunStoresArtifact proves design section 9.2's own first turn
+// and ok outcome: one "respond" artifact {threads, batch 1, sha, seen}, its
+// own seen copied from the batch marker, never the model.
+func TestRespondRunStoresArtifact(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, local := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a stored artifact: %+v", commit.Escalation.Payload)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("Artifacts = %+v, want exactly one", commit.Artifacts)
+	}
+	var artifact response.RespondArtifact
+	if unmarshalErr := json.Unmarshal(commit.Artifacts[0].Payload, &artifact); unmarshalErr != nil {
+		t.Fatalf("unmarshal artifact: %v", unmarshalErr)
+	}
+	if artifact.Batch != 1 {
+		t.Errorf("Batch = %d, want 1", artifact.Batch)
+	}
+	if artifact.SHA != local {
+		t.Errorf("SHA = %q, want %q", artifact.SHA, local)
+	}
+	if len(artifact.Threads) != 1 || artifact.Threads[0].ID != shipRespondTID {
+		t.Errorf("Threads = %+v, want exactly one action for %q", artifact.Threads, shipRespondTID)
+	}
+	if len(artifact.Seen) != 1 || artifact.Seen[0].TID != shipRespondTID {
+		t.Errorf("Seen = %+v, want exactly one entry for %q", artifact.Seen, shipRespondTID)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestRespondCoverageResumes proves design section 9.2's own coverage gate:
+// a first turn that answers the wrong thread terminalizes ok and writes
+// "respond coverage failed run <rid>"; the resume, answering correctly,
+// stores the artifact and writes "respond coverage delivered run <rid>".
+func TestRespondCoverageResumes(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondWrongThreadScript, shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	firstCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if firstCommit.Escalation != nil {
+		t.Fatalf("got an escalation on the first coverage failure: %+v", firstCommit.Escalation.Payload)
+	}
+	if len(firstCommit.Artifacts) != 0 {
+		t.Errorf("first commit stored %d artifacts, want 0", len(firstCommit.Artifacts))
+	}
+	found := false
+	for _, m := range firstCommit.Messages {
+		if strings.HasPrefix(m.Body, "respond coverage failed run ") && strings.Contains(m.Body, "is not in this batch") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("firstCommit.Messages = %+v, want a %q marker", firstCommit.Messages, "respond coverage failed run")
+	}
+	pbApply(t, s, ticket, firstCommit)
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	resumeCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	if resumeCommit.Escalation != nil {
+		t.Fatalf("got an escalation on the resume: %+v", resumeCommit.Escalation.Payload)
+	}
+	if len(resumeCommit.Artifacts) != 1 {
+		t.Fatalf("resumeCommit.Artifacts = %+v, want exactly one", resumeCommit.Artifacts)
+	}
+	deliveredFound := false
+	for _, m := range resumeCommit.Messages {
+		if strings.HasPrefix(m.Body, "respond coverage delivered run ") {
+			deliveredFound = true
+		}
+	}
+	if !deliveredFound {
+		t.Errorf("resumeCommit.Messages = %+v, want a %q marker", resumeCommit.Messages, "respond coverage delivered run")
+	}
+}
+
+// TestRespondSecondCoverageEscalates proves design section 9.2's own second
+// branch: a coverage resume whose own ok outcome is incomplete too
+// escalates response_invalid instead of resuming a third time.
+func TestRespondSecondCoverageEscalates(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondWrongThreadScript, shipRespondWrongThreadScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	firstCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	pbApply(t, s, ticket, firstCommit)
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	resumeCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	if resumeCommit.Escalation == nil {
+		t.Fatal("want an escalation on the second coverage failure")
+	}
+	if resumeCommit.Escalation.Payload.Code != string(response.EscalationCodeResponseInvalid) {
+		t.Errorf("Code = %q, want %q", resumeCommit.Escalation.Payload.Code, response.EscalationCodeResponseInvalid)
+	}
+	if resumeCommit.Escalation.Payload.Origin != string(response.EscalationOriginRespond) {
+		t.Errorf("Origin = %q, want %q", resumeCommit.Escalation.Payload.Origin, response.EscalationOriginRespond)
+	}
+}
+
+// TestRespondQuestionResumes proves design section 9.2's own "question"
+// outcome and decision tree step (1)'s "job respond" branch: a first turn
+// that asks waits on "questions"; once answered, the same session resumes
+// (shipHandler.resumeRespondAnswered) and the next ok outcome stores the
+// artifact.
+func TestRespondQuestionResumes(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	askCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("ask Run: %v", err)
+	}
+	if askCommit.Waiting == nil || *askCommit.Waiting != waitingFlagQuestions {
+		t.Fatalf("askCommit.Waiting = %+v, want %q", askCommit.Waiting, waitingFlagQuestions)
+	}
+	if len(askCommit.Messages) != 1 {
+		t.Fatalf("askCommit.Messages = %+v, want exactly one question", askCommit.Messages)
+	}
+	pbApply(t, s, ticket, askCommit)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	resumeCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	if resumeCommit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", resumeCommit.Escalation.Payload)
+	}
+	if len(resumeCommit.Artifacts) != 1 {
+		t.Fatalf("resumeCommit.Artifacts = %+v, want exactly one", resumeCommit.Artifacts)
+	}
+	if resumeCommit.Session == nil || resumeCommit.Session.ID == nil || askCommit.Session == nil || askCommit.Session.ID == nil ||
+		*resumeCommit.Session.ID != *askCommit.Session.ID {
+		t.Errorf("resumeCommit.Session = %+v, want the same session askCommit opened (%+v)", resumeCommit.Session, askCommit.Session)
+	}
+}
+
+// TestRespondBatchSkippedWhenThreadsGone proves design section 9.2: when
+// none of a batch's own tids still match a thread GitHub returns, RESPOND
+// writes "respond batch 1 skipped" and starts no run.
+func TestRespondBatchSkippedWhenThreadsGone(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+	gh.threads = nil // the owner resolved it, or it vanished, before RESPOND ran
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none", commit.Runs)
+	}
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != "respond batch 1 skipped" {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, "respond batch 1 skipped")
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestSkippedBatchIsClosed proves the tick after a skip does not reach
+// decision tree step (2) again (design section 8.1): it falls through to
+// POLL.
+func TestSkippedBatchIsClosed(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, local := shipRespondReady(t, when)
+	gh.threads = nil
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	skipCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("skip Run: %v", err)
+	}
+	pbApply(t, s, ticket, skipCommit)
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	nextCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("next Run: %v", err)
+	}
+	if len(nextCommit.Runs) != 0 {
+		t.Errorf("nextCommit.Runs = %+v, want none (POLL makes no runtime call)", nextCommit.Runs)
+	}
+	for _, m := range nextCommit.Messages {
+		if strings.HasPrefix(m.Body, "respond batch 1 started") {
+			t.Errorf("nextCommit.Messages = %+v, want no second %q marker for batch 1", nextCommit.Messages, "respond batch 1 started")
+		}
+	}
+}
+
+// TestRespondErrorRetry proves design section 5.6's own "respond, with no
+// run" row: escalationCommit with RunID nil resolves to the plain "retry
+// requested" marker plus ClearPoll, the same shape shipRetryMarkerCommit
+// gives every other no-run retry.
+func TestRespondErrorRetry(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginRespond)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if m.Body == markerRetryRequested {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
+	}
+}
+
+// TestRespondCapResumesRetryStartsFresh proves design section 5.6's own
+// "cap_resumes, exhausted session of job respond" row: the retry marker
+// copies the started marker's own sha, tids, and seen line byte for byte
+// into "respond batch 1 retry sha <sha> after run <R>"; the next tick runs
+// a first turn in a brand-new session, not the exhausted one.
+func TestRespondCapResumesRetryStartsFresh(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, local := shipRespondReady(t, when)
+	started, err := s.MarkersWithPrefix(t.Context(), ticket.ID, respondBatchMarkerPrefix)
+	if err != nil || len(started) != 1 {
+		t.Fatalf("MarkersWithPrefix: rows=%d err=%v", len(started), err)
+	}
+	wantLine2, wantLine3, splitErr := respondBatchRawLines(started[0].Body)
+	if splitErr != nil {
+		t.Fatalf("respondBatchRawLines: %v", splitErr)
+	}
+
+	// The exhausted session's own first turn answers the wrong thread (a
+	// coverage failure, not ok): an ok turn would store batch 1's own
+	// artifact immediately, and decision tree step (2)'s own guard ("no
+	// respond artifact of batch n yet", design section 8.1) would then
+	// never fire again for this batch, which is not what an exhausted,
+	// still-mid-batch session looks like.
+	rt := runtime.NewFake(respondScriptsFS(shipRespondWrongThreadScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	runCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if runCommit.Session == nil || runCommit.Session.ID == nil {
+		t.Fatalf("runCommit.Session = %+v, want a freshly reserved session id", runCommit.Session)
+	}
+	sessionID := *runCommit.Session.ID
+	pbApply(t, s, ticket, runCommit)
+
+	owner := "ship-respond-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobRespondName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, &sessionID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	retryCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(retryCommit.Runs) != 0 {
+		t.Errorf("retryCommit.Runs = %+v, want none (deferred to the next tick)", retryCommit.Runs)
+	}
+	wantFirst := "respond batch 1 retry sha " + local + " after run "
+	if len(retryCommit.Messages) != 1 || !strings.HasPrefix(retryCommit.Messages[0].Body, wantFirst) {
+		t.Fatalf("retryCommit.Messages = %+v, want exactly one %q marker", retryCommit.Messages, wantFirst)
+	}
+	gotLine2, gotLine3, splitErr2 := respondBatchRawLines(retryCommit.Messages[0].Body)
+	if splitErr2 != nil {
+		t.Fatalf("respondBatchRawLines: %v", splitErr2)
+	}
+	if gotLine2 != wantLine2 {
+		t.Errorf("retry tids line = %q, want %q (copied from the started marker)", gotLine2, wantLine2)
+	}
+	if gotLine3 != wantLine3 {
+		t.Errorf("retry seen line = %q, want %q (copied from the started marker)", gotLine3, wantLine3)
+	}
+
+	// The retry reruns batch 1 itself (design section 5.6: "n the batch of
+	// the exhausted session"), not a new, higher batch number, so the fresh
+	// session's own first turn is still labeled "1" -- a separate Fake
+	// instance is what makes it a fresh session, not a new batch number.
+	rt2 := runtime.NewFake(respondScriptsFS(shipRespondReplyScript))
+	deps3 := shipClaim(t, s, rt2, ticket.ID, gh, tr)
+	freshCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3)
+	if err != nil {
+		t.Fatalf("Run after retry: %v", err)
+	}
+	if len(freshCommit.Runs) != 1 {
+		t.Fatalf("freshCommit.Runs = %+v, want exactly one (a fresh first turn)", freshCommit.Runs)
+	}
+	if freshCommit.Session == nil || freshCommit.Session.ID == nil || *freshCommit.Session.ID == sessionID {
+		t.Errorf("freshCommit.Session = %+v, want a freshly minted session (not the exhausted one, %d)", freshCommit.Session, sessionID)
+	}
+}
+
+// TestRespondRetryStaleOnNewComment proves design section 9.2's own
+// freshness check, reached through a "respond batch 1 retry ..." marker: a
+// human comments on the batch's own thread before the retry's own tick
+// runs, so the next tick writes "respond batch 1 stale" instead of a run.
+func TestRespondRetryStaleOnNewComment(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, local := shipRespondReady(t, when)
+
+	owner := "ship-respond-stale-comment-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	line2, line3, splitErr := respondBatchRawLines(mustNewestMarker(t, s, ticket.ID, respondBatchMarkerPrefix))
+	if splitErr != nil {
+		t.Fatalf("respondBatchRawLines: %v", splitErr)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Messages: []store.Message{{
+			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("respond batch 1 retry sha %s after run 0\n%s\n%s", local, line2, line3),
+		}},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed retry marker: applied=%v err=%v", applied, err)
+	}
+
+	gh.threads = []orchestrator.Thread{
+		shipThread(shipRespondThreadID, "greet.go", 3,
+			shipHumanComment("c1", "reviewer1", "please fix this", when),
+			shipHumanComment("c2", "reviewer1", "actually, one more thing", when.Add(time.Hour))),
+	}
+
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none", commit.Runs)
+	}
+	want := "respond batch 1 stale\nthread " + shipRespondTID + " has a new comment"
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestRespondRetryStaleOnHeadMoved proves design section 9.2's own other
+// freshness check, reached through a "respond batch 1 retry ..." marker:
+// the pull request head moves before the retry's own tick runs, so the
+// next tick writes "respond batch 1 stale" with the head-moved reason.
+func TestRespondRetryStaleOnHeadMoved(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, local := shipRespondReady(t, when)
+
+	owner := "ship-respond-stale-head-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	line2, line3, splitErr := respondBatchRawLines(mustNewestMarker(t, s, ticket.ID, respondBatchMarkerPrefix))
+	if splitErr != nil {
+		t.Fatalf("respondBatchRawLines: %v", splitErr)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Messages: []store.Message{{
+			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("respond batch 1 retry sha %s after run 0\n%s\n%s", local, line2, line3),
+		}},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed retry marker: applied=%v err=%v", applied, err)
+	}
+
+	foreignSHA := strings.Repeat("a", 40)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: foreignSHA, BaseRef: pbFixtureDefaultBranch}
+
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none", commit.Runs)
+	}
+	want := "respond batch 1 stale\n" + respondStaleHeadMovedReason
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// mustNewestMarker returns the newest marker of ticketID whose first line
+// starts with prefix, its own body, failing the test when there is none.
+func mustNewestMarker(t *testing.T, s *store.Store, ticketID int64, prefix string) string {
+	t.Helper()
+	rows, err := s.MarkersWithPrefix(t.Context(), ticketID, prefix)
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("MarkersWithPrefix(%q): rows=%d err=%v", prefix, len(rows), err)
+	}
+	return rows[len(rows)-1].Body
 }

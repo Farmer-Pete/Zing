@@ -695,10 +695,45 @@ func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, 
 	return "", nil
 }
 
+// ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
+// ListReviews, RequestReviewers, and Viewer give dispatchShipGitHub
+// job.ReviewThreads too (M4 task 4): this test's own fixture ticket never
+// opens a real review thread, so every read returns empty and every write
+// is unreachable, the same shape ListStatuses and JobLogTail above already
+// give POLL's other unused reads.
+func (g *dispatchShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
+	return nil, nil
+}
+
+func (g *dispatchShipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
+	return false, errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) ReplyToThread(context.Context, string, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) ResolveThread(context.Context, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
+	return nil, nil
+}
+
+func (g *dispatchShipGitHub) RequestReviewers(context.Context, string, string, int, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) Viewer(context.Context) (string, error) {
+	return "zing-dispatch-test-bot", nil
+}
+
 var (
 	_ orchestrator.GitHub = (*dispatchShipGitHub)(nil)
 	_ job.PullRequests    = (*dispatchShipGitHub)(nil)
 	_ job.Checks          = (*dispatchShipGitHub)(nil)
+	_ job.ReviewThreads   = (*dispatchShipGitHub)(nil)
 )
 
 // dispatchShipTracker is a minimal job.ShipTracker double for this file's
@@ -775,7 +810,8 @@ func advanceShipping(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 		deps.Projects = map[int64]job.Project{
 			ticket.ProjectID: {
 				Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
-				Owner: testShipGitHubOwner, Repo: testShipGitHubOwner, PullRequests: gh, Checks: gh,
+				Owner: testShipGitHubOwner, Repo: testShipGitHubOwner,
+				PullRequests: gh, Checks: gh, Threads: gh,
 			},
 		}
 		deps.Tracker = tr

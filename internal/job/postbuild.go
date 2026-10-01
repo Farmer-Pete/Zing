@@ -155,8 +155,13 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
 // (shipping.go, task 7); its pr_closed and every other code share
 // shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll.
-// A row this task does not yet cover (respond, M4) is a loud, named error:
-// a later task adds it.
+// The respond rows (M4 task 4, respond.go) are shipHandler.retryRespondWithRun
+// ("respond, with a run": a fresh batch run immediately with notes and
+// error) and shipHandler.retryRespondNoRun ("respond, with no run":
+// shipRetryMarkerCommit, same as shipping's own any-other-code row); the
+// cap_resumes row for job respond is shipHandler.retryCapResumesRespond,
+// dispatched from retryCapResumes' own job switch (building.go), the same
+// way judge's is.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -217,6 +222,12 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 
 	case origin == response.EscalationOriginShipping:
 		commit = shipRetryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginRespond && escMsg.RunID != nil:
+		commit, err = shipHandler{}.retryRespondWithRun(ctx, t, d, resolveIDs, notes, errorText)
+
+	case origin == response.EscalationOriginRespond:
+		commit = shipHandler{}.retryRespondNoRun(t, d, resolveIDs)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: postbuild: escalation %d: unrecognized origin %q", escID, payload.Origin)
