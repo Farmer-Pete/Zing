@@ -114,8 +114,8 @@ func projectAddArgs(name, repo, path string) []string {
 }
 
 // TestProjectAdd_WritesProjectWithDiscoveredDefaultBranch proves the happy
-// path (PKG5-PLAN.md section 11's project_test.go row): a repo whose
-// protection includes "ci" writes the project with the branch
+// path (PKG5-PLAN.md section 11's project_test.go row): a repo whose merged
+// required checks are non-empty writes the project with the branch
 // RepoDefaultBranch discovered, and this doubles as the "bootstraps from a
 // project-less config" case, since writeProjectlessConfig starts at zero
 // projects.
@@ -189,9 +189,11 @@ func TestProjectAdd_DoesNotInlineDefaults(t *testing.T) {
 	}
 }
 
-// TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing proves step 6's
-// exact-string contract and its no-write guarantee.
-func TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing(t *testing.T) {
+// TestProjectAdd_NoRequiredCheckGivesExactErrorAndWritesNothing proves step
+// 6's exact-string contract and its no-write guarantee: a merged result
+// (classic protection and any ruleset, D28) with zero required checks of
+// any name is rejected, not just one missing a literal "ci".
+func TestProjectAdd_NoRequiredCheckGivesExactErrorAndWritesNothing(t *testing.T) {
 	t.Parallel()
 
 	cfgPath := writeProjectlessConfig(t)
@@ -202,14 +204,14 @@ func TestProjectAdd_MissingCIGivesExactErrorAndWritesNothing(t *testing.T) {
 
 	gh := fakeGitHub{
 		defaultBranch:  "main",
-		checksByBranch: map[string][]string{"main": {fakeRequiredCheckLint, "build"}}, // no "ci"
+		checksByBranch: map[string][]string{"main": {}}, // neither source names a check
 	}
 
 	err = projectAdd(t.Context(), cfgPath, gh, projectAddArgs("zing", "Farmer-Pete/Zing", t.TempDir()))
 	if err == nil {
-		t.Fatal("projectAdd() = nil, want an error for a missing ci check")
+		t.Fatal("projectAdd() = nil, want an error for a branch with no required check")
 	}
-	const want = "branch protection missing required check ci"
+	const want = "branch protection requires no status check"
 	if err.Error() != want {
 		t.Errorf("projectAdd() error = %q, want the exact string %q", err.Error(), want)
 	}

@@ -24,9 +24,13 @@ import (
 type GitHub interface {
 	// RepoDefaultBranch returns the repository's default branch name.
 	RepoDefaultBranch(ctx context.Context, owner, repo string) (string, error)
-	// RequiredChecks returns the required status-check contexts on the named
-	// branch's protection. When the branch has no protection it returns an
-	// empty slice and no error. Any other failure is an error.
+	// RequiredChecks returns the required status-check contexts named by
+	// either the branch's classic protection or a repository ruleset that
+	// applies to it, merged and deduplicated by context name (D28, found
+	// 2026-10-01: a branch can be protected by a ruleset alone, which
+	// classic protection reads cannot see). When neither source names any
+	// check it returns an empty slice and no error. Any other failure is
+	// an error.
 	RequiredChecks(ctx context.Context, owner, repo, branch string) ([]string, error)
 	// CreateDraftPR opens a draft pull request and returns its URL and number.
 	CreateDraftPR(ctx context.Context, owner, repo, head, base, title, body string) (url string, number int, err error)
@@ -94,43 +98,24 @@ func (g *GitHubClient) RepoDefaultBranch(ctx context.Context, owner, repo string
 	return repository.GetDefaultBranch(), nil
 }
 
-// RequiredChecks calls Repositories.GetBranchProtection. An unprotected
-// branch surfaces as errors.Is(err, github.ErrBranchNotProtected), which
-// this method treats as an empty result and no error; any other failure
-// (a missing repo or branch, a hidden authorization failure) is returned
-// wrapped, so a misconfiguration never reads as "no checks". On success it
-// unions the modern RequiredStatusChecks.Checks[].Context shape with the
-// legacy RequiredStatusChecks.Contexts shape, deduplicated, preserving the
-// order each context is first seen in (checks, then legacy contexts).
+// RequiredChecks returns RequiredCheckRules' merged contexts, deduplicated
+// by name (D28): classic protection's checks, then its legacy contexts,
+// then the rulesets' checks, in the order each name is first seen.
 func (g *GitHubClient) RequiredChecks(ctx context.Context, owner, repo, branch string) ([]string, error) {
-	protection, _, err := g.c.Repositories.GetBranchProtection(ctx, owner, repo, branch)
+	rules, err := g.RequiredCheckRules(ctx, owner, repo, branch)
 	if err != nil {
-		if errors.Is(err, github.ErrBranchNotProtected) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("orchestrator: required checks: %w", err)
 	}
 
-	rsc := protection.GetRequiredStatusChecks()
-	modern := rsc.GetChecks()
-	legacy := rsc.GetContexts()
-
-	seen := make(map[string]bool, len(modern)+len(legacy))
-	checks := make([]string, 0, len(modern)+len(legacy))
-	appendContext := func(name string) {
-		if name == "" || seen[name] {
-			return
+	seen := make(map[string]bool, len(rules))
+	checks := make([]string, 0, len(rules))
+	for _, rc := range rules {
+		if rc.Context == "" || seen[rc.Context] {
+			continue
 		}
-		seen[name] = true
-		checks = append(checks, name)
+		seen[rc.Context] = true
+		checks = append(checks, rc.Context)
 	}
-	for _, c := range modern {
-		appendContext(c.GetContext())
-	}
-	for _, name := range legacy {
-		appendContext(name)
-	}
-
 	return checks, nil
 }
 
@@ -474,35 +459,129 @@ func (g *GitHubClient) ListStatuses(ctx context.Context, owner, repo, sha string
 	return out, nil
 }
 
-// RequiredCheckRules calls Repositories.GetBranchProtection, the app-aware
-// read (job.Checks.RequiredCheckRules; PKG9-PLAN.md section 10.3). An
-// unprotected branch returns an empty slice and no error, the same
-// ErrBranchNotProtected handling as RequiredChecks above. A modern check's
-// app_id of null or -1 (any source) maps to a nil AppID; any other app_id
-// is kept, so EvaluateCI can refuse a same-name check from another app.
+// RequiredCheckRules returns the required status checks named by either
+// classic branch protection or a repository ruleset that applies to the
+// branch, merged and deduplicated by (context, app id)
+// (job.Checks.RequiredCheckRules; PKG9-PLAN.md section 10.3; D28, found
+// 2026-10-01: Farmer-Pete/Zing is protected only by a ruleset, which
+// classic protection reads cannot see). Neither source existing is not an
+// error, the app-aware analog of RequiredChecks above; a genuine failure
+// from either source is.
 func (g *GitHubClient) RequiredCheckRules(ctx context.Context, owner, repo, branch string) ([]RequiredCheck, error) {
+	classic, err := g.classicRequiredCheckRules(ctx, owner, repo, branch)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: required check rules: classic protection: %w", err)
+	}
+	rules, err := g.rulesetRequiredCheckRules(ctx, owner, repo, branch)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: required check rules: rules: %w", err)
+	}
+	return mergeRequiredCheckRules(classic, rules), nil
+}
+
+// classicRequiredCheckRules calls Repositories.GetBranchProtection and
+// returns its required status checks, the modern RequiredStatusChecks.
+// Checks[] shape first (with each check's app id), then the legacy
+// RequiredStatusChecks.Contexts shape (always a nil app id). Any 404 means
+// this source has no checks and returns an empty result and no error (D28):
+// go-github's own github.ErrBranchNotProtected sentinel for the usual
+// "Branch not protected" message, or a differently worded 404 classified
+// through classifyGitHubErr. Any other failure is classified and returned.
+func (g *GitHubClient) classicRequiredCheckRules(ctx context.Context, owner, repo, branch string) ([]RequiredCheck, error) {
 	protection, _, err := g.c.Repositories.GetBranchProtection(ctx, owner, repo, branch)
 	if err != nil {
 		if errors.Is(err, github.ErrBranchNotProtected) {
 			return nil, nil
 		}
-		return nil, classifyGitHubErr(err)
+		classified := classifyGitHubErr(err)
+		if errors.Is(classified, ErrGitHubNotFound) {
+			return nil, nil
+		}
+		return nil, classified
 	}
 
 	rsc := protection.GetRequiredStatusChecks()
 	var out []RequiredCheck
 	for _, c := range rsc.GetChecks() {
-		rc := RequiredCheck{Context: c.Context}
-		if c.AppID != nil && *c.AppID != -1 {
-			appID := *c.AppID
-			rc.AppID = &appID
-		}
-		out = append(out, rc)
+		out = append(out, RequiredCheck{Context: c.Context, AppID: normalizeAppID(c.AppID)})
 	}
 	for _, name := range rsc.GetContexts() {
 		out = append(out, RequiredCheck{Context: name})
 	}
 	return out, nil
+}
+
+// rulesetRequiredCheckRules calls Repositories.ListRulesForBranch (GET
+// /repos/{owner}/{repo}/rules/branches/{branch}), paginated to completion,
+// and returns every required_status_checks rule's checks as RequiredCheck
+// values (D28). A 404 means no ruleset applies to the branch at all, the
+// ruleset analog of an unprotected branch, and returns an empty slice and
+// no error; any other failure is classified and returned.
+func (g *GitHubClient) rulesetRequiredCheckRules(ctx context.Context, owner, repo, branch string) ([]RequiredCheck, error) {
+	opts := &github.ListOptions{PerPage: ghPerPage}
+
+	var out []RequiredCheck
+	for {
+		rules, resp, err := g.c.Repositories.ListRulesForBranch(ctx, owner, repo, branch, opts)
+		if err != nil {
+			classified := classifyGitHubErr(err)
+			if errors.Is(classified, ErrGitHubNotFound) {
+				return nil, nil
+			}
+			return nil, classified
+		}
+		for _, rule := range rules.RequiredStatusChecks {
+			for _, c := range rule.Parameters.RequiredStatusChecks {
+				out = append(out, RequiredCheck{Context: c.Context, AppID: normalizeAppID(c.IntegrationID)})
+			}
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+// normalizeAppID maps a check's raw app id field onto RequiredCheck.AppID:
+// nil when the field itself is nil or -1 (GitHub's "any source" value), a
+// copy of the app id otherwise, matching RequiredCheck's documented rule.
+func normalizeAppID(appID *int64) *int64 {
+	if appID == nil || *appID == -1 {
+		return nil
+	}
+	return new(*appID)
+}
+
+// mergeRequiredCheckRules merges a and b, in that order, dropping an entry
+// of b whose context and app id (including both having no app id) exactly
+// duplicate one already kept from a (D28).
+func mergeRequiredCheckRules(a, b []RequiredCheck) []RequiredCheck {
+	type key struct {
+		context string
+		appID   int64
+		hasApp  bool
+	}
+	seen := make(map[key]bool, len(a)+len(b))
+	out := make([]RequiredCheck, 0, len(a)+len(b))
+	add := func(rc RequiredCheck) {
+		k := key{context: rc.Context}
+		if rc.AppID != nil {
+			k.appID = *rc.AppID
+			k.hasApp = true
+		}
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, rc)
+	}
+	for _, rc := range a {
+		add(rc)
+	}
+	for _, rc := range b {
+		add(rc)
+	}
+	return out
 }
 
 // ListReviews calls PullRequests.ListReviews, paginated to completion

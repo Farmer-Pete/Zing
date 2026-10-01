@@ -20,6 +20,11 @@ import (
 // so a test can assert the Authorization header it produces.
 const testGHToken = "test-token-123" //nolint:gosec // not a credential, a fixed test fixture value
 
+// testDeployCheck is a check-run or required-check name reused across
+// several fixtures below, pulled out as a constant so goconst does not
+// flag the repeats.
+const testDeployCheck = "deploy"
+
 // newTestGHClient builds a real *GitHubClient whose *github.Client points at
 // an httptest server backed by mux, so github_test.go exercises the real
 // go-github v92 wiring at the HTTP layer rather than faking the GitHub
@@ -145,9 +150,31 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 	}
 }
 
+// handleNoRules registers a 404 handler for mainBranch's rules/branches
+// route on mux, the response a repository with no applicable ruleset
+// returns (D28): every TestGHClientRequiredChecks and TestRequiredCheckRules
+// subtest that does not itself script that route needs one registered, so
+// an unmatched request fails loudly (http.ServeMux's own plain-text 404)
+// rather than silently reading as "no rules" by accident.
+func handleNoRules(mux *http.ServeMux) {
+	mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message": "Not Found"}`)
+	})
+}
+
+// handleNoProtection registers a 404 "Branch not protected" handler for
+// mainBranch's classic protection route on mux (D28; see handleNoRules).
+func handleNoProtection(mux *http.ServeMux) {
+	mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message": "Branch not protected"}`)
+	})
+}
+
 func TestGHClientRequiredChecks(t *testing.T) {
 	t.Parallel()
-	t.Run("unions modern checks and legacy contexts, deduplicated", func(t *testing.T) {
+	t.Run("unions classic checks, legacy contexts, and a ruleset's checks, deduplicated", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
@@ -159,6 +186,13 @@ func TestGHClientRequiredChecks(t *testing.T) {
 				}
 			}`)
 		})
+		mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{
+				"ruleset_id": 1,
+				"type": "required_status_checks",
+				"parameters": {"required_status_checks": [{"context": "ci"}, {"context": "deploy"}]}
+			}]`)
+		})
 
 		g := newTestGHClient(t, mux)
 
@@ -167,7 +201,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 			t.Fatalf("RequiredChecks: unexpected error: %v", err)
 		}
 
-		want := map[string]bool{"ci": true, "build": true, "lint": true}
+		want := map[string]bool{"ci": true, "build": true, "lint": true, testDeployCheck: true}
 		if len(checks) != len(want) {
 			t.Fatalf("RequiredChecks = %v, want the %d contexts %v (deduplicated)", checks, len(want), want)
 		}
@@ -178,13 +212,11 @@ func TestGHClientRequiredChecks(t *testing.T) {
 		}
 	})
 
-	t.Run("branch not protected yields an empty slice and no error", func(t *testing.T) {
+	t.Run("neither source names a check yields an empty slice and no error", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
-		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"message": "Branch not protected"}`)
-		})
+		handleNoProtection(mux)
+		handleNoRules(mux)
 
 		g := newTestGHClient(t, mux)
 
@@ -197,19 +229,20 @@ func TestGHClientRequiredChecks(t *testing.T) {
 		}
 	})
 
-	t.Run("a different 404 is an error, not an empty result", func(t *testing.T) {
+	t.Run("a non-404 failure from classic protection is an error, not swallowed", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"message": "Not Found"}`)
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"message": "Internal Server Error"}`)
 		})
+		handleNoRules(mux)
 
 		g := newTestGHClient(t, mux)
 
 		_, err := g.RequiredChecks(t.Context(), "acme", "widgets", mainBranch)
 		if err == nil {
-			t.Fatal("RequiredChecks: expected an error for a non-branch-protection 404, got nil")
+			t.Fatal("RequiredChecks: expected an error for a 500 from classic protection, got nil")
 		}
 	})
 }
@@ -406,7 +439,7 @@ func TestListCheckRunsAllPages(t *testing.T) {
 	}
 	want := []CheckRun{
 		{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 15368, DetailsURL: "https://x/1"},
-		{ID: 2, Name: "deploy", Status: "completed", Conclusion: "neutral", AppSlug: "other-app", AppID: 99, DetailsURL: "https://x/2"},
+		{ID: 2, Name: testDeployCheck, Status: "completed", Conclusion: "neutral", AppSlug: "other-app", AppID: 99, DetailsURL: "https://x/2"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ListCheckRuns = %+v, want %+v", got, want)
@@ -455,10 +488,36 @@ func TestListStatusesAllPages(t *testing.T) {
 	}
 }
 
+// assertRequiredCheckRules fails t unless got holds exactly the (context,
+// app id) pairs want names, order ignored.
+func assertRequiredCheckRules(t *testing.T, got []RequiredCheck, want map[string]*int64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("RequiredCheckRules = %+v, want %d entries %v", got, len(want), want)
+	}
+	for _, rc := range got {
+		wantAppID, ok := want[rc.Context]
+		if !ok {
+			t.Errorf("RequiredCheckRules: unexpected context %q", rc.Context)
+			continue
+		}
+		if (rc.AppID == nil) != (wantAppID == nil) {
+			t.Errorf("RequiredCheckRules[%q].AppID = %v, want %v", rc.Context, rc.AppID, wantAppID)
+			continue
+		}
+		if rc.AppID != nil && *rc.AppID != *wantAppID {
+			t.Errorf("RequiredCheckRules[%q].AppID = %d, want %d", rc.Context, *rc.AppID, *wantAppID)
+		}
+	}
+}
+
+// TestRequiredCheckRules proves D28's merge of classic branch protection
+// with the rules a repository ruleset applies to the branch
+// (GET /repos/{owner}/{repo}/rules/branches/{branch}).
 func TestRequiredCheckRules(t *testing.T) {
 	t.Parallel()
 
-	t.Run("legacy context, a modern app-bound check, and app id -1 or absent as any source", func(t *testing.T) {
+	t.Run("classic only: legacy context, a modern app-bound check, and app id -1 or absent as any source", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
@@ -473,6 +532,7 @@ func TestRequiredCheckRules(t *testing.T) {
 				}
 			}`)
 		})
+		handleNoRules(mux)
 
 		g := newTestGHClient(t, mux)
 
@@ -480,33 +540,85 @@ func TestRequiredCheckRules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
 		}
-
-		want := map[string]*int64{"ci": new(int64(15368)), "format": nil, "build": nil, "legacy-ctx": nil}
-		if len(got) != len(want) {
-			t.Fatalf("RequiredCheckRules = %+v, want %d entries %v", got, len(want), want)
-		}
-		for _, rc := range got {
-			wantAppID, ok := want[rc.Context]
-			if !ok {
-				t.Errorf("RequiredCheckRules: unexpected context %q", rc.Context)
-				continue
-			}
-			if (rc.AppID == nil) != (wantAppID == nil) {
-				t.Errorf("RequiredCheckRules[%q].AppID = %v, want %v", rc.Context, rc.AppID, wantAppID)
-				continue
-			}
-			if rc.AppID != nil && *rc.AppID != *wantAppID {
-				t.Errorf("RequiredCheckRules[%q].AppID = %d, want %d", rc.Context, *rc.AppID, *wantAppID)
-			}
-		}
+		assertRequiredCheckRules(t, got, map[string]*int64{"ci": new(int64(15368)), "format": nil, "build": nil, "legacy-ctx": nil})
 	})
 
-	t.Run("branch not protected yields an empty slice and no error", func(t *testing.T) {
+	t.Run("ruleset only: the Zing shape, app ids kept per check", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		handleNoProtection(mux)
+		// The payload Farmer-Pete/Zing's main returns from
+		// GET /repos/Farmer-Pete/Zing/rules/branches/main (facts verified
+		// 2026-10-01): one required_status_checks rule from ruleset 23792541,
+		// two checks sharing app 15368 and two each bound to their own app.
+		mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{
+				"ruleset_id": 23792541,
+				"type": "required_status_checks",
+				"parameters": {"required_status_checks": [
+					{"context": "Hooks and tests", "integration_id": 15368},
+					{"context": "Secret scan", "integration_id": 15368},
+					{"context": "CodeRabbit", "integration_id": 347564},
+					{"context": "cubic · AI code reviewer", "integration_id": 1082092}
+				]}
+			}]`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err != nil {
+			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
+		}
+		assertRequiredCheckRules(t, got, map[string]*int64{
+			"Hooks and tests":          new(int64(15368)),
+			"Secret scan":              new(int64(15368)),
+			"CodeRabbit":               new(int64(347564)),
+			"cubic · AI code reviewer": new(int64(1082092)),
+		})
+	})
+
+	t.Run("both sources, an exact duplicate dropped", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"message": "Branch not protected"}`)
+			fmt.Fprint(w, `{
+				"required_status_checks": {
+					"contexts": [],
+					"checks": [{"context": "ci", "app_id": 15368}, {"context": "lint"}]
+				}
+			}`)
+		})
+		mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+			// "ci"/15368 exactly duplicates the classic entry and must be
+			// dropped; "deploy"/42 is new and must be kept.
+			fmt.Fprint(w, `[{
+				"ruleset_id": 1,
+				"type": "required_status_checks",
+				"parameters": {"required_status_checks": [
+					{"context": "ci", "integration_id": 15368},
+					{"context": "deploy", "integration_id": 42}
+				]}
+			}]`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err != nil {
+			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
+		}
+		assertRequiredCheckRules(t, got, map[string]*int64{"ci": new(int64(15368)), "lint": nil, testDeployCheck: new(int64(42))})
+	})
+
+	t.Run("neither source names a check (a valid empty response from each) yields an empty slice and no error", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"required_status_checks": {"contexts": [], "checks": []}}`)
+		})
+		mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[]`)
 		})
 
 		g := newTestGHClient(t, mux)
@@ -517,6 +629,40 @@ func TestRequiredCheckRules(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Errorf("RequiredCheckRules = %+v, want an empty slice", got)
+		}
+	})
+
+	t.Run("a 404 on each source yields an empty slice and no error", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		handleNoProtection(mux)
+		handleNoRules(mux)
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err != nil {
+			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("RequiredCheckRules = %+v, want an empty slice", got)
+		}
+	})
+
+	t.Run("a non-404 failure from the rules source is an error, not swallowed", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		handleNoProtection(mux)
+		mux.HandleFunc("/repos/acme/widgets/rules/branches/main", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"message": "Internal Server Error"}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		_, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err == nil {
+			t.Fatal("RequiredCheckRules: expected an error for a 500 from the rules source, got nil")
 		}
 	})
 }

@@ -1,6 +1,7 @@
 // project.go implements "zing project add" (PKG5-PLAN.md section 10):
-// discover a repository's default branch and its "ci" required check
-// through the GitHub API, then append the project to zing.toml.
+// discover a repository's default branch and confirm it requires at least
+// one status check (classic branch protection or a repository ruleset,
+// D28) through the GitHub API, then append the project to zing.toml.
 package main
 
 import (
@@ -20,11 +21,14 @@ import (
 
 const projectAddUsage = `usage: zing project add --name <n> --repo <owner/repo> --path <dir> --test "<cmd>" --lint "<cmd>" [--tracker github]`
 
-// errMissingRequiredCICheck is the exact error PKG5-PLAN.md section 10 step
-// 6 requires when the repository's default branch protection does not list
-// "ci" among its required status checks. projectAdd returns it unwrapped, so
-// its Error() text is exactly this string with no added prefix.
-var errMissingRequiredCICheck = errors.New("branch protection missing required check ci")
+// errNoRequiredStatusCheck is the exact error PKG5-PLAN.md section 10 step
+// 6 requires when neither the repository's default branch protection nor
+// any repository ruleset applying to it names a required status check
+// (D28: a repo can gate its branch with a ruleset alone, with no required
+// check named "ci" or any other fixed name). projectAdd returns it
+// unwrapped, so its Error() text is exactly this string with no added
+// prefix.
+var errNoRequiredStatusCheck = errors.New("branch protection requires no status check")
 
 // runProject dispatches "zing project"'s one subcommand, "add".
 func runProject(args []string) int {
@@ -142,8 +146,9 @@ func splitOwnerRepo(repo string) (owner, name string, err error) {
 //     DefaultBranch into the saved project (store.EnsureProject only
 //     defaults an empty DefaultBranch to "main" for a project it is
 //     inserting for the first time, not one already on record).
-//  6. gh.RequiredChecks on that branch; a result missing "ci" fails with
-//     errMissingRequiredCICheck and writes nothing.
+//  6. gh.RequiredChecks on that branch, merged from classic protection and
+//     any applying ruleset (D28); an empty result fails with
+//     errNoRequiredStatusCheck and writes nothing.
 //  7. config.AppendProject writes the new project, with the discovered
 //     default branch, as a single appended [[projects]] block, leaving every
 //     existing key and value in zing.toml untouched.
@@ -179,8 +184,8 @@ func projectAdd(ctx context.Context, cfgPath string, gh orchestrator.GitHub, arg
 	if err != nil {
 		return fmt.Errorf("zing project add: required checks: %w", err)
 	}
-	if !slices.Contains(checks, "ci") {
-		return errMissingRequiredCICheck
+	if len(checks) == 0 {
+		return errNoRequiredStatusCheck
 	}
 
 	newProject := config.Project{
