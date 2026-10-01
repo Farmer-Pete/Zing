@@ -46,12 +46,15 @@ type runResult struct {
 // lens becomes RunSeed.Lens: the lens name for a review lens run (ROUND and
 // CONTINUE, PKG9-PLAN.md section 6.2, 6.2a), nil for every other job.
 // runAndRoute's own callers -- planning's four and building's own -- pass
-// nil for both.
+// nil for both. throughBatch becomes store.RunSeed.ThroughBatch (D31,
+// design section 22.3): the largest owner-message batch this reserved run
+// carries, above 0 only for a planning resume or first turn that found
+// PlanningConversation.Undelivered() non-empty; every other caller passes 0.
 func runJob(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
-	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string, throughBatch int64,
 ) (runResult, error) {
-	return runJobWith(ctx, d, t, jobName, su, req, taskN, lens, nil)
+	return runJobWith(ctx, d, t, jobName, su, req, taskN, lens, throughBatch, nil)
 }
 
 // afterReserve runs after Reserve and before rt.Run (PKG9-PLAN.md section
@@ -80,7 +83,7 @@ type afterReserve func(ctx context.Context, rsv store.Reserved, req *runtime.Run
 // terminalize the run (postRunFailure) rather than orphaning it.
 func runJobWith(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
-	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string,
+	su store.SessionUpsert, req runtime.RunRequest, taskN *int, lens *string, throughBatch int64,
 	hook afterReserve,
 ) (runResult, error) {
 	jobCfg, ok := d.Machine.Jobs[jobName]
@@ -217,7 +220,7 @@ func runJobWith(
 	defer cancel()
 
 	var reserveErr error
-	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN, Lens: lens})
+	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN, Lens: lens, ThroughBatch: throughBatch})
 	if reserveErr != nil {
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, reserveErr)
 	}

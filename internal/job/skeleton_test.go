@@ -74,6 +74,20 @@ const (
 	// testFixtureGitHubOwner is the owner and repo name every orchestrator
 	// this file builds uses: a placeholder, never a real GitHub repository.
 	testFixtureGitHubOwner = "fixture"
+
+	// testOptionAText and testOptionBText are the two-option payload's own
+	// option text, shared across every hand-built question/questions
+	// response in planning_test.go and escalation_test.go (D31's own
+	// conversation-carrying fixtures among them).
+	testOptionAText  = "Option A"
+	testOptionBText  = "Option B"
+	testQuestionBody = "Body."
+	// testQ1SettledDecision is the fixed decision text every D31 fixture
+	// uses to settle Q1 through a hand-built <replies> reply, so a
+	// ready/children/nothing_to_do response can pass checkConversation's
+	// "every question settled" rule without each test inventing its own
+	// wording.
+	testQ1SettledDecision = "The owner's answer to Q1 settles this thread."
 )
 
 // testProject is the one project every test in this file seeds. LocalPath

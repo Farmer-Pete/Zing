@@ -814,7 +814,7 @@ func judgeRunAndRoute(
 	hook afterReserve,
 	onOk func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error),
 ) (store.HandlerCommit, runResult, error) {
-	rr, runErr := runJobWith(ctx, d, t, jobJudgeName, su, req, nil, nil, hook)
+	rr, runErr := runJobWith(ctx, d, t, jobJudgeName, su, req, nil, nil, 0, hook)
 	sessionCommit := sessionRecord(rr)
 
 	if runErr != nil {

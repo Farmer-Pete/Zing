@@ -706,7 +706,7 @@ func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d D
 	return runAndRoute(ctx, d, t, jobBuildName, su, req, priorInvalid, sessionRecord, resolveIDs, originFor(u),
 		func(rr runResult) (store.HandlerCommit, error) {
 			return buildSuccessCommit(t, d, rr, sessionRecord(rr), resolveIDs, u)
-		}, seedTaskN(u.TaskN))
+		}, seedTaskN(u.TaskN), 0)
 }
 
 // ---- escalation resolution (task 13, design section 6.9) ------------------
@@ -1636,7 +1636,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	return runAndRoute(ctx, d, t, jobBuildName, su, req, 0, freshSessionRecord, resolveIDs, originFor(u),
 		func(rr runResult) (store.HandlerCommit, error) {
 			return buildSuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs, u)
-		}, &n)
+		}, &n, 0)
 }
 
 func taskByN(tasks []response.Task, n int) (response.Task, bool) {
@@ -2003,7 +2003,7 @@ func (h buildingHandler) describeOne(ctx context.Context, t store.Ticket, d Deps
 			}
 			c.ResolveQuestions = resolveIDs
 			return c, nil
-		}, seedTaskN(u.TaskN))
+		}, seedTaskN(u.TaskN), 0)
 }
 
 // perimeterSuccessCommit routes a perimeter run's parsed response (design
@@ -2448,7 +2448,7 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 			}
 			c.Artifacts = append(artifacts, c.Artifacts...)
 			return c, nil
-		}, seedTaskN(report.Report.TaskN))
+		}, seedTaskN(report.Report.TaskN), 0)
 	return withBranchResult(commit, runErr, wt)
 }
 
@@ -2578,7 +2578,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 			}
 			c.ResolveQuestions = resolveIDs
 			return c, nil
-		}, seedTaskN(taskN))
+		}, seedTaskN(taskN), 0)
 	return withBranchResult(commit, runErr, wt)
 }
 

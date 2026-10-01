@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"zing/internal/response"
+	"zing/internal/runtime"
 	"zing/internal/store"
 )
 
@@ -134,7 +135,7 @@ func seedAnsweredPlanningRound(t *testing.T, s *store.Store, ticketID int64) (se
 
 	payload, err := json.Marshal(response.QuestionPayload{
 		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
-		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Option A"}, {Key: "b", Text: "Option B"}},
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: testOptionAText}, {Key: "b", Text: testOptionBText}},
 	})
 	if err != nil {
 		t.Fatalf("seedAnsweredPlanningRound: marshal question payload: %v", err)
@@ -468,9 +469,36 @@ func TestEscalationResolve_GateApprove_RetryReRunsApproveBranches(t *testing.T) 
 
 // ---- cap_resumes origin: both choices go fresh with preserved answers -----
 
+// capResumesFreshQuestionResult builds a planning "question" outcome that
+// also replies (but does not settle) the preserved planning thread Q1
+// (D31, design section 22.2): a fresh session's own transcript
+// (conversationFreshInput) still shows Q1 as an unsettled thread with an
+// undelivered owner answer, so a response that ignores it fails
+// checkConversation's "answer every owner message you receive" rule before
+// ever reaching this outcome's own commit logic.
+func capResumesFreshQuestionResult(sessionID string) scriptedStep {
+	resp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q2", Title: "A question", Body: testQuestionBody,
+			Options:     []response.Option{{Key: "a", Text: testOptionAText}, {Key: "b", Text: testOptionBText}},
+			Recommended: "a",
+		}},
+		Replies: []response.Reply{
+			{Question: "Q1", Text: "Noted, thanks."},
+		},
+	}
+	return scriptedStep{res: runtime.RunResult{Response: resp, SessionID: sessionID, ExitCode: 0, AgentTime: time.Second}}
+}
+
 // TestEscalationResolve_CapResumes_BackStartsFreshCarriesPreservedAnswersAndResolvesBothRounds
-// proves section 6.7's cap_resumes row: "b starts a fresh session AND
-// carries the preserved round's answers AND resolves both rounds."
+// proves section 6.7's cap_resumes row, D31-adjusted (design section 22.4):
+// "b starts a fresh session" still holds, but the preserved planning
+// question Q1 no longer resolves through commit.ResolveQuestions -- no
+// planning question ever does any more (D31 dropped
+// resolveCapResumesEscalation's own round-preserving loop) -- it instead
+// arrives in the fresh session's own conversation transcript, and only
+// resolves if and when the agent settles it through a reply.
 func TestEscalationResolve_CapResumes_BackStartsFreshCarriesPreservedAnswersAndResolvesBothRounds(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
@@ -479,7 +507,7 @@ func TestEscalationResolve_CapResumes_BackStartsFreshCarriesPreservedAnswersAndR
 	escQID := escalateDirect(t, s, ticketID, nil, &sessID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
 	answerGateQuestion(t, s, ticketID, escQID, new("b"), "")
 
-	rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "cap-resumes-fresh-sess")}}
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{capResumesFreshQuestionResult("cap-resumes-fresh-sess")}}
 	rec := &recordingRuntime{rt: rt}
 	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 	if err != nil {
@@ -491,27 +519,33 @@ func TestEscalationResolve_CapResumes_BackStartsFreshCarriesPreservedAnswersAndR
 	if commit.Session == nil || commit.Session.BumpResumes {
 		t.Fatalf("commit.Session = %+v, want a fresh session (BumpResumes false)", commit.Session)
 	}
-	assertFenced(t, rec.lastReq.Prompt, "answers", "Q1 body")
-	if len(commit.ResolveQuestions) != 2 {
-		t.Fatalf("commit.ResolveQuestions = %v, want 2 (the escalation round and the preserved Q1 round)", commit.ResolveQuestions)
+	assertFenced(t, rec.lastReq.Prompt, "conversation", "Q1 body")
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != escQID {
+		t.Fatalf("commit.ResolveQuestions = %v, want [%d] (only the escalation round; Q1 is a planning question, never resolved this way any more)", commit.ResolveQuestions, escQID)
 	}
-	for _, want := range []int64{escQID, preservedQID} {
-		found := false
-		for _, id := range commit.ResolveQuestions {
-			if id == want {
-				found = true
-			}
+	if commit.Conversation == nil || len(commit.Conversation.Settle) != 0 {
+		t.Errorf("commit.Conversation = %+v, want a reply with no settle (Q1 stays open; the agent only acknowledged it)", commit.Conversation)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	stillOpen, err := s.QuestionsByState(t.Context(), ticketID, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByState(answered): %v", err)
+	}
+	found := false
+	for _, q := range stillOpen {
+		if q.ID == preservedQID {
+			found = true
 		}
-		if !found {
-			t.Errorf("commit.ResolveQuestions = %v, want it to include %d", commit.ResolveQuestions, want)
-		}
+	}
+	if !found {
+		t.Errorf("preserved question %d is no longer answered, want it to stay open until the agent settles it", preservedQID)
 	}
 }
 
 // TestEscalationResolve_CapResumes_RetryBehavesTheSameAsBack proves choice
-// a on cap_resumes takes the identical fresh-with-preserved-answers path as
-// b (design section 6.7: the exhausted session guarantees resumeOrFresh's
-// own SessionOpen branch is unreachable either way).
+// a on cap_resumes takes the identical fresh-with-preserved-conversation
+// path as b (design section 6.7: the exhausted session guarantees
+// resumeOrFresh's own SessionOpen branch is unreachable either way).
 func TestEscalationResolve_CapResumes_RetryBehavesTheSameAsBack(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
@@ -520,7 +554,7 @@ func TestEscalationResolve_CapResumes_RetryBehavesTheSameAsBack(t *testing.T) {
 	escQID := escalateDirect(t, s, ticketID, nil, &sessID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
 	answerGateQuestion(t, s, ticketID, escQID, new("a"), "")
 
-	rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "cap-resumes-retry-sess")}}
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{capResumesFreshQuestionResult("cap-resumes-retry-sess")}}
 	rec := &recordingRuntime{rt: rt}
 	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 	if err != nil {
@@ -529,7 +563,7 @@ func TestEscalationResolve_CapResumes_RetryBehavesTheSameAsBack(t *testing.T) {
 	if commit.Session == nil || commit.Session.BumpResumes {
 		t.Fatalf("commit.Session = %+v, want a fresh session", commit.Session)
 	}
-	assertFenced(t, rec.lastReq.Prompt, "answers", "Q1 body")
+	assertFenced(t, rec.lastReq.Prompt, "conversation", "Q1 body")
 }
 
 // ---- cap_loops origin: retry carries findings, back does not --------------

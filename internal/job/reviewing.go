@@ -733,7 +733,7 @@ func (h reviewingHandler) discussRunAndRoute(
 	onOk func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error),
 ) (store.HandlerCommit, error) {
 	lensStr := string(lens)
-	rr, runErr := runJob(ctx, d, t, jobReviewName, su, req, nil, &lensStr)
+	rr, runErr := runJob(ctx, d, t, jobReviewName, su, req, nil, &lensStr, 0)
 	sessionCommit := resumeSessionRecord(sessionID, rr)
 
 	if runErr != nil {
@@ -955,7 +955,7 @@ func runLensesParallel(
 
 			su, req, sessionRecord := build(lens)
 			lensStr := string(lens)
-			rr, err := runJob(roundCtx, d, t, jobReviewName, su, req, nil, &lensStr)
+			rr, err := runJob(roundCtx, d, t, jobReviewName, su, req, nil, &lensStr, 0)
 
 			at := lensAttempt{idx: idx, lens: lens, rr: rr, err: err, sessionRecord: sessionRecord}
 			if !at.isGood() {

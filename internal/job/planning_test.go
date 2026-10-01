@@ -124,8 +124,8 @@ func claimWithFloor(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 // D31), so forJob picks which concrete type this scripted step carries.
 func questionResult(forJob response.Job, sessionID string) scriptedStep {
 	questions := []response.Question{{
-		Key: "q1", Title: "A question", Body: "Body.",
-		Options:     []response.Option{{Key: "a", Text: "Option A"}, {Key: "b", Text: "Option B"}},
+		Key: "q1", Title: "A question", Body: testQuestionBody,
+		Options:     []response.Option{{Key: "a", Text: testOptionAText}, {Key: "b", Text: testOptionBText}},
 		Recommended: "a",
 	}}
 	var resp response.Response
@@ -354,7 +354,25 @@ func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 // section 4.2, ResolveQuestions the round's question ids), and the resumed
 // prompt fences the owner's answer text behind the untrusted-input markers
 // (design D15, section 4.2).
-func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *testing.T) {
+// TestPlanningHandler_Resume_ConversationBumpsResumesOnceAndFences is D31's
+// rewrite of the pre-D31
+// TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer
+// (design section 22.4): Q1 is a planning question, so the owner's answer
+// never becomes an "answered round" any more -- it is delivered as
+// undelivered conversation input, fenced exactly the way an answered
+// round's own input used to be, and the resume settles the thread through
+// commit.Conversation rather than resolving it through
+// commit.ResolveQuestions. Deviation from the plan's own name: this is a
+// plain owner delivery (Undelivered() non-empty, no D14/validation/floor
+// reason, and the session's prior run did not end in error), so by design
+// section 22.4's resume-charging table it is the one case that is never
+// charged (BumpResumes=false) -- the "once" in this test's own name
+// predates the owner's correction recorded in the build log ("owner-
+// delivery resumes set BumpResumes=false"), which TestOwnerDeliveriesNever
+// Exhaust and TestMixedResumeIsCharged exercise at the aggregate level.
+// This test keeps the plan's own name but asserts the corrected amount: the
+// session's resumes count stays unchanged.
+func TestPlanningHandler_Resume_ConversationBumpsResumesOnceAndFences(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
@@ -388,11 +406,12 @@ func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *t
 	if err != nil {
 		t.Fatalf("planning resume Run: %v", err)
 	}
-	// BumpResumes is charged by Reserve now, not by the terminal commit
-	// (design section 4.2), so the resume is proved by the commit's session
-	// id matching the already-open session, and by that session's resumes
-	// total having gone up by one in the store already (Reserve's own
-	// transaction, independent of whether this commit is ever applied).
+	// This resume is a plain owner delivery (Undelivered() non-empty, no
+	// other agent-driven reason, and the session's one prior run ended
+	// "question", not "error"), so design section 22.4's own table charges
+	// it nothing: the resume is proved by the commit's session id matching
+	// the already-open session, and by that session's resumes total having
+	// stayed at zero (Reserve never bumped it).
 	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
 		t.Fatalf("commit.Session = %+v, want the already-open session %d", commit.Session, openSess.ID)
 	}
@@ -406,11 +425,11 @@ func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *t
 			gotResumes = sess.Resumes
 		}
 	}
-	if gotResumes != 1 {
-		t.Errorf("session %d resumes = %d, want 1", openSess.ID, gotResumes)
+	if gotResumes != 0 {
+		t.Errorf("session %d resumes = %d, want 0 (an owner-delivery resume is never charged)", openSess.ID, gotResumes)
 	}
-	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != open[0].ID {
-		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, open[0].ID)
+	if commit.Conversation == nil || len(commit.Conversation.Settle) != 1 || commit.Conversation.Settle[0].QuestionID != open[0].ID || commit.Conversation.Settle[0].Decision == "" {
+		t.Errorf("commit.Conversation = %+v, want one settled entry for question %d with a decision", commit.Conversation, open[0].ID)
 	}
 
 	if rec.lastReq.Prompt == "" {
@@ -430,6 +449,106 @@ func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *t
 	resolved, err := s.QuestionsByState(t.Context(), ticketID, "resolved")
 	if err != nil || len(resolved) != 1 || resolved[0].ID != open[0].ID {
 		t.Errorf("QuestionsByState(resolved) = %v, %v, want [%d]", resolved, err, open[0].ID)
+	}
+}
+
+// TestPlanningHandler_MixedResume_DeliversQueuedAndCharges proves design
+// section 22.4's own worked case: "the owner sends while run 40 is in
+// flight; run 40 returns invalid output; the next tick is the D14 retry,
+// which delivers the queued messages and is charged once." Turn 1 posts
+// Q1; the owner answers it (undelivered); turn 2 resumes to deliver that
+// answer (entry step 4, free) but returns invalid output, so the answer is
+// still undelivered and the session now carries one invalid-output marker;
+// turn 3's entry decision is the D14 retry (entry step 2, charged), and its
+// own resume still carries the same still-undelivered answer alongside the
+// D14 invalid-reason input.
+func TestPlanningHandler_MixedResume_DeliversQueuedAndCharges(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // turn 1: posts Q1
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+	}
+	if _, ansErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"}); ansErr != nil {
+		t.Fatalf("AnswerQuestion: %v", ansErr)
+	}
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	var sess store.Session
+	for _, sv := range sessions {
+		if sv.Job == testStatePlanning {
+			sess = sv
+		}
+	}
+	if sess.ID == 0 || sess.ExternalID == nil {
+		t.Fatalf("SessionsForTicket: no open planning session with an external id")
+	}
+	extID := *sess.ExternalID
+
+	// Turn 2: entry step 4 (plain delivery, free) resumes, but the model's
+	// output is invalid. invalidOutputCommit writes no delivered marker, so
+	// Q1's answer stays undelivered.
+	invalidRT := &scriptedRuntime{t: t, steps: []scriptedStep{invalidResult("not well-formed XML", extID)}}
+	turn2 := mustPlanning(t, s, claim(t, s, invalidRT, ticketID), ticketID)
+	apply(t, s, getTicket(t, s, ticketID), turn2)
+
+	sessions, err = s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	for _, sv := range sessions {
+		if sv.ID == sess.ID && sv.Resumes != 0 {
+			t.Errorf("after turn 2, session %d resumes = %d, want 0 (the free delivery resume, even though it failed)", sess.ID, sv.Resumes)
+		}
+	}
+
+	// Turn 3: the D14 retry (entry step 2, charged), carrying both the
+	// invalid-reason input and the still-undelivered Q1 answer.
+	settleResp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q2", Title: "Next", Body: testQuestionBody,
+			Options: []response.Option{{Key: "a", Text: "A"}}, Recommended: "a",
+		}},
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: "Use the owner's chosen option."},
+		},
+	}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: settleResp, SessionID: extID, ExitCode: 0, AgentTime: time.Second}},
+	}}}
+	turn3, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("turn 3 planning Run: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "invalid") {
+		t.Errorf("turn 3 prompt does not carry the D14 invalid-reason input:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "conversation:\n") {
+		t.Errorf("turn 3 prompt does not carry the still-undelivered conversation input:\n%s", rec.lastReq.Prompt)
+	}
+	if turn3.Conversation == nil || len(turn3.Conversation.Settle) != 1 || turn3.Conversation.Settle[0].QuestionID != open[0].ID {
+		t.Errorf("turn3.Conversation = %+v, want Q1 settled", turn3.Conversation)
+	}
+	apply(t, s, getTicket(t, s, ticketID), turn3)
+
+	sessions, err = s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	for _, sv := range sessions {
+		if sv.ID == sess.ID && sv.Resumes != 1 {
+			t.Errorf("after turn 3, session %d resumes = %d, want 1 (the D14 retry is charged, even though it also delivered Q1)", sess.ID, sv.Resumes)
+		}
 	}
 }
 
@@ -484,10 +603,18 @@ func TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning(t *te
 // nothingToDoResponse builds a *response.NothingToDoResponse naming job
 // planning and outcome nothing_to_do, the shape a scriptedRuntime step hands
 // back in place of a real agent's XML document (design section 6.8, task 8).
+// Every caller resumes a session that answeredRoundReadyForResume left with
+// one open planning thread, Q1 (D31, design section 22.2): nothing_to_do
+// settles it, or checkConversation would reject the response outright
+// ("nothing_to_do needs every question settled") before this outcome's own
+// commit logic is ever reached.
 func nothingToDoResponse(claims []response.Claim, notes string) *response.NothingToDoResponse {
 	return &response.NothingToDoResponse{
 		Job: response.JobPlanning, Outcome: response.OutcomeNothingToDo,
 		Claims: claims, Notes: notes,
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: testQ1SettledDecision},
+		},
 	}
 }
 
@@ -541,8 +668,12 @@ func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) 
 	if commit.Session == nil {
 		t.Error("commit.Session is nil, want the resumed session's id recorded")
 	}
-	if len(commit.ResolveQuestions) != 1 {
-		t.Errorf("commit.ResolveQuestions = %v, want the resolved round's one question id", commit.ResolveQuestions)
+	// D31 (design section 22.3, 22.4): Q1 is a planning question, so it is
+	// no longer resolved via ResolveQuestions (that round mechanism never
+	// sees a planning question any more) -- it is settled via
+	// commit.Conversation instead.
+	if commit.Conversation == nil || len(commit.Conversation.Settle) != 1 || commit.Conversation.Settle[0].Decision == "" {
+		t.Errorf("commit.Conversation = %+v, want one settled question with a decision", commit.Conversation)
 	}
 	if commit.TrackerEffect == nil {
 		t.Fatal("commit.TrackerEffect is nil, want {Kind: nothing_to_do, Ref: t.TrackerRef, Notes: resp.Notes}")
@@ -650,6 +781,13 @@ func TestPlanningHandler_Children_EscalatesSplitUnsupported(t *testing.T) {
 			{Key: "c2", Title: "Part two", Body: "build the write path"},
 		},
 		Notes: "the two halves share no code",
+		// D31 (design section 22.2): children needs every planning question
+		// settled, or checkConversation rejects the response before this
+		// outcome's own escalation logic is ever reached. The resumed
+		// session carries one open thread, Q1 (answeredRoundReadyForResume).
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: testQ1SettledDecision},
+		},
 	}
 	resumeRT := readyScriptedRuntime(t, readyStep(children, "children-sess"))
 
@@ -728,7 +866,7 @@ func TestPlanningHandler_Classify_AnsweredQuestionRoundRerunsClassifyFresh(t *te
 	if len(rt.reqs) != 2 {
 		t.Fatalf("scriptedRuntime saw %d calls, want 2", len(rt.reqs))
 	}
-	if !strings.Contains(rt.reqs[1].Prompt, "Option A") {
+	if !strings.Contains(rt.reqs[1].Prompt, testOptionAText) {
 		t.Errorf("second classify prompt does not carry the answer's option text:\n%s", rt.reqs[1].Prompt)
 	}
 
@@ -1349,7 +1487,16 @@ func TestReadyCommit_PostRunStoreFailureTerminalizesRun(t *testing.T) {
 	answeredRoundReadyForResume(t, s, ticketID)
 
 	plan := validPlan("Add a hello endpoint so a caller can get a plain-text greeting back over HTTP.")
-	resumeRT := readyScriptedRuntime(t, readyStep(readyResponse(plan, validClaims(), validScenarios(2, "post-run")), "post-run-fail-sess"))
+	resp := readyResponse(plan, validClaims(), validScenarios(2, "post-run"))
+	// D31 (design section 22.2): ready needs every planning question
+	// settled, or checkConversation rejects the response before readyCommit
+	// (and its own os.OpenRoot failure, this test's whole point) ever runs.
+	// The resumed session carries one open thread, Q1
+	// (answeredRoundReadyForResume).
+	resp.Conversation = response.Conversation{Replies: []response.Reply{
+		{Question: "Q1", Settled: true, Decision: testQ1SettledDecision},
+	}}
+	resumeRT := readyScriptedRuntime(t, readyStep(resp, "post-run-fail-sess"))
 
 	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
 	if err != nil {
@@ -1432,6 +1579,12 @@ func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched
 	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); answerErr != nil {
 		t.Fatalf("AnswerQuestion: %v", answerErr)
 	}
+	// D31 (design section 22.2): ready needs every planning question
+	// settled, or checkConversation rejects planB before readyCommit ever
+	// runs. Q1, inserted above, is still open.
+	planB.Conversation = response.Conversation{Replies: []response.Reply{
+		{Question: "Q1", Settled: true, Decision: "Revise the plan with the owner's chosen option."},
+	}}
 
 	secondCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, byJob, ticketID), ticketID)
 	if err != nil {
@@ -1638,7 +1791,7 @@ func TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDe
 	goodResp := &response.PlanningQuestionsResponse{
 		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
 		Questions: []response.Question{{
-			Key: "q1", Title: "Continue?", Body: "Body.",
+			Key: "q1", Title: "Continue?", Body: testQuestionBody,
 			Options: []response.Option{{Key: "a", Text: "Yes"}, {Key: "b", Text: "No"}}, Recommended: "a",
 		}},
 	}
@@ -2133,6 +2286,39 @@ func storedQuestionKeys(t *testing.T, s *store.Store, ticketID int64) []string {
 	return keys
 }
 
+// settleQ1AndQ2 settles ticketID's open planning questions directly through
+// store.CommitHandlerResult's own Conversation field (D31, design section
+// 22.3), the same mechanism a real planning reply uses: a test-only
+// shortcut for tests whose own point is unrelated to conversation
+// settling, so they need not script a turn that carries <replies>.
+func settleQ1AndQ2(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	settle := make([]store.SettleQuestion, len(open))
+	for i := range open {
+		settle[i] = store.SettleQuestion{QuestionID: open[i].ID, Decision: "settled directly for this test"}
+	}
+	owner := "settle-q1-q2-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Conversation: &store.ConversationCommit{Settle: settle},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (settle): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult (settle): applied = false")
+	}
+}
+
 // TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions
 // proves F030: a planning question batch never stores the model's own
 // q.Key (design section 4.5, 6.7: "gate and planning questions use the same
@@ -2172,6 +2358,13 @@ func TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions(
 	if got := storedQuestionKeys(t, s, ticketID); !slices.Equal(got, []string{"Q1", "Q2"}) {
 		t.Fatalf("stored question keys after the batch = %v, want [Q1 Q2] (the model's own Q2/Q7 discarded)", got)
 	}
+
+	// D31 (design section 22.4 entry step 6): the review tick refuses to
+	// start while any planning thread is open, so Q1 and Q2 must settle
+	// first -- this test is about the gate's own key allocation, not
+	// conversation settling, so it settles them directly through the store
+	// rather than scripting a third planning turn.
+	settleQ1AndQ2(t, s, ticketID)
 
 	seedCohort(t, s, ticketID, validPlan("The gate shares the Q<n> allocation."), validScenarios(2, "keys"))
 
@@ -2329,7 +2522,7 @@ func TestPlanningHandler_ReviewTick_QuestionAndD14RetryDoNotConsumeLoopAllowance
 	if len(invalidCommit.ResolveQuestions) != 1 || invalidCommit.ResolveQuestions[0] != open[0].ID {
 		t.Errorf("invalidCommit.ResolveQuestions = %v, want [%d]", invalidCommit.ResolveQuestions, open[0].ID)
 	}
-	if !strings.Contains(rec.lastReq.Prompt, "Option A") {
+	if !strings.Contains(rec.lastReq.Prompt, testOptionAText) {
 		t.Errorf("planreview re-run prompt does not carry the answer's option text:\n%s", rec.lastReq.Prompt)
 	}
 	apply(t, s, getTicket(t, s, ticketID), invalidCommit)
@@ -2548,9 +2741,16 @@ func TestPlanningHandler_Budget_ExhaustedBeforeReviewTickEscalatesWallClock(t *t
 }
 
 // TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound
-// proves budget exhaustion does not strand the round that triggered the run:
-// the wall_clock escalation resolves the same answered question ids the
-// resume itself would have (design section 6.7, 6.8; PR #23 review).
+// proved, pre-D31, that budget exhaustion does not strand the round that
+// triggered the run: the wall_clock escalation resolved the same answered
+// question ids the resume itself would have (design section 6.7, 6.8; PR
+// #23 review). Q1 (answeredRoundReadyForResume) is now a planning
+// question, which an answered round never carries any more (design
+// section 22.3): the resume this test drives is reached through entry
+// step 4 (plain conversation delivery, resolveIDs nil), so the budget
+// escalation carries no ResolveQuestions at all -- Q1 stays open, its
+// undelivered answer redelivered once the owner resolves the wall_clock
+// escalation and planning resumes again.
 func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
@@ -2564,22 +2764,13 @@ func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t 
 	if len(answered) == 0 {
 		t.Fatal("no answered question to resolve; the resume fixture changed")
 	}
-	wantIDs := make(map[int64]bool, len(answered))
-	for i := range answered {
-		wantIDs[answered[i].ID] = true
-	}
 
 	commit, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
 	if err != nil {
 		t.Fatalf("planning (resume, budget exhausted) Run: %v", err)
 	}
 	assertWallClockEscalation(t, commit)
-	if len(commit.ResolveQuestions) != len(wantIDs) {
-		t.Fatalf("commit.ResolveQuestions = %v, want the %d answered question id(s) %v", commit.ResolveQuestions, len(wantIDs), wantIDs)
-	}
-	for _, id := range commit.ResolveQuestions {
-		if !wantIDs[id] {
-			t.Errorf("commit.ResolveQuestions has %d, not among the answered round %v", id, wantIDs)
-		}
+	if len(commit.ResolveQuestions) != 0 {
+		t.Errorf("commit.ResolveQuestions = %v, want none (Q1 is a planning question; it stays open, not resolved by this escalation)", commit.ResolveQuestions)
 	}
 }

@@ -304,3 +304,51 @@ func TestInFlightRunThroughBatch(t *testing.T) {
 		}
 	})
 }
+
+// TestThreadByKey proves PlanningConversation.ThreadByKey (design section
+// 22.3), left untested by D31-2: it finds a thread by its question's own
+// wire key regardless of position, tells two keys on the same ticket apart,
+// and reports ok=false for a key naming no planning question of this
+// conversation at all.
+func TestThreadByKey(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	q1ID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+	q2ID := insertOpenQuestion(t, s, ticketID, runID, "Q2")
+
+	conv, err := s.PlanningConversation(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("PlanningConversation: %v", err)
+	}
+	if len(conv.Threads) != 2 {
+		t.Fatalf("Threads = %d, want 2", len(conv.Threads))
+	}
+
+	th, ok := conv.ThreadByKey("Q2")
+	if !ok {
+		t.Fatal("ThreadByKey(Q2) ok = false, want true")
+	}
+	if th.Question.ID != q2ID {
+		t.Errorf("ThreadByKey(Q2).Question.ID = %d, want %d", th.Question.ID, q2ID)
+	}
+
+	th, ok = conv.ThreadByKey("Q1")
+	if !ok {
+		t.Fatal("ThreadByKey(Q1) ok = false, want true")
+	}
+	if th.Question.ID != q1ID {
+		t.Errorf("ThreadByKey(Q1).Question.ID = %d, want %d", th.Question.ID, q1ID)
+	}
+
+	if _, ok := conv.ThreadByKey("Q9"); ok {
+		t.Error("ThreadByKey(Q9) ok = true, want false (no planning question has this key)")
+	}
+	if _, ok := conv.ThreadByKey(""); ok {
+		t.Error(`ThreadByKey("") ok = true, want false`)
+	}
+}

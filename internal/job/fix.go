@@ -354,5 +354,5 @@ func runFixFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt o
 	return runAndRoute(ctx, d, t, jobBuildName, su, runReq, 0, freshSessionRecord, resolveIDs, response.EscalationOriginFix,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return buildSuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs, u)
-		}, nil) // taskN nil: RunSeed.TaskN is nil for a fix (design section 8)
+		}, nil, 0) // taskN nil: RunSeed.TaskN is nil for a fix (design section 8)
 }

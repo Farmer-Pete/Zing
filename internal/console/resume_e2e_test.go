@@ -635,9 +635,12 @@ func assertResumeE2EStateSequence(t *testing.T, st *store.Store, ticketID int64)
 }
 
 // assertResumeE2EResumedOnce asserts the ticket's one planning session
-// resumed exactly once (job/skeleton.go bumps Session.Resumes on every
-// resume commit), the "the planning session resumes once" checkpoint
-// design section 12 row 7 and section 14's dispatcher contract both name.
+// resumed exactly once (one runs row past the first turn), but was never
+// charged for it (D31, design section 22.4): the owner's answer to Q1 (a
+// planning question) delivers through a plain owner-delivery resume, and
+// BumpResumes is false for that resume -- owner deliveries are free, so
+// sessions.resumes stays at its start value even though the session did
+// resume.
 func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	t.Helper()
 	sessions, err := st.SessionsForTicket(t.Context(), ticketID)
@@ -653,7 +656,20 @@ func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	if len(planning) != 1 {
 		t.Fatalf("planning sessions for ticket %d = %d, want exactly 1", ticketID, len(planning))
 	}
-	if planning[0].Resumes != 1 {
-		t.Errorf("planning session Resumes = %d, want exactly 1 (one resume, from clearing the questions wait)", planning[0].Resumes)
+	if planning[0].Resumes != 0 {
+		t.Errorf("planning session Resumes = %d, want exactly 0 (an owner-delivery resume is never charged)", planning[0].Resumes)
+	}
+	runs, err := st.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	var planningRuns int
+	for _, r := range runs {
+		if r.SessionID == planning[0].ID {
+			planningRuns++
+		}
+	}
+	if planningRuns != 2 {
+		t.Errorf("planning runs for session %d = %d, want exactly 2 (the first turn, then the one free resume that delivered and settled Q1)", planning[0].ID, planningRuns)
 	}
 }

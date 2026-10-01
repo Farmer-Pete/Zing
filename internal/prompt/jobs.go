@@ -143,6 +143,14 @@ func Answers(text string) NamedInput {
 	return NamedInput{Label: "answers", Text: text, Untrusted: true}
 }
 
+// Conversation returns the "conversation" labeled input (D31, design
+// section 22.6): the owner's undelivered messages, or a fresh session's
+// full transcript, fenced, since it carries owner-typed and model-written
+// text alike.
+func Conversation(text string) NamedInput {
+	return NamedInput{Label: "conversation", Text: text, Untrusted: true}
+}
+
 // BuildResumeHeader replaces the prompt file on a build resume turn: there
 // is no fresh job prompt to load, only this fixed instruction to continue
 // the open worktree session (plan section 6.3), byte-for-byte from the

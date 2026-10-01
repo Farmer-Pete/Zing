@@ -189,11 +189,15 @@ func roundKeyFor(q MessageRow) roundKey {
 // (design section 4.5, 5.1 step 1). Every "question" message in state
 // "answered" (never "resolved") is grouped by run_id when non-null, else by
 // parent_id; a round's Answers and Replies are its group's sent answers and
-// replies, matched by parent_id.
+// replies, matched by parent_id. Planning questions are excluded (D31,
+// design section 22.3): SendBatch never moves one to "answered" again, so
+// the only rows this can still match are legacy ones a pre-D31 build left
+// "answered" (treated as open, section 22.8's upgrade note), which must
+// never resume through the round mechanism this function feeds.
 func (s *Store) AnsweredRounds(ctx context.Context, ticketID int64) ([]Round, error) {
 	qRows, err := s.db.QueryContext(ctx,
-		`SELECT `+messageColumns+` FROM messages WHERE ticket_id = ? AND type = ? AND state = ? ORDER BY id`,
-		ticketID, msgTypeQuestion, questionStateAnswered)
+		`SELECT `+messageColumns+` FROM messages WHERE ticket_id = ? AND type = ? AND state = ? AND id NOT IN (`+planningQuestionsSQL+`) ORDER BY id`,
+		ticketID, msgTypeQuestion, questionStateAnswered, ticketID)
 	if err != nil {
 		return nil, fmt.Errorf("answered rounds for ticket %d: %w", ticketID, err)
 	}
@@ -293,25 +297,30 @@ func fillRunContexts(ctx context.Context, s *Store, groups map[roundKey]*Round) 
 	return nil
 }
 
-// messagesByParent returns every message of (typ, state) whose parent_id is
-// one of parentIDs, bucketed by parent id, each bucket ordered by id. The
-// dynamic part of the query is a fixed number of "?" placeholders, one per
-// id; every value rides as a bind argument, never concatenated into the
-// query text (the same pattern ListReadyCandidates uses, reads.go).
+// messagesByParent returns every message of (typ, state), authored by the
+// owner (author "you"), whose parent_id is one of parentIDs, bucketed by
+// parent id, each bucket ordered by id. The author filter (D31, design
+// section 22.3) is what keeps an agent's own zing-authored reply, parented
+// to a planning question, out of AnsweredRounds' Replies -- its two callers
+// are both AnsweredRounds' own answers and replies reads, and a round's
+// Replies must only ever hold what the owner wrote. The dynamic part of the
+// query is a fixed number of "?" placeholders, one per id; every value
+// rides as a bind argument, never concatenated into the query text (the
+// same pattern ListReadyCandidates uses, reads.go).
 func messagesByParent(ctx context.Context, s *Store, ticketID int64, typ, state string, parentIDs []int64) (map[int64][]MessageRow, error) {
 	out := make(map[int64][]MessageRow)
 	if len(parentIDs) == 0 {
 		return out, nil
 	}
 	placeholders := make([]string, len(parentIDs))
-	args := make([]any, 0, len(parentIDs)+3)
-	args = append(args, ticketID, typ, state)
+	args := make([]any, 0, len(parentIDs)+4)
+	args = append(args, ticketID, typ, state, authorYou)
 	for i, id := range parentIDs {
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
-	inClause := `parent_id IN (` + strings.Join(placeholders, ", ") + `)`                                                                  //nolint:gosec // G202: placeholders only, values are bind args
-	query := `SELECT ` + messageColumns + ` FROM messages WHERE ticket_id = ? AND type = ? AND state = ? AND ` + inClause + ` ORDER BY id` //nolint:gosec // G202: messageColumns and inClause are both fixed text, no user input
+	inClause := `parent_id IN (` + strings.Join(placeholders, ", ") + `)`                                                                                 //nolint:gosec // G202: placeholders only, values are bind args
+	query := `SELECT ` + messageColumns + ` FROM messages WHERE ticket_id = ? AND type = ? AND state = ? AND author = ? AND ` + inClause + ` ORDER BY id` //nolint:gosec // G202: messageColumns and inClause are both fixed text, no user input
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -480,6 +489,35 @@ func (s *Store) ConsecutiveInvalidOutputs(ctx context.Context, ticketID int64, j
 		}
 	}
 	return n, lastReason, nil
+}
+
+// SessionInterrupted reports whether sessionID's own newest run ended
+// "error" with no "response invalid run <rid>" marker for it (design
+// section 22.4's resume-charging table): a crash ExpireClaims reconciled to
+// exit -1, or an exec failure, rather than a parsed-but-invalid document
+// (D14 always writes that marker for one). false, with no error, when the
+// session has no run yet.
+func (s *Store) SessionInterrupted(ctx context.Context, ticketID, sessionID int64) (bool, error) {
+	runs, err := s.RunsForTicket(ctx, ticketID)
+	if err != nil {
+		return false, fmt.Errorf("session interrupted for session %d: %w", sessionID, err)
+	}
+	var newest *Run
+	for i := range runs {
+		if runs[i].SessionID == sessionID {
+			newest = &runs[i]
+		}
+	}
+	if newest == nil || newest.Outcome == nil || *newest.Outcome != "error" {
+		return false, nil
+	}
+
+	reasons, err := invalidOutputReasons(ctx, s, ticketID)
+	if err != nil {
+		return false, fmt.Errorf("session interrupted for session %d: %w", sessionID, err)
+	}
+	_, hasReason := reasons[newest.ID]
+	return !hasReason, nil
 }
 
 // runsWithEscalation returns the set of run ids that have at least one

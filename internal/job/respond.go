@@ -803,7 +803,7 @@ func (h shipHandler) respondRunAndRouteRaw(
 	priorInvalid int, sessionRecord func(runResult) *store.SessionUpsert, resolveIDs []int64,
 	onOk func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error),
 ) (store.HandlerCommit, error) {
-	rr, runErr := runJob(ctx, d, t, jobRespondName, su, req, nil, nil)
+	rr, runErr := runJob(ctx, d, t, jobRespondName, su, req, nil, nil, 0)
 	sessionCommit := sessionRecord(rr)
 
 	if runErr != nil {

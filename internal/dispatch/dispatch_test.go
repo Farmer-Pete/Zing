@@ -3804,6 +3804,14 @@ func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T)
 			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "already tested"},
 		},
 		Notes: notes,
+		// D31 (design section 22.2): nothing_to_do needs every planning
+		// question settled, or checkConversation rejects the response
+		// before this outcome's own commit logic (and the tracker comment
+		// this test is about) ever runs. Q1 is answerOpenQuestion's own
+		// open planning question.
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: "The owner's answer to Q1 settles this thread."},
+		},
 	}
 	rt := &planningNothingToDoRuntime{t: t, fake: fakeRuntime(t), resp: resp}
 

@@ -249,14 +249,30 @@ func openQuestionForTicketTx(ctx context.Context, tx *sql.Tx, questionID, ticket
 	return payload, nil
 }
 
-// questionDraftableTx reports whether q still takes a draft (D30): true for
-// state=open always, true for state=answered only while ticketID's own
-// waiting_on is still "questions" (the agent has not resumed with this
-// round yet, so a revised pick still lands before it is read), false for
-// every other state or once the wait has cleared.
+// questionDraftableTx reports whether q still takes a draft. A planning
+// question (D31, design section 22.3) is draftable while its state is
+// "open" or "answered" (the legacy upgrade case, section 22.8), whatever
+// waiting_on says -- a settled one is the existing "question closed"
+// conflict. Every other question keeps D30's own rule: true for state=open
+// always, true for state=answered only while ticketID's own waiting_on is
+// still "questions" (the agent has not resumed with this round yet, so a
+// revised pick still lands before it is read), false for every other state
+// or once the wait has cleared.
 func questionDraftableTx(ctx context.Context, tx *sql.Tx, q MessageRow, ticketID int64) (bool, error) {
 	if q.State == nil {
 		return false, nil
+	}
+	isPlanning, err := isPlanningQuestionTx(ctx, tx, ticketID, q.ID)
+	if err != nil {
+		return false, err
+	}
+	if isPlanning {
+		switch *q.State {
+		case questionStateOpen, questionStateAnswered:
+			return true, nil
+		default:
+			return false, nil
+		}
 	}
 	switch *q.State {
 	case questionStateOpen:
@@ -270,6 +286,25 @@ func questionDraftableTx(ctx context.Context, tx *sql.Tx, q MessageRow, ticketID
 	default:
 		return false, nil
 	}
+}
+
+// isPlanningQuestionTx reports whether questionID is one of ticketID's
+// planning questions (planningQuestionsSQL, conversation_reads.go): the one
+// check every D31-aware console write shares, so SaveDraft, SendBatch, and
+// clearMatchingWaitTx's own kind-grouped wait never classify a question
+// differently from PlanningConversation's own read.
+func isPlanningQuestionTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM messages WHERE id = ? AND id IN (`+planningQuestionsSQL+`)`,
+		questionID, ticketID).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("is planning question %d: %w", questionID, err)
+	}
+	return true, nil
 }
 
 // ticketWaitingOnTx reads ticketID's own waiting_on, "" when NULL (D30,
@@ -610,13 +645,20 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		}
 	}
 
-	if markErr := markAnsweredQuestionsTx(ctx, tx, valid, questions); markErr != nil {
+	if markErr := markAnsweredQuestionsTx(ctx, tx, ticketID, valid, questions); markErr != nil {
 		return BatchResult{}, markErr
 	}
 
 	waitCleared, err := clearMatchingWaitTx(ctx, tx, ticketID)
 	if err != nil {
 		return BatchResult{}, err
+	}
+	planningWoken, err := wakePlanningTx(ctx, tx, ticketID, valid)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if planningWoken {
+		waitCleared = true
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -813,9 +855,19 @@ func sentItemDecisionsTx(ctx context.Context, tx *sql.Tx, qid int64) (map[string
 // item ref in the question's payload has a decision, counting decisions
 // already sent in an earlier SendBatch call alongside this batch's own), or
 // a sent reply (design section 6.7). An incomplete item answer sends its
-// draft like any other but leaves the question open.
-func markAnsweredQuestionsTx(ctx context.Context, tx *sql.Tx, drafts []MessageRow, questions map[int64]response.QuestionPayload) error {
+// draft like any other but leaves the question open. A planning question
+// is skipped outright (D31, design section 22.3): SendBatch never moves one
+// to "answered" again -- it stays "open" until the agent itself settles it
+// (store.ConversationCommit.Settle, applyConversationTx).
+func markAnsweredQuestionsTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts []MessageRow, questions map[int64]response.QuestionPayload) error {
 	for qid, payload := range questions {
+		isPlanning, err := isPlanningQuestionTx(ctx, tx, ticketID, qid)
+		if err != nil {
+			return err
+		}
+		if isPlanning {
+			continue
+		}
 		answered := false
 		items := make(map[string]response.Decision)
 		if len(payload.Items) > 0 {
@@ -909,11 +961,15 @@ func clearMatchingWaitTx(ctx context.Context, tx *sql.Tx, ticketID int64) (bool,
 
 // openQuestionOfKindExistsTx reports whether ticketID has any open question
 // whose payload Kind equals kind. Kind is not its own column, so this reads
-// every open question and decodes each payload rather than filtering in SQL.
+// every open question and decodes each payload rather than filtering in
+// SQL. Planning questions are excluded outright (D31, design section
+// 22.3), so an open planning thread never holds a classify or escalation
+// round's "questions" wait: D31 clears and sets that wait through
+// wakePlanningTx instead, by its own rule.
 func openQuestionOfKindExistsTx(ctx context.Context, tx *sql.Tx, ticketID int64, kind response.QuestionKind) (bool, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT payload FROM messages WHERE ticket_id = ? AND type = ? AND state = ?`,
-		ticketID, msgTypeQuestion, questionStateOpen)
+		`SELECT payload FROM messages WHERE ticket_id = ? AND type = ? AND state = ? AND id NOT IN (`+planningQuestionsSQL+`)`,
+		ticketID, msgTypeQuestion, questionStateOpen, ticketID)
 	if err != nil {
 		return false, fmt.Errorf("send batch: list open questions: %w", err)
 	}
@@ -939,6 +995,82 @@ func openQuestionOfKindExistsTx(ctx context.Context, tx *sql.Tx, ticketID int64,
 		return false, fmt.Errorf("send batch: list open questions: %w", err)
 	}
 	return false, nil
+}
+
+// wakePlanningTx is D31's own planning wake (design section 22.3): when
+// sent (the batch SendBatch just flipped to "sent") carries at least one
+// row whose parent is a planning question, ticketID's own waiting_on is
+// "questions", and no escalation question (type "question", parent_id IS
+// NOT NULL, state "open") is open, this clears waiting_on to NULL and
+// reports true. An open escalation question means the planning messages
+// stay queued, waiting for it to be answered first (design section 22.4's
+// own "escalation open" edge case).
+func wakePlanningTx(ctx context.Context, tx *sql.Tx, ticketID int64, sent []MessageRow) (bool, error) {
+	sentPlanning := false
+	for i := range sent {
+		if sent[i].ParentID == nil {
+			continue
+		}
+		isPlanning, err := isPlanningQuestionTx(ctx, tx, ticketID, *sent[i].ParentID)
+		if err != nil {
+			return false, err
+		}
+		if isPlanning {
+			sentPlanning = true
+			break
+		}
+	}
+	if !sentPlanning {
+		return false, nil
+	}
+
+	waitingOn, err := ticketWaitingOnTx(ctx, tx, ticketID)
+	if err != nil {
+		return false, err
+	}
+	if waitingOn != waitingFlagQuestions {
+		return false, nil
+	}
+
+	escalationOpen, err := openEscalationQuestionExistsTx(ctx, tx, ticketID)
+	if err != nil {
+		return false, err
+	}
+	if escalationOpen {
+		return false, nil
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tickets SET waiting_on = NULL WHERE id = ? AND waiting_on = ?`, ticketID, waitingFlagQuestions)
+	if err != nil {
+		return false, fmt.Errorf("send batch: wake planning: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("send batch: wake planning: %w", err)
+	}
+	return n > 0, nil
+}
+
+// openEscalationQuestionExistsTx reports whether ticketID has any open
+// escalation-linked question: type "question", parent_id IS NOT NULL (an
+// escalation's own linked question always carries one, escalateTx,
+// commit.go), state "open". A gate or a classify question also carries
+// parent_id NULL, same as a planning question, so this never mistakes
+// either for an escalation.
+func openEscalationQuestionExistsTx(ctx context.Context, tx *sql.Tx, ticketID int64) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM messages WHERE ticket_id = ? AND type = ? AND parent_id IS NOT NULL AND state = ? LIMIT 1`,
+		ticketID, msgTypeQuestion, questionStateOpen,
+	).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("open escalation question for ticket %d: %w", ticketID, err)
+	}
+	return true, nil
 }
 
 // SetSettings writes one or more settings rows in a single transaction

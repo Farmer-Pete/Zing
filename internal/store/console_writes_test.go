@@ -12,6 +12,11 @@ import (
 	"zing/internal/response"
 )
 
+// testConflictQuestionClosed is the "question closed" conflict reason,
+// named once so goconst has nothing to flag across this file's several
+// closed-question tests (D30 and D31 alike).
+const testConflictQuestionClosed = "question closed"
+
 // draftQuestionPayload builds a QuestionPayload for kind, with options for
 // an option kind or items for an item kind, marshaled the way a real
 // planning (or gate, split, perimeter, review, merge) commit would write it
@@ -342,7 +347,7 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 		in   DraftInput
 		want string
 	}{
-		{"closed question", DraftInput{TicketID: ticketA, QuestionID: &resolvedQID, Option: &opt}, "question closed"},
+		{"closed question", DraftInput{TicketID: ticketA, QuestionID: &resolvedQID, Option: &opt}, testConflictQuestionClosed},
 		{"wrong ticket", DraftInput{TicketID: ticketB, QuestionID: &qID, Option: &opt}, "wrong ticket"},
 		{"bad option", DraftInput{TicketID: ticketA, QuestionID: &qID, Option: &badOpt}, "missing option"},
 		{
@@ -410,8 +415,8 @@ func TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared(t *testing.T) {
 	if err == nil {
 		t.Fatal("SaveDraft: err = nil, want a ConflictError")
 	}
-	if got := conflictReason(t, err); got != "question closed" {
-		t.Errorf("conflict reason = %q, want %q", got, "question closed")
+	if got := conflictReason(t, err); got != testConflictQuestionClosed {
+		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
 	}
 }
 
@@ -914,6 +919,179 @@ func mustLatestAnswerID(t *testing.T, s *Store, questionID int64) int64 {
 		t.Fatalf("mustLatestAnswerID(%d): %v", questionID, err)
 	}
 	return id
+}
+
+// ---- D31: planning questions through SendBatch and SaveDraft ---------------
+
+// insertPlanningQuestion inserts an open planning question keyed "Q1"
+// (D31, design section 22.1): a "question" message, kind "question", no
+// parent, asked by a run on a fresh "planning" job session -- the one
+// shape planningQuestionsSQL (conversation_reads.go) recognizes.
+func insertPlanningQuestion(t *testing.T, s *Store, ticketID int64) int64 {
+	t.Helper()
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	return insertQuestionOfKindWithRun(t, s, ticketID, runID, "Q1", response.QuestionKindQuestion)
+}
+
+// TestSendBatchWakesPlanningOnOneMessage proves wakePlanningTx (design
+// section 22.3): sending one message to an open planning question clears
+// the "questions" wait at once, with no escalation in the way.
+func TestSendBatchWakesPlanningOnOneMessage(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "Also print the commit hash."}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Empty || res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (no escalation open)")
+	}
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// TestSendBatchNeverMarksPlanningQuestionAnswered proves markAnsweredQuestionsTx
+// skips planning questions (design section 22.3): the question stays "open"
+// after SendBatch sends an option draft against it, unlike every other
+// question kind.
+func TestSendBatchNeverMarksPlanningQuestionAnswered(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state = %v, want %q (planning questions never become answered)", q.State, questionStateOpen)
+	}
+}
+
+// TestSendBatchQueuesUnderOpenEscalation proves wakePlanningTx's own
+// escalation guard (design section 22.3): with an open escalation-linked
+// question on the ticket, sending a message to a planning question leaves
+// waiting_on untouched -- the messages queue behind the escalation.
+func TestSendBatchQueuesUnderOpenEscalation(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	parentID := insertUpdateMarker(t, s, ticketID, "escalation placeholder")
+	insertQuestionWithParent(t, s, ticketID, runID, parentID, "Q9") // open escalation-linked question
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if res.WaitCleared {
+		t.Error("WaitCleared = true, want false (an escalation question is still open)")
+	}
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn == nil || *ticket.WaitingOn != testWaitingQuestions {
+		t.Errorf("ticket.WaitingOn = %v, want still %q", ticket.WaitingOn, testWaitingQuestions)
+	}
+}
+
+// TestSaveDraftPlanningQuestionDraftableUntilSettled proves questionDraftableTx's
+// own planning rule (design section 22.3): a planning question drafts fine
+// in "answered" state with waiting_on already cleared (nil) -- every other
+// question kind would refuse this as "question closed" -- and only a
+// "resolved" state ever refuses it.
+func TestSaveDraftPlanningQuestionDraftableUntilSettled(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertPlanningQuestion(t, s, ticketID)
+	closeQuestion(t, s, qID, questionStateAnswered)
+	// waiting_on stays nil: under D30's own rule this would refuse the
+	// draft outright, but a planning question ignores waiting_on entirely.
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft on an answered planning question: %v, want it to succeed", err)
+	}
+
+	closeQuestion(t, s, qID, questionStateResolved)
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	var ce *ConflictError
+	if !errors.As(err, &ce) || ce.Reason != testConflictQuestionClosed {
+		t.Errorf("SaveDraft on a resolved planning question: err = %v, want the \"question closed\" conflict", err)
+	}
+}
+
+// TestClearMatchingWaitIgnoresPlanningQuestions proves openQuestionOfKindExistsTx's
+// own planning exclusion (design section 22.3): an open planning question
+// never holds a classify round's own "questions" wait open -- answering
+// that round's own question clears the wait even while the planning
+// thread stays open.
+func TestClearMatchingWaitIgnoresPlanningQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	insertPlanningQuestion(t, s, ticketID) // stays open throughout
+
+	classifyQID := insertQuestionOption(t, s, ticketID, "Q2") // a classify-round-shaped question, no run
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &classifyQID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (the open planning question must not hold this wait)")
+	}
 }
 
 // ---- SaveDraft: reply dedupe on repeated Enter ------------------------------

@@ -218,11 +218,39 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 			return store.HandlerCommit{}, fmt.Errorf("job: planning: consecutive invalid outputs: %w", invErr)
 		}
 		if n == 1 {
-			return runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, n)
+			return runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, n, true)
 		}
 		if commit, handled, resumeErr := maybeResumeValidationErrors(ctx, t, d, sess); handled {
 			return commit, resumeErr
 		}
+
+		// Steps 4 and 5 (D31, design section 22.4): a conversation-only
+		// resume delivers every owner message the ticket has not yet seen,
+		// and a repair commit recovers a ticket D31 left unwaiting with an
+		// open thread (rather than ErrNoAction forever), both ahead of the
+		// review tick and the floor loop, which now also require every
+		// thread settled (maybeReviewTick's own guard).
+		conv, convErr := d.Store.PlanningConversation(ctx, t.ID)
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planning: planning conversation: %w", convErr)
+		}
+		if len(conv.Undelivered()) > 0 {
+			charge, chargeErr := d.Store.SessionInterrupted(ctx, t.ID, sess.ID)
+			if chargeErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: planning: session interrupted: %w", chargeErr)
+			}
+			return runPlanningResume(ctx, t, d, sess, nil, nil, 0, charge)
+		}
+		if len(conv.Unsettled()) > 0 && t.WaitingOn == nil {
+			return repairPlanningWaitCommit(t, d), nil
+		}
+		if len(conv.Unsettled()) > 0 {
+			// Already correctly waiting on the owner (the ordinary case: a
+			// thread is open and nothing is left to repair) -- ErrNoAction,
+			// not a second repair commit every tick.
+			return store.HandlerCommit{}, ErrNoAction
+		}
+
 		if commit, handled, resumeErr := maybeReviewTick(ctx, t, d); handled {
 			return commit, resumeErr
 		}
@@ -232,6 +260,20 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, ErrNoAction
 	}
 	return store.HandlerCommit{}, ErrNoAction
+}
+
+// repairPlanningWaitCommit is entry step 5 (design section 22.4): a ticket
+// whose planning session is open, has no undelivered owner message, and
+// still carries an unsettled thread, but is not itself waiting (D31's own
+// fence, design section 22.3 step 3, can leave it this way), gets
+// waiting_on set to "questions" alone -- no runtime call -- rather than
+// return ErrNoAction forever.
+func repairPlanningWaitCommit(t store.Ticket, d Deps) store.HandlerCommit {
+	c := baseCommit(t, d)
+	waiting := waitingFlagQuestions
+	c.Waiting = &waiting
+	slog.Info("planning waits on the owner", "ticket_id", t.ID)
+	return c
 }
 
 // enterFromRound is section 5.1 step 1: round is the newest answered round
@@ -258,8 +300,12 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 		// whichever grouping produced this round, is what actually tells an
 		// escalation-linked question apart from an ordinary one.
 		return h.enterFromEscalationRound(ctx, t, d, round, *newest.ParentID)
-	case round.Job == jobPlanningName:
-		return h.enterFromPlanningRound(ctx, t, d, round)
+	// round.Job == jobPlanningName is unreachable (D31, design section
+	// 22.4): AnsweredRounds no longer returns planning questions at all
+	// (conversation_reads.go's planningQuestionsSQL excludes them), so no
+	// round this switch ever sees can be keyed by a planning run any more.
+	// enterFromPlanningRound is gone with it; answerInputsForRound stays,
+	// still shared by building.go's own answered-round resume.
 	case round.Job == jobClassifyName:
 		rendered, err := renderRoundAnswers(round)
 		if err != nil {
@@ -274,52 +320,6 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 		return runPlanReview(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
 	default:
 		return store.HandlerCommit{}, ErrNoAction
-	}
-}
-
-// enterFromPlanningRound is section 5.1 step 1(c): a round whose questions
-// were posted by a planning run. An open session that still owns the round
-// resumes it (6.4); an exhausted session that still owns it escalates
-// resumes_exhausted without resolving the round; anything else (an older
-// round, or no session at all any more) starts the planning first turn
-// fresh with the round's answers, and resolves it there.
-func (h planningHandler) enterFromPlanningRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
-	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
-	sess, state, err := d.Store.LatestSession(ctx, t.ID, jobPlanningName, maxResumes)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: latest session for round: %w", err)
-	}
-
-	sameSession := round.SessionID != nil && *round.SessionID == sess.ID
-	switch {
-	case state == store.SessionOpen && sameSession:
-		answers, answerErr := answerInputsForRound(round)
-		if answerErr != nil {
-			return store.HandlerCommit{}, answerErr
-		}
-		return runPlanningResume(ctx, t, d, sess, questionIDs(round), answers, 0)
-	case state == store.SessionExhausted && sameSession:
-		// This branch never calls runPlanningResume, so it cannot itself
-		// produce a new ready outcome; the only way round could carry a
-		// stranded ready cohort is if an earlier resume already stored one
-		// and left round unresolved, but readyCommit sets ResolveQuestions
-		// unconditionally (even on a failed validation), so any round a
-		// ready resume was given is always resolved in that same commit and
-		// never reaches AnsweredRounds again. A round surviving to here,
-		// answered against an already-exhausted session, is therefore
-		// always a "questions" batch the session posted on its own final
-		// resume, not an orphaned cohort -- exactly what capResumesEscalation
-		// (design D17) preserves rather than resolves, for
-		// resolveCapResumesEscalation to fold back in later. An orphaned
-		// ready cohort is entry step 3's own concern (planningHandler.Run's
-		// SessionExhausted case, maybeReviewTick's guard).
-		return capResumesEscalation(t, d, sess.ID), nil
-	default:
-		rendered, renderErr := renderRoundAnswers(round)
-		if renderErr != nil {
-			return store.HandlerCommit{}, renderErr
-		}
-		return runPlanningFirst(ctx, t, d, []prompt.NamedInput{prompt.Answers(rendered)}, questionIDs(round))
 	}
 }
 
@@ -362,7 +362,7 @@ func runClassify(ctx context.Context, t store.Ticket, d Deps, extra []prompt.Nam
 	return runAndRoute(ctx, d, t, jobClassifyName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginClassify,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return classifySuccessCommit(t, d, rr, freshSessionRecord(rr), resolveIDs)
-		}, nil)
+		}, nil, 0)
 }
 
 // classifySuccessCommit routes a classify run's parsed response (design
@@ -395,7 +395,10 @@ func classifySuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *
 // file by kind, layers the job's style files, fences the ticket plus extra,
 // and routes runJob's result through planningSuccessCommit. extra and
 // resolveIDs carry a resolved round's rendered answers exactly as
-// runClassify's do.
+// runClassify's do. Every call also reads PlanningConversation and, when
+// the ticket already has a planning thread, appends the fresh session's own
+// transcript (design section 22.4, 22.6): a brand new ticket's very first
+// call carries no threads yet and so appends nothing.
 func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []prompt.NamedInput, resolveIDs []int64) (store.HandlerCommit, error) {
 	if t.Kind == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: ticket %d has no kind", t.ID)
@@ -430,7 +433,13 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", err)
 	}
 
-	in := prompt.ForPlanningFirst(promptText, styles, t.Title+"\n\n"+t.Body, extra)
+	conv, err := d.Store.PlanningConversation(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: planning conversation: %w", err)
+	}
+	convExtra, throughBatch := conversationFreshInput(conv)
+
+	in := prompt.ForPlanningFirst(promptText, styles, t.Title+"\n\n"+t.Body, append(append([]prompt.NamedInput{}, extra...), convExtra...))
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
@@ -438,8 +447,8 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	req := runtime.RunRequest{Job: response.JobPlanning, Prompt: assembled}
 	return runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst)
-		}, nil)
+			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst, conv, throughBatch)
+		}, nil, throughBatch)
 }
 
 // runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
@@ -451,7 +460,13 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 // round-based resume, which carries no D14 check of its own; the actual
 // count for step 4's automatic retry), so a second consecutive invalid
 // output escalates response_invalid in the same commit that terminalizes it.
-func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, resolveIDs []int64, extra []prompt.NamedInput, priorInvalid int) (store.HandlerCommit, error) {
+// charge becomes the resume's own SessionUpsert.BumpResumes (design section
+// 22.4's resume-charging table): false only for an owner-delivery resume
+// that followed no other, agent-driven reason. Every call also reads
+// PlanningConversation and, when Undelivered() is non-empty, appends the
+// resume block carrying every owner message this turn has not yet seen
+// (design section 22.4, 22.5).
+func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, resolveIDs []int64, extra []prompt.NamedInput, priorInvalid int, charge bool) (store.HandlerCommit, error) {
 	if sess.ExternalID == nil || *sess.ExternalID == "" {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: session %d has no external id", sess.ID)
 	}
@@ -460,45 +475,120 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: %w", err)
 	}
-	in := prompt.ForPlanningResume(extra)
+
+	conv, err := d.Store.PlanningConversation(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: planning conversation: %w", err)
+	}
+	convExtra, throughBatch := conversationResumeInput(conv)
+
+	in := prompt.ForPlanningResume(append(append([]prompt.NamedInput{}, extra...), convExtra...))
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: charge}
 	req := runtime.RunRequest{Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: assembled}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume)
-		}, nil)
+			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume, conv, throughBatch)
+		}, nil, throughBatch)
 }
 
 // planningSuccessCommit routes a planning run's parsed response (design
-// section 6.8), shared by the first turn and the resume: questions and
-// error are the same universal handling classify uses; ready is section
-// 6.5's real cohort check and store; children escalates split_unsupported
-// (design D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate
-// check (task 8).
-func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
-	switch resp := rr.Res.Response.(type) {
+// section 6.8, 22.2, 22.4), shared by the first turn and the resume:
+// questions and error are the same universal handling classify uses;
+// replies is D31's own thread-only outcome; ready is section 6.5's real
+// cohort check and store; children escalates split_unsupported (design
+// D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate check
+// (task 8). Every outcome but error can carry <replies> (design section
+// 22.2): when the response does, checkConversation runs first against conv
+// (the same PlanningConversation its caller already read to build this
+// turn's prompt), and a failure writes the validation-errors-pending marker
+// in place of whatever the outcome's own commit would have been, posting
+// nothing (design section 22.2's own "a failure terminalizes the run,
+// posts nothing"); otherwise the outcome's own commit gains the reply
+// messages, the settles, and the delivered marker (conversationEffects),
+// never touching Waiting beyond what the outcome's own commit already set
+// (the fence inside CommitHandlerResult's applyConversationTx is what can
+// still clear it, design section 22.3 step 3).
+func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin, conv store.PlanningConversation, throughBatch int64) (store.HandlerCommit, error) {
+	resp := rr.Res.Response
+	rl, hasReplies := resp.(replyLister)
+	if hasReplies {
+		if errs := checkConversation(resp.Header().Outcome, rl.ReplyList(), buildThreadState(conv)); len(errs) > 0 {
+			return conversationValidationErrorCommit(t, d, rr, sessionCommit, resolveIDs, errs), nil
+		}
+	}
+
+	var c store.HandlerCommit
+	var err error
+	switch r := resp.(type) {
 	case *response.PlanningQuestionsResponse:
-		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
+		c, err = questionOutcomeCommit(t, d, rr, r.Questions, sessionCommit, resolveIDs)
+	case *response.RepliesResponse:
+		c, err = repliesOutcomeCommit(t, d, rr, sessionCommit, resolveIDs)
 	case *response.ReadyResponse:
-		return readyCommit(ctx, t, d, rr, resp, sessionCommit, resolveIDs)
+		c, err = readyCommit(ctx, t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ChildrenResponse:
-		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		c = escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
 			string(response.EscalationCodeSplitUnsupported), splitUnsupportedWhat, splitUnsupportedWhy, "", response.EscalationOriginSplit)
 		c.Runs = terminalRuns(rr, string(response.OutcomeChildren))
 		c.Session = sessionCommit
 		c.ResolveQuestions = resolveIDs
-		return c, nil
 	case *response.NothingToDoResponse:
-		return nothingToDoCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		c, err = nothingToDoCommit(t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
-		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, origin), nil
+		return errorOutcomeCommit(t, d, rr, r, sessionCommit, resolveIDs, origin), nil
 	default:
-		return store.HandlerCommit{}, fmt.Errorf("job: planning: outcome %s not handled", rr.Res.Response.Header().Outcome)
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: outcome %s not handled", resp.Header().Outcome)
 	}
+	if err != nil || !hasReplies {
+		return c, err
+	}
+
+	msgs, cc := conversationEffects(t.ID, rr.Reserved.RunID, throughBatch, rl.ReplyList(), conv)
+	c.Messages = append(c.Messages, msgs...)
+	c.Conversation = &cc
+	return c, nil
+}
+
+// conversationValidationErrorCommit is checkConversation's own failure
+// commit (design section 22.2): the run terminalizes with its own outcome,
+// resolveIDs still resolve (matching readyCommit's own content-validation
+// failure), and the ticket stays in planning, not waiting, with the
+// existing "validation errors pending" marker naming every path error --
+// the same mechanism and the same entry-step-3 resume (planningHandler.Run)
+// that already redelivers a failed ready response's own errors.
+func conversationValidationErrorCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, errs []*response.PathError) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(rr.Res.Response.Header().Outcome))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("%s run %d\n%s", validationErrorsPendingPrefix, rr.Reserved.RunID, formatReadyErrors(errs)),
+	}}
+	return c
+}
+
+// repliesOutcomeCommit is the replies outcome's own commit (design section
+// 22.4's table): it carries no new question, so terminalRuns stores "runs
+// outcome question" exactly as planning's own questions/question outcome
+// does (section 22.2: runs.outcome has no "replies" value and never will,
+// D16's own single-transaction constraint), and Waiting is always
+// "questions" -- the 22.2 rule already guarantees at least one planning
+// question stays open after a valid replies response. The reply messages,
+// the settles, and the delivered marker are attached by
+// planningSuccessCommit's own caller, like every other outcome's.
+func repliesOutcomeCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) { //nolint:unparam // error is always nil today; the signature matches every other outcome builder planningSuccessCommit's switch calls (questionOutcomeCommit, readyCommit, nothingToDoCommit), which can fail
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeQuestion))
+	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
+	waiting := waitingFlagQuestions
+	c.Waiting = &waiting
+	return c, nil
 }
 
 // errNothingToDoClaimNotFalse is nothingToDoCommit's own defensive sentinel
@@ -788,7 +878,7 @@ func maybeResumeValidationErrors(ctx context.Context, t store.Ticket, d Deps, se
 	firstLine, errsText, _ := strings.Cut(m.Body, "\n")
 	rid := strings.TrimPrefix(firstLine, validationErrorsPendingPrefix+" run ")
 
-	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Validation(errsText)}, 0)
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Validation(errsText)}, 0, true)
 	if err != nil {
 		return commit, true, err
 	}
@@ -826,6 +916,18 @@ func planreviewDeliveredMarker(version int) string {
 // false when there is no cohort yet, or its planreview artifact already
 // exists, so the caller falls through to step 7.
 func maybeReviewTick(ctx context.Context, t store.Ticket, d Deps) (commit store.HandlerCommit, handled bool, err error) {
+	// D31 (design section 22.4 entry step 6): no review or gate starts while
+	// a planning thread is still open, whether this call came from an open
+	// session (step 6 proper) or an exhausted one (planningHandler.Run's
+	// SessionExhausted case) -- both share this one guard.
+	conv, err := d.Store.PlanningConversation(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: planning conversation: %w", err)
+	}
+	if len(conv.Unsettled()) > 0 {
+		return store.HandlerCommit{}, false, nil
+	}
+
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: current cohort: %w", err)
@@ -899,7 +1001,7 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return c, true, nil
 	}
 
-	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0)
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0, true)
 	if err != nil {
 		return commit, true, err
 	}
@@ -985,7 +1087,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
-		}, nil)
+		}, nil, 0)
 }
 
 // planReviewSuccessCommit routes a planreview run's parsed response (design
@@ -1229,7 +1331,7 @@ func resumeOrFresh(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		return store.HandlerCommit{}, fmt.Errorf("job: resume or fresh: latest session: %w", err)
 	}
 	if state == store.SessionOpen {
-		return runPlanningResume(ctx, t, d, sess, resolveIDs, extra, 0)
+		return runPlanningResume(ctx, t, d, sess, resolveIDs, extra, 0, true)
 	}
 	if t.Kind == nil {
 		return runClassify(ctx, t, d, extra, resolveIDs)
@@ -1313,7 +1415,11 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
 
 	case origin == response.EscalationOriginCapResumes:
-		commit, preserved, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs, int64OrZero(payload.SessionID))
+		// D31 (design section 22.4): resolveCapResumesEscalation no longer
+		// preserves any older round (there is none left to preserve), so
+		// preserved stays 0 here -- runPlanningFirst's own fresh transcript
+		// carries the exhausted session's threads instead.
+		commit, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs)
 
 	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
 		findings, findErr := outstandingFloorFindings(ctx, t, d)
@@ -1401,39 +1507,15 @@ func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]re
 // resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row
 // (design D17): the exhausted session guarantees resumeOrFresh's own
 // SessionOpen branch is unreachable, so this calls the planning first turn
-// (section 6.2) directly, carrying notes, error, and, when the exhausted
-// session preserved any answered-unresolved planning round of its own
-// (entry step 1(c), 3: "preserving any answered round"), every one of them
-// combined into a single prompt.Answers input, in AnsweredRounds' own newest-
-// first order. preserved is how many such older rounds this call folds in
-// and resolves alongside the escalation round itself (resolveIDs), the
-// "escalation resolved" log line's own preserved_rounds field.
-func resolveCapResumesEscalation(ctx context.Context, t store.Ticket, d Deps, notes, errorText string, resolveIDs []int64, sessionID int64) (store.HandlerCommit, int, error) {
-	allRounds, err := d.Store.AnsweredRounds(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, 0, fmt.Errorf("job: planning: cap_resumes retry: answered rounds: %w", err)
-	}
-
-	var parts []string
-	preserved := append([]int64{}, resolveIDs...)
-	for _, r := range allRounds {
-		if r.Job != jobPlanningName || r.SessionID == nil || *r.SessionID != sessionID {
-			continue
-		}
-		rendered, renderErr := renderRoundAnswers(r)
-		if renderErr != nil {
-			return store.HandlerCommit{}, 0, renderErr
-		}
-		parts = append(parts, rendered)
-		preserved = append(preserved, questionIDs(r)...)
-	}
-
+// (section 6.2) directly, carrying notes and error. D31 (design section
+// 22.4) dropped this function's own planning-round-preserving loop: no
+// planning question reaches AnsweredRounds any more, so there is never a
+// round left to fold in here -- runPlanningFirst's own fresh transcript
+// (conversationFreshInput) now carries every one of the exhausted session's
+// threads instead.
+func resolveCapResumesEscalation(ctx context.Context, t store.Ticket, d Deps, notes, errorText string, resolveIDs []int64) (store.HandlerCommit, error) {
 	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
-	if len(parts) > 0 {
-		extra = append(extra, prompt.Answers(strings.Join(parts, "\n\n")))
-	}
-	commit, err := runPlanningFirst(ctx, t, d, extra, preserved)
-	return commit, len(parts), err
+	return runPlanningFirst(ctx, t, d, extra, resolveIDs)
 }
 
 // gateApprove is section 6.6's approve pre-check, in exact branch order
@@ -1544,7 +1626,11 @@ func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int6
 // dispatcher's own releaseClaim path still runs and clears the claim.
 // taskN is threaded straight through to runJob, and from there into
 // RunSeed.TaskN: &n for a build or perimeter task unit, nil otherwise.
-// Planning's four callers pass nil.
+// Planning's four callers pass nil. throughBatch is threaded straight
+// through to runJob, and from there into RunSeed.ThroughBatch (D31, design
+// section 22.3): above 0 only for a planning resume or first turn that
+// found PlanningConversation.Undelivered() non-empty; every other caller
+// passes 0.
 func runAndRoute(
 	ctx context.Context, d Deps, t store.Ticket, jobName string,
 	su store.SessionUpsert, req runtime.RunRequest, priorInvalid int,
@@ -1552,8 +1638,9 @@ func runAndRoute(
 	resolveIDs []int64, origin response.EscalationOrigin,
 	success func(rr runResult) (store.HandlerCommit, error),
 	taskN *int, //nolint:unparam // planning's four callers pass nil; the building handler (task 9) passes &n
+	throughBatch int64,
 ) (store.HandlerCommit, error) {
-	rr, runErr := runJob(ctx, d, t, jobName, su, req, taskN, nil)
+	rr, runErr := runJob(ctx, d, t, jobName, su, req, taskN, nil, throughBatch)
 	sessionCommit := sessionRecord(rr)
 
 	if runErr != nil {
