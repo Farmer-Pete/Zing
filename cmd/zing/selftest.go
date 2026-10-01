@@ -196,6 +196,20 @@ func (*selftestShipGitHub) JobLogTail(context.Context, string, string, int64, in
 	return "", nil
 }
 
+// MarkReady and ConvertToDraft give selftestShipGitHub job.DraftFlips too
+// (M4 task 7): this fake always reports Draft: true (GetPR, above), so the
+// e2e necessarily reaches row 8's own ready flip on its first clean-sha
+// poll before GetPR starts reporting merged; both calls just succeed,
+// since this suite verifies the ticket reaches done, not what a draft
+// flip posts.
+func (*selftestShipGitHub) MarkReady(context.Context, string) error {
+	return nil
+}
+
+func (*selftestShipGitHub) ConvertToDraft(context.Context, string) error {
+	return nil
+}
+
 // ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
 // ListReviews, RequestReviewers, and Viewer give selftestShipGitHub
 // job.ReviewThreads too (M4 task 4): this suite's own fixture ticket never
@@ -678,7 +692,7 @@ func selftestResumeE2E(ctx context.Context) error {
 				projectID: {
 					Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
 					Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner,
-					PullRequests: selftestShipGH, Checks: selftestShipGH, Threads: selftestShipGH,
+					PullRequests: selftestShipGH, Checks: selftestShipGH, Threads: selftestShipGH, Flips: selftestShipGH,
 				},
 			},
 		}, rts)

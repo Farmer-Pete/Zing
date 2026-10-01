@@ -19,11 +19,16 @@
 // turn and every resume), and the respond rows of resolvePostBuildEscalation.
 // M4 task 5 (respond.go) adds decision tree step (3), APPLY (9.3). M4 task 6
 // (respond.go) adds rows 1 and 2, FIX-REPLIES and RE-REQUEST, wired into
-// poll below. 8.5's rows 3, 6, 6a, 8, and 9 (the draft/ready flip, the
-// leftover resolve, the unclassified blocking marker, and MERGE) stay later
-// M4 tasks'. Reaching one of those unbuilt rows is ErrNoAction, not a
-// silent no-op, since nothing before them can write the marker or round
-// shape that would route there.
+// poll below. M4 task 7 (this file) adds rows 3, 6, 6a, and 8: the
+// draft-to-ready flip when CI is green and every thread is resolved, a
+// reopened loop (failed CI, or any unresolved thread of any class)
+// flipping a ready pull request back to draft and withdrawing a stale
+// merge question in the same commit, the leftover resolve (9.5), and the
+// informational marker an unclassified thread blocks rows 8 and 9 behind.
+// Row 9, the merge question and MERGE itself, stays M4 task 8's; reaching
+// its condition (CI green, zero unresolved threads, not draft) is
+// ErrNoAction, not a silent no-op, since nothing before it can write the
+// "merge asked" marker a resumed round would need.
 package job
 
 import (
@@ -33,6 +38,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -480,6 +486,76 @@ const (
 // whenever an idle poll's own Missing set changes from the previous poll's.
 const ciWaitingPrefix = "ci waiting "
 
+// prDraftPrefix and prReadyPrefix are design section 5.1's own
+// informational markers for the draft/ready flip (design section 8.5 rows
+// 3 and 8, 8.9): no decision ever reads either back.
+const (
+	prDraftPrefix = "pr draft "
+	prReadyPrefix = "pr ready "
+)
+
+// threadsBlockingPrefix is design section 5.1's own "threads blocking "
+// marker (8.5 row 6a): the set of unclassified thread tids currently
+// blocking the ready flip and the merge gate (9.1).
+const threadsBlockingPrefix = "threads blocking "
+
+// mergeMarkerPrefix groups every "merge " marker design section 8.8 writes
+// for one pull request head: "asked" (row 9, M4 task 8), "withdrawn" (rows
+// 3 to 5, this file), "held" (MERGE-ANSWER, M4 task 8), and "refused"
+// (MERGE, M4 task 8). Row 3 (below) is the one row task 7 builds that
+// reads this family back: a loop that just reopened on a head GitHub may
+// still be showing a stale merge question for.
+const mergeMarkerPrefix = "merge "
+
+// mergeMarkerLine matches one "merge " marker's own first line: its kind
+// and the sha it names.
+var mergeMarkerLine = regexp.MustCompile(`^merge (asked|withdrawn|held|refused) ([0-9a-f]{40})$`)
+
+// newestMergeMarkerKind returns the kind ("asked", "withdrawn", "held", or
+// "refused") of the newest "merge <kind> <sha>" marker among markers that
+// names exactly sha, "" when none does (design section 8.9: "this head's
+// own newest merge marker"). markers is MarkersWithPrefix's own oldest-
+// first order, so the last match is the newest.
+func newestMergeMarkerKind(markers []store.MessageRow, sha string) string {
+	kind := ""
+	for i := range markers {
+		firstLine, _, _ := strings.Cut(markers[i].Body, "\n")
+		sub := mergeMarkerLine.FindStringSubmatch(firstLine)
+		if sub == nil {
+			continue
+		}
+		if sub[2] != sha {
+			continue
+		}
+		kind = sub[1]
+	}
+	return kind
+}
+
+// withdrawMergeQuestionIfAsked appends a "merge withdrawn <sha>" marker to
+// c, and resolves every open or answered question on the ticket, when
+// mergeMarkers' own newest "merge ..." marker for sha is "asked" or "held"
+// (design section 8.5 rows 3 to 5, 8.9): the loop just reopened on a head
+// GitHub may still be showing a stale merge question for, so it is
+// withdrawn in the same commit that notices the reopen -- "so the head can
+// be asked about again once the loop is clean". c.ResolveAll is safe to
+// set unconditionally here because shipping's own POLL never asks any
+// other kind of question (pollDone, above, resolves every question the
+// same way).
+func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMarkers []store.MessageRow, sha string) store.HandlerCommit {
+	switch newestMergeMarkerKind(mergeMarkers, sha) {
+	case "asked", "held":
+	default:
+		return c
+	}
+	c.ResolveAll = true
+	c.Messages = append(c.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "merge withdrawn " + sha,
+	})
+	return c
+}
+
 // poll is POLL (design section 8.3 to 8.9): step 1's own three checks
 // (pollChecks), the PR read and its own three terminal rows (merged,
 // closed, a foreign or behind head), the check and status reads, and --
@@ -594,29 +670,155 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 
 	// classifyThreads and pollThreadsFrom are threadrules.go's and respond.go's
 	// own pure helpers (design section 9.1, 8.3): every class feeds the
-	// fingerprint (pollThreadsFrom), but only actionable threads drive row 5
-	// below (M4 task 4). Rows 3, 6, 6a, 8, and 9 -- the draft/ready flip, the
-	// leftover resolve, the unclassified blocking marker, and the merge
-	// question -- are M4 tasks 7 and 8's own reads of resolved/leftover/
-	// unclassified; this task only wires the real thread list through.
-	_, actionable, _, _ := classifyThreads(threadsRaw, login)
+	// fingerprint (pollThreadsFrom). Row 5 (M4 task 4) drives off actionable
+	// threads; rows 6 and 6a (this task) drive off leftover and unclassified
+	// ones; row 3 (this task) and row 9 (M4 task 8) both read whether any
+	// thread of any class is still unresolved.
+	_, actionable, leftover, unclassified := classifyThreads(threadsRaw, login)
 	pollThreads := pollThreadsFrom(threadsRaw)
 
 	fp := pollFingerprint(pr, runs, statuses, required, pollThreads)
 	result := EvaluateCI(runs, statuses, required)
+	anyUnresolved := len(actionable) > 0 || len(leftover) > 0 || len(unclassified) > 0
 
 	switch {
 	case result.State == CIUnprotected:
 		c := shipEscalation(t, d, unprotectedWhat, unprotectedWhy, "")
 		c.ClearPoll = true
 		return c, nil
+	case !pr.Draft && (result.State == CIFailed || anyUnresolved):
+		return h.pollConvertToDraft(ctx, t, d, proj, pr, local)
 	case result.State == CIFailed:
 		return h.pollCIFailed(ctx, t, d, proj, result)
 	case len(actionable) > 0:
 		return h.startRespondBatch(ctx, t, d, local, actionable, login)
-	default: // CIPending, CIGreen with no actionable thread: M4 tasks 7, 8 add the ready flip and merge (8.5 rows 8, 9).
+	case len(leftover) > 0:
+		return h.pollLeftover(ctx, t, d, proj, leftover)
+	case len(unclassified) > 0:
+		return h.pollUnclassifiedBlocking(ctx, t, d, fp, unclassified)
+	case result.State == CIPending:
 		return h.pollIdle(ctx, t, d, fp, result.Missing)
+	case pr.Draft: // CIGreen, zero unresolved threads, still draft: row 8
+		return h.pollMarkReady(ctx, t, d, proj, pr, local)
+	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE), M4 task 8's.
+		return store.HandlerCommit{}, ErrNoAction
 	}
+}
+
+// pollConvertToDraft is design section 8.5 row 3 and 8.9 (M4 task 7): the
+// loop just reopened (CI failed, or any unresolved thread of any class) on
+// a pull request still marked ready, whoever made it ready -- so Zing
+// converts it back to draft, writes the informational "pr draft <sha>"
+// marker, and, in the same commit, withdraws any merge question this
+// exact head's own newest merge marker still shows as asked or held
+// (withdrawMergeQuestionIfAsked).
+func (h shipHandler) pollConvertToDraft(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, sha string) (store.HandlerCommit, error) {
+	if err := proj.Flips.ConvertToDraft(ctx, pr.NodeID); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: convert to draft: %w", err)
+	}
+
+	mergeMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: merge markers: %w", err)
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: prDraftPrefix + sha,
+	}}
+	c = withdrawMergeQuestionIfAsked(c, t, mergeMarkers, sha)
+	c.ClearPoll = true
+	return c, nil
+}
+
+// pollLeftover is LEFTOVER (design section 8.5 row 6, 9.5): every poll
+// that finds a leftover thread resolves each of them, in tid order, and
+// commits ClearPoll with no marker of its own -- the next poll reads the
+// threads again, so a crash after a resolve converges, and someone who
+// unresolves a thread Zing already answered, with no comment, sees it
+// resolved again the next time; a comment is how to reopen the
+// discussion (it becomes actionable instead).
+func (h shipHandler) pollLeftover(ctx context.Context, t store.Ticket, d Deps, proj Project, leftover []orchestrator.Thread) (store.HandlerCommit, error) {
+	sorted := append([]orchestrator.Thread(nil), leftover...)
+	sort.Slice(sorted, func(i, j int) bool { return tid(sorted[i].ID) < tid(sorted[j].ID) })
+	for _, th := range sorted {
+		if err := proj.Threads.ResolveThread(ctx, th.ID); err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: resolve leftover thread: %w", err)
+		}
+	}
+
+	c := baseCommit(t, d)
+	c.ClearPoll = true
+	return c, nil
+}
+
+// previousThreadsBlocking returns the tids the newest "threads blocking "
+// marker on t carried (design section 5.1), nil when none exists or the
+// newest one named none.
+func previousThreadsBlocking(ctx context.Context, t store.Ticket, d Deps) ([]string, error) {
+	rows, err := d.Store.MarkersWithPrefix(ctx, t.ID, threadsBlockingPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: poll: threads blocking markers: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	tail := strings.TrimPrefix(rows[len(rows)-1].Body, threadsBlockingPrefix)
+	if tail == "" {
+		return nil, nil
+	}
+	return strings.Split(tail, ","), nil
+}
+
+// pollUnclassifiedBlocking is design section 8.5 row 6a: an idle commit
+// (8.3's own backoff), plus the informational "threads blocking <tids>"
+// marker whenever the unclassified set differs from the previous poll's
+// own newest such marker. An unclassified thread blocks rows 8 and 9 (the
+// ready flip and the merge question) until it changes class -- a human
+// comment makes it actionable, or someone resolves it.
+func (h shipHandler) pollUnclassifiedBlocking(ctx context.Context, t store.Ticket, d Deps, fp string, unclassified []orchestrator.Thread) (store.HandlerCommit, error) {
+	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
+	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
+
+	c := baseCommit(t, d)
+	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
+
+	tids := make([]string, len(unclassified))
+	for i, th := range unclassified {
+		tids[i] = tid(th.ID)
+	}
+	sort.Strings(tids)
+
+	prev, err := previousThreadsBlocking(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if !slices.Equal(prev, tids) {
+		c.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: threadsBlockingPrefix + strings.Join(tids, ","),
+		}}
+	}
+	return c, nil
+}
+
+// pollMarkReady is design section 8.5 row 8 and 8.9 (M4 task 7): CI green
+// and zero unresolved threads of any class, on a pull request still
+// marked draft -- Zing marks it ready for review and writes the
+// informational "pr ready <sha>" marker.
+func (h shipHandler) pollMarkReady(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, sha string) (store.HandlerCommit, error) {
+	if err := proj.Flips.MarkReady(ctx, pr.NodeID); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: mark ready: %w", err)
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: prReadyPrefix + sha,
+	}}
+	c.ClearPoll = true
+	return c, nil
 }
 
 // pollChecks is POLL's own step 1 (design section 8.3): EnsureWorktree,

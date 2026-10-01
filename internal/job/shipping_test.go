@@ -159,6 +159,15 @@ type shipGitHub struct {
 	containsCalls []string
 	containsErr   error
 	resolveErrFor map[string]error
+
+	// markReadyErr and convertToDraftErr, when set, fail every MarkReady or
+	// ConvertToDraft call instead (M4 task 7's own DraftFlips reads);
+	// markReadyCalls and convertToDraftCalls record the pull request node
+	// id each call carried, in call order.
+	markReadyErr        error
+	convertToDraftErr   error
+	markReadyCalls      []string
+	convertToDraftCalls []string
 }
 
 // shipViewerLogin is shipGitHub's own default Viewer() result (M4 task 4):
@@ -318,6 +327,27 @@ func (g *shipGitHub) RequestReviewers(_ context.Context, _, _ string, _ int, log
 	return nil
 }
 
+// MarkReady and ConvertToDraft give shipGitHub job.DraftFlips too (M4 task
+// 7): POLL's own tests configure markReadyErr/convertToDraftErr the same
+// way every other write above is configured, and read markReadyCalls/
+// convertToDraftCalls back to assert which pull request node id a row
+// actually flipped.
+func (g *shipGitHub) MarkReady(_ context.Context, prNodeID string) error {
+	if g.markReadyErr != nil {
+		return g.markReadyErr
+	}
+	g.markReadyCalls = append(g.markReadyCalls, prNodeID)
+	return nil
+}
+
+func (g *shipGitHub) ConvertToDraft(_ context.Context, prNodeID string) error {
+	if g.convertToDraftErr != nil {
+		return g.convertToDraftErr
+	}
+	g.convertToDraftCalls = append(g.convertToDraftCalls, prNodeID)
+	return nil
+}
+
 func (g *shipGitHub) Viewer(context.Context) (string, error) {
 	if g.viewerErr != nil {
 		return "", g.viewerErr
@@ -390,7 +420,8 @@ func shipOrchestratorFor(t *testing.T, localPath string, gh orchestrator.GitHub)
 // buildJobProjects fills all three from one *orchestrator.GitHubClient
 // (PKG9-PLAN.md section 10.3) -- so POLL's own tests can share the one
 // *shipGitHub PUBLISH's own OpenDraftPR call already used, and see the
-// very pull request it opened.
+// very pull request it opened. job.ReviewThreads and job.DraftFlips are
+// filled the same conditional way (M4 tasks 4 and 7).
 func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map[int64]Project {
 	t.Helper()
 	projects, err := s.ListProjects(t.Context())
@@ -400,6 +431,7 @@ func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map
 	prs, hasPRs := gh.(PullRequests)
 	checks, hasChecks := gh.(Checks)
 	threads, hasThreads := gh.(ReviewThreads)
+	flips, hasFlips := gh.(DraftFlips)
 
 	out := make(map[int64]Project, len(projects))
 	for _, p := range projects {
@@ -414,6 +446,9 @@ func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map
 		}
 		if hasThreads {
 			proj.Threads = threads
+		}
+		if hasFlips {
+			proj.Flips = flips
 		}
 		out[p.ID] = proj
 	}
@@ -1272,6 +1307,11 @@ func shipPollRun(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitH
 	return (shipHandler{}).Run(t.Context(), ticket, deps)
 }
 
+// shipCILogTailText is the canned JobLogTail text every failed-CI test
+// below configures gh.logTail with (goconst: repeated across the ci_log
+// fix-request test and task 7's own draft-flip tests).
+const shipCILogTailText = "FAIL: boom"
+
 // shipGreenCI is the Checks reads a ticket.ID's own POLL needs to reach
 // EvaluateCI's green branch: one required "ci" context, matched by one
 // completed/success run of the same name. Statuses are never used by any
@@ -1576,7 +1616,7 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 	runs, required := shipFailedCI()
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return "FAIL: boom", nil }
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -1587,7 +1627,7 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 	}
 	found := false
 	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, "FAIL: boom") {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
 			found = true
 		}
 	}
@@ -1896,20 +1936,26 @@ func TestPollUnprotectedEscalates(t *testing.T) {
 
 // TestPollCIWaitingMarkerOnChange proves design section 8.4's own
 // informational marker: an idle poll writes "ci waiting <names>" only when
-// Missing differs from the previous poll's.
+// Missing differs from the previous poll's. Two required checks, "ci" and
+// "deploy", keep CI pending across every poll here (deploy never reports),
+// so this test's own three polls stay inside row 7 (8.5) and never reach
+// row 8's own ready flip (M4 task 7): a scenario where Missing shrinks to
+// empty while still pending cannot arise (CI is never pending with an
+// empty Missing, design section 8.4 rule 3), so this is the strongest
+// Missing-shrinks case row 7 can exercise on its own.
 func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
-	gh.runs = nil // nothing reports "ci" yet: Missing = ["ci"]
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "deploy"}}
+	gh.runs = nil // neither reports yet: Missing = ["ci","deploy"]
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
 		t.Fatalf("Run (first poll): %v", err)
 	}
-	wantFirst := ciWaitingPrefix + "ci"
+	wantFirst := ciWaitingPrefix + "ci,deploy"
 	foundFirst := false
 	for _, m := range commit.Messages {
 		if m.Body == wantFirst {
@@ -1921,14 +1967,15 @@ func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit)
 
-	// The required check now reports, so Missing becomes empty: a new
-	// marker is written because the set changed.
+	// "ci" now reports, so Missing shrinks to ["deploy"]: a new marker is
+	// written because the set changed. CI stays pending ("deploy" is still
+	// missing), so this poll still never reaches row 8.
 	gh.runs, _ = shipGreenCI()
 	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (second poll): %v", err)
 	}
-	wantSecond := ciWaitingPrefix
+	wantSecond := ciWaitingPrefix + "deploy"
 	foundSecond := false
 	for _, m := range commit2.Messages {
 		if m.Body == wantSecond {
@@ -1936,11 +1983,12 @@ func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 		}
 	}
 	if !foundSecond {
-		t.Errorf("commit2.Messages = %+v, want %q (Missing changed to empty)", commit2.Messages, wantSecond)
+		t.Errorf("commit2.Messages = %+v, want %q (Missing changed to just deploy)", commit2.Messages, wantSecond)
 	}
 	pbApply(t, s, ticket, commit2)
 
-	// A third poll with the same (empty) Missing writes no new marker.
+	// A third poll with the same (still missing "deploy") Missing writes no
+	// new marker.
 	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (third poll): %v", err)
@@ -3541,5 +3589,474 @@ func TestReRequestSkipsUnrequestable(t *testing.T) {
 	want := "reviewers re-requested " + local + "\n" + shipStaleReviewLogin
 	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
 		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// -----------------------------------------------------------------------
+// POLL: ready, draft, and leftovers (M4 task 7, design section 8.5 rows 3,
+// 6, 6a, 8, and 8.9)
+// -----------------------------------------------------------------------
+
+// shipSeedMergeAsked seeds ticketID with an open "merge" question and the
+// matching "merge asked <sha>" marker directly through
+// CommitHandlerResult, the shape design section 8.8's own MERGE question
+// takes (M4 task 8, not yet built in this worktree): task 7's own tests
+// need a loop that reopens on an already-asked head without driving
+// MERGE-ANSWER's own code to get there. It returns the question's own
+// message id, since a ticket that already passed through planning,
+// building, reviewing, and judging (shipTicketReady) carries other,
+// already-resolved questions of its own: a caller checks this one
+// specifically, not a ticket-wide resolved count.
+func shipSeedMergeAsked(t *testing.T, s *store.Store, ticketID int64, sha string) int64 {
+	t.Helper()
+	ctx := t.Context()
+	owner := "seed-merge-asked"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(ctx, ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("shipSeedMergeAsked: claim: claimed=%v err=%v", claimed, err)
+	}
+	payload, marshalErr := json.Marshal(response.QuestionPayload{
+		Kind: response.QuestionKindMerge, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options:     []response.Option{{Key: "a", Text: "Merge now"}, {Key: "b", Text: "Hold"}},
+	})
+	if marshalErr != nil {
+		t.Fatalf("shipSeedMergeAsked: marshal question payload: %v", marshalErr)
+	}
+	state := questionStateOpen
+	waiting := "merge"
+	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires, Waiting: &waiting,
+		Messages: []store.Message{
+			{TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing, State: &state, Body: "Merge pull request?", Payload: payload},
+			{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge asked " + sha},
+		},
+	})
+	if err != nil || !applied {
+		t.Fatalf("shipSeedMergeAsked: commit: applied=%v err=%v", applied, err)
+	}
+
+	open, err := s.QuestionsByState(ctx, ticketID, questionStateOpen)
+	if err != nil || len(open) == 0 {
+		t.Fatalf("shipSeedMergeAsked: QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	return open[len(open)-1].ID
+}
+
+// TestReadyWhenGreenAndNoThreads proves design section 8.5 row 8: a draft
+// pull request with CI green and no threads at all is marked ready, and
+// the informational "pr ready <sha>" marker names the head.
+func TestReadyWhenGreenAndNoThreads(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_ready"}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want the ready flip: %+v", commit.Escalation.Payload)
+	}
+	if len(gh.markReadyCalls) != 1 || gh.markReadyCalls[0] != "PR_node_ready" {
+		t.Fatalf("markReadyCalls = %+v, want exactly [%q]", gh.markReadyCalls, "PR_node_ready")
+	}
+	want := prReadyPrefix + local
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestNoReadyWithUnresolvedThread proves row 8's own "zero unresolved
+// threads" guard: an actionable thread takes row 5 instead (starting a
+// respond batch), and the ready flip never fires.
+func TestNoReadyWithUnresolvedThread(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.threads = []orchestrator.Thread{
+		shipThread(shipRespondThreadID, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when)),
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.markReadyCalls) != 0 {
+		t.Errorf("markReadyCalls = %+v, want none", gh.markReadyCalls)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "respond batch 1 started sha "+local+" after run ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a respond batch 1 started marker", commit.Messages)
+	}
+}
+
+// TestNoReadyWithUnclassifiedThread proves row 8's same guard against the
+// unclassified class (design section 9.1): a thread with zero comments and
+// one with an odd (empty) raw id each block the ready flip, idle (row 6a)
+// instead of marking ready.
+func TestNoReadyWithUnclassifiedThread(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		thread orchestrator.Thread
+	}{
+		{"zero comments", orchestrator.Thread{ID: "RT_unclassified_zero_comments"}},
+		{"odd id", orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket, gh, tr := shipPublished(t)
+			local := shipHeadSHA(t, s, ticket)
+			runs, required := shipGreenCI()
+			gh.runs, gh.required = runs, required
+			gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+			gh.threads = []orchestrator.Thread{tc.thread}
+
+			commit, err := shipPollRun(t, s, ticket, gh, tr)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(gh.markReadyCalls) != 0 {
+				t.Errorf("markReadyCalls = %+v, want none", gh.markReadyCalls)
+			}
+			if commit.Poll == nil {
+				t.Fatal("commit.Poll is nil, want the idle backoff commit (row 6a)")
+			}
+			found := false
+			for _, m := range commit.Messages {
+				if strings.HasPrefix(m.Body, threadsBlockingPrefix) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, threadsBlockingPrefix)
+			}
+		})
+	}
+}
+
+// TestDraftWhenLoopReopens proves design section 8.5 row 3: a failed
+// required check converts an already-ready pull request back to draft,
+// whoever made it ready -- draft and ready state are read from GitHub
+// every poll (design D27's own section 8.9), never from a Zing-only
+// marker, so this fires exactly the same way whether Zing's own row 8
+// marked it ready earlier or the owner did it by hand on GitHub.
+func TestDraftWhenLoopReopens(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipFailedCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_reopen"}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want the draft flip: %+v", commit.Escalation.Payload)
+	}
+	if len(gh.convertToDraftCalls) != 1 || gh.convertToDraftCalls[0] != "PR_node_reopen" {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly [%q]", gh.convertToDraftCalls, "PR_node_reopen")
+	}
+	want := prDraftPrefix + local
+	found := false
+	for _, m := range commit.Messages {
+		if m.Body == want {
+			found = true
+		}
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) {
+			t.Errorf("commit.Messages = %+v, want no ci_log fix request: row 3 outranks row 4", commit.Messages)
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestReadyPRFlipsBackOnZeroCommentThread and TestReadyPRFlipsBackOnUnclassifiedThread
+// both prove design section 8.9: starting from a ready pull request with an
+// open merge question, an unclassified thread (zero comments, or an odd
+// id) reopens the loop. One commit converts the pull request back to
+// draft and withdraws the merge question -- ResolveAll, the "pr draft
+// <sha>" marker, and the "merge withdrawn <sha>" marker all land together.
+func testReadyPRFlipsBackOnUnclassified(t *testing.T, thread orchestrator.Thread) {
+	t.Helper()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_flip_back"}
+	questionID := shipSeedMergeAsked(t, s, ticket.ID, local)
+	gh.threads = []orchestrator.Thread{thread}
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 1 || gh.convertToDraftCalls[0] != "PR_node_flip_back" {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly [%q]", gh.convertToDraftCalls, "PR_node_flip_back")
+	}
+	if !commit.ResolveAll {
+		t.Error("ResolveAll = false, want true (the open merge question is withdrawn)")
+	}
+	var sawDraft, sawWithdrawn bool
+	for _, m := range commit.Messages {
+		switch m.Body {
+		case prDraftPrefix + local:
+			sawDraft = true
+		case "merge withdrawn " + local:
+			sawWithdrawn = true
+		}
+	}
+	if !sawDraft {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, prDraftPrefix+local)
+	}
+	if !sawWithdrawn {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "merge withdrawn "+local)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+
+	pbApply(t, s, ticket, commit)
+	question, err := s.GetMessage(t.Context(), questionID)
+	if err != nil {
+		t.Fatalf("GetMessage(%d): %v", questionID, err)
+	}
+	if question.State == nil || *question.State != "resolved" {
+		t.Errorf("merge question %d state = %v, want %q", questionID, question.State, "resolved")
+	}
+}
+
+func TestReadyPRFlipsBackOnZeroCommentThread(t *testing.T) {
+	t.Parallel()
+	testReadyPRFlipsBackOnUnclassified(t, orchestrator.Thread{ID: "RT_flipback_zero_comments"})
+}
+
+func TestReadyPRFlipsBackOnUnclassifiedThread(t *testing.T) {
+	t.Parallel()
+	testReadyPRFlipsBackOnUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
+}
+
+// TestReadyCrashConverges proves design section 8.9's own convergence
+// rule: draft and ready state are read from GitHub every poll, never from
+// a marker, so a crash after a real MarkReady call but before its own
+// commit converges cleanly -- the next poll reads the pull request
+// already ready and calls MarkReady no further times -- and a later red
+// CI still flips it to draft.
+func TestReadyCrashConverges(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_crash"}
+
+	// A crash right after MarkReady succeeded on GitHub, before its own
+	// commit: the write happens directly (TestPublishFindsExistingPRAfterCrash,
+	// above, simulates PUBLISH's own pre-commit crash the same way), and the
+	// claim is released with no commit applied.
+	preCrashDeps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	if err := gh.MarkReady(t.Context(), gh.prState.NodeID); err != nil {
+		t.Fatalf("MarkReady (pre-crash): %v", err)
+	}
+	shipReleaseClaim(t, s, ticket.ID, preCrashDeps)
+	if len(gh.markReadyCalls) != 1 {
+		t.Fatalf("markReadyCalls after the pre-crash write = %d, want 1", len(gh.markReadyCalls))
+	}
+
+	// The next poll reads GitHub fresh: GetPR already reports the pull
+	// request ready (the real write succeeded), so row 8's own condition no
+	// longer matches, and this tick calls MarkReady no further times. CI
+	// green, zero threads, and a ready pull request is row 9's own
+	// condition (the merge question), M4 task 8's: ErrNoAction, not a
+	// silent no-op.
+	gh.prState.Draft = false
+	deps2 := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("Run (converged poll) = %v, want ErrNoAction", err)
+	}
+	if len(gh.markReadyCalls) != 1 {
+		t.Errorf("markReadyCalls after the converged poll = %d, want still 1 (no duplicate call)", len(gh.markReadyCalls))
+	}
+	shipReleaseClaim(t, s, ticket.ID, deps2)
+
+	// A later red CI flips the (still not-draft) pull request back to draft.
+	gh.runs, gh.required = shipFailedCI()
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (CI failed poll): %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 1 {
+		t.Errorf("convertToDraftCalls = %+v, want exactly one call", gh.convertToDraftCalls)
+	}
+	want := prDraftPrefix + local
+	found := false
+	for _, m := range commit3.Messages {
+		if m.Body == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, want)
+	}
+}
+
+// TestLeftoverResolvedEachPoll proves LEFTOVER (design section 8.5 row 6,
+// 9.5): a thread whose last comment is Zing's own disclosed reply resolves
+// every poll, with no marker of its own.
+func TestLeftoverResolvedEachPoll(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	leftoverID := "RT_leftover_resolved"
+	gh.threads = []orchestrator.Thread{
+		shipThread(leftoverID, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when), zingReplyComment(shipViewerLogin)),
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != leftoverID {
+		t.Fatalf("resolves = %+v, want exactly [%q]", gh.resolves, leftoverID)
+	}
+	if len(commit.Messages) != 0 {
+		t.Errorf("commit.Messages = %+v, want none (9.5: no marker records a leftover resolve)", commit.Messages)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestLeftoverCrashConverges proves design section 11's own leftover-resolve
+// row: a crash after the resolve call but before the commit leaves no
+// marker behind, so the next poll -- reading the same, still-unresolved
+// thread back off the fake, which never flips IsResolved on its own --
+// resolves it again, exactly 9.5's own "sees it resolved again"
+// convergence.
+func TestLeftoverCrashConverges(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	leftoverID := "RT_leftover_crash"
+	gh.threads = []orchestrator.Thread{
+		shipThread(leftoverID, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when), zingReplyComment(shipViewerLogin)),
+	}
+
+	preCrashDeps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), preCrashDeps)
+	if err != nil {
+		t.Fatalf("Run (pre-crash): %v", err)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != leftoverID {
+		t.Fatalf("resolves (pre-crash) = %+v, want exactly [%q]", gh.resolves, leftoverID)
+	}
+	shipReleaseClaim(t, s, ticket.ID, preCrashDeps)
+
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (converged poll): %v", err)
+	}
+	if len(gh.resolves) != 2 || gh.resolves[1] != leftoverID {
+		t.Errorf("resolves (converged poll) = %+v, want a second %q", gh.resolves, leftoverID)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestThreadsBlockingMarkerOnChange proves design section 8.5 row 6a's own
+// change-only marker: "threads blocking <tids>" is written only when the
+// unclassified set differs from the previous poll's own newest such
+// marker, the same shape ciWaitingPrefix already gives row 7 (
+// TestPollCIWaitingMarkerOnChange, above).
+func TestThreadsBlockingMarkerOnChange(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.threads = []orchestrator.Thread{{ID: "RT_unclass_a"}}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (first poll): %v", err)
+	}
+	wantFirst := threadsBlockingPrefix + tid("RT_unclass_a")
+	foundFirst := false
+	for _, m := range commit.Messages {
+		if m.Body == wantFirst {
+			foundFirst = true
+		}
+	}
+	if !foundFirst {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, wantFirst)
+	}
+	pbApply(t, s, ticket, commit)
+
+	// A second poll with the same unclassified set writes no new marker.
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+	for _, m := range commit2.Messages {
+		if strings.HasPrefix(m.Body, threadsBlockingPrefix) {
+			t.Errorf("commit2.Messages = %+v, want no new %q marker (set unchanged)", commit2.Messages, threadsBlockingPrefix)
+		}
+	}
+	pbApply(t, s, ticket, commit2)
+
+	// A third poll where the set changes (a second unclassified thread
+	// joins) writes a new marker naming both tids, sorted.
+	gh.threads = []orchestrator.Thread{{ID: "RT_unclass_a"}, {ID: "RT_unclass_b"}}
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (third poll): %v", err)
+	}
+	wantTIDs := []string{tid("RT_unclass_a"), tid("RT_unclass_b")}
+	sort.Strings(wantTIDs)
+	wantThird := threadsBlockingPrefix + strings.Join(wantTIDs, ",")
+	foundThird := false
+	for _, m := range commit3.Messages {
+		if m.Body == wantThird {
+			foundThird = true
+		}
+	}
+	if !foundThird {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, wantThird)
 	}
 }

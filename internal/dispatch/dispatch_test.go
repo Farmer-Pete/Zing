@@ -695,6 +695,20 @@ func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, 
 	return "", nil
 }
 
+// MarkReady and ConvertToDraft give dispatchShipGitHub job.DraftFlips too
+// (M4 task 7): this fake always reports Draft: true (GetPR, above), so
+// this file's own shipping e2e necessarily reaches row 8's ready flip on
+// its first clean-sha poll before GetPR starts reporting merged; both
+// calls just succeed, since this test cares about the ticket's own state
+// and markers, not what a draft flip posts.
+func (g *dispatchShipGitHub) MarkReady(context.Context, string) error {
+	return nil
+}
+
+func (g *dispatchShipGitHub) ConvertToDraft(context.Context, string) error {
+	return nil
+}
+
 // ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
 // ListReviews, RequestReviewers, and Viewer give dispatchShipGitHub
 // job.ReviewThreads too (M4 task 4): this test's own fixture ticket never
@@ -734,6 +748,7 @@ var (
 	_ job.PullRequests    = (*dispatchShipGitHub)(nil)
 	_ job.Checks          = (*dispatchShipGitHub)(nil)
 	_ job.ReviewThreads   = (*dispatchShipGitHub)(nil)
+	_ job.DraftFlips      = (*dispatchShipGitHub)(nil)
 )
 
 // dispatchShipTracker is a minimal job.ShipTracker double for this file's
@@ -811,7 +826,7 @@ func advanceShipping(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 			ticket.ProjectID: {
 				Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
 				Owner: testShipGitHubOwner, Repo: testShipGitHubOwner,
-				PullRequests: gh, Checks: gh, Threads: gh,
+				PullRequests: gh, Checks: gh, Threads: gh, Flips: gh,
 			},
 		}
 		deps.Tracker = tr
