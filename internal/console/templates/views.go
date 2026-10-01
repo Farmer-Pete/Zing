@@ -129,6 +129,14 @@ type ThreadQuestion struct {
 	DraftReply  string
 	DraftOption string
 	DraftItems  map[string]response.Decision
+
+	// AnsweredText is a closed, state=answered question's own sent answer,
+	// plainly formatted (console.sentAnswerText), empty otherwise (bug fix:
+	// an answered question's controls disappeared with nothing to show in
+	// their place, so the group looked inert rather than closed and
+	// decided). questionGroup renders it as a locked note instead of
+	// optionChips/itemRows/freeReply when !Interactive.
+	AnsweredText string
 }
 
 // HasDraft reports whether this question carries any unsent draft -- a

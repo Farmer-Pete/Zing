@@ -157,3 +157,81 @@ func TestQuestionGroupLabelsMessageCount(t *testing.T) {
 		}
 	})
 }
+
+// TestFreeReplyRendersDraftConflictSpan proves the bug fix for a 409 beside
+// the reply box: freeReply always renders an empty ".draft-conflict" span
+// (CSS hides it empty, shell.templ) as a sibling of the reply-input,
+// console.js's showDraftConflict own stable target regardless of whether
+// any conflict has happened yet.
+func TestFreeReplyRendersDraftConflictSpan(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := freeReply(1, 2, "").Render(t.Context(), &sb); err != nil {
+		t.Fatalf("freeReply.Render: %v", err)
+	}
+	got := sb.String()
+	if !strings.Contains(got, `<p class="draft-conflict" aria-live="polite"></p>`) {
+		t.Errorf("rendered freeReply missing the draft-conflict span; got:\n%s", got)
+	}
+}
+
+// TestQuestionGroupLocksAnAnsweredQuestion proves the bug fix for "render
+// an answered question's controls as disabled or locked with its answer
+// shown, so you can't type into a closed question at all": a non-interactive
+// question with AnsweredText set renders answeredLocked's note instead of
+// optionChips/itemRows/freeReply, and a non-interactive question with no
+// AnsweredText (nothing decoded, or a reply-only question) renders neither.
+func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an answered question shows its locked note, not a reply box", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: "Approve the plan?", StateLabel: "resuming",
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Interactive: false, AnsweredText: "a",
+			},
+		})
+		if !strings.Contains(got, `<p class="q-answered">Answered: a</p>`) {
+			t.Errorf("rendered question group missing the locked note; got:\n%s", got)
+		}
+		if strings.Contains(got, "reply-input") || strings.Contains(got, `class="chips"`) {
+			t.Errorf("rendered question group still carries live controls on a closed question; got:\n%s", got)
+		}
+	})
+
+	t.Run("a non-interactive question with no answer text shows no locked note", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 2,
+			Question: &ThreadQuestion{
+				Key: "Q2", Title: "Resolved already", StateLabel: "resolved",
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Interactive: false, AnsweredText: "",
+			},
+		})
+		if strings.Contains(got, "q-answered") {
+			t.Errorf("rendered question group has a locked note with no answer text; got:\n%s", got)
+		}
+	})
+
+	t.Run("an open question still renders its live reply box, no locked note", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 3,
+			Question: &ThreadQuestion{
+				Key: "Q3", Title: "Split this ticket?", StateLabel: testWaitingOnYou,
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Interactive: true,
+			},
+		})
+		if !strings.Contains(got, "reply-input") {
+			t.Errorf("rendered question group missing the live reply box for an open question; got:\n%s", got)
+		}
+		if strings.Contains(got, "q-answered") {
+			t.Errorf("rendered question group has a locked note on an open question; got:\n%s", got)
+		}
+	})
+}

@@ -137,8 +137,20 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 					@optionChips(ticketID, row.ID, row.Question.Options, row.Question.DraftOption)
 			}
 			@freeReply(ticketID, row.ID, row.Question.DraftReply)
+		} else if row.Question.AnsweredText != "" {
+			@answeredLocked(row.Question.AnsweredText)
 		}
 	</details>
+}
+
+// answeredLocked is a closed, state=answered question's locked note (bug
+// fix: "render an answered question's controls as disabled or locked with
+// its answer shown, so you can't type into a closed question at all"):
+// optionChips/itemRows/freeReply render nothing once !Interactive, so this
+// is the only thing in their place, naming what was actually sent rather
+// than leaving the group looking merely inert.
+templ answeredLocked(answeredText string) {
+	<p class="q-answered">Answered: { answeredText }</p>
 }
 
 // gateContext is the gate kind's context region (design section 6.6, 6.9,
@@ -388,10 +400,17 @@ func decisionClass(d, draftDecision response.Decision) string {
 // saved-but-unsent reply survives a reload or a later patch instead of
 // looking lost, and reply-hint says what sends it, since sending is
 // keyboard-only (Q31) and nothing on screen said so before this fix.
+//
+// .draft-conflict (bug fix: Enter on a question that closed out from under
+// a stale, still-rendered reply box got a 409 with the typed text silently
+// gone) starts empty -- :empty hides it (shell.templ) -- and is console.js's
+// own showDraftConflict target, a sibling .reply-input a 409 can always
+// find via el.closest('.reply').
 templ freeReply(ticketID, questionID int64, draftReply string) {
 	<div class="reply">
 		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" value={ draftReply } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
 		<p class="reply-hint">Saved as a draft. <span class="send-chord">⌘+Enter</span> sends.</p>
+		<p class="draft-conflict" aria-live="polite"></p>
 	</div>
 }
 

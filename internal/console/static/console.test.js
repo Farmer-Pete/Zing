@@ -20,6 +20,7 @@ import {
 	isSendChord,
 	sendChordToken,
 	sendChordLabel,
+	draftConflictMessage,
 	resolveToken,
 	stepFocus,
 	reconcileFocus,
@@ -165,6 +166,18 @@ test('sendChordToken names the platform-correct keys.json token', () => {
 test('sendChordLabel renders the platform-correct glyph', () => {
 	assert.equal(sendChordLabel(true), '⌘+Enter');
 	assert.equal(sendChordLabel(false), 'Ctrl+Enter');
+});
+
+// draftConflictMessage (bug fix): a closed-question 409 beside the reply
+// box that triggered it reads as a sentence, not console_writes.go's raw
+// conflict reason.
+test('draftConflictMessage: "question closed" reads as a plain sentence', () => {
+	assert.equal(draftConflictMessage('question closed'), 'This question is already answered.');
+});
+
+test('draftConflictMessage: any other reason is shown as-is', () => {
+	assert.equal(draftConflictMessage('missing option'), 'missing option');
+	assert.equal(draftConflictMessage('ambiguous draft mode'), 'ambiguous draft mode');
 });
 
 // resolveToken: outside an input, a single key held with Ctrl, Meta, or Alt

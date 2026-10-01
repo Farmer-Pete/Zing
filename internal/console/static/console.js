@@ -32,6 +32,7 @@ import {
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
+	draftConflictMessage,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -325,17 +326,36 @@ async function postJSON(path, body) {
 	}
 }
 
+// findDraftConflictEl locates the reply box's own conflict span
+// (thread.templ's freeReply: a ".draft-conflict" sibling inside the same
+// ".reply" wrapper), the element showDraftConflict/clearDraftConflict
+// below fill in or empty.
+function findDraftConflictEl(inputEl) {
+	return inputEl.closest('.reply')?.querySelector('.draft-conflict') ?? null;
+}
+
+function showDraftConflict(inputEl, message) {
+	const el = findDraftConflictEl(inputEl);
+	if (el) {
+		el.textContent = message;
+	}
+}
+
 // postDraft handles Enter inside a question input (design section 6.4,
 // 6.7): data-draft-ticket/data-draft-question on the focused input, its
 // value as the free-text reply. It clears the input synchronously, the
-// moment the draft is queued, rather than waiting on postJSON's fetch to
-// resolve (PR #16 review, cubic console.js:255): clearing in the async
-// .then left a window where fast typing after Enter landed in the input
-// before the response came back, and the old callback then wiped out that
-// new, unsent text along with the already-sent draft. Clearing up front
-// means a failed POST (postJSON's own console.error) loses the input's
-// echo of what was sent, which is an acceptable trade against silently
-// eating a later keystroke.
+// moment the draft is queued, rather than waiting on the fetch to resolve
+// (PR #16 review, cubic console.js:255): clearing in the async .then left a
+// window where fast typing after Enter landed in the input before the
+// response came back, and the old callback then wiped out that new, unsent
+// text along with the already-sent draft.
+//
+// On a 409 (bug fix: Enter on a question that closed out from under a
+// stale, still-rendered reply box got a conflict and the typed text
+// silently vanished with nothing explaining why), postDraftRequest below
+// restores the typed text -- but only if the box is still empty, so a
+// keystroke typed while the request was in flight still wins -- and shows
+// the conflict beside the box via draftConflictMessage (keyboard.mjs).
 function postDraft() {
 	const el = document.activeElement;
 	const ticket = el?.dataset?.draftTicket;
@@ -345,12 +365,29 @@ function postDraft() {
 	}
 	const text = el.value;
 	el.value = '';
-	postJSON('/draft', {
-		ticket: Number(ticket),
-		question: question ? Number(question) : null,
-		text,
-	});
+	showDraftConflict(el, '');
+	postDraftRequest(el, Number(ticket), question ? Number(question) : null, text);
 	return true;
+}
+
+async function postDraftRequest(el, ticket, question, text) {
+	try {
+		const resp = await fetch('/draft', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ ticket, question, text }),
+		});
+		if (!resp.ok) {
+			console.error('console.js: POST /draft', resp.status);
+			const reason = (await resp.text()).trim();
+			if (el.value === '') {
+				el.value = text;
+			}
+			showDraftConflict(el, draftConflictMessage(reason));
+		}
+	} catch (err) {
+		console.error('console.js: POST /draft', err);
+	}
 }
 
 // installChipActivation wires a delegated click listener for the

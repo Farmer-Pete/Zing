@@ -274,6 +274,24 @@ templ palette() {
 			font-size: 0.75rem;
 			margin: 0.25rem 0 0;
 		}
+		/* .draft-conflict (bug fix, console.js's showDraftConflict): a
+		   closed-question 409 beside the reply box that triggered it, e.g.
+		   "This question is already answered." Empty (the common case)
+		   renders nothing, matching #alerts:empty above. */
+		.draft-conflict:empty { display: none; }
+		.draft-conflict {
+			color: var(--zing-danger);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
+		/* .q-answered (bug fix, thread.templ's answeredLocked): a closed,
+		   answered question's locked note, shown where its now-hidden
+		   controls were, naming what was actually sent. */
+		.q-answered {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0 0;
+		}
 
 		/* #send-result (bug fix, console.js's showSendResult): a client-owned
 		   banner reporting POST /send's own result line ("Sent N answer(s)."

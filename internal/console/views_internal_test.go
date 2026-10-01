@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"zing/internal/console/templates"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -282,5 +284,78 @@ func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
 				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSentAnswerText proves sentAnswerText's own formatting (bug fix,
+// questionGroup's locked note): an option answer shows the option's text,
+// falling back to its bare key when it no longer matches any of the
+// question's own options; an item answer shows "ref: decision" pairs in
+// ref order; neither present renders empty.
+func TestSentAnswerText(t *testing.T) {
+	t.Parallel()
+	options := []templates.ThreadOption{{Key: "a", Text: "Keep it simple"}, {Key: "b", Text: "Add a flag"}}
+
+	t.Run("an option answer shows the option's text", func(t *testing.T) {
+		t.Parallel()
+		opt := "a"
+		got := sentAnswerText(response.AnswerPayload{Option: &opt}, options)
+		if got != "Keep it simple" {
+			t.Errorf("sentAnswerText = %q, want %q", got, "Keep it simple")
+		}
+	})
+
+	t.Run("an option that no longer matches falls back to its bare key", func(t *testing.T) {
+		t.Parallel()
+		opt := "z"
+		got := sentAnswerText(response.AnswerPayload{Option: &opt}, options)
+		if got != "z" {
+			t.Errorf("sentAnswerText = %q, want %q", got, "z")
+		}
+	})
+
+	t.Run("an item answer shows ref: decision pairs in ref order", func(t *testing.T) {
+		t.Parallel()
+		got := sentAnswerText(response.AnswerPayload{Items: map[string]response.Decision{
+			"greet.go": response.DecisionAccept, "machine.toml": response.DecisionReject,
+		}}, nil)
+		want := "greet.go: accept, machine.toml: reject"
+		if got != want {
+			t.Errorf("sentAnswerText = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("neither option nor items renders empty", func(t *testing.T) {
+		t.Parallel()
+		if got := sentAnswerText(response.AnswerPayload{}, options); got != "" {
+			t.Errorf("sentAnswerText = %q, want empty", got)
+		}
+	})
+}
+
+// TestCollectSentAnswers proves collectSentAnswers reads only "answer" rows
+// (bug fix): a reply row, and an answer row with no ParentID, are both
+// skipped, and a decodable answer row is keyed by its own ParentID.
+func TestCollectSentAnswers(t *testing.T) {
+	t.Parallel()
+	questionID := int64(7)
+	rows := []store.MessageRow{
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{Message: store.Message{Type: msgTypeAnswer, ParentID: &questionID, Payload: []byte(`{"option":"a"}`)}},
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{Message: store.Message{Type: msgTypeReply, ParentID: &questionID, Body: "a reply"}},
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{Message: store.Message{Type: msgTypeAnswer, Payload: []byte(`{"option":"b"}`)}},
+	}
+	got := collectSentAnswers(rows)
+	if len(got) != 1 {
+		t.Fatalf("collectSentAnswers returned %d entries, want 1", len(got))
+	}
+	ap, ok := got[questionID]
+	if !ok {
+		t.Fatalf("collectSentAnswers missing question %d", questionID)
+	}
+	if ap.Option == nil || *ap.Option != "a" {
+		t.Errorf("collectSentAnswers[%d].Option = %v, want \"a\"", questionID, ap.Option)
 	}
 }

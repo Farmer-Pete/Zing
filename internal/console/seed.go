@@ -34,6 +34,14 @@ var seedQuestionKinds = []response.QuestionKind{
 // kinds" (design section 6.15).
 const msgStateOpen = "open"
 
+// msgStateAnswered is store's own answered question state (console_writes.go's
+// markAnsweredQuestionsTx), kept as a package-local literal the same way
+// msgStateOpen is (console cannot import store's unexported constants):
+// questionGroup (thread.templ) shows a closed question's own locked note,
+// its sent answer, only for this state (bug fix) -- not "resolved", a
+// separate terminal state the gate step (not SendBatch) sets.
+const msgStateAnswered = "answered"
+
 // helloHandlerPath is the one fixture path both SeedQuestionFixtures'
 // perimeter question and SeedDemo's plan artifact name, named once so
 // goconst's repeated-literal guard has one definition to point at.

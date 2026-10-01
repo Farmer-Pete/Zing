@@ -151,6 +151,29 @@ export function sendChordLabel(isMac) {
 }
 
 /**
+ * draftConflictMessage maps a POST /draft 409 body (store.ConflictError's
+ * Reason, console_writes.go's own small closed set of conflict() call
+ * sites) to the sentence the reply box shows beside itself (bug fix:
+ * pressing Enter on a question that closed out from under a stale,
+ * still-rendered reply box -- most often a race with the owner's own
+ * just-sent batch answer -- got a raw "question closed" 409 and the typed
+ * text silently vanished, with nothing explaining why). "question closed"
+ * is the one reason a reader hits often enough to need a plain sentence;
+ * every other reason (a bad option or item ref, an ambiguous or missing
+ * draft) is rare enough from the real console UI, which only ever sends
+ * well-formed requests, that its own store wording is shown as-is.
+ *
+ * @param {string} reason
+ * @returns {string}
+ */
+export function draftConflictMessage(reason) {
+	if (reason === 'question closed') {
+		return 'This question is already answered.';
+	}
+	return reason;
+}
+
+/**
  * resolveToken turns one plain keydown descriptor, plus whether it landed in
  * an input, into the token keys.json binds (design section 6.4, 8; PR review
  * fix: a Ctrl/Meta/Alt-held single key outside an input must not resolve to

@@ -534,6 +534,7 @@ func questionStateLabel(state *string) string {
 func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
+	sentAnswers := collectSentAnswers(rows)
 
 	// messageCounts holds, per question message id, how many other messages
 	// in this ticket name it as their parent (design section 6.6: the
@@ -549,7 +550,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
-		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts)
+		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts, sentAnswers)
 		if err != nil {
 			return nil, err
 		}
@@ -560,6 +561,60 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		})
 	}
 	return out, nil
+}
+
+// collectSentAnswers scans rows (already visibleRows-filtered, so every
+// "answer" row left is sent, never a draft) for each question's own sent
+// answer, keyed by the question's message id (bug fix, questionGroup's
+// locked note: "render an answered question's controls as disabled or
+// locked with its answer shown"). A payload that fails to decode is
+// skipped, the same defensive choice collectQuestionDrafts and
+// buildThreadQuestion both make for a payload they cannot parse.
+func collectSentAnswers(rows []store.MessageRow) map[int64]response.AnswerPayload {
+	out := make(map[int64]response.AnswerPayload)
+	for i := range rows {
+		m := &rows[i]
+		if m.Type != msgTypeAnswer || m.ParentID == nil {
+			continue
+		}
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(m.Payload, &ap); err != nil {
+			continue
+		}
+		out[*m.ParentID] = ap
+	}
+	return out
+}
+
+// sentAnswerText formats a question's own sent answer plainly (bug fix):
+// the option's text when payload.Option names one of q's own options (its
+// bare key as a fallback, for a payload that is well-formed but, through
+// some future drift, no longer matches), or "ref: decision" pairs, ref
+// order, for an item answer. Empty when payload carries neither, which
+// questionGroup (thread.templ) treats as "nothing to show" rather than an
+// empty locked note.
+func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOption) string {
+	if payload.Option != nil {
+		for _, o := range options {
+			if o.Key == *payload.Option {
+				return o.Text
+			}
+		}
+		return *payload.Option
+	}
+	if len(payload.Items) == 0 {
+		return ""
+	}
+	refs := make([]string, 0, len(payload.Items))
+	for ref := range payload.Items {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		parts = append(parts, ref+": "+string(payload.Items[ref]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // questionDraft is one question's in-progress, unsent draft (bug fix): at
@@ -624,7 +679,7 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // it against the messages/question schema; a markdown render failure, by
 // contrast, is a real error (design section 6.10: Render can fail), and is
 // returned rather than silently dropping the question's body.
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft) (*templates.ThreadQuestion, error) {
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -668,6 +723,14 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		// draft SaveDraft would refuse anyway (openQuestionForTicketTx) --
 		// still looked editable.
 		Interactive: m.State != nil && *m.State == msgStateOpen,
+	}
+	// AnsweredText (bug fix): a closed question's locked note, shown instead
+	// of its now-hidden controls, only for state=answered -- not resolved, a
+	// later terminal state a reader has already moved past.
+	if m.State != nil && *m.State == msgStateAnswered {
+		if ap, ok := sentAnswers[m.ID]; ok {
+			q.AnsweredText = sentAnswerText(ap, options)
+		}
 	}
 	if payload.Kind == response.QuestionKindMerge && ticket != nil && ticket.PRURL != nil {
 		q.PRURL = *ticket.PRURL
