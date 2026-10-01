@@ -7,6 +7,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/store"
 )
 
 // splitQuestionGroups splits one rendered #main thread frame into its
@@ -264,4 +265,46 @@ func TestReviewRendersThreeDecisions(t *testing.T) {
 	_, review := perimeterAndReviewGroups(t)
 	assertItemRowDecisions(t, review, "F1", reviewItemDecisions...)
 	assertItemRowDecisions(t, review, "F2", reviewItemDecisions...)
+}
+
+// TestMergeQuestionShowsPRLink proves mergeContext's own real-rendering
+// branch (views.go's buildThreadQuestion, templates/thread.templ): once
+// ticket.PRURL is set, the merge question's own context region renders the
+// PR link instead of "No PR yet." (M4 task 8, deferred from task 9's own
+// TestQuestionKindsRenderTheirControls, whose merge subtest only proves the
+// empty-state fallback -- that fixture's ticket carries no PRURL at all).
+func TestMergeQuestionShowsPRLink(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	projectID, err := s.EnsureProject(t.Context(), testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	prURL := "https://github.com/x/zing/pull/7"
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "fake#2", Title: "Add a hello endpoint", State: "queued", PRURL: &prURL,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
+		t.Fatalf("SeedQuestionFixtures: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, main, _, _ := readInitialFrames(t, r)
+	groups := splitQuestionGroups(t, main)
+	g := findGroup(t, groups, "Merge the PR?")
+
+	if !strings.Contains(g, prURL) {
+		t.Errorf("merge group missing the PR link %q; got:\n%s", prURL, g)
+	}
+	if strings.Contains(g, "No PR yet.") {
+		t.Errorf("merge group with ticket.PRURL set should not show the empty state; got:\n%s", g)
+	}
 }

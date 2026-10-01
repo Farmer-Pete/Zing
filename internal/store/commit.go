@@ -112,6 +112,18 @@ type HandlerCommit struct {
 	// ResolveAll resolves every ticket question still "open" or "answered",
 	// the abandon case where no individual id list applies.
 	ResolveAll bool
+	// WithdrawQuestions resolves each named question, open or answered,
+	// inserting one "resolved" message per id, in this commit's own
+	// transaction (design section 4.2, M4, D13's merge question): unlike
+	// ResolveQuestions, which requires "answered" and errors on anything
+	// else, an already-resolved question here is success with no second
+	// message (a retried commit, after the owner's Merge now already ran
+	// once, converges rather than erroring), and withdrawing a still-open
+	// question (POLL finds a loop reopened while a merge question sits
+	// unanswered) is exactly what the name is for. An id that is not a
+	// question of this commit's own ticket is the error "question <id> is
+	// not a question of ticket <t>".
+	WithdrawQuestions []int64
 	// Seal applies the section 4.5 cohort seal, after Artifacts: the
 	// ticket's max-version plan artifact must match RunID and PlanVersion,
 	// its scenario cohort (artifacts of type "scenario" carrying that
@@ -418,6 +430,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			TicketID: c.TicketID, ParentID: &qid, Type: msgTypeResolved, Author: authorSystem,
 		}); err != nil {
 			return false, fmt.Errorf("commit handler result: insert resolved message for question %d: %w", qid, err)
+		}
+	}
+
+	for _, qid := range c.WithdrawQuestions {
+		if err = s.withdrawQuestionTx(ctx, tx, c.TicketID, qid); err != nil {
+			return false, fmt.Errorf("commit handler result: withdraw question %d: %w", qid, err)
 		}
 	}
 
@@ -1045,6 +1063,55 @@ func resolveQuestionTx(ctx context.Context, tx *sql.Tx, questionID int64) error 
 		return fmt.Errorf("question %d is not in answered state", questionID)
 	}
 	return nil
+}
+
+// withdrawQuestionTx is HandlerCommit.WithdrawQuestions' own per-id step
+// (design section 4.2, M4): questionID must name a "question" message of
+// ticketID, else "question <id> is not a question of ticket <t>"; already
+// "resolved" is a no-op success with no second message (an idempotent
+// retry after a crash, or after the owner's own answer already resolved
+// it concurrently -- TestWithdrawRacesOwnerAnswer); "open" or "answered"
+// both move to "resolved" with one inserted "resolved" message, unlike
+// resolveQuestionTx, which only ever accepts "answered".
+func (s *Store) withdrawQuestionTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) error {
+	var gotTicketID int64
+	var gotType, gotState string
+	err := tx.QueryRowContext(ctx,
+		`SELECT ticket_id, type, state FROM messages WHERE id = ?`, questionID).Scan(&gotTicketID, &gotType, &gotState)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("question %d is not a question of ticket %d", questionID, ticketID)
+		}
+		return fmt.Errorf("get question %d: %w", questionID, err)
+	}
+	if gotType != msgTypeQuestion || gotTicketID != ticketID {
+		return fmt.Errorf("question %d is not a question of ticket %d", questionID, ticketID)
+	}
+	if gotState == questionStateResolved {
+		return nil
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE messages SET state = ? WHERE id = ? AND type = ? AND state IN (?, ?)`,
+		questionStateResolved, questionID, msgTypeQuestion, questionStateOpen, questionStateAnswered)
+	if err != nil {
+		return fmt.Errorf("withdraw question %d: %w", questionID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("withdraw question %d: %w", questionID, err)
+	}
+	if n == 0 {
+		// The state read above was "open" or "answered", but moved again
+		// (resolved by a concurrent write) before this UPDATE's own WHERE
+		// clause ran -- the same idempotent success as finding it already
+		// resolved, not an error to roll the commit back over.
+		return nil
+	}
+
+	return s.insertMessageTx(ctx, tx, Message{
+		TicketID: ticketID, ParentID: &questionID, Type: msgTypeResolved, Author: authorSystem,
+	})
 }
 
 // insertMessageTx is InsertMessage (store.go), tx-scoped: it validates

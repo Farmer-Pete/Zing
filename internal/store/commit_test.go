@@ -2517,6 +2517,127 @@ func TestCommitHandlerResult_ResolveAllResolvesOpenAndAnsweredQuestionsOnly(t *t
 	}
 }
 
+// --- CommitHandlerResult: WithdrawQuestions (M4 task 8) ---------------------
+
+// TestCommitWithdrawQuestions proves WithdrawQuestions' own scope (design
+// section 4.2, M4, D13's merge question): an "open" question resolves, an
+// "answered" question resolves, an already-"resolved" question is a no-op
+// (no second "resolved" message on a retried withdraw), and an id that
+// belongs to another ticket is refused.
+func TestCommitWithdrawQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	qOpen := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+	qAnswered := insertOpenQuestion(t, s, ticketID, runID, "Q2")
+	markAnswered(t, s, qAnswered)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		WithdrawQuestions: []int64{qOpen, qAnswered},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	for _, id := range []int64{qOpen, qAnswered} {
+		msg, getErr := s.GetMessage(ctx, id)
+		if getErr != nil {
+			t.Fatalf("GetMessage(%d): %v", id, getErr)
+		}
+		if msg.State == nil || *msg.State != questionStateResolved {
+			t.Errorf("question %d state = %v, want resolved", id, msg.State)
+		}
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE type = ? AND parent_id = ?`, msgTypeResolved, qOpen); n != 1 {
+		t.Errorf("resolved messages for %d = %d, want 1", qOpen, n)
+	}
+
+	// Already resolved: re-withdrawing qOpen is a no-op, no second
+	// "resolved" message (an idempotent retry, design section 11).
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	applied, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2,
+		WithdrawQuestions: []int64{qOpen},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (re-withdraw): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult (re-withdraw): applied = false, want true")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE type = ? AND parent_id = ?`, msgTypeResolved, qOpen); n != 1 {
+		t.Errorf("resolved messages for %d after a second withdraw = %d, want 1 (idempotent)", qOpen, n)
+	}
+
+	// Another ticket's id is refused.
+	_, otherTicketID := seedQueuedTicket(t, s, "2")
+	owner3, expires3 := claimForCommit(t, s, otherTicketID)
+	_, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: otherTicketID, Owner: owner3, Expires: expires3,
+		WithdrawQuestions: []int64{qAnswered},
+	})
+	wantErr := fmt.Sprintf("commit handler result: withdraw question %d: question %d is not a question of ticket %d", qAnswered, qAnswered, otherTicketID)
+	if err == nil || err.Error() != wantErr {
+		t.Errorf("error = %v, want %q", err, wantErr)
+	}
+}
+
+// TestWithdrawRacesOwnerAnswer proves WithdrawQuestions' own idempotent
+// race handling (design section 8.5 rows 3 to 5, 11; M4 task 8's merge
+// question): a poll that read the merge question "open" builds its own
+// commit with WithdrawQuestions before the owner's answer lands; by the
+// time the commit actually runs, the owner's own answer has already moved
+// the question to "answered" underneath it. The commit still applies, the
+// question still ends "resolved" (not left "answered"), and
+// CommitHandlerResult returns no error -- the dispatcher does not fail
+// closed over the race.
+func TestWithdrawRacesOwnerAnswer(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateBuilding)
+
+	sessID := insertSession(t, s, ticketID, testStateBuilding)
+	runID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+
+	// The poll's own read saw "open" and built a commit with
+	// WithdrawQuestions; before that commit runs, the owner's answer lands
+	// and moves the question to "answered" underneath it.
+	markAnswered(t, s, qID)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		WithdrawQuestions: []int64{qID},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	msg, getErr := s.GetMessage(ctx, qID)
+	if getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	}
+	if msg.State == nil || *msg.State != questionStateResolved {
+		t.Errorf("question state = %v, want resolved", msg.State)
+	}
+}
+
 // --- CommitHandlerResult: Seal (design D16, section 4.5) --------------------
 
 // insertRun inserts a bare runs row (outcome, exit_code, and agent_seconds

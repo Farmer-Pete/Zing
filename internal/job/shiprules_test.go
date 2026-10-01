@@ -508,3 +508,88 @@ func TestParsePRNumber(t *testing.T) {
 		t.Errorf("error = %v, want %q", err, wantErr)
 	}
 }
+
+// -----------------------------------------------------------------------
+// Pure: mergeDecision (M4 task 8)
+// -----------------------------------------------------------------------
+
+// mergeTestFileX is one ordinary, never-special changed path TestMergeDecision's
+// table reuses across cases (goconst).
+const mergeTestFileX = "internal/x.go"
+
+// mergeTestRule is config.Merge's own default manual_paths and
+// dependency_files (internal/config/config.go), reused here so
+// TestMergeDecision's table matches design section 8.8's own worked
+// examples exactly.
+var mergeTestRule = MergeRule{
+	Auto:            true,
+	Method:          shipMergeMethodSquash,
+	ManualPaths:     []string{"deploy/**", "**/migrations/**", "Dockerfile", ".github/workflows/**"},
+	DependencyFiles: []string{"go.mod", "go.sum", "package.json", "pyproject.toml"},
+}
+
+func TestMergeDecision(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		rule    MergeRule
+		changed []string
+		auto    bool
+		reason  string
+	}{
+		{
+			name:    "auto off always asks",
+			rule:    MergeRule{Auto: false},
+			changed: []string{mergeTestFileX},
+			auto:    false,
+			reason:  "merge.auto is off",
+		},
+		{
+			name:    "auto on, no rule blocks",
+			rule:    mergeTestRule,
+			changed: []string{mergeTestFileX, "internal/x_test.go"},
+			auto:    true,
+			reason:  "merge.auto is on and no rule blocks it",
+		},
+		{
+			name:    "dependency file by exact path",
+			rule:    mergeTestRule,
+			changed: []string{"go.mod", "go.sum", mergeTestFileX},
+			auto:    false,
+			reason:  "the diff changes a dependency file: go.mod, go.sum",
+		},
+		{
+			name:    "dependency file by base name",
+			rule:    mergeTestRule,
+			changed: []string{"web/package.json"},
+			auto:    false,
+			reason:  "the diff changes a dependency file: web/package.json",
+		},
+		{
+			name:    "manual-deploy path, migrations glob",
+			rule:    mergeTestRule,
+			changed: []string{"internal/store/migrations/0005_x.sql"},
+			auto:    false,
+			reason:  "the diff touches a manual-deploy path: internal/store/migrations/0005_x.sql",
+		},
+		{
+			name:    "manual-deploy path, workflows glob",
+			rule:    mergeTestRule,
+			changed: []string{".github/workflows/ci.yml"},
+			auto:    false,
+			reason:  "the diff touches a manual-deploy path: .github/workflows/ci.yml",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			auto, reason := mergeDecision(c.rule, c.changed)
+			if auto != c.auto || reason != c.reason {
+				t.Errorf("mergeDecision(%+v, %v) = (%v, %q), want (%v, %q)",
+					c.rule, c.changed, auto, reason, c.auto, c.reason)
+			}
+		})
+	}
+}

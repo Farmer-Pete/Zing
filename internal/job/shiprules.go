@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -409,4 +410,100 @@ func parsePRNumber(url string) (int, error) {
 		return 0, fmt.Errorf("job: shipping: pr url %s has no number", url)
 	}
 	return n, nil
+}
+
+// mergeDecision is design section 8.8's own merge rule, task 8's addition:
+// rule.Auto off blocks outright ("merge.auto is off"); a changed path
+// matching a ManualPaths glob blocks with every matching path named, in
+// changed's own order ("the diff touches a manual-deploy path: <paths>");
+// a changed path equal to a DependencyFiles entry, or whose base name
+// equals one, blocks the same way ("the diff changes a dependency file:
+// <paths>"); otherwise merge.auto's own rule allows it ("merge.auto is on
+// and no rule blocks it"). changed is ChangedFilesSinceBase's own sorted
+// result (orchestrator/review.go); mergeDecision does no sorting of its
+// own.
+func mergeDecision(rule MergeRule, changed []string) (auto bool, reason string) {
+	if !rule.Auto {
+		return false, "merge.auto is off"
+	}
+
+	var manual []string
+	for _, p := range changed {
+		if matchesAnyMergePattern(rule.ManualPaths, p) {
+			manual = append(manual, p)
+		}
+	}
+	if len(manual) > 0 {
+		return false, "the diff touches a manual-deploy path: " + strings.Join(manual, ", ")
+	}
+
+	var dep []string
+	for _, p := range changed {
+		if isMergeDependencyFile(rule.DependencyFiles, p) {
+			dep = append(dep, p)
+		}
+	}
+	if len(dep) > 0 {
+		return false, "the diff changes a dependency file: " + strings.Join(dep, ", ")
+	}
+
+	return true, "merge.auto is on and no rule blocks it"
+}
+
+// isMergeDependencyFile reports whether p is design section 8.8's own
+// dependency-file match: equal to one of deps, or whose base name equals
+// one (so "go.mod" at the repo root and "web/go.mod" in a subdirectory
+// both match the entry "go.mod").
+func isMergeDependencyFile(deps []string, p string) bool {
+	base := path.Base(p)
+	for _, d := range deps {
+		if p == d || base == d {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAnyMergePattern(patterns []string, p string) bool {
+	for _, pattern := range patterns {
+		if matchesMergePattern(pattern, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesMergePattern is mergeDecision's own ManualPaths glob (design
+// section 8.8: "the perimeter matcher, ** spans directories"). config.go's
+// own default manual_paths includes "**/migrations/**", a leading-**
+// shape internal/orchestrator/perimeter.go's own unexported matchPattern
+// does not support (its own "/**" special case only ever matches a
+// trailing segment); mergeDecision needs the fuller shape, so this is a
+// small recursive-descent matcher over the pattern and path each split on
+// "/" (the repo's own style: recursive descent for any parsing, no parser
+// generators), not a copy of that narrower one. "**" matches zero or more
+// whole segments; any other segment matches with path.Match, Go's own
+// single-segment wildcard ("*", "?", "[...]").
+func matchesMergePattern(pattern, p string) bool {
+	return matchPathSegments(strings.Split(pattern, "/"), strings.Split(p, "/"))
+}
+
+func matchPathSegments(pat, seg []string) bool {
+	if len(pat) == 0 {
+		return len(seg) == 0
+	}
+	if pat[0] == "**" {
+		if matchPathSegments(pat[1:], seg) {
+			return true
+		}
+		return len(seg) > 0 && matchPathSegments(pat, seg[1:])
+	}
+	if len(seg) == 0 {
+		return false
+	}
+	ok, err := path.Match(pat[0], seg[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchPathSegments(pat[1:], seg[1:])
 }

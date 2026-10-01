@@ -33,6 +33,7 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,12 +107,12 @@ type shipHandler struct{}
 
 // Run is the shipping state's own decision tree (design section 8.1): the
 // prelude (P), step (1)'s own "job respond" branch (RESPOND resume with
-// answers, M4 task 4), step (2) (RESPOND's first turn and every resume, M4
-// task 4), step (3) (APPLY, M4 task 5, respond.go), step (4) PUBLISH when
-// pr_url is still NULL, and step (5) POLL otherwise. Step (1)'s own "merge"
-// branch (MERGE-ANSWER) is M4 task 8's: nothing before it ever writes a
-// "merge asked" or "merge held" marker, so an answered round of any other
-// job or kind is a bug this reports loudly rather than guessing at.
+// answers, M4 task 4) and "merge" branch (MERGE-ANSWER, M4 task 8), step
+// (2) (RESPOND's first turn and every resume, M4 task 4), step (3) (APPLY,
+// M4 task 5, respond.go), step (4) PUBLISH when pr_url is still NULL, and
+// step (5) POLL otherwise. Nothing before row 9 (8.5) or MERGE-ANSWER
+// itself ever writes a "merge asked" marker, so an answered round of any
+// other job or kind is a bug this reports loudly rather than guessing at.
 func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginShipping)
 	if handled || err != nil {
@@ -127,6 +128,9 @@ func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Han
 		kind, kindErr := newestQuestionKind(round)
 		if kindErr != nil {
 			return store.HandlerCommit{}, kindErr
+		}
+		if kind == response.QuestionKindMerge {
+			return h.mergeAnswer(ctx, t, d, round)
 		}
 		if kind != response.QuestionKindQuestion || round.Job != jobRespondName {
 			return store.HandlerCommit{}, fmt.Errorf("job: shipping: unexpected answered round (job %q kind %q)", round.Job, kind)
@@ -700,8 +704,8 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		return h.pollIdle(ctx, t, d, fp, result.Missing)
 	case pr.Draft: // CIGreen, zero unresolved threads, still draft: row 8
 		return h.pollMarkReady(ctx, t, d, proj, pr, local)
-	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE), M4 task 8's.
-		return store.HandlerCommit{}, ErrNoAction
+	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE or the merge question, M4 task 8).
+		return h.pollMergeGate(ctx, t, d, proj, wt, number, local, fp)
 	}
 }
 
@@ -1024,16 +1028,22 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 	return c, nil
 }
 
-// pollIdle is design section 8.5 row 7 (CI pending) and, in M3 only
-// (8.5 rows 8 and 9 are M4's), row's own CI green case too: the backoff
-// commit of 8.3 (Poll{NextAt, IntervalS, Fingerprint}), plus the
-// informational "ci waiting <names>" marker (design section 8.4) whenever
-// Missing differs from the previous poll's own newest such marker.
+// pollIdle is design section 8.5 row 7 (CI pending): the backoff commit of
+// 8.3 (Poll{NextAt, IntervalS, Fingerprint}), plus the informational "ci
+// waiting <names>" marker (design section 8.4) whenever Missing differs
+// from the previous poll's own newest such marker. c.Waiting is carried
+// forward from t.WaitingOn (M4 task 8, row 7's own "Waiting unchanged"):
+// CommitHandlerResult's own ticket UPDATE writes waiting_on = c.Waiting
+// unconditionally, nil included, so a commit that never touches it would
+// otherwise silently clear a still-open merge question's own "merge"
+// wait -- nil carries forward as nil, the ordinary case, so this changes
+// nothing when nothing is waiting.
 func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, fp string, missing []string) (store.HandlerCommit, error) {
 	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
 	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
 
 	c := baseCommit(t, d)
+	c.Waiting = t.WaitingOn
 	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
 
 	prevMissing, err := previousCIWaiting(ctx, t, d)
@@ -1145,5 +1155,340 @@ func (h shipHandler) retryShippingLoopsExhausted(ctx context.Context, t store.Ti
 			Body: fmt.Sprintf("respond applied %d\nreplied 0 fixing 1 skipped 0\nfix request after run %d", aid, maxRunID),
 		})
 	}
+	return c, nil
+}
+
+// -----------------------------------------------------------------------
+// Merge (design section 8.8, 8.9, task 8)
+// -----------------------------------------------------------------------
+
+// waitingMerge is legalWaiting's own "merge" flag (job.go): the merge
+// question's own Waiting value, and row 7's and row 10's own carried-
+// forward value while it is still open.
+const waitingMerge = "merge"
+
+// mergeOptions is the merge question's own fixed two-option closed set
+// (design section 8.8): "a" merges now, "b" holds.
+var mergeOptions = []response.Option{{Key: "a", Text: "Merge now"}, {Key: "b", Text: "Hold"}}
+
+// The four reasons MERGE's own same-tick precondition re-read can refuse a
+// merge (design section 8.8's own "A failed condition ... the reason").
+const (
+	mergeReasonHeadMoved  = "the head moved"
+	mergeReasonCINotGreen = "CI is not green"
+	mergeReasonThreadOpen = "a review thread is open"
+	mergeReasonDraft      = "the pull request is a draft"
+)
+
+// mergeMarkerLine's own four kinds, named once for mergeAskable and
+// newestMergeAskedSHA.
+const (
+	mergeMarkerAsked     = "asked"
+	mergeMarkerWithdrawn = "withdrawn"
+	mergeMarkerHeld      = "held"
+)
+
+// mergeAskable is design section 8.5 row 9's own "the head is askable"
+// rule: the newest of a head's merge asked, merge withdrawn, and merge
+// held markers is none (kind "") or merge withdrawn.
+func mergeAskable(kind string) bool {
+	return kind == "" || kind == mergeMarkerWithdrawn
+}
+
+// shortSHA is prbody.go's own sha7 truncation (design section 8.8, 8.10),
+// named here for the merge question's own body text.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+// mergeQuestionMessages builds the merge question itself and its own
+// "merge asked <sha>" marker together (design section 8.8's "The merge
+// question"), reused by both row 9's first ask and MERGE's own re-ask
+// after a GitHub refusal.
+func mergeQuestionMessages(t store.Ticket, number int, sha, reason string) ([]store.Message, error) {
+	payload, err := json.Marshal(response.QuestionPayload{
+		Kind: response.QuestionKindMerge, State: response.QuestionStateOpen,
+		Recommended: "a", Options: mergeOptions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: merge question: marshal payload: %w", err)
+	}
+	body := fmt.Sprintf(
+		"Merge pull request #%d?\n\nEvery check is green on %s and no review thread is open. Zing needs you because %s.",
+		number, shortSHA(sha), reason,
+	)
+	return []store.Message{
+		{TicketID: t.ID, Type: msgTypeQuestion, Author: authorZing, State: new(questionStateOpen), Body: body, Payload: payload},
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge " + mergeMarkerAsked + " " + sha},
+	}, nil
+}
+
+// askMerge is design section 8.8's own "The merge question": the question
+// itself, waiting "merge", and Poll with 8.3's own backoff. Design section
+// 8.1's own blanket rule ("every commit in shipping sets ClearPoll, except
+// POLL's idle commits and the merge question commit, which set Poll")
+// names this commit as one of the two exceptions.
+func (h shipHandler) askMerge(t store.Ticket, d Deps, number int, sha, reason, fp string) (store.HandlerCommit, error) {
+	msgs, err := mergeQuestionMessages(t, number, sha, reason)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
+	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
+	waiting := waitingMerge
+
+	c := baseCommit(t, d)
+	c.Messages = msgs
+	c.Waiting = &waiting
+	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
+	return c, nil
+}
+
+// pollMergeWait is design section 8.5 row 10 (M4 task 8): CI green, zero
+// unresolved threads, not draft, and the head is not askable -- still
+// "asked" (open, unanswered) or "held" (resolved, waiting for the loop to
+// reopen and close again, design section 8.8's MERGE-ANSWER). An idle
+// commit with 8.3's own backoff; c.Waiting carries t.WaitingOn forward
+// unchanged, exactly as pollIdle's own row 7 does: "merge" while the
+// question is still open and unanswered (SendBatch has not cleared
+// waiting_on yet), or nil once a held sha already cleared it at answer
+// time, in which case POLL simply falls back onto its own ordinary
+// next_poll_at schedule.
+func (h shipHandler) pollMergeWait(t store.Ticket, d Deps, fp string) store.HandlerCommit {
+	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
+	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
+
+	c := baseCommit(t, d)
+	c.Waiting = t.WaitingOn
+	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
+	return c
+}
+
+// pollMergeGate is design section 8.5 row 9 (M4 task 8): the head must be
+// askable (mergeAskable) before anything else happens -- otherwise row
+// 10's own idle wait applies. An askable head runs mergeDecision
+// (shiprules.go) over the files changed since the default branch
+// (orchestrator.ChangedFilesSinceBase): the rule allowing it calls MERGE
+// directly, with no round to resolve; anything else asks the merge
+// question instead.
+func (h shipHandler) pollMergeGate(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, number int, sha, fp string) (store.HandlerCommit, error) {
+	mergeMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: merge markers: %w", err)
+	}
+	if kind := newestMergeMarkerKind(mergeMarkers, sha); !mergeAskable(kind) {
+		return h.pollMergeWait(t, d, fp), nil
+	}
+
+	changed, err := proj.Orch.ChangedFilesSinceBase(ctx, wt, sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: changed files since base: %w", err)
+	}
+	auto, reason := mergeDecision(d.MergeRule, changed)
+	if auto {
+		return h.merge(ctx, t, d, proj, number, sha, nil)
+	}
+	return h.askMerge(t, d, number, sha, reason, fp)
+}
+
+// mergePreconditionFailed is design section 8.8's own MERGE refusal for
+// one of the four local preconditions (not a GitHub refusal, mergeGitHubRefused
+// below): the informational "merge refused <sha>" marker with its own
+// reason line, "merge withdrawn <sha>" in the same commit so the head can
+// be asked about again once the loop is clean, and -- on the Merge now
+// path -- the answered round resolved too (resolveIDs, empty on the
+// automatic path, which never had a round to begin with). Design section
+// 8.1's own blanket rule makes this ClearPoll: it is neither "POLL's idle
+// commits" nor "the merge question commit", the two named exceptions, and
+// a cleared poll means the very next tick re-runs ordinary POLL from the
+// top, the simplest way for "the next poll's rows handle the reopened
+// loop" to actually happen.
+func (h shipHandler) mergePreconditionFailed(t store.Ticket, d Deps, sha, reason string, resolveIDs []int64) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.WithdrawQuestions = resolveIDs
+	c.Messages = []store.Message{
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge refused " + sha + "\n" + reason},
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge withdrawn " + sha},
+	}
+	c.ClearPoll = true
+	return c
+}
+
+// mergeGitHubRefused is design section 8.8's own ErrMergeRefused row: the
+// bare informational "merge refused <sha>" marker (no reason line -- the
+// reason goes in the re-asked question's own body instead), then the
+// merge question asked again with "GitHub refused the merge: <GitHub's
+// own message>" as its reason, waiting "merge", and Poll with 8.3's own
+// backoff (the second of design section 8.1's two ClearPoll exceptions:
+// this re-asks). ghErr's own message is read by trimming
+// orchestrator.ErrMergeRefused's own sentinel text off the wrapped
+// error's Error() string, rather than hardcoding it a second time.
+func (h shipHandler) mergeGitHubRefused(t store.Ticket, d Deps, number int, sha string, ghErr error, resolveIDs []int64, fp string) (store.HandlerCommit, error) {
+	reason := "GitHub refused the merge: " + strings.TrimPrefix(ghErr.Error(), orchestrator.ErrMergeRefused.Error()+": ")
+	askMsgs, err := mergeQuestionMessages(t, number, sha, reason)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
+	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
+	waiting := waitingMerge
+
+	c := baseCommit(t, d)
+	c.WithdrawQuestions = resolveIDs
+	c.Messages = append([]store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge refused " + sha,
+	}}, askMsgs...)
+	c.Waiting = &waiting
+	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
+	return c, nil
+}
+
+// merge is MERGE (design section 8.8): a same-tick re-read of the pull
+// request, CI, and threads, pinned to sha (N4) -- independent of whatever
+// read decided to call it, whether row 9's own automatic gate or a "Merge
+// now" answer MERGE-ANSWER reads days later -- then either the real
+// GitHub merge call or a refusal that asks again. resolveIDs is the merge
+// question's own round, non-empty only on the Merge now path
+// (mergeAnswer); the automatic path calls this with no round to resolve.
+func (h shipHandler) merge(ctx context.Context, t store.Ticket, d Deps, proj Project, number int, sha string, resolveIDs []int64) (store.HandlerCommit, error) {
+	pr, err := proj.PullRequests.GetPR(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: get pr: %w", err)
+	}
+	runs, err := proj.Checks.ListCheckRuns(ctx, proj.Owner, proj.Repo, sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: list check runs: %w", err)
+	}
+	statuses, err := proj.Checks.ListStatuses(ctx, proj.Owner, proj.Repo, sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: list statuses: %w", err)
+	}
+	required, err := proj.Checks.RequiredCheckRules(ctx, proj.Owner, proj.Repo, pr.BaseRef)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: required check rules: %w", err)
+	}
+	threadsRaw, err := proj.Threads.ListThreads(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: list threads: %w", err)
+	}
+	login, err := proj.Threads.Viewer(ctx)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: viewer: %w", err)
+	}
+
+	_, actionable, leftover, unclassified := classifyThreads(threadsRaw, login)
+	anyUnresolved := len(actionable) > 0 || len(leftover) > 0 || len(unclassified) > 0
+	result := EvaluateCI(runs, statuses, required)
+	fp := pollFingerprint(pr, runs, statuses, required, pollThreadsFrom(threadsRaw))
+
+	reason := ""
+	switch {
+	case pr.HeadSHA != sha:
+		reason = mergeReasonHeadMoved
+	case pr.State != "open" || pr.Draft:
+		reason = mergeReasonDraft
+	case result.State != CIGreen:
+		reason = mergeReasonCINotGreen
+	case anyUnresolved:
+		reason = mergeReasonThreadOpen
+	}
+	if reason != "" {
+		return h.mergePreconditionFailed(t, d, sha, reason, resolveIDs), nil
+	}
+
+	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: stored plan: %w", err)
+	}
+	if !havePlan {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: ticket %d has no stored plan", t.ID)
+	}
+	title := fmt.Sprintf("%s (#%d)", prTitle(plan.Overview.Objective), number)
+
+	if _, mergeErr := proj.PullRequests.Merge(ctx, proj.Owner, proj.Repo, number, sha, d.MergeRule.Method, title); mergeErr != nil {
+		if errors.Is(mergeErr, orchestrator.ErrMergeRefused) {
+			return h.mergeGitHubRefused(t, d, number, sha, mergeErr, resolveIDs, fp)
+		}
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: %w", mergeErr)
+	}
+
+	c := baseCommit(t, d)
+	c.WithdrawQuestions = resolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "pr merged " + sha,
+	}}
+	c.ClearPoll = true
+	return c, nil
+}
+
+// newestMergeAskedSHA returns the sha of the newest "merge asked" marker
+// among markers (design section 8.8's own "MERGE-ANSWER. sha := the sha
+// of the newest merge asked marker"): unlike newestMergeMarkerKind, this
+// is not scoped to one sha -- it scans every "merge " marker on the
+// ticket for the newest one whose own kind is "asked". markers is
+// MarkersWithPrefix's own oldest-first order, so the last match is the
+// newest.
+func newestMergeAskedSHA(markers []store.MessageRow) (sha string, ok bool) {
+	for i := range markers {
+		firstLine, _, _ := strings.Cut(markers[i].Body, "\n")
+		sub := mergeMarkerLine.FindStringSubmatch(firstLine)
+		if sub == nil {
+			continue
+		}
+		if sub[1] != mergeMarkerAsked {
+			continue
+		}
+		sha, ok = sub[2], true
+	}
+	return sha, ok
+}
+
+// mergeAnswer is MERGE-ANSWER (design section 8.8): option a (roundChoice's
+// own escalationChoiceRetry) calls MERGE with the newest "merge asked"
+// marker's own sha, resolving the round; option b, or a reply with no
+// option (roundChoice's own default), holds instead -- the informational
+// "merge held <sha>" marker, the round resolved the same way, ClearPoll
+// (design section 8.1's blanket rule: this is neither an idle commit nor
+// the merge question commit). t.WaitingOn is already nil by the time this
+// runs either way: answering a question, through the console's own
+// SendBatch, already cleared waiting_on at answer time (clearMatchingWaitTx,
+// internal/store/console_writes.go), before this handler ever sees the
+// round.
+func (h shipHandler) mergeAnswer(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge answer: no project %d", t.ProjectID)
+	}
+	if t.PRURL == nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge answer: ticket %d has no pr url", t.ID)
+	}
+	number, err := parsePRNumber(*t.PRURL)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge answer: %w", err)
+	}
+
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge answer: merge markers: %w", err)
+	}
+	sha, ok := newestMergeAskedSHA(markers)
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge answer: ticket %d has no open merge asked marker", t.ID)
+	}
+
+	resolveIDs := questionIDs(round)
+	if roundChoice(round) == escalationChoiceRetry {
+		return h.merge(ctx, t, d, proj, number, sha, resolveIDs)
+	}
+
+	c := baseCommit(t, d)
+	c.WithdrawQuestions = resolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge " + mergeMarkerHeld + " " + sha,
+	}}
+	c.ClearPoll = true
 	return c, nil
 }

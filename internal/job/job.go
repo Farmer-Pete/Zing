@@ -95,6 +95,23 @@ type Deps struct {
 	// its own tracker and bindings and passes itself here
 	// (internal/dispatch/dispatch.go's runAndCommit).
 	Tracker ShipTracker
+	// MergeRule is config.Merge, resolved once at startup (PKG9-PLAN.md
+	// section 4.3, 8.8): mergeDecision's own input for row 9's automatic
+	// merge gate (shiprules.go). The zero value (Auto false) always asks.
+	MergeRule MergeRule
+}
+
+// MergeRule is design section 8.8's own merge rule (zing.toml's [merge]
+// table, config.Merge): Auto gates every automatic merge off by default
+// (N5); ManualPaths and DependencyFiles each name path globs or exact/base
+// names that block an automatic merge even when Auto is on, so
+// mergeDecision (shiprules.go) can ask instead. Method is the GitHub merge
+// method MERGE itself calls with (squash, merge, or rebase).
+type MergeRule struct {
+	Auto            bool
+	Method          string
+	ManualPaths     []string
+	DependencyFiles []string
 }
 
 // Project is what building needs to know about one store project (design
@@ -241,8 +258,9 @@ func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 		len(c.ResolveQuestions) == 0 && c.Session == nil && len(c.Sessions) == 0 &&
 		c.SetKind == nil && c.SetBranch == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
 		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil &&
-		c.SetPRURL == nil && c.Poll == nil && c.PollSchedule == nil && !c.ClearPoll {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, or ClearPoll", t.ID)
+		c.SetPRURL == nil && c.Poll == nil && c.PollSchedule == nil && !c.ClearPoll &&
+		len(c.WithdrawQuestions) == 0 {
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, or WithdrawQuestions", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

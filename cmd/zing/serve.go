@@ -327,6 +327,10 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		DataDir:        dataDir,
 		LensesParallel: cfg.Review.MaxLensesParallel,
 		JudgeCodexHome: judgeCodexHome,
+		MergeRule: job.MergeRule{
+			Auto: cfg.Merge.Auto, Method: cfg.Merge.Method,
+			ManualPaths: cfg.Merge.ManualPaths, DependencyFiles: cfg.Merge.DependencyFiles,
+		},
 	}, rts)
 	if err != nil {
 		_ = st.Close()

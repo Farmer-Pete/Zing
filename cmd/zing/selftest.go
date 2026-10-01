@@ -64,30 +64,32 @@ func (selftestGitHub) FindPRByHead(context.Context, string, string, string, stri
 }
 
 // selftestShipGitHub is selftestResumeE2E's own working GitHub double (M3
-// tasks 6, 7, 8): unlike selftestGitHub above, PUBLISH and POLL both reach
-// it for real, so CreateDraftPR and FindPRByHead actually track one pull
-// request. GetPR, ListCheckRuns, and ListStatuses are scripted to carry
-// that pull request through a CI failure, a landed ci_log fix, the push
-// that follows, and the merge GitHub reports once the pushed commit's own
-// checks have been read green -- the same "the owner merged once CI went
-// green" shape design section 14's own "the owner merges on GitHub while
-// the ticket waits on merge" row already describes, since M3 builds
-// PUBLISH and POLL but not the ready flip or MERGE itself (M4). redSHA is
-// the commit PUBLISH first pushed, read straight off the real bare origin
-// remoteDir rather than a canned field this double would otherwise have to
-// be told about, so a real git push -- not a call back into this double --
-// is what actually moves what GetPR next reports: every check run on
-// redSHA always fails; every other sha (the one the landed fix later
-// pushes) always succeeds, and GetPR reports the pull request merged
-// starting on its own second read of that other sha, so one CI-green poll
-// is actually observed before done.
+// tasks 6, 7, 8; M4 task 8): unlike selftestGitHub above, PUBLISH and POLL
+// both reach it for real, so CreateDraftPR and FindPRByHead actually track
+// one pull request. GetPR and ListCheckRuns are scripted to carry that
+// pull request through a CI failure, a landed ci_log fix, and the push
+// that follows; redSHA is the commit PUBLISH first pushed, read straight
+// off the real bare origin remoteDir rather than a canned field this
+// double would otherwise have to be told about, so a real git push -- not
+// a call back into this double -- is what actually moves what GetPR and
+// ListCheckRuns next report: every check run on redSHA always fails, every
+// other sha always succeeds. draft and merged are this double's own real
+// state, moved only by MarkReady, ConvertToDraft, and Merge, so the e2e
+// walks the real design section 8.5/8.8 path end to end -- CI green, then
+// row 8's ready flip, then row 9's merge question (merge.auto is off, the
+// suite's own dispatcher carries the zero-value MergeRule), then the
+// owner's "Merge now" answer, then MERGE's own GetPR/ListCheckRuns re-read
+// and PullRequests.Merge call -- rather than GetPR synthesizing Merged on
+// its own after a fixed number of reads, the way an earlier M3-only build
+// of this double did before MERGE existed.
 type selftestShipGitHub struct {
-	mu          sync.Mutex
-	remoteDir   string
-	pr          *selftestShipPR
-	nextNum     int
-	redSHA      string
-	callsForSHA map[string]int
+	mu        sync.Mutex
+	remoteDir string
+	pr        *selftestShipPR
+	nextNum   int
+	redSHA    string
+	draft     bool
+	merged    bool
 }
 
 type selftestShipPR struct {
@@ -99,7 +101,7 @@ type selftestShipPR struct {
 // off remoteDir, the gitfixture bare origin selftestResumeE2E adds to the
 // fixture project (gitfixture.WithBareOrigin).
 func newSelftestShipGitHub(remoteDir string) *selftestShipGitHub {
-	return &selftestShipGitHub{remoteDir: remoteDir, callsForSHA: map[string]int{}}
+	return &selftestShipGitHub{remoteDir: remoteDir}
 }
 
 // headSHA reads branch's own current commit straight off g's real bare
@@ -135,6 +137,7 @@ func (g *selftestShipGitHub) CreateDraftPR(ctx context.Context, _, _, head, base
 	g.nextNum++
 	g.pr = &selftestShipPR{url: fmt.Sprintf("https://github.com/%s/%s/pull/%d", e2eFixtureGitHubOwner, e2eFixtureGitHubOwner, g.nextNum), head: head, base: base, number: g.nextNum}
 	g.redSHA = sha
+	g.draft = true
 	return g.pr.url, g.pr.number, nil
 }
 
@@ -150,7 +153,6 @@ func (g *selftestShipGitHub) FindPRByHead(_ context.Context, _, _, head, base st
 func (g *selftestShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orchestrator.PRState, error) {
 	g.mu.Lock()
 	pr := g.pr
-	redSHA := g.redSHA
 	g.mu.Unlock()
 	if pr == nil {
 		return orchestrator.PRState{}, errors.New("selftestShipGitHub: GetPR before CreateDraftPR")
@@ -160,17 +162,24 @@ func (g *selftestShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orc
 		return orchestrator.PRState{}, err
 	}
 	g.mu.Lock()
-	g.callsForSHA[sha]++
-	n := g.callsForSHA[sha]
-	g.mu.Unlock()
+	defer g.mu.Unlock()
 	return orchestrator.PRState{
-		Number: pr.number, State: "open", Draft: true, HeadSHA: sha, BaseRef: pr.base,
-		Merged: sha != redSHA && n >= 2,
+		Number: pr.number, State: "open", Draft: g.draft, HeadSHA: sha, BaseRef: pr.base,
+		NodeID: pr.url, Merged: g.merged,
 	}, nil
 }
 
-func (*selftestShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
-	return "", errors.New("selftestShipGitHub: Merge not implemented (M4)")
+// Merge is MERGE's own real GitHub write (M4 task 8, design section 8.8):
+// it records that a merge happened, so the next GetPR reports Merged
+// true and POLL's own row (design section 8.3 step 3) moves the ticket to
+// done. This double never refuses: every precondition MERGE itself must
+// hold (open, not draft, head pinned, CI green, no open thread) is already
+// proved by the real dispatcher tick that reached here.
+func (g *selftestShipGitHub) Merge(_ context.Context, _, _ string, _ int, _, _, _ string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.merged = true
+	return "", nil
 }
 
 func (g *selftestShipGitHub) ListCheckRuns(_ context.Context, _, _, sha string) ([]orchestrator.CheckRun, error) {
@@ -197,16 +206,21 @@ func (*selftestShipGitHub) JobLogTail(context.Context, string, string, int64, in
 }
 
 // MarkReady and ConvertToDraft give selftestShipGitHub job.DraftFlips too
-// (M4 task 7): this fake always reports Draft: true (GetPR, above), so the
-// e2e necessarily reaches row 8's own ready flip on its first clean-sha
-// poll before GetPR starts reporting merged; both calls just succeed,
-// since this suite verifies the ticket reaches done, not what a draft
-// flip posts.
-func (*selftestShipGitHub) MarkReady(context.Context, string) error {
+// (M4 task 7, task 8): this fake's own draft field is real state, read
+// back by the very next GetPR (design section 8.9's own convergence
+// rule), so row 8's ready flip and row 9's merge gate both see it for
+// real rather than a canned value.
+func (g *selftestShipGitHub) MarkReady(context.Context, string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.draft = false
 	return nil
 }
 
-func (*selftestShipGitHub) ConvertToDraft(context.Context, string) error {
+func (g *selftestShipGitHub) ConvertToDraft(context.Context, string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.draft = true
 	return nil
 }
 
@@ -859,13 +873,19 @@ func answerFixtureQuestion(ctx context.Context, st *store.Store, base string, ti
 // 6.6, task 7c), it answers that the same console way answerFixtureQuestion
 // answered Q1 -- a draft with option "a" then /send, which SendBatch's own
 // kindForWaitReason maps straight to the gate kind -- so the dispatcher can
-// seal the cohort and carry the ticket the rest of the way. After every
-// tick it also advances clock to the ticket's own next_poll_at (design
-// section 17.1, task 8): shipping's own babysit poll (section 8.3) can
-// leave the ticket waiting on a real backoff up to 300s out, and this is
-// what keeps that wait from ever actually happening.
+// seal the cohort and carry the ticket the rest of the way. Once POLL asks
+// the merge question (design section 8.5 row 9, waiting "merge", M4 task
+// 8), it answers that the same way with its own first option, "Merge now"
+// (mergeOptions' own closed set, internal/job/shipping.go) -- selftestShipGH's
+// own Merge then records the real GitHub write, so the ticket reaches done
+// through the real design section 8.8 path, not a canned Merged value.
+// After every tick it also advances clock to the ticket's own
+// next_poll_at (design section 17.1, task 8): shipping's own babysit poll
+// (section 8.3) can leave the ticket waiting on a real backoff up to 300s
+// out, and this is what keeps that wait from ever actually happening.
 func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, clock *selftestClock, base string, ticketID int64) error {
 	answeredGate := false
+	answeredMerge := false
 	for i := range e2eMaxTicks {
 		if err := d.Tick(ctx); err != nil {
 			return fmt.Errorf("post-send tick %d: %w", i, err)
@@ -875,8 +895,11 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 			return err
 		}
 		if ticket.State == "done" {
-			if !answeredGate {
+			switch {
+			case !answeredGate:
 				return errors.New("e2e: ticket reached done without ever waiting on the gate")
+			case !answeredMerge:
+				return errors.New("e2e: ticket reached done without ever waiting on the merge question")
 			}
 			return nil
 		}
@@ -885,6 +908,12 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 				return fmt.Errorf("answer the gate: %w", err)
 			}
 			answeredGate = true
+		}
+		if !answeredMerge && ticket.WaitingOn != nil && *ticket.WaitingOn == "merge" {
+			if err := answerFixtureQuestion(ctx, st, base, ticketID); err != nil {
+				return fmt.Errorf("answer the merge question: %w", err)
+			}
+			answeredMerge = true
 		}
 		if ticket.NextPollAt != nil {
 			clock.advanceTo(*ticket.NextPollAt)
@@ -1175,9 +1204,10 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if !slices.Equal(states, e2eWantStates) {
 		return fmt.Errorf("state messages = %v, want %v", states, e2eWantStates)
 	}
-	// Q1 (the fixture's planning question) plus the gate (design section
-	// 6.6, task 7c): two of each.
-	const wantQuestionsAnswersResolved = 2
+	// Q1 (the fixture's planning question), the gate (design section 6.6,
+	// task 7c), and the merge question (design section 8.8, M4 task 8):
+	// three of each.
+	const wantQuestionsAnswersResolved = 3
 	if questions != wantQuestionsAnswersResolved {
 		return fmt.Errorf("question messages = %d, want exactly %d", questions, wantQuestionsAnswersResolved)
 	}
@@ -1229,18 +1259,22 @@ func verifySelftestJudgeFailedFixedThenPassed(msgs []store.MessageRow) error {
 }
 
 // verifySelftestShipCILogFixedThenMerged asserts msgs (ticketID's own, in
-// id order) actually walked the path PKG9-PLAN.md section 19.4 task 8
-// names -- PUBLISH opens a draft pull request, POLL sees the pushed
-// commit's checks fail and requests a ci_log fix, and the fix lands --
-// rather than reaching done some other way: a "pr opened" marker, a "fix
-// requested ci_log" marker after it, and a "fix landed" marker after that.
-// Done itself (and its own "merged" reason) is proved by e2eWantStates and
-// driveToDone's own answeredGate check above; selftestShipGH's own GetPR
-// is what actually required POLL to see the pushed commit's checks read
-// green before it ever reported the pull request merged (its own doc
-// comment).
+// id order) actually walked the real path PKG9-PLAN.md section 19.4 task 8
+// and section 19.5 task 8 name end to end -- PUBLISH opens a draft pull
+// request, POLL sees the pushed commit's checks fail and requests a ci_log
+// fix, the fix lands, CI reads green, row 8 marks the pull request ready,
+// row 9 asks the merge question, and MERGE-ANSWER's own "Merge now" calls
+// the real Merge -- rather than reaching done some other way: a "pr
+// opened" marker, a "fix requested ci_log" marker after it, a "fix landed"
+// marker after that, a "pr ready" marker, a "merge asked" marker, and
+// finally "pr merged", each after the one before it. Done itself (and its
+// own "merged" reason) is proved by e2eWantStates and driveToDone's own
+// answeredGate and answeredMerge checks above; selftestShipGH's own Merge
+// is what actually requires the real design section 8.8 path -- ready,
+// asked, answered -- before it ever records the pull request merged (its
+// own doc comment).
 func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
-	var sawPROpened, sawFixRequested, sawFixLanded bool
+	var sawPROpened, sawFixRequested, sawFixLanded, sawReady, sawAsked, sawMerged bool
 	for i := range msgs {
 		if msgs[i].Type != "update" {
 			continue
@@ -1252,6 +1286,12 @@ func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
 			sawFixRequested = true
 		case strings.HasPrefix(msgs[i].Body, "fix landed ") && sawFixRequested && !sawFixLanded:
 			sawFixLanded = true
+		case strings.HasPrefix(msgs[i].Body, "pr ready ") && sawFixLanded:
+			sawReady = true
+		case strings.HasPrefix(msgs[i].Body, "merge asked ") && sawReady:
+			sawAsked = true
+		case strings.HasPrefix(msgs[i].Body, "pr merged ") && sawAsked:
+			sawMerged = true
 		}
 	}
 	switch {
@@ -1261,6 +1301,12 @@ func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
 		return errors.New(`e2e: no "fix requested ci_log" marker after the pull request opened, want POLL to request a fix once CI failed`)
 	case !sawFixLanded:
 		return errors.New(`e2e: no "fix landed" marker after the ci_log fix request, want the fix to land`)
+	case !sawReady:
+		return errors.New(`e2e: no "pr ready" marker after the fix landed, want row 8 to mark the pull request ready once CI reads green`)
+	case !sawAsked:
+		return errors.New(`e2e: no "merge asked" marker after the ready flip, want row 9 to ask the merge question (PKG9-PLAN.md section 19.5 task 8)`)
+	case !sawMerged:
+		return errors.New(`e2e: no "pr merged" marker after the merge question was asked, want MERGE-ANSWER's own "Merge now" to merge for real`)
 	}
 	return nil
 }

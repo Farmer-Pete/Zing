@@ -168,12 +168,30 @@ type shipGitHub struct {
 	convertToDraftErr   error
 	markReadyCalls      []string
 	convertToDraftCalls []string
+
+	// mergeErr, when set, fails every Merge call instead (M4 task 8's own
+	// PullRequests.Merge); mergeResultSHA backs its own successful string
+	// return (never read by shipHandler.merge, but asserted by a test of
+	// its own); mergeCalls records number|sha|method|title, in call order.
+	mergeErr       error
+	mergeResultSHA string
+	mergeCalls     []string
 }
 
 // shipViewerLogin is shipGitHub's own default Viewer() result (M4 task 4):
 // distinct from any login a test's own comment author uses, so isZingReply
 // only matches a comment this package's own tests build with it on purpose.
 const shipViewerLogin = "zing-bot"
+
+// shipQuestionResolved is questionStateResolved's own literal (store.go's
+// own constant is unexported from that package), named once here so the
+// merge tests' own post-commit state checks (M4 task 8) share it (goconst).
+const shipQuestionResolved = "resolved"
+
+// shipMergeMethodSquash is MergeRule.Method's own fixed literal every M4
+// task 8 merge test configures, named once (goconst) and shared with
+// shiprules_test.go's own TestMergeDecision (same package).
+const shipMergeMethodSquash = "squash"
 
 var (
 	errShipGitHub         = errors.New("shipGitHub: not implemented")
@@ -226,8 +244,16 @@ func (g *shipGitHub) GetPR(context.Context, string, string, int) (orchestrator.P
 	return g.prState, nil
 }
 
-func (g *shipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
-	return "", errors.New("shipGitHub: Merge not implemented (M4)")
+// Merge gives shipGitHub job.PullRequests.Merge too (M4 task 8): a test
+// configures mergeErr to simulate a GitHub refusal (wrap orchestrator.ErrMergeRefused
+// for the MERGE row 8.8 covers specially) or any other failure, and reads
+// mergeCalls back to assert the exact sha MERGE pinned the call to.
+func (g *shipGitHub) Merge(_ context.Context, _, _ string, number int, sha, method, title string) (string, error) {
+	g.mergeCalls = append(g.mergeCalls, fmt.Sprintf("%d|%s|%s|%s", number, sha, method, title))
+	if g.mergeErr != nil {
+		return "", g.mergeErr
+	}
+	return g.mergeResultSHA, nil
 }
 
 func (g *shipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
@@ -501,6 +527,18 @@ func shipReleaseClaim(t *testing.T, s *store.Store, ticketID int64, deps Deps) {
 	if err != nil || !applied {
 		t.Fatalf("shipReleaseClaim: applied=%v err=%v", applied, err)
 	}
+}
+
+// shipHasMessage reports whether c.Messages carries a message whose Body
+// is exactly body, the one-line marker-presence check most of this file's
+// merge tests repeat (M4 task 8).
+func shipHasMessage(c store.HandlerCommit, body string) bool {
+	for _, m := range c.Messages {
+		if m.Body == body {
+			return true
+		}
+	}
+	return false
 }
 
 // shipTicketReady drives a ticket all the way to "shipping" through the
@@ -1305,6 +1343,46 @@ func shipPollRun(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitH
 	t.Helper()
 	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
 	return (shipHandler{}).Run(t.Context(), ticket, deps)
+}
+
+// shipPollRunWithRule is shipPollRun with rule in place of Deps' own
+// zero-value MergeRule (M4 task 8's own mergeDecision input, design
+// section 8.8): a test of the automatic merge gate claims through this
+// instead of shipPollRun.
+func shipPollRunWithRule(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, rule MergeRule) (store.HandlerCommit, error) {
+	t.Helper()
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	deps.MergeRule = rule
+	return (shipHandler{}).Run(t.Context(), ticket, deps)
+}
+
+// shipAnswerMergeQuestion answers ticketID's one open merge question with
+// option ("a" merges now, "b" holds), the same AnswerQuestion path the
+// console's own SendBatch uses (clearMatchingWaitTx clears waiting_on at
+// answer time, design section 4.2).
+func shipAnswerMergeQuestion(t *testing.T, s *store.Store, ticketID int64, option string) {
+	t.Helper()
+	open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: option})
+	if err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", result.Conflict)
+	}
+}
+
+// shipMergeReadyPR is the common CI-green, zero-thread, ready (not draft)
+// pull-request state every row 9 test (M4 task 8) starts from: GetPR's own
+// read that lets POLL reach the merge gate at all.
+func shipMergeReadyPR(local, nodeID string) orchestrator.PRState {
+	return orchestrator.PRState{State: "open", Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: nodeID}
 }
 
 // shipCILogTailText is the canned JobLogTail text every failed-CI test
@@ -3845,8 +3923,8 @@ func testReadyPRFlipsBackOnUnclassified(t *testing.T, thread orchestrator.Thread
 	if err != nil {
 		t.Fatalf("GetMessage(%d): %v", questionID, err)
 	}
-	if question.State == nil || *question.State != "resolved" {
-		t.Errorf("merge question %d state = %v, want %q", questionID, question.State, "resolved")
+	if question.State == nil || *question.State != shipQuestionResolved {
+		t.Errorf("merge question %d state = %v, want %q", questionID, question.State, shipQuestionResolved)
 	}
 }
 
@@ -3891,13 +3969,20 @@ func TestReadyCrashConverges(t *testing.T) {
 	// request ready (the real write succeeded), so row 8's own condition no
 	// longer matches, and this tick calls MarkReady no further times. CI
 	// green, zero threads, and a ready pull request is row 9's own
-	// condition (the merge question), M4 task 8's: ErrNoAction, not a
-	// silent no-op.
+	// condition: with merge.auto off (deps2's own zero-value MergeRule),
+	// row 9 asks the merge question instead (design section 8.8, M4 task
+	// 8).
 	gh.prState.Draft = false
 	deps2 := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
-	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
-	if !errors.Is(err, ErrNoAction) {
-		t.Fatalf("Run (converged poll) = %v, want ErrNoAction", err)
+	commit2, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("Run (converged poll): %v", err)
+	}
+	if commit2.Waiting == nil || *commit2.Waiting != waitingMerge {
+		t.Errorf("Waiting = %v, want %q (the merge question)", commit2.Waiting, waitingMerge)
+	}
+	if want := "merge asked " + local; !shipHasMessage(commit2, want) {
+		t.Errorf("commit.Messages = %+v, want %q", commit2.Messages, want)
 	}
 	if len(gh.markReadyCalls) != 1 {
 		t.Errorf("markReadyCalls after the converged poll = %d, want still 1 (no duplicate call)", len(gh.markReadyCalls))
@@ -4058,5 +4143,795 @@ func TestThreadsBlockingMarkerOnChange(t *testing.T) {
 	}
 	if !foundThird {
 		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, wantThird)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Merge (M4 task 8, design section 8.8 and 8.9)
+// -----------------------------------------------------------------------
+
+// shipQuestionMessage returns commit's own "question" message, failing the
+// test if it carries none.
+func shipQuestionMessage(t *testing.T, commit store.HandlerCommit) store.Message {
+	t.Helper()
+	for i := range commit.Messages {
+		if commit.Messages[i].Type == msgTypeQuestion {
+			return commit.Messages[i]
+		}
+	}
+	t.Fatalf("commit.Messages = %+v, want a question message", commit.Messages)
+	return store.Message{}
+}
+
+// TestMergeQuestionPosted proves design section 8.8's own "The merge
+// question": with merge.auto off (the zero-value MergeRule shipPollRun's
+// own Deps carries), row 9 asks instead of merging -- the question's own
+// options and recommendation, Waiting "merge", the 30s backoff Poll
+// commit, and the "merge asked <sha>" marker.
+func TestMergeQuestionPosted(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_ask")
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Waiting == nil || *commit.Waiting != waitingMerge {
+		t.Fatalf("Waiting = %v, want %q", commit.Waiting, waitingMerge)
+	}
+	if commit.Poll == nil {
+		t.Fatal("Poll is nil, want the merge question's own backoff commit")
+	}
+	if !shipHasMessage(commit, "merge asked "+local) {
+		t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, "merge asked "+local)
+	}
+
+	q := shipQuestionMessage(t, commit)
+	var payload response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if payload.Kind != response.QuestionKindMerge {
+		t.Errorf("payload.Kind = %q, want %q", payload.Kind, response.QuestionKindMerge)
+	}
+	if payload.Recommended != "a" {
+		t.Errorf("payload.Recommended = %q, want %q", payload.Recommended, "a")
+	}
+	wantOptions := []response.Option{{Key: "a", Text: "Merge now"}, {Key: "b", Text: "Hold"}}
+	if len(payload.Options) != len(wantOptions) || payload.Options[0] != wantOptions[0] || payload.Options[1] != wantOptions[1] {
+		t.Errorf("payload.Options = %+v, want %+v", payload.Options, wantOptions)
+	}
+	if !strings.Contains(q.Body, "merge.auto is off") {
+		t.Errorf("question body = %q, want it to name the reason", q.Body)
+	}
+}
+
+// TestMergeNowMerges proves MERGE-ANSWER's own option a (design section
+// 8.8): the owner's Merge now re-reads CI and threads pinned to the asked
+// sha, finds everything still clean, and calls PullRequests.Merge with
+// that sha -- "pr merged <sha>", ClearPoll, and the round resolved through
+// WithdrawQuestions.
+func TestMergeNowMerges(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_merge_now")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if !shipHasMessage(commit2, "pr merged "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr merged "+local)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(gh.mergeCalls) != 1 || !strings.HasPrefix(gh.mergeCalls[0], "1|"+local+"|") {
+		t.Errorf("mergeCalls = %+v, want exactly one call pinned to %q", gh.mergeCalls, local)
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Fatalf("WithdrawQuestions = %+v, want exactly one id", commit2.WithdrawQuestions)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	question, err := s.GetMessage(t.Context(), commit2.WithdrawQuestions[0])
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if question.State == nil || *question.State != shipQuestionResolved {
+		t.Errorf("merge question state = %v, want resolved", question.State)
+	}
+}
+
+// TestMergeNowRefusedWhenHeadMoved proves MERGE's own same-tick re-read
+// (N4): between the ask and the owner's Merge now answer, the pull
+// request's head moved -- MERGE refuses with "the head moved", pinned to
+// the sha the question was actually asked about, not the new head; "merge
+// withdrawn <sha>" lands in the same commit, and the round still resolves.
+func TestMergeNowRefusedWhenHeadMoved(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_head_moved")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.prState.HeadSHA = strings.Repeat("f", 40)
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (the head moved before Merge was called)", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonHeadMoved) {
+		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonHeadMoved)
+	}
+	if !shipHasMessage(commit2, "merge withdrawn "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id (the Merge now round)", commit2.WithdrawQuestions)
+	}
+}
+
+// TestMergeNowRefusedWhenThreadOpen proves MERGE's own re-read of threads:
+// an actionable thread reappeared between the ask and the answer, so MERGE
+// refuses with "a review thread is open".
+func TestMergeNowRefusedWhenThreadOpen(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_thread_open")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.threads = []orchestrator.Thread{
+		shipThread(shipRespondThreadID, "greet.go", 3, shipHumanComment("c1", "reviewer1", "one more thing", time.Now())),
+	}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (a thread reopened before Merge was called)", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonThreadOpen) {
+		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonThreadOpen)
+	}
+}
+
+// testMergeGateBlockedByUnclassified is TestMergeGateBlockedByZeroCommentThread's
+// and TestMergeGateBlockedByOddThreadID's shared body: an unclassified
+// thread (design section 9.1) reappears between the ask and the Merge now
+// answer, and MERGE's own anyUnresolved check blocks it exactly as an
+// actionable or leftover thread would.
+func testMergeGateBlockedByUnclassified(t *testing.T, thread orchestrator.Thread) {
+	t.Helper()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_gate_unclass")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.threads = []orchestrator.Thread{thread}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonThreadOpen) {
+		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonThreadOpen)
+	}
+}
+
+func TestMergeGateBlockedByZeroCommentThread(t *testing.T) {
+	t.Parallel()
+	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "RT_gate_zero_comments"})
+}
+
+func TestMergeGateBlockedByOddThreadID(t *testing.T) {
+	t.Parallel()
+	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
+}
+
+// TestMergeGateBlockedBySpoofedCheck proves MERGE's own re-read of CI uses
+// EvaluateCI's app-id matching (design section 8.4): a same-name check
+// run from an app other than the one the required check is bound to
+// reappears between the ask and the answer (a spoof), so the required
+// check reads as missing and MERGE refuses with "CI is not green".
+func TestMergeGateBlockedBySpoofedCheck(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	const boundAppID = int64(15368)
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci", AppID: new(boundAppID)}}
+	gh.runs = []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess, AppID: boundAppID, AppSlug: ghGitHubActions}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_spoofed")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.runs = []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess, AppID: 99, AppSlug: ghGitHubActions}}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (the required check's own app no longer matches)", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonCINotGreen) {
+		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonCINotGreen)
+	}
+}
+
+// TestMergeCrashConverges proves design section 11's own convergence rule
+// for MERGE: a crash after the real GitHub Merge call but before its own
+// commit leaves tickets.pr_url's state unchanged, but the next poll's own
+// GetPR already reports the pull request merged, so it runs DONE -- Merge
+// is not called a second time.
+func TestMergeCrashConverges(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_crash_merge")
+
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	deps.MergeRule = MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (auto merge): %v", err)
+	}
+	if !shipHasMessage(commit, "pr merged "+local) {
+		t.Fatalf("commit.Messages = %+v, want %q", commit.Messages, "pr merged "+local)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Fatalf("mergeCalls = %+v, want exactly 1", gh.mergeCalls)
+	}
+	// Crash: the real GitHub Merge call above already landed; this commit
+	// is never applied.
+	shipReleaseClaim(t, s, ticket.ID, deps)
+
+	gh.prState.Merged = true
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (converged poll): %v", err)
+	}
+	if commit2.Next != stateDone {
+		t.Errorf("Next = %q, want %q", commit2.Next, stateDone)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Errorf("mergeCalls after the converged poll = %d, want still 1 (no duplicate call)", len(gh.mergeCalls))
+	}
+}
+
+// TestMergeHold proves MERGE-ANSWER's own option b (design section 8.8):
+// no GitHub call, the informational "merge held <sha>" marker, the round
+// resolved, ClearPoll.
+func TestMergeHold(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_hold")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "b")
+
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (hold): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge "+mergeMarkerHeld+" "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge held "+local)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id", commit2.WithdrawQuestions)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (Hold never merges)", gh.mergeCalls)
+	}
+}
+
+// TestHeldShaNotAskedAgain proves design section 8.8's own "A held sha is
+// not asked about again": after Hold, a clean poll on the same head is
+// row 10's own idle wait, not a fresh ask.
+func TestHeldShaNotAskedAgain(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_held_not_again")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "b")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (hold): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (poll after hold): %v", err)
+	}
+	if shipHasMessage(commit3, "merge asked "+local) {
+		t.Errorf("commit3.Messages = %+v, want no fresh ask (held sha)", commit3.Messages)
+	}
+	if commit3.Poll == nil {
+		t.Fatal("Poll is nil, want row 10's own idle backoff commit")
+	}
+	if commit3.Waiting != nil {
+		t.Errorf("Waiting = %v, want nil (held already cleared it at answer time)", commit3.Waiting)
+	}
+}
+
+// TestMergeAskedAgainAfterReopenSameHead proves design section 8.8's own
+// "the merge question can be asked again after a withdraw on the same
+// head": asked, a failed check reopens the loop (converting the pull
+// request back to draft and withdrawing the question in the same commit,
+// design section 8.5 row 3), then a clean poll re-marks it ready (row 8)
+// and asks again (row 9) once the head is askable again.
+func TestMergeAskedAgainAfterReopenSameHead(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	greenRuns, required := shipGreenCI()
+	gh.runs, gh.required = greenRuns, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_reopen_same_head")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	if !shipHasMessage(commit1, "merge asked "+local) {
+		t.Fatalf("commit1.Messages = %+v, want %q", commit1.Messages, "merge asked "+local)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	failedRuns, _ := shipFailedCI()
+	gh.runs = failedRuns
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (CI fails): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge withdrawn "+local) {
+		t.Fatalf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	}
+	if len(gh.convertToDraftCalls) != 1 {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly one call", gh.convertToDraftCalls)
+	}
+	pbApply(t, s, ticket, commit2)
+	gh.prState.Draft = true
+
+	gh.runs = greenRuns
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (CI green again): %v", err)
+	}
+	if len(gh.markReadyCalls) != 1 {
+		t.Fatalf("markReadyCalls = %+v, want exactly one call", gh.markReadyCalls)
+	}
+	pbApply(t, s, ticket, commit3)
+	gh.prState.Draft = false
+
+	commit4, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (clean again): %v", err)
+	}
+	if !shipHasMessage(commit4, "merge asked "+local) {
+		t.Errorf("commit4.Messages = %+v, want a fresh %q marker", commit4.Messages, "merge asked "+local)
+	}
+}
+
+// TestLoopReopenWithdrawsMergeQuestion proves the same reopen, checked at
+// the store layer: once commit2's own withdrawal commit (above) is
+// applied, the open merge question itself ends "resolved", not left
+// dangling.
+func TestLoopReopenWithdrawsMergeQuestion(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	greenRuns, required := shipGreenCI()
+	gh.runs, gh.required = greenRuns, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_loop_reopen")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, questionStateOpen)
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	questionID := open[len(open)-1].ID
+
+	failedRuns, _ := shipFailedCI()
+	gh.runs = failedRuns
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (CI fails): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge withdrawn "+local) {
+		t.Fatalf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	question, err := s.GetMessage(t.Context(), questionID)
+	if err != nil {
+		t.Fatalf("GetMessage(%d): %v", questionID, err)
+	}
+	if question.State == nil || *question.State != shipQuestionResolved {
+		t.Errorf("merge question state = %v, want resolved", question.State)
+	}
+}
+
+// TestRefusedAutoMergeAsks proves design section 8.8's own ErrMergeRefused
+// row on the automatic path: GitHub refuses the merge, so row 9 falls
+// back to the merge question with "GitHub refused the merge: <GitHub's
+// own message>", waiting "merge"; polling continues, and the next tick
+// does not call Merge again (the head is not askable until answered).
+func TestRefusedAutoMergeAsks(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_auto_refused")
+	gh.mergeErr = fmt.Errorf("%w: a required review is missing", orchestrator.ErrMergeRefused)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Fatalf("mergeCalls = %+v, want exactly 1 (the refused attempt)", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit, "merge refused "+local) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "merge refused "+local)
+	}
+	if commit.Waiting == nil || *commit.Waiting != waitingMerge {
+		t.Errorf("Waiting = %v, want %q", commit.Waiting, waitingMerge)
+	}
+	q := shipQuestionMessage(t, commit)
+	if !strings.Contains(q.Body, "GitHub refused the merge: a required review is missing") {
+		t.Errorf("question body = %q, want the GitHub refusal reason", q.Body)
+	}
+	if commit.Poll == nil {
+		t.Fatal("Poll is nil, want the merge question's own backoff commit")
+	}
+	pbApply(t, s, ticket, commit)
+
+	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Errorf("mergeCalls after the second poll = %d, want still 1 (not askable yet)", len(gh.mergeCalls))
+	}
+	if commit2.Waiting == nil || *commit2.Waiting != waitingMerge {
+		t.Errorf("Waiting (second poll) = %v, want %q", commit2.Waiting, waitingMerge)
+	}
+}
+
+// TestRefusedMergeNowAsksAgain is TestRefusedAutoMergeAsks' own Merge now
+// twin: the owner answered a, GitHub refused anyway, so MERGE re-asks the
+// same way, and the next unanswered poll does not call Merge a second
+// time.
+func TestRefusedMergeNowAsksAgain(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_now_refused")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.mergeErr = fmt.Errorf("%w: a required review is missing", orchestrator.ErrMergeRefused)
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now, refused): %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Fatalf("mergeCalls = %+v, want exactly 1", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge refused "+local)
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id (the Merge now round)", commit2.WithdrawQuestions)
+	}
+	q := shipQuestionMessage(t, commit2)
+	if !strings.Contains(q.Body, "GitHub refused the merge: a required review is missing") {
+		t.Errorf("question body = %q, want the GitHub refusal reason", q.Body)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	if _, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr); err != nil {
+		t.Fatalf("Run (third poll, unanswered): %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Errorf("mergeCalls after the third poll = %d, want still 1", len(gh.mergeCalls))
+	}
+}
+
+// testMergeNowWithdraws is TestMergeNowCIPendingWithdraws' and
+// TestMergeNowDraftWithdraws' shared body (design section 8.8's own "once
+// clean, the question is asked again"): the owner chose Merge now, but by
+// the time the commit runs the precondition arrange breaks; MERGE never
+// calls GitHub's own Merge, refuses with reason, withdraws, and resolves
+// the round; once arrange is undone, the next clean poll asks again.
+func testMergeNowWithdraws(t *testing.T, reason string, arrange, undo func(gh *shipGitHub)) {
+	t.Helper()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_now_withdraws")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	arrange(gh)
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now, blocked): %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit2, "merge refused "+local+"\n"+reason) {
+		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, reason)
+	}
+	if !shipHasMessage(commit2, "merge withdrawn "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id", commit2.WithdrawQuestions)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	undo(gh)
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (clean again): %v", err)
+	}
+	if !shipHasMessage(commit3, "merge asked "+local) {
+		t.Errorf("commit3.Messages = %+v, want a fresh %q marker", commit3.Messages, "merge asked "+local)
+	}
+}
+
+func TestMergeNowCIPendingWithdraws(t *testing.T) {
+	t.Parallel()
+	pendingRuns := []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}
+	var greenRuns []orchestrator.CheckRun
+	testMergeNowWithdraws(t, mergeReasonCINotGreen,
+		func(gh *shipGitHub) { greenRuns = gh.runs; gh.runs = pendingRuns },
+		func(gh *shipGitHub) { gh.runs = greenRuns })
+}
+
+func TestMergeNowDraftWithdraws(t *testing.T) {
+	t.Parallel()
+	testMergeNowWithdraws(t, mergeReasonDraft,
+		func(gh *shipGitHub) { gh.prState.Draft = true },
+		func(gh *shipGitHub) { gh.prState.Draft = false })
+}
+
+// TestHeldAskedAgainAfterReopen is TestMergeAskedAgainAfterReopenSameHead's
+// own Held twin: a held sha is withdrawn exactly like an asked one
+// (withdrawMergeQuestionIfAsked's own "asked" or "held" switch) once the
+// loop reopens, and asked again once it closes clean.
+func TestHeldAskedAgainAfterReopen(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	greenRuns, required := shipGreenCI()
+	gh.runs, gh.required = greenRuns, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_held_reopen")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "b")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (hold): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge held "+local) {
+		t.Fatalf("commit2.Messages = %+v, want %q", commit2.Messages, "merge held "+local)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	gh.threads = []orchestrator.Thread{{ID: "RT_held_reopen"}}
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (reopen): %v", err)
+	}
+	if !shipHasMessage(commit3, "merge withdrawn "+local) {
+		t.Fatalf("commit3.Messages = %+v, want %q", commit3.Messages, "merge withdrawn "+local)
+	}
+	if len(gh.convertToDraftCalls) != 1 {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly one call", gh.convertToDraftCalls)
+	}
+	pbApply(t, s, ticket, commit3)
+	gh.prState.Draft = true
+
+	gh.threads = nil
+	commit4, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (clean, ready again): %v", err)
+	}
+	if len(gh.markReadyCalls) != 1 {
+		t.Fatalf("markReadyCalls = %+v, want exactly one call", gh.markReadyCalls)
+	}
+	pbApply(t, s, ticket, commit4)
+	gh.prState.Draft = false
+
+	commit5, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (clean, asked again): %v", err)
+	}
+	if !shipHasMessage(commit5, "merge asked "+local) {
+		t.Errorf("commit5.Messages = %+v, want a fresh %q marker", commit5.Messages, "merge asked "+local)
+	}
+}
+
+// TestAutoMergeWhenAllowed proves design section 8.8's own happy path:
+// merge.auto on, no manual-deploy or dependency path in the diff, so row 9
+// merges directly with no question asked at all.
+func TestAutoMergeWhenAllowed(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_auto_allowed")
+
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, MergeRule{Auto: true, Method: shipMergeMethodSquash})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !shipHasMessage(commit, "pr merged "+local) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "pr merged "+local)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Errorf("mergeCalls = %+v, want exactly 1", gh.mergeCalls)
+	}
+	if commit.Waiting != nil {
+		t.Errorf("Waiting = %v, want nil (no question asked)", commit.Waiting)
+	}
+}
+
+// TestAutoMergeBlockedByDependencyFile proves mergeDecision's own
+// DependencyFiles rule end to end: merge.auto is on, but the ticket's own
+// real build landed hello.txt (shipTicketReady's own fixture), named here
+// as a dependency file, so row 9 asks instead of merging, naming the path
+// in its own reason.
+func TestAutoMergeBlockedByDependencyFile(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_auto_blocked")
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash, DependencyFiles: []string{"hello.txt"}}
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (the dependency file blocks it)", gh.mergeCalls)
+	}
+	q := shipQuestionMessage(t, commit)
+	if !strings.Contains(q.Body, "the diff changes a dependency file: hello.txt") {
+		t.Errorf("question body = %q, want the dependency-file reason naming hello.txt", q.Body)
+	}
+}
+
+// TestMergeWaitPollsAndSeesMerge proves D21: a ticket waiting on "merge"
+// stays a dispatch candidate, so a merge GitHub itself reports -- the
+// owner merged it there directly, with the question still open and
+// unanswered -- is seen on the next poll and moves the ticket to done.
+func TestMergeWaitPollsAndSeesMerge(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_wait_merge")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.prState.Merged = true
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (sees the merge): %v", err)
+	}
+	if commit2.Next != stateDone {
+		t.Errorf("Next = %q, want %q", commit2.Next, stateDone)
+	}
+	if !commit2.ResolveAll {
+		t.Error("ResolveAll = false, want true (the still-open merge question resolves too)")
 	}
 }
