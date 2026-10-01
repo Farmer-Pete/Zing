@@ -3,6 +3,7 @@ package tracker_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -13,6 +14,12 @@ import (
 )
 
 const fixtureProject = "zing"
+
+// testFixtureRef1 names fixtures/tickets.toml's one seeded ticket ref
+// ("fake#1"), pulled out so TestFixture_IssueFindsAFiledTicketByRef's two
+// uses are a named identifier, not a third raw string-literal occurrence
+// alongside the two this file already carries (goconst).
+const testFixtureRef1 = "fake#1"
 
 func newFixture(t *testing.T) *tracker.Fixture {
 	t.Helper()
@@ -99,6 +106,37 @@ func TestFixture_FetchFindsAFiledTicketByRef(t *testing.T) {
 
 	if _, err := f.Fetch(context.Background(), fixtureProject, "fake#999"); err == nil {
 		t.Error("Fetch of an unknown ref returned nil error, want one")
+	}
+}
+
+// TestFixture_IssueFindsAFiledTicketByRef proves Issue is the same lookup
+// as Fetch for a ref the fixture carries (PKG9-PLAN.md D29).
+func TestFixture_IssueFindsAFiledTicketByRef(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	got, err := f.Issue(context.Background(), fixtureProject, testFixtureRef1)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if got.Ref != testFixtureRef1 {
+		t.Errorf("Issue ref = %q, want %s", got.Ref, testFixtureRef1)
+	}
+}
+
+// TestFixture_IssueReturnsErrIssueNotFoundForAnUnknownRef proves Issue
+// returns the typed ErrIssueNotFound sentinel, not a generic error, so a
+// caller (dispatch's pickup handler) can match it with errors.Is
+// (PKG9-PLAN.md D29).
+func TestFixture_IssueReturnsErrIssueNotFoundForAnUnknownRef(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	_, err := f.Issue(context.Background(), fixtureProject, "fake#999")
+	if !errors.Is(err, tracker.ErrIssueNotFound) {
+		t.Errorf("Issue err = %v, want errors.Is ErrIssueNotFound", err)
 	}
 }
 

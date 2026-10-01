@@ -8,14 +8,20 @@ package templates
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-import "zing/internal/store"
+import (
+	"strconv"
+
+	"zing/internal/store"
+)
 
 // Project renders the #main region for view=project (design section 6.5):
-// one project's tickets, ordered by tracker_ref then id, read only. The
-// project id itself has nothing to render (the nav's project link already
-// carries the name), so the caller passes only the tickets it already
-// scoped to that project.
-func Project(tickets []store.Ticket) templ.Component {
+// one project's tickets, ordered by tracker_ref then id, read only, plus
+// the "Pick up issue #" manual-intake form (PKG9-PLAN.md D29), which every
+// project shows regardless of its own intake mode (D29: "works in auto mode
+// too"). projectID feeds the form's data-pickup-project attribute, the
+// contract console.js's pickupIssue reads to build POST
+// /projects/{id}/pickup's URL.
+func Project(projectID int64, tickets []store.Ticket) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -40,6 +46,10 @@ func Project(tickets []store.Ticket) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
+		templ_7745c5c3_Err = pickupBox(projectID).Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
 		if len(tickets) == 0 {
 			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<p class=\"empty\">No tickets in this project.</p>")
 			if templ_7745c5c3_Err != nil {
@@ -54,6 +64,56 @@ func Project(tickets []store.Ticket) templ.Component {
 			}
 		}
 		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</main>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		return nil
+	})
+}
+
+// pickupBox renders the manual-intake form (PKG9-PLAN.md D29): a number
+// input for the issue number and a submit button, no <form> element (mw.go
+// rejects every plain-form content type; console.js's installPickupBox
+// wires the button's click the same delegated way installSideBox wires the
+// side box's submit). pickupError is the refusal or error text POST
+// /projects/{id}/pickup's non-2xx response body carries verbatim
+// (PKG9-PLAN.md D29: "with the exact console message"); empty on first
+// paint.
+func pickupBox(projectID int64) templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var2 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var2 == nil {
+			templ_7745c5c3_Var2 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<section class=\"pickup-box\" data-pickup-project=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var3 string
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(projectID, 10))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/project.templ`, Line: 39, Col: 83}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\"><label for=\"pickup-n\">Pick up issue #</label> <input type=\"number\" id=\"pickup-n\" class=\"pickup-n\" min=\"1\" step=\"1\" aria-label=\"Issue number to pick up\"> <button type=\"submit\">Pick up</button> <span class=\"pickup-error\" role=\"alert\"></span></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -24,6 +24,9 @@ func TestLinear_EveryMethodReturnsNotImplemented(t *testing.T) {
 	if _, err := l.Fetch(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("Fetch err = %v, want %v", err, errLinearNotImplemented)
 	}
+	if _, err := l.Issue(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
+		t.Errorf("Issue err = %v, want %v", err, errLinearNotImplemented)
+	}
 	if err := l.Comment(ctx, "proj", "ref", "body"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("Comment err = %v, want %v", err, errLinearNotImplemented)
 	}

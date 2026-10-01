@@ -368,7 +368,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)))
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User)
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -1036,6 +1036,7 @@ func ensureBindings(ctx context.Context, st *store.Store, projects []config.Proj
 			TrackerProject: p.Name,
 			Rule:           tracker.IntakeRule{Assignee: p.Intake.AssignedTo},
 			User:           user,
+			Mode:           p.Intake.Mode,
 		})
 	}
 	return bindings, nil

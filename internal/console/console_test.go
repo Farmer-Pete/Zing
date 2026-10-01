@@ -20,6 +20,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // frameTimeout bounds every SSE read in this file: long enough for a slow
@@ -97,6 +98,7 @@ const (
 	testArtifactTypePlan     = "plan"
 	testArtifactTypeScenario = "scenario"
 	testPlanningLiteral      = "planning"
+	testStateQueued          = "queued"
 )
 
 var testProject = store.Project{
@@ -144,12 +146,40 @@ func newTestServerFloor(t *testing.T, s *store.Store, b *bus.Broker, m *machine.
 	return newTestServerSandbox(t, s, b, m, log, floor, "")
 }
 
+// testPickupUser is the user every pickup_test.go server acts for
+// (PKG9-PLAN.md D29): no test there asserts the pickup comment's exact
+// text, so one fixed name suffices.
+const testPickupUser = "peter"
+
+// newTestServerPickup is newTestServer with an explicit tracker (PKG9-PLAN.md
+// D29): every other server in this package leaves it nil, since only
+// pickup_test.go's own tests exercise POST /projects/{id}/pickup. machine is
+// always nil here (no test in pickup_test.go touches the rail) and user is
+// always testPickupUser, so neither is a parameter.
+func newTestServerPickup(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, tr tracker.Tracker) *httptest.Server {
+	t.Helper()
+	return newTestServerSandboxTracker(t, s, b, nil, log, response.SeverityMinor, "", tr, testPickupUser)
+}
+
 // newTestServerSandbox is newTestServerFloor with an explicit sandboxReason
 // (design section 9.2, Task 15): every other test in this package keeps the
 // default "" (sandbox available) through newTestServer or newTestServerFloor;
 // TestNavShowsSandboxOff and TestNavHidesSandboxWhenLoaded call this
 // directly, to prove the nav region's sandbox indicator at both values.
 func newTestServerSandbox(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, floor response.Severity, sandboxReason string) *httptest.Server {
+	t.Helper()
+	return newTestServerSandboxTracker(t, s, b, m, log, floor, sandboxReason, nil, "")
+}
+
+// newTestServerSandboxTracker is newTestServerSandbox with an explicit
+// tracker and user (PKG9-PLAN.md D29): newTestServerSandbox itself passes
+// nil, "", its own prior behavior, so every existing caller is unaffected;
+// newTestServerPickup (above) is pickup_test.go's own entry point into this
+// function.
+func newTestServerSandboxTracker(
+	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
+	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
+) *httptest.Server {
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -162,7 +192,7 @@ func newTestServerSandbox(t *testing.T, s *store.Store, b *bus.Broker, m *machin
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -183,7 +213,7 @@ func seedTicketIn(t *testing.T, s *store.Store, proj store.Project, ref, title s
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	id, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: ref, Title: title, State: "queued",
+		ProjectID: projectID, TrackerRef: ref, Title: title, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket(%s): %v", ref, err)

@@ -97,7 +97,20 @@ type Binding struct {
 	// claim identity. intake names it in the pickup comment it posts for
 	// every newly inserted ticket.
 	User string
+	// Mode is the project's config.Intake.Mode value, copied verbatim by
+	// ensureBindings (cmd/zing/serve.go) so this package need not import
+	// internal/config for one comparison (PKG9-PLAN.md D29): intake skips a
+	// binding whose Mode is intakeModeManual. Empty (a Binding literal that
+	// predates D29, as every existing test's own still is) behaves as auto,
+	// matching config's own default.
+	Mode string
 }
+
+// intakeModeManual is config.IntakeModeManual copied as a plain string
+// (PKG9-PLAN.md D29), the same "own copy of an unexported-to-us constant"
+// pattern msgTypeUpdate and authorSystem above already use for store's
+// values.
+const intakeModeManual = "manual"
 
 // Config is the dispatcher's run-time tuning (design section 6.8). Models,
 // Budget, and Floor (design section 4.4) are threaded straight into every
@@ -350,9 +363,14 @@ func ctxErrOr(ctx context.Context, err error) error {
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
 // insert every one the store does not already carry for that (project, ref)
-// pair (design section 6.8 step 3).
+// pair (design section 6.8 step 3). A binding whose Mode is intakeModeManual
+// is skipped entirely: manual intake (PKG9-PLAN.md D29) picks up issues only
+// through POST /projects/{id}/pickup, never through this automatic poll.
 func (d *Dispatcher) intake(ctx context.Context) error {
 	for _, b := range d.bindings {
+		if b.Mode == intakeModeManual {
+			continue
+		}
 		tickets, err := d.tracker.Intake(ctx, b.TrackerProject, b.Rule)
 		if err != nil {
 			// A single project's tracker going unreachable must not stop
@@ -370,23 +388,36 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 			if ok {
 				continue
 			}
-			newID, err := d.store.InsertTicket(ctx, store.Ticket{
-				ProjectID: b.StoreProjectID, TrackerRef: tk.Ref, Title: tk.Title, Body: tk.Body, State: stateQueued,
-			})
-			if err != nil {
-				return fmt.Errorf("dispatch: intake insert %s: %w", tk.Ref, err)
-			}
-			// The pickup comment is best-effort: it never fails the tick,
-			// never rolls back the row just inserted, and is never retried.
-			// The store is the source of truth; the tracker is a mirror, so
-			// a lagging mirror is acceptable (design section 6.8 step 3,
-			// plan section 6). The comment body is never logged.
-			if cErr := d.tracker.Comment(ctx, b.TrackerProject, tk.Ref, tracker.PickupComment(b.User)); cErr != nil {
-				slog.Warn("pickup comment failed", "ticket_id", newID, "project", b.TrackerProject, "ref", tk.Ref, "err", cErr)
+			if _, err := InsertAndAnnounce(ctx, d.store, d.tracker, b.StoreProjectID, b.TrackerProject, b.User, tk); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+// InsertAndAnnounce inserts a new queued ticket for tk under
+// storeProjectID and posts the pickup comment, exactly once, matching
+// intake's own insert step above (design section 6.8 step 3). It is
+// exported so POST /projects/{id}/pickup's manual-intake handler
+// (internal/console/pickup.go, PKG9-PLAN.md D29) reuses this same step
+// instead of duplicating it: "it inserts the ticket exactly as intake does
+// ... and posts the same pickup comment." The comment post is best-effort,
+// like intake's own: a failure only warns, the inserted row is never rolled
+// back, and the post is never retried (the store is the source of truth;
+// the tracker is a mirror).
+func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker, storeProjectID int64, trackerProject, user string, tk tracker.Ticket) (int64, error) {
+	newID, err := st.InsertTicket(ctx, store.Ticket{
+		ProjectID: storeProjectID, TrackerRef: tk.Ref, Title: tk.Title, Body: tk.Body, State: stateQueued,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("dispatch: insert ticket %s: %w", tk.Ref, err)
+	}
+	// The comment body is never logged (repo rule: never log a secret).
+	if cErr := tr.Comment(ctx, trackerProject, tk.Ref, tracker.PickupComment(user)); cErr != nil {
+		slog.Warn("pickup comment failed", "ticket_id", newID, "project", trackerProject, "ref", tk.Ref, "err", cErr)
+	}
+	return newID, nil
 }
 
 // claimTimeoutFor returns the claim/run timeout for state (design section

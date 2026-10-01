@@ -140,7 +140,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		return templates.Project(tickets), nil
+		return templates.Project(project, tickets), nil
 	case viewThread:
 		return c.threadComponent(ctx, open)
 	default:

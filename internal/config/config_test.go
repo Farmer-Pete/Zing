@@ -129,7 +129,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 				// default branch recorded by an earlier "zing project add".
 				DefaultBranch: "",
 				Self:          false,
-				Intake:        Intake{AssignedTo: testUser}, // defaults to the top-level user
+				Intake:        Intake{AssignedTo: testUser, Mode: IntakeModeAuto}, // defaults to the top-level user, mode auto
 				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
@@ -226,7 +226,7 @@ lint = "golangci-lint run"
 				Name: testZingProjectName, Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				DefaultBranch: "develop",
 				Self:          true,
-				Intake:        Intake{AssignedTo: "someone-else"},
+				Intake:        Intake{AssignedTo: "someone-else", Mode: IntakeModeAuto},
 				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
@@ -532,6 +532,61 @@ lint = "golangci-lint run"
 	}
 }
 
+// TestLoad_IntakeModeDefaultsToAuto proves an absent intake.mode defaults to
+// "auto" (PKG9-PLAN.md D29), and that auto mode keeps today's
+// assigned_to-defaults-to-user rule.
+func TestLoad_IntakeModeDefaultsToAuto(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Projects[0].Intake.Mode != IntakeModeAuto {
+		t.Errorf("Intake.Mode = %q, want %q", cfg.Projects[0].Intake.Mode, IntakeModeAuto)
+	}
+	if cfg.Projects[0].Intake.AssignedTo != testUser {
+		t.Errorf("Intake.AssignedTo = %q, want %q (auto mode defaults it to the top-level user)", cfg.Projects[0].Intake.AssignedTo, testUser)
+	}
+}
+
+// TestLoad_IntakeModeManualLeavesAssignedToEmpty proves manual mode does not
+// apply the assigned_to-defaults-to-user rule (PKG9-PLAN.md D29: "assigned_to
+// is not required (it may be absent)" in manual mode): an explicit manual
+// project with no assigned_to loads with AssignedTo left empty, not
+// defaulted to the top-level user.
+func TestLoad_IntakeModeManualLeavesAssignedToEmpty(t *testing.T) {
+	t.Parallel()
+
+	const body = `
+user = "peter"
+github_token = "ghp_test_token_0123456789"
+
+[[projects]]
+name = "zing"
+repo = "git@github.com:x/zing.git"
+path = "/home/peter/zing"
+tracker = "github"
+
+[projects.intake]
+mode = "manual"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Projects[0].Intake.Mode != IntakeModeManual {
+		t.Errorf("Intake.Mode = %q, want %q", cfg.Projects[0].Intake.Mode, IntakeModeManual)
+	}
+	if cfg.Projects[0].Intake.AssignedTo != "" {
+		t.Errorf("Intake.AssignedTo = %q, want empty (manual mode does not default it)", cfg.Projects[0].Intake.AssignedTo)
+	}
+}
+
 func TestLoad_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -649,6 +704,11 @@ test = "go test ./..."
 lint = "golangci-lint run"
 `,
 			want: `zing.toml: duplicate project name "zing": each project's name must be unique`,
+		},
+		{
+			name: "bad project intake.mode",
+			body: minimalValidTOML + "\n[projects.intake]\nmode = \"sometimes\"\n",
+			want: "zing.toml: project zing: intake.mode must be auto or manual",
 		},
 		{
 			name: "bad console.port too high",
@@ -902,11 +962,12 @@ func TestAppendProject_AppendsAndLoadsBack(t *testing.T) {
 	if len(cfg.Projects) != 1 {
 		t.Fatalf("Projects = %+v, want exactly one", cfg.Projects)
 	}
-	// Intake.AssignedTo defaults to the top-level user on Load, since
-	// testAppendedProject leaves it unset; every other field must come back
-	// exactly as appended.
+	// Intake.AssignedTo defaults to the top-level user on Load, and
+	// Intake.Mode defaults to "auto", since testAppendedProject leaves both
+	// unset; every other field must come back exactly as appended.
 	want := testAppendedProject
 	want.Intake.AssignedTo = testUser
+	want.Intake.Mode = IntakeModeAuto
 	if got := cfg.Projects[0]; got != want {
 		t.Errorf("appended project = %+v, want %+v", got, want)
 	}

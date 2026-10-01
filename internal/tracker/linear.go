@@ -25,6 +25,12 @@ func (Linear) Fetch(context.Context, string, string) (Ticket, error) {
 	return Ticket{}, errLinearNotImplemented
 }
 
+// Issue always fails: see errLinearNotImplemented (PKG9-PLAN.md D29: "Linear
+// stub returns not-implemented").
+func (Linear) Issue(context.Context, string, string) (Ticket, error) {
+	return Ticket{}, errLinearNotImplemented
+}
+
 // Comment always fails: see errLinearNotImplemented.
 func (Linear) Comment(context.Context, string, string, string) error {
 	return errLinearNotImplemented

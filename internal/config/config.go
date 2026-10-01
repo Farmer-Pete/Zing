@@ -122,7 +122,28 @@ type Project struct {
 
 type Intake struct {
 	AssignedTo string `toml:"assigned_to"`
+	// Mode is "auto" (default) or "manual" (PKG9-PLAN.md D29): auto keeps
+	// today's rule, open issues assigned to AssignedTo; manual means the
+	// dispatcher never calls Tracker.Intake for this project, and
+	// AssignedTo is not required -- applyDefaults only fills AssignedTo
+	// from the top-level user when Mode is auto. Any other explicit value
+	// is a load error (checkValues).
+	Mode string `toml:"mode"`
 }
+
+// IntakeModeAuto and IntakeModeManual are intake.mode's two valid explicit
+// values (PKG9-PLAN.md D29). An absent mode defers to applyDefaults, which
+// fills IntakeModeAuto.
+const (
+	IntakeModeAuto   = "auto"
+	IntakeModeManual = "manual"
+)
+
+// validIntakeModes is checkValues' own allowlist for an explicit
+// intake.mode value, built from the two constants above the same way
+// validReviewFloors and validMergeMethods list their own fields' allowed
+// values.
+var validIntakeModes = []string{IntakeModeAuto, IntakeModeManual}
 
 type Commands struct {
 	Test string `toml:"test"`
@@ -492,6 +513,12 @@ func checkValues(md toml.MetaData, cfg Config) error {
 			return fmt.Errorf("zing.toml: projects[%d].tracker: must be github", i)
 		}
 	}
+	for i := range cfg.Projects {
+		p := &cfg.Projects[i]
+		if p.Intake.Mode != "" && !slices.Contains(validIntakeModes, p.Intake.Mode) {
+			return fmt.Errorf("zing.toml: project %s: intake.mode must be auto or manual", p.Name)
+		}
+	}
 	if md.IsDefined("console", "port") && (cfg.Console.Port < 1 || cfg.Console.Port > 65535) {
 		return errors.New("zing.toml: console.port: must be 1 to 65535")
 	}
@@ -664,7 +691,14 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 	}
 
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Intake.AssignedTo == "" {
+		if cfg.Projects[i].Intake.Mode == "" {
+			cfg.Projects[i].Intake.Mode = IntakeModeAuto
+		}
+		// assigned_to only defaults to the top-level user in auto mode
+		// (PKG9-PLAN.md D29): manual mode's assigned_to is not required and
+		// may stay absent, since the dispatcher never calls Tracker.Intake
+		// for a manual project.
+		if cfg.Projects[i].Intake.Mode == IntakeModeAuto && cfg.Projects[i].Intake.AssignedTo == "" {
 			cfg.Projects[i].Intake.AssignedTo = cfg.User
 		}
 		// DefaultBranch is deliberately left "" when zing.toml omits it,

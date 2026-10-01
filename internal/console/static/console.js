@@ -434,6 +434,61 @@ function installSideBox() {
 	});
 }
 
+// ---- manual intake pickup (PKG9-PLAN.md D29) ------------------------------
+
+// pickupIssue handles a click on the project view's "Pick up" button
+// (PKG9-PLAN.md D29): reads the issue number from the box's own number
+// input and the project id off the box's data-pickup-project attribute,
+// posts POST /projects/{id}/pickup, and on a non-2xx response shows the
+// response body -- D29's own exact refusal text -- in the box's error span.
+// Unlike postJSON's other callers, the response body matters on failure, so
+// this builds its own fetch rather than using postJSON, the same reason
+// postSide above does.
+async function pickupIssue(button) {
+	const box = button.closest('.pickup-box');
+	const input = box?.querySelector('.pickup-n');
+	const errorSpan = box?.querySelector('.pickup-error');
+	const projectID = box?.dataset?.pickupProject;
+	if (!box || !input || !errorSpan || !projectID) {
+		return;
+	}
+	const n = Number(input.value);
+	if (!Number.isInteger(n) || n <= 0) {
+		errorSpan.textContent = 'enter a positive issue number';
+		return;
+	}
+	try {
+		const resp = await fetch(`/projects/${projectID}/pickup`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ n }),
+		});
+		if (!resp.ok) {
+			errorSpan.textContent = await resp.text();
+			return;
+		}
+		input.value = '';
+		errorSpan.textContent = '';
+	} catch (err) {
+		console.error('console.js: POST /projects/{id}/pickup', err);
+		errorSpan.textContent = 'request failed';
+	}
+}
+
+// installPickupBox wires the project view's pickup button (PKG9-PLAN.md
+// D29), delegated from document like installSideBox above, because #main
+// is morphed by every /stream patch (design section 6.3).
+function installPickupBox() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.pickup-box button[type="submit"]');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		pickupIssue(button);
+	});
+}
+
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
@@ -748,6 +803,7 @@ async function install() {
 	installSideBox();
 	installLogControls();
 	installChipActivation();
+	installPickupBox();
 }
 
 install();

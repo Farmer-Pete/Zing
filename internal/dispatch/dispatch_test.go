@@ -1155,6 +1155,78 @@ func TestTick_IntakeInsertsAndDedupsOnASecondIntake(t *testing.T) {
 	}
 }
 
+// intakeCallTracker wraps a Tracker and records every project name Intake
+// was called with, so a test can assert Intake was never called for a
+// manual-mode binding (PKG9-PLAN.md D29) while still being called for an
+// auto one. It embeds tracker.Tracker, the same pattern slowTracker below
+// uses, so every other method just delegates.
+type intakeCallTracker struct {
+	tracker.Tracker
+	mu       sync.Mutex
+	projects []string
+}
+
+func (c *intakeCallTracker) Intake(ctx context.Context, project string, rule tracker.IntakeRule) ([]tracker.Ticket, error) {
+	c.mu.Lock()
+	c.projects = append(c.projects, project)
+	c.mu.Unlock()
+	return c.Tracker.Intake(ctx, project, rule)
+}
+
+func (c *intakeCallTracker) calledProjects() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.projects...)
+}
+
+// TestTick_IntakeSkipsManualModeProjectButRunsForAuto proves intake (design
+// section 6.8 step 3, PKG9-PLAN.md D29) never calls Tracker.Intake for a
+// binding whose Mode is "manual", while an "auto" binding alongside it still
+// gets its ordinary automatic intake. MaxParallel: 0 isolates intake's own
+// effect, as TestTick_IntakeInsertsAndDedupsOnASecondIntake above does.
+func TestTick_IntakeSkipsManualModeProjectButRunsForAuto(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	autoProjectID := seedProject(t, s) // testProject.Name ("zing"), matching the fixture
+	manualProjectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "manual-proj", RepoURL: "https://github.com/x/manual", Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject(manual-proj): %v", err)
+	}
+
+	tr := &intakeCallTracker{Tracker: newFixtureTracker(t)}
+	bindings := []dispatch.Binding{
+		{StoreProjectID: autoProjectID, TrackerProject: testProject.Name, Mode: "auto"},
+		{StoreProjectID: manualProjectID, TrackerProject: "manual-proj", Mode: "manual"},
+	}
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	called := tr.calledProjects()
+	if !slices.Contains(called, testProject.Name) {
+		t.Errorf("Intake calls = %v, want it to include the auto project %q", called, testProject.Name)
+	}
+	if slices.Contains(called, "manual-proj") {
+		t.Errorf("Intake calls = %v, want no call for the manual-mode project", called)
+	}
+
+	tickets, err := s.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("ListAllTickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets after Tick = %d, want exactly 1 (only the auto project's fixture ticket)", len(tickets))
+	}
+	if tickets[0].ProjectID != autoProjectID {
+		t.Errorf("the one inserted ticket's ProjectID = %d, want the auto project %d", tickets[0].ProjectID, autoProjectID)
+	}
+}
+
 // failingIntakeTracker is a minimal Tracker test double for the intake
 // resilience test below (PKG7-PLAN.md D6, task 14): Intake fails with
 // errIntakeBoom for failProject and returns exactly one fixed ticket for any
@@ -1177,6 +1249,10 @@ func (f *failingIntakeTracker) Intake(_ context.Context, project string, _ track
 
 func (f *failingIntakeTracker) Fetch(context.Context, string, string) (tracker.Ticket, error) {
 	panic("failingIntakeTracker: Fetch is unused by this test")
+}
+
+func (f *failingIntakeTracker) Issue(context.Context, string, string) (tracker.Ticket, error) {
+	panic("failingIntakeTracker: Issue is unused by this test")
 }
 
 func (f *failingIntakeTracker) Comment(context.Context, string, string, string) error {

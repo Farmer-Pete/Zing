@@ -132,6 +132,27 @@ func (f *Fixture) Fetch(_ context.Context, project, ref string) (Ticket, error) 
 	return Ticket{}, fmt.Errorf("tracker: no ticket %q in project %q", ref, project)
 }
 
+// Issue returns the ticket matching ref within project, the same lookup
+// Fetch makes, but with ErrIssueNotFound (PKG9-PLAN.md D29) in place of
+// Fetch's own generic "no ticket" error when ref is unknown: the fixture
+// carries no closed or pull-request state to test ErrIssueClosed or
+// ErrIssueIsPullRequest against (those are exercised against the real
+// GitHub tracker, github_test.go).
+func (f *Fixture) Issue(_ context.Context, project, ref string) (Ticket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if project != f.project {
+		return Ticket{}, fmt.Errorf("tracker: unknown project %q", project)
+	}
+	for _, t := range f.tickets {
+		if t.Ref == ref {
+			return t, nil
+		}
+	}
+	return Ticket{}, ErrIssueNotFound
+}
+
 // Comment records a structured log line for body against ref, keeps body
 // in memory under ref for CommentContains to search, and returns nil. The
 // log line carries body's length, never body itself: a comment body can

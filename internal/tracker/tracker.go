@@ -3,7 +3,10 @@
 // the same dispatcher behind one seam.
 package tracker
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Tracker is the ticket source. The project name is passed per call so one
 // implementation can serve many projects.
@@ -12,6 +15,14 @@ type Tracker interface {
 	Intake(ctx context.Context, project string, rule IntakeRule) ([]Ticket, error)
 	// Fetch returns the single ticket ref within project.
 	Fetch(ctx context.Context, project, ref string) (Ticket, error)
+	// Issue returns the single issue ref within project, for manual intake
+	// (PKG9-PLAN.md D29, POST /projects/{id}/pickup): the caller, not this
+	// method, builds the exact console refusal message, since only the
+	// caller knows the issue number the console form was given. Issue
+	// returns ErrIssueNotFound, ErrIssueClosed, or ErrIssueIsPullRequest
+	// (sentinels, matched with errors.Is) in place of a Ticket when ref
+	// does not name a pickable open issue.
+	Issue(ctx context.Context, project, ref string) (Ticket, error)
 	// Comment posts body against ref within project.
 	Comment(ctx context.Context, project, ref, body string) error
 	// FileTicket creates t within project and returns its new ref.
@@ -45,3 +56,13 @@ type NewTicket struct {
 type IntakeRule struct {
 	Assignee string
 }
+
+// ErrIssueNotFound, ErrIssueClosed, and ErrIssueIsPullRequest are Issue's
+// own sentinels (PKG9-PLAN.md D29): a caller matches one with errors.Is to
+// build the exact console refusal message for an issue number it, not
+// Issue, holds.
+var (
+	ErrIssueNotFound      = errors.New("tracker: issue not found")
+	ErrIssueClosed        = errors.New("tracker: issue closed")
+	ErrIssueIsPullRequest = errors.New("tracker: issue is a pull request")
+)

@@ -379,6 +379,105 @@ func TestGitHubTrackerFetch(t *testing.T) {
 	})
 }
 
+// TestGitHubTrackerIssue proves Issue (PKG9-PLAN.md D29) returns the open
+// issue, and maps a 404, a closed issue, and a pull request each to their
+// own typed sentinel.
+func TestGitHubTrackerIssue(t *testing.T) {
+	t.Run("returns the open issue", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"title":"A title","body":"A body","state":"open"}`)
+		})
+		g := newDefaultTracker(t, mux)
+
+		tk, err := g.Issue(t.Context(), testProject, "42")
+		if err != nil {
+			t.Fatalf("Issue: unexpected error: %v", err)
+		}
+		want := Ticket{Ref: "42", Title: "A title", Body: "A body"}
+		if tk != want {
+			t.Errorf("Issue = %+v, want %+v", tk, want)
+		}
+	})
+
+	t.Run("a 404 becomes ErrIssueNotFound", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+		g := newDefaultTracker(t, mux)
+
+		_, err := g.Issue(t.Context(), testProject, "42")
+		if !errors.Is(err, ErrIssueNotFound) {
+			t.Errorf("Issue err = %v, want errors.Is ErrIssueNotFound", err)
+		}
+	})
+
+	t.Run("a closed issue becomes ErrIssueClosed", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"title":"A title","body":"A body","state":"closed"}`)
+		})
+		g := newDefaultTracker(t, mux)
+
+		_, err := g.Issue(t.Context(), testProject, "42")
+		if !errors.Is(err, ErrIssueClosed) {
+			t.Errorf("Issue err = %v, want errors.Is ErrIssueClosed", err)
+		}
+	})
+
+	t.Run("a pull request becomes ErrIssueIsPullRequest, even when also marked closed", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"title":"A title","body":"A body","state":"closed","pull_request":{"url":"https://api.github.com/repos/o/r/pulls/42"}}`)
+		})
+		g := newDefaultTracker(t, mux)
+
+		_, err := g.Issue(t.Context(), testProject, "42")
+		if !errors.Is(err, ErrIssueIsPullRequest) {
+			t.Errorf("Issue err = %v, want errors.Is ErrIssueIsPullRequest (checked before the closed state)", err)
+		}
+	})
+
+	t.Run("a 500 is a wrapped error, not a sentinel", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		g := newDefaultTracker(t, mux)
+
+		_, err := g.Issue(t.Context(), testProject, "42")
+		if err == nil {
+			t.Fatal("Issue: expected an error for a 500, got nil")
+		}
+		if errors.Is(err, ErrIssueNotFound) || errors.Is(err, ErrIssueClosed) || errors.Is(err, ErrIssueIsPullRequest) {
+			t.Errorf("Issue err = %v, want none of the three sentinels for a 500", err)
+		}
+		if !strings.Contains(err.Error(), "tracker: issue:") {
+			t.Errorf("Issue error = %q, want it to carry the %q prefix", err.Error(), "tracker: issue:")
+		}
+		assertErrorsAsGitHubErrorResponse(t, err)
+	})
+
+	t.Run("a non-canonical ref errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if _, err := g.Issue(t.Context(), testProject, "+1"); err == nil {
+			t.Fatal("Issue: expected an error for a non-canonical ref, got nil")
+		}
+	})
+
+	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		_, err := g.Issue(t.Context(), "no-such-project", "42")
+		if err == nil {
+			t.Fatal("Issue: expected an error for an unknown project, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown project") {
+			t.Errorf("Issue error = %q, want it to mention %q", err.Error(), "unknown project")
+		}
+	})
+}
+
 func TestGitHubTrackerComment(t *testing.T) {
 	t.Run("posts the body to the right path with the auth header", func(t *testing.T) {
 		var gotMethod, gotPath, gotAuth string

@@ -17,6 +17,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // contentTypeJS and contentTypeJSON are the MIME types the vendored and
@@ -88,6 +89,16 @@ type console struct {
 	pushToken     string
 	floor         response.Severity
 	sandboxReason string
+	// tracker and user back POST /projects/{id}/pickup's manual intake
+	// (pickup.go, PKG9-PLAN.md D29): tracker calls Issue against a project's
+	// own tracker project name (looked up by id through c.store), and user
+	// is cfg.User, the Zing-acts-for identity the pickup comment names --
+	// the same value ensureBindings (cmd/zing/serve.go) already sets on
+	// every dispatch.Binding.User for intake's own pickup comment. Nilable
+	// the way push and machine already are: a test that never exercises
+	// POST /projects/{id}/pickup passes nil and "".
+	tracker tracker.Tracker
+	user    string
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -101,6 +112,7 @@ type console struct {
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
+//	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle
@@ -141,11 +153,19 @@ type console struct {
 // profile for; selftest passes sandbox.Off().Reason(), since its
 // dispatcher always runs unwrapped.
 //
+// tr and user back POST /projects/{id}/pickup (PKG9-PLAN.md D29): tr is the
+// production tracker cmd/zing/serve.go already builds (productionTracker),
+// and user is cfg.User. Either may be left zero (nil, "") by a caller that
+// never exercises that one route.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string) http.Handler {
-	c := &console{store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken, floor: floor, sandboxReason: sandboxReason}
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string) http.Handler {
+	c := &console{
+		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
+		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
+	}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()
@@ -158,6 +178,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
+	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
 	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
 	// POST /push/subscribe is token-only (push.go's checkPushToken), not
 	// behind the same-origin guard: a phone subscribing is authenticated by

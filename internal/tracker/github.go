@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -179,6 +180,39 @@ func (g *GitHubTracker) Fetch(ctx context.Context, project, ref string) (Ticket,
 	issue, _, err := g.c.Issues.Get(ctx, r.owner, r.name, n)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("tracker: fetch: %w", err)
+	}
+	return Ticket{Ref: strconv.Itoa(issue.GetNumber()), Title: issue.GetTitle(), Body: issue.GetBody()}, nil
+}
+
+// Issue returns the single issue ref within project (PKG9-PLAN.md D29,
+// manual intake's POST /projects/{id}/pickup): a 404 becomes
+// ErrIssueNotFound, a pull request becomes ErrIssueIsPullRequest (checked
+// before the state, since GitHub's own IsPullRequest is the more specific
+// fact), and a closed issue becomes ErrIssueClosed. Every other error wraps
+// the go-github failure, matching Fetch's own "tracker: issue:" prefix
+// convention.
+func (g *GitHubTracker) Issue(ctx context.Context, project, ref string) (Ticket, error) {
+	r, err := g.repoFor(project)
+	if err != nil {
+		return Ticket{}, err
+	}
+	n, err := canonicalRef(ref)
+	if err != nil {
+		return Ticket{}, err
+	}
+
+	issue, resp, err := g.c.Issues.Get(ctx, r.owner, r.name, n)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return Ticket{}, ErrIssueNotFound
+		}
+		return Ticket{}, fmt.Errorf("tracker: issue: %w", err)
+	}
+	if issue.IsPullRequest() {
+		return Ticket{}, ErrIssueIsPullRequest
+	}
+	if issue.GetState() == "closed" {
+		return Ticket{}, ErrIssueClosed
 	}
 	return Ticket{Ref: strconv.Itoa(issue.GetNumber()), Title: issue.GetTitle(), Body: issue.GetBody()}, nil
 }
