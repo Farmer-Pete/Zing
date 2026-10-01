@@ -1279,6 +1279,56 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	}
 }
 
+// TestClaimTimeoutForShipping proves claimTimeoutFor's own "shipping" row
+// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.build 45
+// minutes, jobs.perimeter 3, and jobs.respond 15, so
+// max(respond, build, perimeter) is 45 -- the build job's own timeout, not
+// respond's alone, so this also proves the row reads every one of the
+// three jobs rather than just "respond".
+func TestClaimTimeoutForShipping(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-shipping-timeout-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateShipping, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateDone, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateShipping] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(44 * time.Minute)
+	wantMax := after.Add(46 * time.Minute)
+	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.deadline, wantMin, wantMax)
+	}
+}
+
 // TestRunAndCommitCopiesJudgeCodexHome proves runAndCommit copies
 // dispatch.Config.JudgeCodexHome into every job.Deps it builds
 // (PKG9-PLAN.md section 4.3, 7.3, D27), the same way it already threads

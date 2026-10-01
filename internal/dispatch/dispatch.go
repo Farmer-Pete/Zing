@@ -32,19 +32,24 @@ const stateQueued = "queued"
 // runs up to seven lens runs in parallel under one job.review.timeout_minutes
 // horizon, PKG9-PLAN.md section 6.2), judging's own claim takes the largest
 // of "judge", "build", and "perimeter" (a fix step runs in every post-build
-// state, design section 5.3) and a 10-minute floor. Every other candidate
-// state is a code-only handler and uses defaultCodeTimeout.
+// state, design section 5.3) and a 10-minute floor; shipping's own claim
+// takes the largest of "respond", "build", and "perimeter", the same
+// reasoning with no floor of its own (a respond batch, not just a fix step,
+// can also run inside "shipping"). Every other candidate state is a
+// code-only handler and uses defaultCodeTimeout.
 const (
 	statePlanning  = "planning"
 	stateBuilding  = "building"
 	stateReviewing = "reviewing"
 	stateJudging   = "judging"
+	stateShipping  = "shipping"
 
 	jobPlanning  = "planning"
 	jobBuild     = "build"
 	jobReview    = "review"
 	jobJudge     = "judge"
 	jobPerimeter = "perimeter"
+	jobRespond   = "respond"
 )
 
 // defaultCodeTimeout is the claim/run timeout a code-only state's handler
@@ -401,6 +406,8 @@ func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
 		return d.jobTimeoutOrDefault(jobReview)
 	case stateJudging:
 		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
+	case stateShipping:
+		return max(d.jobTimeoutMinutes(jobRespond), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
 	default:
 		return defaultCodeTimeout
 	}
@@ -464,6 +471,10 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Owner: d.cfg.Owner, Expires: expires,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
 		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
+		// Tracker is the dispatcher itself: PostPRLink and PostDone (below)
+		// already give it job.ShipTracker's own two methods, over its own
+		// tracker and bindings (PKG9-PLAN.md section 8.6, 17.1).
+		Tracker: d,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).
@@ -678,6 +689,10 @@ func (d *Dispatcher) postMarkedOnce(ctx context.Context, projectID int64, ref, k
 	}
 	return b, nil
 }
+
+// Dispatcher satisfies job.ShipTracker through PostPRLink and PostDone
+// below, so Deps.Tracker (runAndCommit) can carry *Dispatcher directly.
+var _ job.ShipTracker = (*Dispatcher)(nil)
 
 // PostPRLink implements job.ShipTracker's PostPRLink (PKG9-PLAN.md section
 // 8.2 step 5, section 11): posts tracker.PRComment at most once per ticket,

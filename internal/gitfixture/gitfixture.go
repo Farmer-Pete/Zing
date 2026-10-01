@@ -182,6 +182,29 @@ func AddFile(ctx context.Context, dir, relPath string, content []byte) error {
 	return nil
 }
 
+// WithBareOrigin inits a bare repository as a sibling of dir (a fresh
+// temporary directory under dir's own parent) and adds it as dir's
+// "origin" remote, so a real git push -- Orchestrator.Push, OpenDraftPR --
+// has somewhere real to land without ever reaching GitHub (PKG9-PLAN.md
+// section 19.4 task 6; internal/orchestrator/push_test.go's own
+// newBareRemote plus addOrigin, shared here now that internal/job's
+// shipping tests need the same shape). It returns the bare repository's
+// own directory, so a test can read back what a push landed there (for
+// example "git show-ref").
+func WithBareOrigin(ctx context.Context, dir string) (remoteDir string, err error) {
+	remoteDir, err = os.MkdirTemp(filepath.Dir(dir), "zing-fixture-origin-")
+	if err != nil {
+		return "", fmt.Errorf("gitfixture: temp dir for bare origin: %w", err)
+	}
+	if err := runGit(ctx, remoteDir, "init", "-q", "--bare", "-b", "main"); err != nil {
+		return "", err
+	}
+	if err := runGit(ctx, dir, "remote", "add", "origin", remoteDir); err != nil {
+		return "", err
+	}
+	return remoteDir, nil
+}
+
 // runGit runs one git command against dir with the location-redirecting
 // environment variables scrubbed, so it can never be sent at a
 // repository other than dir.

@@ -89,6 +89,12 @@ type Deps struct {
 	// "judge" (runjob.go). Empty for a judge run is ErrConfig. Wired by
 	// dispatch.Config.JudgeCodexHome.
 	JudgeCodexHome string
+	// Tracker is what the shipping handler needs from the tracker
+	// (PKG9-PLAN.md section 8.6, 17.1): PUBLISH's own PostPRLink, and
+	// POLL's PostDone (task 7). The dispatcher implements ShipTracker over
+	// its own tracker and bindings and passes itself here
+	// (internal/dispatch/dispatch.go's runAndCommit).
+	Tracker ShipTracker
 }
 
 // Project is what building needs to know about one store project (design
