@@ -701,6 +701,29 @@ func isWithdrawnGate(kind response.QuestionKind, state *string, answered bool) b
 	return kind == response.QuestionKindGate && state != nil && *state == msgStateResolved && !answered
 }
 
+// isSupersededGate reports whether a resolved gate closed because the
+// confirming turn (D32, design section 22.12.3a) answered with a revised
+// plan instead of "confirmed": Zing writes a "gate approval cancelled gate
+// <QID> run <R>" marker (job/planning.go's cancelGateApproval) as a child of
+// the gate question and resolves it, then a fresh gate follows. Without this
+// check that gate would read "withdrawn" (isWithdrawnGate also matches it: a
+// resolved gate the owner never answered), which reads as nobody having
+// approved it -- the owner did approve it, and the agent's own answer is
+// what cancelled that approval, so it reads "superseded" instead. children
+// is the question's own child rows (buildThreadQuestion's own param, same
+// one isWithdrawnGate's caller already has in scope).
+func isSupersededGate(kind response.QuestionKind, state *string, children []store.MessageRow) bool {
+	if kind != response.QuestionKindGate || state == nil || *state != msgStateResolved {
+		return false
+	}
+	for i := range children {
+		if children[i].Type == msgTypeUpdate && strings.HasPrefix(children[i].Body, updateMarkerGateApprovalCancelledPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // msgStateResolved mirrors store's own unexported questionStateResolved
 // (internal/store/commit.go), the same package-local-copy pattern
 // msgStateOpen and msgStateAnswered (seed.go) already use: console cannot
@@ -1428,7 +1451,11 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		interactive = (m.State != nil && *m.State == msgStateOpen) || revisable
 		stateLabel = questionStateLabel(m.State, revisable)
 	}
-	if _, answered := sentAnswers[m.ID]; isWithdrawnGate(payload.Kind, m.State, answered) {
+	_, answered := sentAnswers[m.ID]
+	switch {
+	case isSupersededGate(payload.Kind, m.State, children):
+		stateLabel = "superseded"
+	case isWithdrawnGate(payload.Kind, m.State, answered):
 		stateLabel = "withdrawn"
 	}
 

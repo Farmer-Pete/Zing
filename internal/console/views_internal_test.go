@@ -1624,3 +1624,38 @@ func TestIsWithdrawnGate(t *testing.T) {
 		})
 	}
 }
+
+// TestIsSupersededGate proves the D32 case isWithdrawnGate's own "resolved
+// gate with no answer" test does not tell apart from a plain withdrawal: a
+// resolved gate whose children include a "gate approval cancelled" marker
+// (job/planning.go's confirming turn, answered with a revised plan instead
+// of "confirmed") closed because the agent cancelled the owner's approval,
+// not because nobody answered it at all. It reads "superseded", not
+// "withdrawn".
+func TestIsSupersededGate(t *testing.T) {
+	t.Parallel()
+	resolved, open := msgStateResolved, "open"
+	cancelled := []store.MessageRow{*updateRow(updateMarkerGateApprovalCancelledPrefix + "7 run 3")}
+	other := []store.MessageRow{*updateRow("gate confirmed run 3 plan v2 gate 7 answer 9")}
+	tests := []struct {
+		name     string
+		kind     response.QuestionKind
+		state    *string
+		children []store.MessageRow
+		want     bool
+	}{
+		{"resolved gate with a cancellation marker is superseded", response.QuestionKindGate, &resolved, cancelled, true},
+		{"resolved gate with an unrelated marker is not", response.QuestionKindGate, &resolved, other, false},
+		{"resolved gate with no children is not", response.QuestionKindGate, &resolved, nil, false},
+		{"open gate with a cancellation marker is not", response.QuestionKindGate, &open, cancelled, false},
+		{"resolved question with a cancellation marker is not", response.QuestionKindQuestion, &resolved, cancelled, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSupersededGate(tc.kind, tc.state, tc.children); got != tc.want {
+				t.Errorf("isSupersededGate = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
