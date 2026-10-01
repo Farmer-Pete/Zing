@@ -423,3 +423,37 @@ const JudgeResumeHeader = "Continue judging. The input below says why you were r
 func ForJudgeResume(inputs []NamedInput) Input {
 	return Input{JobPrompt: JudgeResumeHeader, Inputs: inputs}
 }
+
+// ForRespond builds the respond job's Input: the job prompt, the
+// machine-configured styles (D15's prompts/style/prose.md), then plan,
+// diff, and threads, all fenced, then extra (plan section 9.2, D15).
+// Called once per respond batch by internal/job's RESPOND step; calls
+// Assemble once Schemas is set from response.RenderTemplate(JobRespond,
+// ...) in respond schema order.
+func ForRespond(jobPrompt string, styles []string, plan, diff, threads string, extra []NamedInput) Input {
+	inputs := make([]NamedInput, 0, 3+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
+		NamedInput{Label: "diff", Text: diff, Untrusted: true},
+		NamedInput{Label: "threads", Text: threads, Untrusted: true},
+	)
+	inputs = append(inputs, extra...)
+	return Input{JobPrompt: jobPrompt, Styles: styles, Inputs: inputs}
+}
+
+// RespondResumeHeader replaces the prompt file on a respond resume turn:
+// there is no fresh job prompt to load, only this fixed instruction to
+// continue sorting the batch's threads (plan section 9.2), byte-for-byte
+// from the plan.
+const RespondResumeHeader = "Continue sorting these review threads. The input below says why you were resumed. " +
+	"Return the next document."
+
+// ForRespondResume builds a respond resume turn's Input: RespondResumeHeader
+// in place of a prompt file, inputs passed through unchanged -- built by
+// the caller with Answers on an answered question, or a "coverage" input
+// carrying the marker's error lines, fenced (plan section 9.2). Called by
+// internal/job's respond resume turn; calls Assemble once Schemas is set
+// from response.RenderTemplate(JobRespond, ...) in respond schema order.
+func ForRespondResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: RespondResumeHeader, Inputs: inputs}
+}

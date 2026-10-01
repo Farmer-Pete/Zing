@@ -69,6 +69,19 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if got := m.Jobs["classify"].Sandbox; got != "" {
 		t.Errorf("classify.Sandbox = %q, want empty", got)
 	}
+
+	// respond runs under the readonly sandbox, bounded by max_loops 3
+	// (D14's shared shipping counter) and the prose style file (D15).
+	respond := m.Jobs["respond"]
+	if respond.Sandbox != "readonly" {
+		t.Errorf("respond.Sandbox = %q, want readonly", respond.Sandbox)
+	}
+	if respond.MaxLoops != 3 {
+		t.Errorf("respond.MaxLoops = %d, want 3", respond.MaxLoops)
+	}
+	if len(respond.Style) != 1 || respond.Style[0] != "prompts/style/prose.md" {
+		t.Errorf("respond.Style = %v, want [prompts/style/prose.md]", respond.Style)
+	}
 }
 
 // TestJobSandboxKey proves the sandbox key's own validation (PKG8-PLAN.md

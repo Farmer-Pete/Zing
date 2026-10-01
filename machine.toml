@@ -76,8 +76,12 @@ model = "sonnet"
 runtime = "claude"
 tools = ["read", "grep", "glob", "bash_readonly"]
 prompt = "prompts/respond.md"
+style = ["prompts/style/prose.md"]
 timeout_minutes = 15
+max_loops = 3
+max_resumes = 2
 outcomes = ["ok"]
+sandbox = "readonly"
 
 [jobs.side]
 model = "sonnet"

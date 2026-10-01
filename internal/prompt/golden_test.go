@@ -288,6 +288,39 @@ func goldenCases() []goldenCase {
 				return in
 			},
 		},
+		{
+			name: "respond-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/respond.md")
+				styles := []string{readAsset(t, "prompts/style/prose.md")}
+				plan := healthCheckPlan
+				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
+					"+func Ping() string { return \"pong\" }\n"
+				threads := "thread t1\n" +
+					"file internal/health/ping.go:12\n" +
+					"comment by @alice at 2026-09-30T12:00:00Z:\n" +
+					"Why does this return 500 on success?"
+				in := ForRespond(jobPrompt, styles, plan, diff, threads, nil)
+				in.Schemas = schemasFor(t, response.JobRespond,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one answers block (plan section 9.2's resume input for
+			// an answered respond question).
+			name: "respond-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForRespondResume([]NamedInput{
+					Answers("Q1: should thread t1 be a fix or a reply? -> a: reply, the code is correct."),
+				})
+				in.Schemas = schemasFor(t, response.JobRespond,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
 	}
 }
 

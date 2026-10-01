@@ -60,6 +60,11 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 			path:   "prompts/judge.md",
 			sha256: "40ba95666f7d24a842b22b061f2f8aeca7b0a13af3aeb48e7f59a0abaf6f9eb6",
 		},
+		{
+			name:   "respond",
+			path:   "prompts/respond.md",
+			sha256: "341e4b2129076565acf85d1a3cbf5b9edaab3918593dbc3bfc9ec96843c9206d",
+		},
 	}
 
 	for _, tc := range cases {
