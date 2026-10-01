@@ -215,7 +215,8 @@ func inClauseFor(ids []int64) (clause string, args []any) {
 }
 
 // ownerRowsByQuestion returns every sent owner message (answer or reply,
-// author you) whose parent is one of qIDs, bucketed by parent id, each
+// author you) and every reopen turn (a "followup" row, state NULL, design
+// section 22.12.2) whose parent is one of qIDs, bucketed by parent id, each
 // bucket ordered (batch_id, id) ascending (design section 22.3's turn
 // order).
 func ownerRowsByQuestion(ctx context.Context, s *Store, ticketID int64, qIDs []int64) (map[int64][]MessageRow, error) {
@@ -224,8 +225,11 @@ func ownerRowsByQuestion(ctx context.Context, s *Store, ticketID int64, qIDs []i
 		return out, nil
 	}
 	inClause, idArgs := inClauseFor(qIDs)
-	args := append([]any{ticketID, authorYou, msgTypeAnswer, msgTypeReply, answerStateSent}, idArgs...)
-	query := `SELECT ` + messageColumns + ` FROM messages WHERE ticket_id = ? AND author = ? AND type IN (?, ?) AND state = ? AND parent_id IN (` + inClause + `) ORDER BY batch_id, id` //nolint:gosec // G202: messageColumns and inClause are both fixed text, no user input
+	args := append([]any{ticketID, authorYou}, idArgs...)
+	args = append(args, msgTypeAnswer, msgTypeReply, answerStateSent, msgTypeFollowup)
+	//nolint:gosec // G202: messageColumns and inClause are both fixed text, no user input
+	query := `SELECT ` + messageColumns + ` FROM messages WHERE ticket_id = ? AND author = ? AND parent_id IN (` + inClause + `) ` +
+		`AND ((type IN (?, ?) AND state = ?) OR type = ?) ORDER BY batch_id, id`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -414,9 +418,12 @@ func (s *Store) PlanningConversation(ctx context.Context, ticketID int64) (Plann
 		decision := ""
 		agentRows := agentByQ[q.ID]
 		for j := range agentRows {
+			// Keep scanning instead of stopping at the first match: a
+			// reopened thread (D32) can be settled more than once over its
+			// life, and agentRows is id-ascending, so the last match is the
+			// newest decision.
 			if agentRows[j].Type == msgTypeResolved {
 				decision = agentRows[j].Body
-				break
 			}
 		}
 		threads[i] = Thread{
@@ -430,9 +437,11 @@ func (s *Store) PlanningConversation(ctx context.Context, ticketID int64) (Plann
 	return PlanningConversation{Threads: threads, Delivered: w, InFlight: inFlight}, nil
 }
 
-// Undelivered returns every sent owner row, across every unsettled thread,
-// whose batch is above the watermark (design section 22.3, 22.4): the set
-// a resume must carry, in (batch_id, id) order.
+// Undelivered returns every sent owner row (answer or reply; a "followup"
+// reopen row is a turn but never an answer, design section 22.12.2's own
+// "Undelivered() still returns only answer and reply rows"), across every
+// unsettled thread, whose batch is above the watermark (design section
+// 22.3, 22.4): the set a resume must carry, in (batch_id, id) order.
 func (c PlanningConversation) Undelivered() []MessageRow {
 	var out []MessageRow
 	for i := range c.Threads {
@@ -442,7 +451,8 @@ func (c PlanningConversation) Undelivered() []MessageRow {
 		}
 		for j := range t.Turns {
 			row := t.Turns[j]
-			if row.Author == authorYou && row.BatchID != nil && *row.BatchID > c.Delivered {
+			if row.Author == authorYou && (row.Type == msgTypeAnswer || row.Type == msgTypeReply) &&
+				row.BatchID != nil && *row.BatchID > c.Delivered {
 				out = append(out, row)
 			}
 		}
@@ -455,6 +465,29 @@ func (c PlanningConversation) Undelivered() []MessageRow {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// ReopenedUndelivered reports whether questionID's own thread carries a
+// "followup" reopen row (design section 22.12.2) with a batch above the
+// watermark: Undelivered() itself excludes followup rows (they carry no
+// answer of their own to deliver), so renderResumeConversation uses this to
+// learn a thread was just reopened and print the fixed "The owner reopened
+// <key>." line instead of a bullet.
+func (c PlanningConversation) ReopenedUndelivered(questionID int64) bool {
+	for i := range c.Threads {
+		t := &c.Threads[i]
+		if t.Question.ID != questionID {
+			continue
+		}
+		for j := range t.Turns {
+			row := t.Turns[j]
+			if row.Author == authorYou && row.Type == msgTypeFollowup && row.BatchID != nil && *row.BatchID > c.Delivered {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // Unsettled returns every thread not yet settled, question id order.
@@ -488,4 +521,142 @@ func questionPayloadKey(q MessageRow) string {
 		return ""
 	}
 	return p.Key
+}
+
+// ---- D32: reopen until the gate, and a confirming turn before approval ---
+
+// confirmingMarkerPrefix is the gate's own confirming marker's body prefix
+// (design section 22.12.1): "gate confirmed run <R> plan v<V> gate <QID>
+// answer <AID>".
+const confirmingMarkerPrefix = "gate confirmed run "
+
+// parseConfirmingMarkerBody extracts every field of a confirming marker's
+// body (design section 22.12.1). ok is false for a body that does not match
+// the exact shape, rather than failing the whole read over one malformed
+// marker.
+func parseConfirmingMarkerBody(body string) (planVersion int, questionID, answerID int64, ok bool) {
+	var runID int64 // the run id is embedded in every marker but never read back; ignored here
+	n, err := fmt.Sscanf(body, confirmingMarkerPrefix+"%d plan v%d gate %d answer %d", &runID, &planVersion, &questionID, &answerID)
+	return planVersion, questionID, answerID, err == nil && n == 4
+}
+
+// ConfirmedApprovalForVersion returns the GateApproval named by the newest
+// confirming marker on ticketID whose plan version is planVersion (D32,
+// design section 22.12.1, 22.12.3): a confirming turn's own "confirmed"
+// commit writes one such marker per attempt, so this is how the direct
+// approve path (already holding its own round's QID and AID, but checking
+// them against the store before trusting them) and a seal_failed or
+// gate_approve retry (holding neither) both learn whether, and what, the
+// gate's current plan version was confirmed as. ok is false when no marker
+// names this version, or a later cancellation marker on that same question
+// superseded it (the owner reopened the thread after all, design section
+// 22.12.2).
+func (s *Store) ConfirmedApprovalForVersion(ctx context.Context, ticketID int64, planVersion int) (GateApproval, bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, body FROM messages WHERE ticket_id = ? AND type = ? AND author = ? AND body LIKE ? ORDER BY id DESC`,
+		ticketID, msgTypeUpdate, authorSystem, confirmingMarkerPrefix+"%")
+	if err != nil {
+		return GateApproval{}, false, fmt.Errorf("confirmed approval for ticket %d: %w", ticketID, err)
+	}
+
+	var markerID, questionID, answerID int64
+	found := false
+	for rows.Next() {
+		var id int64
+		var body string
+		if scanErr := rows.Scan(&id, &body); scanErr != nil {
+			rows.Close() //nolint:sqlclosecheck // closed early, not deferred: see the close below
+			return GateApproval{}, false, fmt.Errorf("confirmed approval for ticket %d: %w", ticketID, scanErr)
+		}
+		v, qid, aid, parsed := parseConfirmingMarkerBody(body)
+		if !parsed || v != planVersion {
+			continue
+		}
+		markerID, questionID, answerID = id, qid, aid
+		found = true
+		break
+	}
+	rowsErr := rows.Err()
+	// Close before this function's own later queries run on the store's one
+	// connection (store.Open's _txlock=immediate keeps it to one): leaving
+	// rows open past this point would hold that connection and deadlock the
+	// cancellation and batch reads below against it. Deferring it to
+	// function return, as the sqlclosecheck linter otherwise wants, would
+	// reintroduce exactly that deadlock.
+	rows.Close() //nolint:sqlclosecheck // closed early and explicitly, see above
+	if rowsErr != nil {
+		return GateApproval{}, false, fmt.Errorf("confirmed approval for ticket %d: %w", ticketID, rowsErr)
+	}
+	if !found {
+		return GateApproval{}, false, nil
+	}
+
+	var cancelID sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(id) FROM messages WHERE parent_id = ? AND type = ? AND author = ? AND body LIKE ?`,
+		questionID, msgTypeUpdate, authorSystem, fmt.Sprintf("gate approval cancelled gate %d %%", questionID),
+	).Scan(&cancelID); err != nil {
+		return GateApproval{}, false, fmt.Errorf("confirmed approval for ticket %d: cancellation marker: %w", ticketID, err)
+	}
+	if cancelID.Valid && cancelID.Int64 > markerID {
+		return GateApproval{}, false, nil
+	}
+
+	var approveBatch sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT batch_id FROM messages WHERE id = ?`, answerID,
+	).Scan(&approveBatch); err != nil {
+		return GateApproval{}, false, fmt.Errorf("confirmed approval for ticket %d: answer %d batch: %w", ticketID, answerID, err)
+	}
+
+	return GateApproval{
+		QuestionID: questionID, AnswerID: answerID,
+		ApproveBatch: approveBatch.Int64, PlanVersion: planVersion,
+	}, true, nil
+}
+
+// ApprovalNotes returns the owner's sent reply rows on the gate question the
+// ticket's newest confirming marker names (D32, design section 22.12.3b):
+// SendBatch already commits those replies as ordinary reply rows alongside
+// the approve answer, durable before the confirming turn or the seal ever
+// runs, so this needs no new column or artifact. Joined by newline, in id
+// order; "" when the ticket carries no confirming marker.
+func (s *Store) ApprovalNotes(ctx context.Context, ticketID int64) (string, error) {
+	var body string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT body FROM messages WHERE ticket_id = ? AND type = ? AND author = ? AND body LIKE ? ORDER BY id DESC LIMIT 1`,
+		ticketID, msgTypeUpdate, authorSystem, confirmingMarkerPrefix+"%",
+	).Scan(&body)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("approval notes for ticket %d: %w", ticketID, err)
+	}
+
+	_, questionID, _, parsed := parseConfirmingMarkerBody(body)
+	if !parsed {
+		return "", nil // unreachable for a marker this package itself wrote
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT body FROM messages WHERE parent_id = ? AND type = ? AND author = ? AND state = ? ORDER BY id`,
+		questionID, msgTypeReply, authorYou, answerStateSent)
+	if err != nil {
+		return "", fmt.Errorf("approval notes for ticket %d: %w", ticketID, err)
+	}
+	defer rows.Close()
+
+	var notes []string
+	for rows.Next() {
+		var text string
+		if scanErr := rows.Scan(&text); scanErr != nil {
+			return "", fmt.Errorf("approval notes for ticket %d: %w", ticketID, scanErr)
+		}
+		notes = append(notes, text)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("approval notes for ticket %d: %w", ticketID, err)
+	}
+	return strings.Join(notes, "\n"), nil
 }

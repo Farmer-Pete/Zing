@@ -325,6 +325,11 @@ const liveJobBuild = "build"
 // points at instead of its own raw "planning" literal.
 const liveJobPlanning = "planning"
 
+// liveMsgTypeQuestion is the messages.type value "question", named once so
+// goconst has one definition across this file's own gate-approval fixture
+// and its question-filtering checks.
+const liveMsgTypeQuestion = "question"
+
 // liveGreetGoFilename is "greet.go", the one fixture source file name every
 // live harness in this package plants, declares as a build claim, or both
 // (this file, live_review_test.go, live_judge_test.go), named once so
@@ -443,15 +448,31 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		return fmt.Errorf("seed live build ticket: ticket %d is already claimed for the gate", ticketID)
 	}
 
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval. This harness seeds the gate flow directly (it never drives
+	// the real confirming turn), so it writes the minimal fixture itself: a
+	// gate question, its approving answer, and the confirming marker
+	// binding both to plan version 1. The gate question carries the plan
+	// run's own id, matching the real shape (a run-attached question,
+	// design section 4.5) that AnsweredRounds and the building handler's
+	// own round grouping expect; a run-less one groups as an orphaned
+	// round instead, the same shape an escalation's linked question takes.
+	gateQID, approveAID, gaErr := seedLiveGateApproval(ctx, st, ticketID, reserved.RunID)
+	if gaErr != nil {
+		return fmt.Errorf("seed the gate approval fixture: %w", gaErr)
+	}
+
 	applied, err = st.CommitHandlerResult(ctx, store.HandlerCommit{
-		TicketID: ticketID,
-		Owner:    gateOwner,
-		Expires:  gateExpires,
-		Next:     liveStateBuilding,
-		Reason:   "live harness: sealed the cohort and moved to building",
+		TicketID:         ticketID,
+		Owner:            gateOwner,
+		Expires:          gateExpires,
+		Next:             liveStateBuilding,
+		Reason:           "live harness: sealed the cohort and moved to building",
+		ResolveQuestions: []int64{gateQID},
 		Seal: &store.SealRequest{
 			RunID: reserved.RunID, PlanVersion: 1, ExpectedCount: len(resp.Scenarios), At: time.Now().UTC(),
 		},
+		GateApproval: &store.GateApproval{QuestionID: gateQID, AnswerID: approveAID, PlanVersion: 1},
 	})
 	if err != nil {
 		return fmt.Errorf("commit the seeded gate approval: %w", err)
@@ -460,6 +481,37 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		return fmt.Errorf("seed live build ticket: ticket %d lost its claim before the gate commit", ticketID)
 	}
 	return nil
+}
+
+// seedLiveGateApproval seeds the minimal gate approval the seal invariant
+// needs (D32, design section 22.12.1, 22.12.3a): a gate question, its
+// approving answer, and the confirming marker binding both to plan version
+// 1. It returns the gate question id and the approving answer id.
+func seedLiveGateApproval(ctx context.Context, st *store.Store, ticketID, runID int64) (gateQID, approveAID int64, err error) {
+	gatePayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateAnswered,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	gateQID, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, RunID: &runID, Type: liveMsgTypeQuestion, Author: "zing", State: new("answered"), Body: "Q1", Payload: gatePayload,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	approveAID, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "answer", Author: "you", State: new("sent"), Payload: []byte(`{"option":"a"}`),
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	_, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "update", Author: "system",
+		Body: fmt.Sprintf("gate confirmed run 1 plan v1 gate %d answer %d", gateQID, approveAID),
+	})
+	return gateQID, approveAID, err
 }
 
 // newLiveFixtureRepo builds the "greeter" gitfixture repository this
@@ -642,7 +694,7 @@ func openEscalationQuestions(ctx context.Context, st *store.Store, ticketID int6
 
 	var open []openEscalationQuestion
 	for i := range msgs {
-		if msgs[i].Type != "question" || msgs[i].ParentID == nil {
+		if msgs[i].Type != liveMsgTypeQuestion || msgs[i].ParentID == nil {
 			continue
 		}
 		if msgs[i].State == nil || *msgs[i].State != "open" {
@@ -1157,7 +1209,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	var perimeterQuestions, buildQuestions int
 	for i := range msgs {
-		if msgs[i].Type != "question" {
+		if msgs[i].Type != liveMsgTypeQuestion {
 			continue
 		}
 		var payload response.QuestionPayload
@@ -1370,10 +1422,19 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
+	answerCount := 0
 	for i := range answered {
 		if answered[i].Type == "answer" {
-			t.Errorf("message %d is an answer; want the harness to have sent none in owner mode", answered[i].ID)
+			answerCount++
 		}
+	}
+	// D32 (design section 22.12.3a): seedLiveBuildTicket now seeds one real
+	// "answer" message of its own -- the gate's approving pick, needed to
+	// satisfy the seal invariant -- so exactly one is expected here, not
+	// zero; the harness itself, in owner mode, must still never send a
+	// second one.
+	if answerCount != 1 {
+		t.Errorf("answer messages = %d, want exactly 1 (the seeded gate approval; the harness itself must send none in owner mode)", answerCount)
 	}
 }
 

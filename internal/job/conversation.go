@@ -31,6 +31,12 @@ const (
 	msgTypeReply    = "reply"
 	msgTypeResolved = "resolved"
 	answerStateSent = "sent"
+
+	// msgTypeFollowup is D32's own reopen turn (design section 22.12.2):
+	// store's own unexported mirror of the same literal (msgTypeFollowup,
+	// commit.go), mirrored here for the same reason as the rest of this
+	// block.
+	msgTypeFollowup = "followup"
 )
 
 // conversationDeliveredPrefix mirrors store's own unexported
@@ -96,12 +102,21 @@ func buildThreadState(conv store.PlanningConversation) threadState {
 	return ts
 }
 
+// pathOutcome is the fixed PathError.Path every outcome-level checkConversation
+// rule (still settled, confirmed-only, confirming-turn-only, needs-everything-
+// settled) shares.
+const pathOutcome = "outcome"
+
 // checkConversation runs design section 22.2's handler-level Layer 2 rules
-// for a planning response that can carry replies: these need the ticket's
-// own threads, which the runtime's own parse (response.Validate) never
-// sees, so they run here instead, after a valid document decodes. It is
-// pure, given s.
-func checkConversation(outcome response.Outcome, replies []response.Reply, s threadState) []*response.PathError {
+// for a planning response that can carry replies (D32, design section
+// 22.12.3 widens it with its own confirming-turn rules): these need the
+// ticket's own threads, which the runtime's own parse (response.Validate)
+// never sees, so they run here instead, after a valid document decodes. It
+// is pure, given s. confirming is true only for the gate's own confirming
+// turn (runGateConfirm): outcome confirmed is refused outside it, and
+// replies, children, and nothing_to_do are refused inside it (the owner
+// asked a direct question; those three change the subject).
+func checkConversation(outcome response.Outcome, replies []response.Reply, s threadState, confirming bool) []*response.PathError {
 	var errs []*response.PathError
 	answeredThisTurn := make(map[string]bool, len(replies))
 	settledThisTurn := make(map[string]bool, len(replies))
@@ -134,18 +149,26 @@ func checkConversation(outcome response.Outcome, replies []response.Reply, s thr
 	}
 	sortKeysByQuestionID(stillOpen, s.order)
 
-	switch outcome {
-	case response.OutcomeReady, response.OutcomeChildren, response.OutcomeNothingToDo:
+	switch {
+	case !confirming && outcome == response.OutcomeConfirmed:
+		errs = append(errs, &response.PathError{
+			Path: pathOutcome, Msg: "confirmed answers only the gate's confirming turn",
+		})
+	case confirming && (outcome == response.OutcomeReplies || outcome == response.OutcomeChildren || outcome == response.OutcomeNothingToDo):
+		errs = append(errs, &response.PathError{
+			Path: pathOutcome, Msg: "the owner asked to close the gate: return confirmed, questions, or ready",
+		})
+	case outcome == response.OutcomeReady, outcome == response.OutcomeChildren, outcome == response.OutcomeNothingToDo, outcome == response.OutcomeConfirmed:
 		if len(stillOpen) > 0 {
 			errs = append(errs, &response.PathError{
-				Path: "outcome",
+				Path: pathOutcome,
 				Msg:  fmt.Sprintf("%s needs every question settled; still open: %s", outcome, strings.Join(stillOpen, ", ")),
 			})
 		}
-	case response.OutcomeReplies:
+	case outcome == response.OutcomeReplies:
 		if len(stillOpen) == 0 {
 			errs = append(errs, &response.PathError{
-				Path: "outcome",
+				Path: pathOutcome,
 				Msg:  "replies needs a question left open; every question is settled, so return ready, children, or nothing_to_do",
 			})
 		}
@@ -342,7 +365,7 @@ func renderResumeConversation(c store.PlanningConversation, undelivered []store.
 			stillOpen = append(stillOpen, questionKey(th.Question))
 			continue
 		}
-		blocks = append(blocks, renderResumeThreadBlock(th, rows))
+		blocks = append(blocks, renderResumeThreadBlock(c, th, rows))
 	}
 
 	var sb strings.Builder
@@ -357,15 +380,23 @@ func renderResumeConversation(c store.PlanningConversation, undelivered []store.
 }
 
 // renderResumeThreadBlock renders one unsettled thread's resume block
-// (design section 22.5): its key and title, its newest agent reply when it
-// has one, then every one of rows (already in (batch_id, id) order,
-// section 22.3) as one bullet each, oldest first.
-func renderResumeThreadBlock(th *store.Thread, rows []store.MessageRow) string {
+// (design section 22.5, widened by D32, design section 22.12.2): its key
+// and title, then, only when the owner just reopened it (c.ReopenedUndelivered),
+// the two fixed lines naming the key and the decision it reopened past --
+// a followup row itself prints no list item below, since these two lines
+// already say it -- then its newest agent reply when it has one, then
+// every one of rows (already in (batch_id, id) order, section 22.3) as one
+// bullet each, oldest first.
+func renderResumeThreadBlock(c store.PlanningConversation, th *store.Thread, rows []store.MessageRow) string {
 	title, _ := questionTitleAndBody(th.Question)
 	options := questionOptions(th.Question)
+	key := questionKey(th.Question)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s: %s\n", questionKey(th.Question), title)
+	fmt.Fprintf(&sb, "%s: %s\n", key, title)
+	if c.ReopenedUndelivered(th.Question.ID) {
+		fmt.Fprintf(&sb, "The owner reopened %s.\nYour decision was: %s\n", key, th.Decision)
+	}
 	if last, ok := newestAgentReply(th); ok {
 		fmt.Fprintf(&sb, "Your last reply: %s\n", last)
 	}
@@ -442,13 +473,19 @@ func renderUnsettledThreadBlock(th *store.Thread) string {
 }
 
 // renderFreshTurnText renders one thread turn for a fresh session's
-// transcript (design section 22.6): "you: ..." for an agent reply, "the
-// owner picked option ..." for a sent answer, "the owner wrote: ..." for a
-// sent reply.
+// transcript (design section 22.6, widened by D32, design section
+// 22.12.2): "you: ..." for an agent reply, "you settled it: ..." for the
+// agent's own settling decision, "the owner reopened the thread" for a
+// followup row, "the owner picked option ..." for a sent answer, "the
+// owner wrote: ..." for a sent reply.
 func renderFreshTurnText(row store.MessageRow, options []response.Option) string {
 	switch {
 	case row.Author == authorZing && row.Type == msgTypeReply:
 		return "you: " + row.Body
+	case row.Author == authorZing && row.Type == msgTypeResolved:
+		return "you settled it: " + row.Body
+	case row.Author == authorYou && row.Type == msgTypeFollowup:
+		return "the owner reopened the thread"
 	case row.Author == authorYou && row.Type == msgTypeAnswer:
 		var ap response.AnswerPayload
 		if err := json.Unmarshal(row.Payload, &ap); err == nil && ap.Option != nil {

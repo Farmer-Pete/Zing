@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "7e2f9577094c21d75b8ae97e893817b04d4bdc20cda6ae8192d68712e89a6c5d",
+			sha256: "b267c6b3a79c1b5acb5d76bd80e618258d8120ef9274620193a49c8aba7eecb4",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "6a1b42de7e161c154d5856f76e79082777ad33cd15b20315a37a9dd16e82c139",
+			sha256: "e28374158e19d529045fc6fba27a24bbba00a7969ab6b028a8f7867f57e3b53d",
 		},
 		{
 			name:   "planreview",
@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "3a88533d216936fba660e84fcf4dea0004f61442b9195b6ee00b3c2428b10fc8",
+			sha256: "10b1fe9b4539a77a4c0fc418364227ec42c425311d27c1284ff4091d26c1c03e",
 		},
 		{
 			name:   "perimeter",
@@ -111,7 +111,9 @@ Settle a thread once the owner's messages give you its decision:
 The decision is one sentence, at most 500 characters, saying what was
 decided. Only you settle a thread. A settled thread takes no more
 replies from you. Until the owner approves the gate, the owner can
-reopen it by writing in it (D32, 22.12.2).
+reopen it by writing in it; you are then told "The owner reopened Q1."
+with your earlier decision. Answer, and settle it again when the
+owner's messages give you the decision.
 
 Settle every thread before you return ready, children, or
 nothing_to_do, in that response or an earlier one. Zing rejects any of

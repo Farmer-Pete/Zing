@@ -22,6 +22,10 @@ const (
 	msgTypeState      = "state"
 	msgTypeResolved   = "resolved"
 	msgTypeEscalation = "escalation"
+	// msgTypeFollowup is D32's own reopen turn (design section 22.12.2): an
+	// owner row, parented to the planning question it reopens, body
+	// "reopened". It carries no payload (messagePayloadTypes).
+	msgTypeFollowup = "followup"
 
 	authorSystem = "system"
 	authorYou    = "you"
@@ -34,11 +38,30 @@ const (
 	questionStateResolved = "resolved"
 
 	waitingFlagQuestions = "questions"
+	// waitingFlagGate mirrors job's own waitingFlagGate (planning.go, the
+	// same string response.QuestionKindGate carries): D32's own fence
+	// widening (design section 22.12.2) needs to recognize it here too.
+	waitingFlagGate = string(response.QuestionKindGate)
 
 	// nullDisplay is the "have" side of a same-to-same conflict message
 	// (setKindTx, setBranchTx, setPRURLTx) when the column's current value
 	// is NULL, so the three share one literal (goconst).
 	nullDisplay = "null"
+
+	// ticketStatePlanning and ticketStateBuilding are the two ticket.state
+	// values checkGateApprovalTx's own seal invariant compares against (D32,
+	// design section 22.12.3a): this package otherwise treats state as an
+	// opaque string owned by internal/job (job.statePlanning,
+	// job.stateBuilding), but the invariant itself -- "a commit that moves a
+	// ticket from planning to building" -- is store's own to enforce.
+	ticketStatePlanning = "planning"
+	ticketStateBuilding = "building"
+
+	// gateApproveOptionKey is the gate question's own "Approve" option key
+	// (design D8, section 6.6; job.gateOptionApprove's same literal, mirrored
+	// here because this package cannot import job): checkGateApprovalTx's
+	// own re-check that AID actually picked approve, not reject.
+	gateApproveOptionKey = "a"
 )
 
 // errRunNeedsSession is returned when a HandlerCommit carries a Run but no
@@ -132,6 +155,14 @@ type HandlerCommit struct {
 	// other outcome is a *SealMismatchError naming the failing stage, and
 	// rolls the whole commit back (design D16).
 	Seal *SealRequest
+	// GateApproval binds a seal to one confirmed gate approval (D32, design
+	// section 22.12.3a): required whenever Seal is set, or Next is
+	// "building" while the ticket is still in "planning". CommitHandlerResult
+	// re-verifies it against fresh reads inside this same transaction
+	// (checkGateApprovalTx) before ever calling sealCohortTx or applying
+	// Next, and a failing check is a *SealRefusedError that rolls the whole
+	// commit back.
+	GateApproval *GateApproval
 	// Escalation records one structured escalation and its linked question
 	// in a single shape (design D10, section 6.7): a nil RunID is a cap
 	// escalation that no run caused; a non-nil RunID ties both inserted
@@ -230,6 +261,32 @@ func (e *SealMismatchError) Error() string {
 }
 
 func (e *SealMismatchError) Unwrap() error { return ErrSealMismatch }
+
+// GateApproval binds a seal to one confirmed gate approval (D32, design
+// section 22.12.3a): QuestionID is the gate question (QID), AnswerID is its
+// approving answer row (AID), ApproveBatch is AID's own batch_id (BA), and
+// PlanVersion is the cohort version the approval covers.
+type GateApproval struct {
+	QuestionID   int64
+	AnswerID     int64
+	ApproveBatch int64
+	PlanVersion  int
+}
+
+// ErrSealRefused is the sentinel every *SealRefusedError unwraps to (D32,
+// design section 22.12.3a), so a caller that only needs to know "was this
+// seal refused" can use errors.Is without also importing the typed shape.
+var ErrSealRefused = errors.New("store: seal refused")
+
+// SealRefusedError is the seal invariant's own typed failure (D32, design
+// section 22.12.3a): Reason is one of the invariant's six fixed texts.
+// Error() renders "seal refused: <reason>", the exact prefix design section
+// 22.12.3a and the dispatcher's own marker (updateLine) share.
+type SealRefusedError struct{ Reason string }
+
+func (e *SealRefusedError) Error() string { return "seal refused: " + e.Reason }
+
+func (e *SealRefusedError) Unwrap() error { return ErrSealRefused }
 
 // SessionUpsert creates or updates the session a HandlerCommit's runs belong
 // to. ID nil creates a new session; a non-nil ID updates the existing one.
@@ -402,6 +459,10 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		if _, err = s.insertArtifactTx(ctx, tx, a); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
+	}
+
+	if err = checkGateApprovalTx(ctx, tx, c.TicketID, ticket.State, c); err != nil {
+		return false, fmt.Errorf("commit handler result: %w", err)
 	}
 
 	if c.Seal != nil {
@@ -923,6 +984,127 @@ func (s *Store) insertArtifactTx(ctx context.Context, tx *sql.Tx, a Artifact) (i
 	return id, nil
 }
 
+// checkGateApprovalTx enforces the seal invariant (D32, design section
+// 22.12.3a): every commit that seals a cohort (c.Seal set) or moves a
+// ticket from "planning" to "building" (c.Next == "building" while
+// ticketState, read at the top of this transaction, is still "planning")
+// must carry a c.GateApproval the checks below -- run fresh, inside tx,
+// against the same transaction the seal or transition itself commits in --
+// accept. Any other commit (ticketState already "building", or moving
+// somewhere else entirely) needs no check and returns nil at once. Each
+// failing check returns a *SealRefusedError{Reason}, in the six-step order
+// the design names; the first failure wins.
+func checkGateApprovalTx(ctx context.Context, tx *sql.Tx, ticketID int64, ticketState string, c HandlerCommit) error {
+	if c.Seal == nil && (c.Next != ticketStateBuilding || ticketState != ticketStatePlanning) {
+		return nil
+	}
+	ga := c.GateApproval
+	if ga == nil {
+		return &SealRefusedError{Reason: "no gate approval check"}
+	}
+
+	notTheApproval := &SealRefusedError{
+		Reason: fmt.Sprintf("answer %d is not the approval of gate question %d", ga.AnswerID, ga.QuestionID),
+	}
+
+	// Step 2: QID names a gate question of this ticket, and AID is the
+	// newest sent answer on it, picking "a".
+	var gotTicketID int64
+	var gotKind sql.NullString
+	err := tx.QueryRowContext(ctx,
+		`SELECT ticket_id, json_extract(payload, '$.kind') FROM messages WHERE id = ? AND type = ?`,
+		ga.QuestionID, msgTypeQuestion,
+	).Scan(&gotTicketID, &gotKind)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return notTheApproval
+	case err != nil:
+		return fmt.Errorf("check gate approval: get question %d: %w", ga.QuestionID, err)
+	case gotTicketID != ticketID, !gotKind.Valid, gotKind.String != string(response.QuestionKindGate):
+		return notTheApproval
+	}
+
+	var newestAID int64
+	var payload sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, payload FROM messages WHERE parent_id = ? AND type = ? AND state = ? ORDER BY id DESC LIMIT 1`,
+		ga.QuestionID, msgTypeAnswer, answerStateSent,
+	).Scan(&newestAID, &payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return notTheApproval
+	case err != nil:
+		return fmt.Errorf("check gate approval: newest answer for question %d: %w", ga.QuestionID, err)
+	case newestAID != ga.AnswerID, !payload.Valid:
+		return notTheApproval
+	}
+	var ap response.AnswerPayload
+	if jsonErr := json.Unmarshal([]byte(payload.String), &ap); jsonErr != nil || ap.Option == nil || *ap.Option != gateApproveOptionKey {
+		return notTheApproval
+	}
+
+	// Step 3: a confirming marker names this exact QID, AID, and
+	// PlanVersion (the run id is wildcarded: any confirming run qualifies).
+	confirmPattern := fmt.Sprintf("gate confirmed run %% plan v%d gate %d answer %d", ga.PlanVersion, ga.QuestionID, ga.AnswerID)
+	var confirmID int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM messages WHERE parent_id = ? AND type = ? AND author = ? AND body LIKE ? ORDER BY id DESC LIMIT 1`,
+		ga.QuestionID, msgTypeUpdate, authorSystem, confirmPattern,
+	).Scan(&confirmID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return &SealRefusedError{Reason: fmt.Sprintf(
+			"no confirmation for gate question %d answer %d plan v%d", ga.QuestionID, ga.AnswerID, ga.PlanVersion)}
+	case err != nil:
+		return fmt.Errorf("check gate approval: find confirming marker: %w", err)
+	}
+
+	// Step 4: no cancellation marker for QID has a greater id than the
+	// confirming marker step 3 just found.
+	cancelPattern := fmt.Sprintf("gate approval cancelled gate %d %%", ga.QuestionID)
+	var cancelID sql.NullInt64
+	if err = tx.QueryRowContext(ctx,
+		`SELECT MAX(id) FROM messages WHERE parent_id = ? AND type = ? AND author = ? AND body LIKE ?`,
+		ga.QuestionID, msgTypeUpdate, authorSystem, cancelPattern,
+	).Scan(&cancelID); err != nil {
+		return fmt.Errorf("check gate approval: find cancellation marker: %w", err)
+	}
+	if cancelID.Valid && cancelID.Int64 > confirmID {
+		return &SealRefusedError{Reason: fmt.Sprintf("approval of gate question %d was cancelled", ga.QuestionID)}
+	}
+
+	// Step 5: the owner fence. Any sent owner row (answer, reply, or
+	// followup) on a planning question of this ticket, with a batch above
+	// BA, refuses the seal: nothing the owner sent after Approve may be
+	// sealed past.
+	var violatingBatch int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT m.batch_id FROM messages m
+		 WHERE m.ticket_id = ? AND m.author = ? AND m.state = ? AND m.type IN (?, ?, ?)
+		   AND m.batch_id > ? AND m.parent_id IN (`+planningQuestionsSQL+`)
+		 ORDER BY m.batch_id DESC LIMIT 1`,
+		ticketID, authorYou, answerStateSent, msgTypeAnswer, msgTypeReply, msgTypeFollowup,
+		ga.ApproveBatch, ticketID,
+	).Scan(&violatingBatch)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// No owner row above BA: the fence holds.
+	case err != nil:
+		return fmt.Errorf("check gate approval: find later owner message: %w", err)
+	default:
+		return &SealRefusedError{Reason: fmt.Sprintf(
+			"owner wrote after approval (batch %d > %d)", violatingBatch, ga.ApproveBatch)}
+	}
+
+	// Step 6: a seal in this same commit must target the approved version.
+	if c.Seal != nil && c.Seal.PlanVersion != ga.PlanVersion {
+		return &SealRefusedError{Reason: fmt.Sprintf(
+			"seal is for plan v%d, approval is for v%d", c.Seal.PlanVersion, ga.PlanVersion)}
+	}
+
+	return nil
+}
+
 // sealCohortTx applies req inside tx (design D16, section 4.5): (1) the
 // ticket's max-version plan artifact must have req.RunID's version and run
 // id, else a "plan" mismatch; (2) the scenario cohort that run id carries
@@ -1117,17 +1299,52 @@ func applyConversationTx(ctx context.Context, tx *sql.Tx, s *Store, ticketID int
 	}
 
 	out := waiting
-	if waiting != nil && *waiting == waitingFlagQuestions && escalation == nil {
+	// D32 widens this fence to "gate" (design section 22.12.2): a
+	// plan-review run can be in flight when the owner reopens a thread,
+	// and its own clean commit would post a fresh gate while that thread
+	// is still open. When that happens, the gate question this same
+	// commit just inserted is withdrawn too, in this same transaction, so
+	// the owner never sees a gate behind an open thread.
+	if waiting != nil && escalation == nil && (*waiting == waitingFlagQuestions || *waiting == waitingFlagGate) {
 		anyLate, err := anyUnsettledPlanningQuestionHasLateMessageTx(ctx, tx, ticketID, conv.ThroughBatch)
 		if err != nil {
 			return nil, err
 		}
 		if anyLate {
+			if *waiting == waitingFlagGate {
+				if err := withdrawJustPostedGateQuestionTx(ctx, tx, s, ticketID); err != nil {
+					return nil, err
+				}
+			}
 			slog.Info("planning wait skipped", "ticket_id", ticketID, "through_batch", conv.ThroughBatch)
 			out = nil
 		}
 	}
 	return out, nil
+}
+
+// withdrawJustPostedGateQuestionTx finds the ticket's own newest open gate
+// question -- the one this same commit just inserted, posted by a
+// plan-review run that finished while the owner was reopening a thread
+// elsewhere (design section 22.12.2) -- and withdraws it (withdrawQuestionTx):
+// a fresh gate behind an open thread is pointless, since the owner's own
+// reopen already withdrew the fence's own planning wait.
+func withdrawJustPostedGateQuestionTx(ctx context.Context, tx *sql.Tx, s *Store, ticketID int64) error {
+	var gateQID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM messages WHERE ticket_id = ? AND type = ? AND json_extract(payload, '$.kind') = ? AND state = ? ORDER BY id DESC LIMIT 1`,
+		ticketID, msgTypeQuestion, string(response.QuestionKindGate), questionStateOpen,
+	).Scan(&gateQID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil // unreachable in practice: a Waiting == "gate" commit always just posted one
+	case err != nil:
+		return fmt.Errorf("find gate question to withdraw: %w", err)
+	}
+	if err := s.withdrawQuestionTx(ctx, tx, ticketID, gateQID); err != nil {
+		return fmt.Errorf("withdraw gate question %d: %w", gateQID, err)
+	}
+	return nil
 }
 
 // verifyOpenPlanningQuestionTx errors unless questionID names an open or

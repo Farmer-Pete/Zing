@@ -120,6 +120,26 @@ func TestForPlanningResume_Helpers(t *testing.T) {
 	assertFenced(t, got, "answers", "Q1: a\nQ2: b")
 }
 
+// TestForPlanningConfirm_LeadsWithConfirmHeader pins the confirming turn's
+// own Input shape (D32, design section 22.12.3): ConfirmHeader in place of a
+// job prompt, no styles, and the notes input fenced like every other
+// owner-originated text.
+func TestForPlanningConfirm_LeadsWithConfirmHeader(t *testing.T) {
+	t.Parallel()
+
+	in := ForPlanningConfirm([]NamedInput{Notes("the JSON must stay stable")})
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if got[:len(ConfirmHeader)] != ConfirmHeader {
+		t.Errorf("ForPlanningConfirm did not lead with ConfirmHeader; got:\n%s", got)
+	}
+	if len(in.Styles) != 0 {
+		t.Errorf("ForPlanningConfirm set Styles, want none")
+	}
+	assertFenced(t, got, "notes", "the JSON must stay stable")
+}
+
 // TestForPlanReview_TicketScenariosPlanFenced pins the plan-review row:
 // ticket, scenarios, and plan all arrive fenced (D15), alongside the lens
 // sections appended to the job prompt.
@@ -209,7 +229,7 @@ func TestForBuildMissingPlaceholder(t *testing.T) {
 	t.Parallel()
 
 	jobPrompt := "Task {n} of {total}: {task title}\n\nProject commands: test `{test_cmd}`."
-	_, err := ForBuild(jobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	_, err := ForBuild(jobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
 	if err == nil {
 		t.Fatal("ForBuild returned no error for a prompt missing {lint_cmd}")
 	}
@@ -225,7 +245,7 @@ func TestForBuildPlanIsRaw(t *testing.T) {
 	t.Parallel()
 
 	planXML := testPlanXML
-	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", planXML, nil, nil)
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", planXML, "", nil, nil)
 	if err != nil {
 		t.Fatalf("ForBuild: %v", err)
 	}
@@ -239,7 +259,7 @@ func TestForBuildPlanIsRaw(t *testing.T) {
 func TestForBuildTicketIsFenced(t *testing.T) {
 	t.Parallel()
 
-	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
 	if err != nil {
 		t.Fatalf("ForBuild: %v", err)
 	}
@@ -254,7 +274,7 @@ func TestForBuildTicketIsFenced(t *testing.T) {
 func TestForBuildOmitsEmptyAccepted(t *testing.T) {
 	t.Parallel()
 
-	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
 	if err != nil {
 		t.Fatalf("ForBuild: %v", err)
 	}
@@ -272,7 +292,7 @@ func TestForFixReplacesTaskLine(t *testing.T) {
 	t.Parallel()
 
 	in, err := ForFix(buildJobPrompt, "Fix review findings", "findings", "finding text",
-		"go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+		"go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
 	if err != nil {
 		t.Fatalf("ForFix: %v", err)
 	}
@@ -293,7 +313,7 @@ func TestForFixTextIsFenced(t *testing.T) {
 	t.Parallel()
 
 	in, err := ForFix(buildJobPrompt, "Fix review findings", "findings", "finding text",
-		"go test ./...", "make lint", "ticket body", "<plan/>", nil, nil)
+		"go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
 	if err != nil {
 		t.Fatalf("ForFix: %v", err)
 	}
@@ -301,6 +321,61 @@ func TestForFixTextIsFenced(t *testing.T) {
 	got := Assemble(in)
 
 	assertFenced(t, got, "findings", "finding text")
+}
+
+// TestForBuildApprovalNotesFencedAfterPlan pins D32's own row (design
+// section 22.12.3b): non-empty approval notes render as a fenced
+// "approval" input right after plan.
+func TestForBuildApprovalNotesFencedAfterPlan(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint",
+		"ticket body", "<plan/>", "for untagged builds, print the bare hash plus -dirty", nil, nil)
+	if err != nil {
+		t.Fatalf("ForBuild: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "approval", "for untagged builds, print the bare hash plus -dirty")
+	planIdx := strings.Index(got, "plan:")
+	approvalIdx := strings.Index(got, "approval:")
+	if planIdx < 0 || approvalIdx < 0 || approvalIdx < planIdx {
+		t.Errorf("approval input does not come right after plan:\n%s", got)
+	}
+}
+
+// TestForBuildOmitsEmptyApproval pins "omitted when empty" (design section
+// 22.12.3b): no approval notes means no "approval:" block at all.
+func TestForBuildOmitsEmptyApproval(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForBuild(buildJobPrompt, testBuildTask(), "go test ./...", "make lint", "ticket body", "<plan/>", "", nil, nil)
+	if err != nil {
+		t.Fatalf("ForBuild: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if strings.Contains(got, "approval:") {
+		t.Errorf("ForBuild with no approval notes still rendered an approval block:\n%s", got)
+	}
+}
+
+// TestForFixApprovalNotesFencedAfterPlan is TestForBuildApprovalNotesFencedAfterPlan
+// for the fix turn: a fix prompt also carries the gate's approval notes.
+func TestForFixApprovalNotesFencedAfterPlan(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForFix(buildJobPrompt, "Fix review findings", "findings", "finding text",
+		"go test ./...", "make lint", "ticket body", "<plan/>", "keep the JSON output stable", nil, nil)
+	if err != nil {
+		t.Fatalf("ForFix: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "approval", "keep the JSON output stable")
 }
 
 // TestForPerimeterFencesPathAndHunk pins the perimeter job's Input: both

@@ -15,12 +15,14 @@ package job_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"zing/internal/response"
+	"zing/internal/runtime"
 	"zing/internal/store"
 )
 
@@ -71,6 +73,43 @@ func answerGateQuestion(t *testing.T, s *store.Store, ticketID, questionID int64
 	}
 }
 
+// seedConfirmedGate seeds the confirming marker binding ticketID's own gate
+// question qID, its newest sent approving answer (already written by
+// answerGateQuestion), and planVersion (D32, design section 22.12.1,
+// 22.12.3a). The branch tests below exercise gateApprove's own pre-check in
+// isolation, so they seed this directly rather than drive a real confirming
+// turn through the runtime; TestGateApproveRunsFreeConfirmingTurn (below)
+// covers the real, unconfirmed path instead.
+func seedConfirmedGate(t *testing.T, s *store.Store, ticketID, qID int64, planVersion int) {
+	t.Helper()
+	// ListMessages, not AnsweredRounds: by the time a retry seeds a new
+	// cohort's confirmation, the original gate round may already be
+	// resolved (ResolveQuestions, applied by an earlier commit in the same
+	// test), and AnsweredRounds only ever returns an answered-but-unresolved
+	// round.
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var aID int64
+	found := false
+	for i := range msgs {
+		if msgs[i].Type == "answer" && msgs[i].ParentID != nil && *msgs[i].ParentID == qID {
+			aID = msgs[i].ID
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("seedConfirmedGate: no sent answer found on question %d", qID)
+	}
+	marker := fmt.Sprintf("gate confirmed run 1 plan v%d gate %d answer %d", planVersion, qID, aID)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeUpdate, Author: testAuthorSystem, Body: marker,
+	}); err != nil {
+		t.Fatalf("InsertMessage(confirming marker): %v", err)
+	}
+}
+
 // assertSealFailedEscalation asserts commit carries section 6.6's own
 // failing-branch shape: Escalation.RunID nil, Origin seal, Code seal_failed,
 // What exactly want, and ResolveQuestions exactly the gate round's question
@@ -98,6 +137,191 @@ func assertSealFailedEscalation(t *testing.T, commit store.HandlerCommit, questi
 	}
 }
 
+// ---- D32: the gate's confirming turn (design section 22.12.3) ------------
+
+// confirmedResult builds a scripted step whose response is a minimal,
+// valid ConfirmedResponse.
+func confirmedResult(sessionID, notes string) scriptedStep {
+	resp := &response.ConfirmedResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeConfirmed,
+		Notes: notes,
+	}
+	return scriptedStep{res: runtime.RunResult{Response: resp, SessionID: sessionID, ExitCode: 0, AgentTime: time.Second}}
+}
+
+// TestGateApproveRunsFreeConfirmingTurn proves D32's own entry change
+// (design section 22.12.3): approving an unconfirmed gate no longer seals
+// at once. It resumes the cohort's own producing session with
+// prompt.ConfirmHeader in place of a job prompt, as a free resume
+// (BumpResumes stays false: nothing agent-driven rode along), and a
+// confirmed response writes the confirming marker while leaving the gate
+// question "answered" and the ticket in planning, not building.
+func TestGateApproveRunsFreeConfirmingTurn(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	_, runID := seedCohort(t, s, ticketID, validPlan("Confirming turn."), validScenarios(2, "confirm"))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{confirmedResult("confirm-sess-1", "Nothing is open.")}}
+	rec := &recordingRuntime{rt: rt}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("gate approve (confirming turn) Run: %v", err)
+	}
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want empty (the confirming turn never seals directly)", commit.Next)
+	}
+	if commit.Session == nil || commit.Session.BumpResumes {
+		t.Errorf("commit.Session = %+v, want BumpResumes=false (a free, owner-triggered resume)", commit.Session)
+	}
+	if !strings.HasPrefix(rec.lastReq.Prompt, "The owner wants to approve this plan and close the gate.") {
+		t.Errorf("confirming turn prompt = %q, want it to lead with ConfirmHeader", rec.lastReq.Prompt)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	after := getTicket(t, s, ticketID)
+	if after.State != testStatePlanning {
+		t.Errorf("ticket state = %q, want still planning", after.State)
+	}
+	gate, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate): %v", err)
+	}
+	if gate.State == nil || *gate.State != "answered" {
+		t.Errorf("gate state = %v, want still answered (the seal resolves it, not the confirming turn)", gate.State)
+	}
+	if n := countMsgs(t, s, ticketID, testMsgTypeUpdate, "gate confirmed run "); n != 1 {
+		t.Errorf("confirming markers = %d, want 1", n)
+	}
+}
+
+// countMsgs counts ticketID's own messages of type with a body starting
+// with prefix, through the public store API (ListMessages), not a direct
+// SQL count: package job_test has no *sql.DB handle.
+func countMsgs(t *testing.T, s *store.Store, ticketID int64, msgType, prefix string) int {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	n := 0
+	for i := range msgs {
+		if msgs[i].Type == msgType && strings.HasPrefix(msgs[i].Body, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestConfirmedWritesMarkerThenNextTickSeals proves the confirming turn's
+// own two-tick shape end to end (design section 22.12.3's table): the
+// first tick's "confirmed" commit writes the marker and nothing else
+// transitions; applying it and running planning again finds the approval
+// confirmed and seals, moving the ticket to building.
+func TestConfirmedWritesMarkerThenNextTickSeals(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	_, runID := seedCohort(t, s, ticketID, validPlan("Two ticks."), validScenarios(2, "twotick"))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{confirmedResult("confirm-sess-2", "Nothing is open.")}}
+	firstCommit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("first tick (confirming turn) Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	secondCommit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("second tick (seal) Run: %v", err)
+	}
+	if secondCommit.Next != testStateBuilding || secondCommit.Seal == nil {
+		t.Fatalf("second tick commit = (Next=%q, Seal=%+v), want (building, sealing run %d)", secondCommit.Next, secondCommit.Seal, runID)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateBuilding {
+		t.Errorf("final ticket state = %q, want building", final.State)
+	}
+}
+
+// TestGateApproveNotesReachConfirmingTurn proves the approval notes row
+// (design section 22.12.3): a reply sent alongside the approve pick
+// reaches the confirming turn's own prompt as a fenced "notes" input.
+func TestGateApproveNotesReachConfirmingTurn(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	_, runID := seedCohort(t, s, ticketID, validPlan("Notes reach confirm."), validScenarios(2, "notes"))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	answerGateQuestion(t, s, ticketID, qID, new("a"), "the JSON must stay stable")
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{confirmedResult("confirm-sess-3", "Nothing is open.")}}
+	rec := &recordingRuntime{rt: rt}
+	if _, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID); err != nil {
+		t.Fatalf("gate approve (confirming turn) Run: %v", err)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "notes", "the JSON must stay stable")
+}
+
+// TestConfirmingTurnQuestionsCancelsApproval proves the confirming turn's
+// own "questions" row (design section 22.12.3's table): the agent asking a
+// new question instead of confirming resolves the gate question (with a
+// cancellation marker naming the run, not a batch) and leaves the ticket
+// waiting on the new thread -- the owner gets a fresh gate only once it
+// settles and planning reaches ready again.
+func TestConfirmingTurnQuestionsCancelsApproval(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	_, runID := seedCohort(t, s, ticketID, validPlan("Cancels on questions."), validScenarios(2, "cancels"))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+
+	questionsResp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestions,
+		Questions: []response.Question{{
+			Key: "q1", Title: "Should the JSON carry a schema version?", Body: testQuestionBody,
+			Options:     []response.Option{{Key: "a", Text: testOptionAText}, {Key: "b", Text: testOptionBText}},
+			Recommended: "a",
+		}},
+		Progress: "Checking the owner's note before confirming.",
+	}
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: questionsResp, SessionID: "confirm-sess-4", ExitCode: 0, AgentTime: time.Second}},
+	}}
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("gate approve (confirming turn, questions) Run: %v", err)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d] (the gate resolves on cancellation)", commit.ResolveQuestions, qID)
+	}
+	waiting := testWaitingQuestions
+	if commit.Waiting == nil || *commit.Waiting != waiting {
+		t.Errorf("commit.Waiting = %v, want %q", commit.Waiting, waiting)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	if n := countMsgs(t, s, ticketID, testMsgTypeUpdate, "gate approval cancelled gate "); n != 1 {
+		t.Errorf("cancellation markers = %d, want 1", n)
+	}
+	after := getTicket(t, s, ticketID)
+	if after.State != testStatePlanning {
+		t.Errorf("ticket state = %q, want still planning", after.State)
+	}
+}
+
 // ---- approve: branch 4 (seals) and branch 5 (already sealed) --------------
 
 // TestPlanningHandler_Gate_Approve_SealsExactlyTheCohortAndTransitionsToBuilding
@@ -114,6 +338,7 @@ func TestPlanningHandler_Gate_Approve_SealsExactlyTheCohortAndTransitionsToBuild
 
 	qID := seedGateQuestion(t, s, ticketID, &newRunID)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+	seedConfirmedGate(t, s, ticketID, qID, newPlanVersion)
 
 	commit, err := runPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID)
 	if err != nil {
@@ -174,10 +399,11 @@ func TestPlanningHandler_Gate_Approve_AlreadySealedTransitionsWithNoNewSeal(t *t
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
-	_, runID := seedSealedCohort(t, s, ticketID, validPlan("Already sealed."), validScenarios(2, "sealed"))
+	planVersion, runID := seedSealedCohort(t, s, ticketID, validPlan("Already sealed."), validScenarios(2, "sealed"))
 
 	qID := seedGateQuestion(t, s, ticketID, &runID)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+	seedConfirmedGate(t, s, ticketID, qID, planVersion)
 
 	commit, err := runPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID)
 	if err != nil {
@@ -260,10 +486,11 @@ func TestPlanningHandler_Gate_Approve_Branch3_ScenarioCountOutOfRangeEscalates(t
 			t.Parallel()
 			s := newJobTestStore(t)
 			ticketID := seedFeatureTicketInPlanning(t, s)
-			_, runID := seedCohort(t, s, ticketID, validPlan("Out of range."), validScenarios(tc.n, "range"))
+			planVersion, runID := seedCohort(t, s, ticketID, validPlan("Out of range."), validScenarios(tc.n, "range"))
 
 			qID := seedGateQuestion(t, s, ticketID, &runID)
 			answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+			seedConfirmedGate(t, s, ticketID, qID, planVersion)
 
 			commit, err := runPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID)
 			if err != nil {
@@ -287,6 +514,7 @@ func TestPlanningHandler_Gate_Approve_Branch6_PartiallySealedEscalates(t *testin
 
 	qID := seedGateQuestion(t, s, ticketID, &runID)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+	seedConfirmedGate(t, s, ticketID, qID, 1)
 
 	commit, err := runPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID)
 	if err != nil {
@@ -304,13 +532,14 @@ func TestPlanningHandler_Gate_Approve_Branch0_TwoMismatchMarkersEscalates(t *tes
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
-	_, runID := seedCohort(t, s, ticketID, validPlan("Twice mismatched."), validScenarios(2, "mismatch"))
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Twice mismatched."), validScenarios(2, "mismatch"))
 
 	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+strconv.FormatInt(runID, 10))
 	insertUpdateMarker(t, s, ticketID, "seal mismatch cohort "+strconv.FormatInt(runID, 10))
 
 	qID := seedGateQuestion(t, s, ticketID, &runID)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+	seedConfirmedGate(t, s, ticketID, qID, planVersion)
 
 	commit, err := runPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID)
 	if err != nil {

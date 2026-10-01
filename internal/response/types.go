@@ -270,6 +270,18 @@ type RepliesResponse struct { // outcome: replies (planning only)
 
 func (r *RepliesResponse) ReplyList() []Reply { return r.Replies }
 
+// ConfirmedResponse is the confirming turn's own clean answer (D32, design
+// section 22.12.3): the gate's approval resumes the planning session with a
+// fixed question asking whether anything is still open, and this outcome
+// says no. Notes is the agent's own one-or-two-sentence reason; Conversation
+// rides along like every other planning outcome's (a confirming turn can
+// still receive an owner message, on the rare resume after a crash).
+type ConfirmedResponse struct { // outcome: confirmed (planning only, the confirming turn)
+	Head
+	Notes string `xml:"notes" json:"notes" jsonschema:"minLength=1" doc:"why no question is open, one or two sentences"`
+	Conversation
+}
+
 // ---- plan review and code review -----------------------------------------
 
 type FindingsResponse struct { // planreview and review, outcome ok

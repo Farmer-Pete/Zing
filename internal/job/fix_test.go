@@ -89,7 +89,7 @@ func withFixTestCmd2(deps job.Deps, ticket store.Ticket) job.Deps {
 func writeFixRequestMarker(t *testing.T, s *store.Store, ticketID int64, kind job.FixKind, text string, afterRunID int64) int64 {
 	t.Helper()
 	body := fmt.Sprintf("fix requested %s after run %d\n%s", kind, afterRunID, text)
-	id, err := s.InsertMessage(t.Context(), store.Message{TicketID: ticketID, Type: "update", Author: "system", Body: body})
+	id, err := s.InsertMessage(t.Context(), store.Message{TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorSystem, Body: body})
 	if err != nil {
 		t.Fatalf("insert fix request marker: %v", err)
 	}

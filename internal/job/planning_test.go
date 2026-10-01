@@ -1964,7 +1964,7 @@ func findingsResponse(findings ...response.Finding) *response.FindingsResponse {
 // ordinarily write it (design section 5.3).
 func insertUpdateMarker(t *testing.T, s *store.Store, ticketID int64, body string) {
 	t.Helper()
-	if _, err := s.InsertMessage(t.Context(), store.Message{TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: body}); err != nil {
+	if _, err := s.InsertMessage(t.Context(), store.Message{TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorSystem, Body: body}); err != nil {
 		t.Fatalf("insertUpdateMarker(%q): %v", body, err)
 	}
 }

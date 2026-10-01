@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,10 @@ import (
 // named once so goconst has nothing to flag across this file's several
 // closed-question tests (D30 and D31 alike).
 const testConflictQuestionClosed = "question closed"
+
+// testReopenText is the owner's reopening reply body, shared by this
+// file's several D32 reopen tests (goconst).
+const testReopenText = "Print JSON too."
 
 // draftQuestionPayload builds a QuestionPayload for kind, with options for
 // an option kind or items for an item kind, marshaled the way a real
@@ -1038,15 +1043,19 @@ func TestSendBatchQueuesUnderOpenEscalation(t *testing.T) {
 	}
 }
 
-// TestSaveDraftPlanningQuestionDraftableUntilSettled proves questionDraftableTx's
-// own planning rule (design section 22.3): a planning question drafts fine
-// in "answered" state with waiting_on already cleared (nil) -- every other
-// question kind would refuse this as "question closed" -- and only a
-// "resolved" state ever refuses it.
-func TestSaveDraftPlanningQuestionDraftableUntilSettled(t *testing.T) {
+// TestSaveDraftPlanningQuestionLocksOnlyAtSeal proves questionDraftableTx's
+// own planning rule (design section 22.3, widened by D32, design section
+// 22.12.1, 22.12.2): a planning question drafts fine in "answered" state
+// with waiting_on already cleared (nil) -- every other question kind would
+// refuse this as "question closed" -- and a "resolved" one still drafts
+// fine (reopenable) while its ticket is in "planning". Only once the ticket
+// has left "planning" (the seal, building here) does the same resolved
+// question finally refuse.
+func TestSaveDraftPlanningQuestionLocksOnlyAtSeal(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
 	qID := insertPlanningQuestion(t, s, ticketID)
 	closeQuestion(t, s, qID, questionStateAnswered)
 	// waiting_on stays nil: under D30's own rule this would refuse the
@@ -1058,10 +1067,15 @@ func TestSaveDraftPlanningQuestionDraftableUntilSettled(t *testing.T) {
 	}
 
 	closeQuestion(t, s, qID, questionStateResolved)
-	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "reopen it"}); err != nil {
+		t.Fatalf("SaveDraft on a resolved, reopenable planning question: %v, want it to succeed", err)
+	}
+
+	setTicketState(t, s, ticketID, testStateBuilding) // the seal: locks every planning thread for good
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "too late"})
 	var ce *ConflictError
 	if !errors.As(err, &ce) || ce.Reason != testConflictQuestionClosed {
-		t.Errorf("SaveDraft on a resolved planning question: err = %v, want the \"question closed\" conflict", err)
+		t.Errorf("SaveDraft on a resolved planning question after the seal: err = %v, want the \"question closed\" conflict", err)
 	}
 }
 
@@ -1091,6 +1105,205 @@ func TestClearMatchingWaitIgnoresPlanningQuestions(t *testing.T) {
 	}
 	if !res.WaitCleared {
 		t.Error("WaitCleared = false, want true (the open planning question must not hold this wait)")
+	}
+}
+
+// ---- D32: reopen until the gate (design section 22.12.2) ------------------
+
+// insertSettledPlanningQuestion inserts a planning question already
+// resolved, with a zing-authored decision row: the fixture D32's reopen
+// tests build on (design section 22.12.1's "reopenable").
+func insertSettledPlanningQuestion(t *testing.T, s *Store, ticketID, runID int64, key, decision string) int64 {
+	t.Helper()
+	qID := insertQuestionOfKindWithRun(t, s, ticketID, runID, key, response.QuestionKindQuestion)
+	closeQuestion(t, s, qID, questionStateResolved)
+	if _, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, ParentID: &qID, RunID: &runID, Type: msgTypeResolved, Author: authorZing, Body: decision,
+	}); err != nil {
+		t.Fatalf("insert decision row for %s: %v", key, err)
+	}
+	return qID
+}
+
+// TestSendBatchReopensSettledThreadAndWithdrawsGate proves reopenStepTx's
+// own steps 2 through 4 (design section 22.12.2): a reply to a settled
+// planning thread, while the ticket sits at an open gate, reopens the
+// thread with its own "followup" turn, withdraws the gate question (a
+// resolved/system row, design section 4.2's withdrawQuestionTx), and clears
+// the "gate" wait -- all in the one SendBatch transaction.
+func TestSendBatchReopensSettledThreadAndWithdrawsGate(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	setTicketWaiting(t, s, ticketID, string(response.QuestionKindGate))
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (the gate question was withdrawn)")
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateOpen {
+		t.Errorf("Q1 state = %v, want %q (reopened)", q1.State, questionStateOpen)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ? AND body = ?`,
+		ticketID, q1ID, msgTypeFollowup, authorYou, "reopened"); n != 1 {
+		t.Errorf("followup rows for Q1 = %d, want 1", n)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate): %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state = %v, want %q (withdrawn)", gate.State, questionStateResolved)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ?`,
+		ticketID, gateQID, msgTypeResolved, authorSystem); n != 1 {
+		t.Errorf("resolved/system rows for the gate = %d, want 1", n)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// TestSendBatchReopenBeatsApproveInOneBatch proves step 1 (design section
+// 22.12.2, 22.12.6's "Approve and a reopen in one batch"): a batch that
+// carries both a reply on a reopenable thread and an approve pick on the
+// still-open gate discards the gate draft as stale, and the gate ends
+// withdrawn rather than answered.
+func TestSendBatchReopenBeatsApproveInOneBatch(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	setTicketWaiting(t, s, ticketID, string(response.QuestionKindGate))
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); err != nil {
+		t.Fatalf("SaveDraft Q1: %v", err)
+	}
+	approve := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &gateQID, Option: &approve}); err != nil {
+		t.Fatalf("SaveDraft gate: %v", err)
+	}
+
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Errorf("Sent = %d, want 1 (only Q1's reply)", res.Sent)
+	}
+	if res.Discarded != 1 {
+		t.Errorf("Discarded = %d, want 1 (the losing gate draft)", res.Discarded)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate): %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state = %v, want %q (withdrawn, never answered)", gate.State, questionStateResolved)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE parent_id = ? AND type = ?`, gateQID, msgTypeAnswer); n != 0 {
+		t.Errorf("answer rows on the gate = %d, want 0 (the draft was discarded, not sent)", n)
+	}
+}
+
+// TestSendDuringApprovalCancelsIt proves step 3's own "answered with an
+// approval in progress" branch (design section 22.12.2, 22.12.6's "the
+// owner writes on a settled thread during an approval"): the owner sends
+// Approve first (the gate goes "answered"), then reopens a settled thread
+// in a later batch; the gate is withdrawn with a cancellation marker naming
+// that later batch, not the run that would have confirmed it.
+func TestSendDuringApprovalCancelsIt(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	approve := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &gateQID, Option: &approve}); err != nil {
+		t.Fatalf("SaveDraft approve: %v", err)
+	}
+	approveRes, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (approve): %v", err)
+	}
+	if approveRes.Sent != 1 {
+		t.Fatalf("approve SendBatch = %+v, want Sent=1", approveRes)
+	}
+	gateAfterApprove, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate) after approve: %v", err)
+	}
+	if gateAfterApprove.State == nil || *gateAfterApprove.State != questionStateAnswered {
+		t.Fatalf("gate state after approve = %v, want %q", gateAfterApprove.State, questionStateAnswered)
+	}
+
+	if _, saveErr := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); saveErr != nil {
+		t.Fatalf("SaveDraft reopen: %v", saveErr)
+	}
+	reopenRes, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (reopen): %v", err)
+	}
+	if reopenRes.Sent != 1 {
+		t.Fatalf("reopen SendBatch = %+v, want Sent=1", reopenRes)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate) after reopen: %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state after reopen = %v, want %q (withdrawn)", gate.State, questionStateResolved)
+	}
+	wantCancel := fmt.Sprintf("gate approval cancelled gate %d batch %d", gateQID, reopenRes.BatchID)
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ? AND body = ?`,
+		ticketID, gateQID, msgTypeUpdate, authorSystem, wantCancel); n != 1 {
+		t.Errorf("cancellation marker %q not found", wantCancel)
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateOpen {
+		t.Errorf("Q1 state = %v, want %q (reopened)", q1.State, questionStateOpen)
 	}
 }
 

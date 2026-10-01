@@ -23,7 +23,7 @@ func TestValues(t *testing.T) {
 			"queued", "planning", "building", "reviewing", "judging", "shipping", "done", "escalated", "abandoned",
 		}},
 		{"Outcome", Outcome(""), []string{
-			"bug", "feature", "questions", "replies", "ready", "children", "nothing_to_do", "ok", "question", "error",
+			"bug", "feature", "questions", "replies", "confirmed", "ready", "children", "nothing_to_do", "ok", "question", "error",
 		}},
 		{"ClaimKind", ClaimKind(""), []string{"code", "env"}},
 		{"ClaimVerdict", ClaimVerdict(""), []string{"true", "false", "unchecked"}},

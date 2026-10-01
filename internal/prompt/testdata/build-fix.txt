@@ -6,7 +6,10 @@ Fix run: Fix review findings
 Work in this order.
 
 1. Read the plan's overview, the changes and types that this task touches,
-   and the test this task names. Read the code those changes name.
+   and the test this task names. Read the code those changes name. When an
+   approval input is present, it is the owner's note from approving the
+   plan; follow it unless it contradicts the plan, and say so in your
+   report if it does.
 
 2. Write the named test first. Run the project's test command and watch
    it fail for the right reason.

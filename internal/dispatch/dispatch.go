@@ -585,6 +585,18 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		if errors.Is(err, store.ErrSealMismatch) && errors.As(err, &mismatch) {
 			return d.releaseAfterSealMismatch(ctx, ticket.ID, commit, expires, mismatch)
 		}
+
+		// store.ErrSealRefused (D32, design section 22.12.3a): the seal
+		// invariant's own check failed -- no approval, a stale or cancelled
+		// one, or an owner message after it. It releases the claim and
+		// writes a marker naming the reason, exactly like a mismatch, but
+		// never escalates: the next tick re-reads the store, which already
+		// reflects whatever made the check fail (a resolved gate question
+		// after an owner send, for instance).
+		var refused *store.SealRefusedError
+		if errors.Is(err, store.ErrSealRefused) && errors.As(err, &refused) {
+			return d.releaseAfterSealRefused(ctx, ticket.ID, commit, expires, refused)
+		}
 	}
 	if err != nil || !applied {
 		if err != nil {
@@ -634,6 +646,35 @@ func (d *Dispatcher) releaseAfterSealMismatch(
 		Body: fmt.Sprintf("seal mismatch cohort %d", cohortRunID),
 	}
 	return d.releaseClaimNoStop(ctx, ticketID, expires, "claim released after seal mismatch", marker)
+}
+
+// releaseAfterSealRefused is D32's own dispatcher rule (design section
+// 22.12.3a): log the refusal at warn with the gate question id commit's own
+// GateApproval named (0 when the commit carried none at all, the "no gate
+// approval check" case -- a caller bug, since every real seal-shaped commit
+// sets it), write the "seal refused gate <QID>" marker (first line) then
+// the reason (second line), and release the claim through the same
+// no-escalate path -- the next tick re-reads the store, which already
+// reflects whatever made the check fail. The marker is parented to the gate
+// question, exactly as releaseAfterSealMismatch's own marker is, only when
+// GateApproval named one; with none, it is still written, unparented,
+// rather than silently dropped.
+func (d *Dispatcher) releaseAfterSealRefused(
+	ctx context.Context, ticketID int64, commit store.HandlerCommit, expires time.Time, refused *store.SealRefusedError,
+) error {
+	var qid int64
+	var parentID *int64
+	if commit.GateApproval != nil {
+		qid = commit.GateApproval.QuestionID
+		parentID = &qid
+	}
+	slog.Warn("seal refused", "ticket_id", ticketID, "question_id", qid, "reason", refused.Reason)
+
+	marker := store.Message{
+		TicketID: ticketID, ParentID: parentID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("seal refused gate %d\n%s", qid, refused.Reason),
+	}
+	return d.releaseClaimNoStop(ctx, ticketID, expires, "claim released after seal refused", marker)
 }
 
 // postCommitTrackerEffect runs commit.TrackerEffect, if any, only after

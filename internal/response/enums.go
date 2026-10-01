@@ -57,6 +57,7 @@ const (
 	OutcomeFeature     Outcome = "feature"
 	OutcomeQuestions   Outcome = "questions"
 	OutcomeReplies     Outcome = "replies"
+	OutcomeConfirmed   Outcome = "confirmed"
 	OutcomeReady       Outcome = "ready"
 	OutcomeChildren    Outcome = "children"
 	OutcomeNothingToDo Outcome = "nothing_to_do"
@@ -69,7 +70,7 @@ const (
 func (Outcome) Values() []string {
 	return []string{
 		string(OutcomeBug), string(OutcomeFeature), string(OutcomeQuestions), string(OutcomeReplies),
-		string(OutcomeReady), string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk),
+		string(OutcomeConfirmed), string(OutcomeReady), string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk),
 		string(OutcomeQuestion), string(OutcomeError),
 	}
 }

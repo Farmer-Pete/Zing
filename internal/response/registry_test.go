@@ -106,6 +106,7 @@ func TestRegisteredPairs_MatchesPlanClosedSet(t *testing.T) {
 		{JobClassify, OutcomeFeature},
 		{JobPlanning, OutcomeQuestions},
 		{JobPlanning, OutcomeReplies},
+		{JobPlanning, OutcomeConfirmed},
 		{JobPlanning, OutcomeReady},
 		{JobPlanning, OutcomeChildren},
 		{JobPlanning, OutcomeNothingToDo},
@@ -224,6 +225,30 @@ func TestRepliesOutcomeIsPlanningOnly(t *testing.T) {
 		t.Fatal("Lookup(build, replies) = nil error, want an error: replies is not an outcome of build")
 	}
 	want := "no response for job build outcome replies"
+	if got := err.Error(); got != want {
+		t.Errorf("err = %q, want %q", got, want)
+	}
+}
+
+// TestConfirmedIsPlanningOnly proves confirmed, D32's own confirming-turn
+// outcome, resolves only for planning (to *ConfirmedResponse) and is not an
+// outcome of any other job.
+func TestConfirmedIsPlanningOnly(t *testing.T) {
+	t.Parallel()
+
+	r, err := Lookup(JobPlanning, OutcomeConfirmed)
+	if err != nil {
+		t.Fatalf("Lookup(planning, confirmed) = %v, want no error", err)
+	}
+	if _, ok := r.(*ConfirmedResponse); !ok {
+		t.Errorf("Lookup(planning, confirmed) type = %T, want *ConfirmedResponse", r)
+	}
+
+	_, err = Lookup(JobBuild, OutcomeConfirmed)
+	if err == nil {
+		t.Fatal("Lookup(build, confirmed) = nil error, want an error: confirmed is not an outcome of build")
+	}
+	want := "no response for job build outcome confirmed"
 	if got := err.Error(); got != want {
 		t.Errorf("err = %q, want %q", got, want)
 	}

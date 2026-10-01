@@ -250,14 +250,17 @@ func openQuestionForTicketTx(ctx context.Context, tx *sql.Tx, questionID, ticket
 }
 
 // questionDraftableTx reports whether q still takes a draft. A planning
-// question (D31, design section 22.3) is draftable while its state is
-// "open" or "answered" (the legacy upgrade case, section 22.8), whatever
-// waiting_on says -- a settled one is the existing "question closed"
-// conflict. Every other question keeps D30's own rule: true for state=open
-// always, true for state=answered only while ticketID's own waiting_on is
-// still "questions" (the agent has not resumed with this round yet, so a
-// revised pick still lands before it is read), false for every other state
-// or once the wait has cleared.
+// question (D31, design section 22.3; widened by D32, design section
+// 22.12.1, 22.12.2) is draftable while its state is "open" or "answered"
+// (the legacy upgrade case, section 22.8), whatever waiting_on says; a
+// "resolved" one is draftable too, while it is reopenable (its ticket is
+// still in "planning" -- the seal is what locks it for good). Any other
+// state (or a resolved one past the seal) is the existing "question closed"
+// conflict. Every other question kind keeps D30's own rule: true for
+// state=open always, true for state=answered only while ticketID's own
+// waiting_on is still "questions" (the agent has not resumed with this
+// round yet, so a revised pick still lands before it is read), false for
+// every other state or once the wait has cleared.
 func questionDraftableTx(ctx context.Context, tx *sql.Tx, q MessageRow, ticketID int64) (bool, error) {
 	if q.State == nil {
 		return false, nil
@@ -270,6 +273,12 @@ func questionDraftableTx(ctx context.Context, tx *sql.Tx, q MessageRow, ticketID
 		switch *q.State {
 		case questionStateOpen, questionStateAnswered:
 			return true, nil
+		case questionStateResolved:
+			state, stateErr := ticketStateTx(ctx, tx, ticketID)
+			if stateErr != nil {
+				return false, stateErr
+			}
+			return state == ticketStatePlanning, nil
 		default:
 			return false, nil
 		}
@@ -316,6 +325,19 @@ func ticketWaitingOnTx(ctx context.Context, tx *sql.Tx, ticketID int64) (string,
 		return "", fmt.Errorf("ticket %d waiting_on: %w", ticketID, err)
 	}
 	return waitingOn.String, nil
+}
+
+// ticketStateTx reads ticketID's own state column (D32, design section
+// 22.12.1's "reopenable"): questionDraftableTx's own check that a resolved
+// planning question's ticket has not yet sealed, mirroring
+// checkGateApprovalTx's (commit.go) own read of the same column at the top
+// of CommitHandlerResult.
+func ticketStateTx(ctx context.Context, tx *sql.Tx, ticketID int64) (string, error) {
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM tickets WHERE id = ?`, ticketID).Scan(&state); err != nil {
+		return "", fmt.Errorf("ticket %d state: %w", ticketID, err)
+	}
+	return state, nil
 }
 
 // lastInsertIDTx returns the id insertMessageTx (commit.go) just gave its
@@ -637,6 +659,15 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		return BatchResult{}, fmt.Errorf("send batch: next batch id: %w", err)
 	}
 
+	// D32's own reopen step (design section 22.12.2), after revalidation and
+	// before markAnsweredQuestionsTx: a reopen may itself discard one more
+	// draft (a gate approve that loses to a reopen in the same batch), so
+	// reopenedDiscarded joins len(stale) in the result below.
+	valid, reopenedDiscarded, err := s.reopenStepTx(ctx, tx, ticketID, batchID, valid)
+	if err != nil {
+		return BatchResult{}, err
+	}
+
 	for i := range valid {
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE messages SET state = ?, batch_id = ? WHERE id = ?`, answerStateSent, batchID, valid[i].ID,
@@ -664,7 +695,7 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 	if err = tx.Commit(); err != nil {
 		return BatchResult{}, fmt.Errorf("send batch: commit tx: %w", err)
 	}
-	return BatchResult{Sent: len(valid), Discarded: len(stale), BatchID: batchID, WaitCleared: waitCleared}, nil
+	return BatchResult{Sent: len(valid), Discarded: len(stale) + reopenedDiscarded, BatchID: batchID, WaitCleared: waitCleared}, nil
 }
 
 // logSendBatchOutcome logs SendBatch's major branches with their ids
@@ -1071,6 +1102,194 @@ func openEscalationQuestionExistsTx(ctx context.Context, tx *sql.Tx, ticketID in
 		return false, fmt.Errorf("open escalation question for ticket %d: %w", ticketID, err)
 	}
 	return true, nil
+}
+
+// ---- D32: reopen until the gate (design section 22.12.2) ------------------
+
+// reopenableQuestionIDsTx returns, among valid's own question-targeted
+// drafts, the distinct ids of every planning question currently in state
+// "resolved" (design section 22.12.1's "reopenable": revalidateBatchTx's own
+// openQuestionForTicketTx -> questionDraftableTx already refused any such
+// draft unless the ticket is still in "planning", so every id this returns
+// is reopenable right now).
+func reopenableQuestionIDsTx(ctx context.Context, tx *sql.Tx, ticketID int64, valid []MessageRow) ([]int64, error) {
+	seen := make(map[int64]bool)
+	var out []int64
+	for i := range valid {
+		if valid[i].ParentID == nil {
+			continue
+		}
+		qid := *valid[i].ParentID
+		if seen[qid] {
+			continue
+		}
+		seen[qid] = true
+
+		var state string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT state FROM messages WHERE id = ? AND type = ?`, qid, msgTypeQuestion,
+		).Scan(&state); err != nil || state != questionStateResolved {
+			continue
+		}
+		isPlanning, err := isPlanningQuestionTx(ctx, tx, ticketID, qid)
+		if err != nil {
+			return nil, err
+		}
+		if isPlanning {
+			out = append(out, qid)
+		}
+	}
+	return out, nil
+}
+
+// openOrAnsweredGateQuestionTx returns ticketID's own gate question, open or
+// answered, the one a reopen's own step 3 (design section 22.12.2) acts on.
+// ok is false when the ticket carries no such question (already resolved,
+// or none posted yet).
+func openOrAnsweredGateQuestionTx(ctx context.Context, tx *sql.Tx, ticketID int64) (questionID int64, state string, ok bool, err error) {
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, state FROM messages WHERE ticket_id = ? AND type = ? AND json_extract(payload, '$.kind') = ? AND state IN (?, ?)
+		 ORDER BY id DESC LIMIT 1`,
+		ticketID, msgTypeQuestion, string(response.QuestionKindGate), questionStateOpen, questionStateAnswered,
+	).Scan(&questionID, &state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, "", false, nil
+	case err != nil:
+		return 0, "", false, fmt.Errorf("open or answered gate question for ticket %d: %w", ticketID, err)
+	}
+	return questionID, state, true, nil
+}
+
+// gateApprovalInProgressTx reports whether gateQID's newest sent answer
+// picks "a" (design section 22.12.1's "gate approval in progress"): the
+// condition that makes an "answered" gate question reopen-withdrawable too,
+// alongside one still "open".
+func gateApprovalInProgressTx(ctx context.Context, tx *sql.Tx, gateQID int64) (bool, error) {
+	var payload sql.NullString
+	err := tx.QueryRowContext(ctx,
+		`SELECT payload FROM messages WHERE parent_id = ? AND type = ? AND state = ? ORDER BY id DESC LIMIT 1`,
+		gateQID, msgTypeAnswer, answerStateSent,
+	).Scan(&payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("gate approval in progress for question %d: %w", gateQID, err)
+	}
+	if !payload.Valid {
+		return false, nil
+	}
+	var ap response.AnswerPayload
+	if jsonErr := json.Unmarshal([]byte(payload.String), &ap); jsonErr != nil {
+		// Unreachable for a real answer row (every one validated against
+		// messages/answer.json at insert): a payload that fails to decode is
+		// not an approval, not a failed read.
+		return false, nil //nolint:nilerr // see the comment above
+	}
+	return ap.Option != nil && *ap.Option == gateApproveOptionKey, nil
+}
+
+// reopenStepTx applies D32's own reopen step (design section 22.12.2),
+// between revalidateBatchTx and markAnsweredQuestionsTx: a reopen beats an
+// approve of the same batch (step 1, discarding the losing gate draft out
+// of valid and off the table), reopens every reopenable thread the batch
+// writes a valid row to with its own "followup" turn (step 2), and
+// withdraws the ticket's own gate question -- open outright, or answered
+// with an approval in progress, the latter also getting the cancellation
+// marker (step 3). Step 4 (clearing a "gate" or "questions" wait) and step 5
+// (logging the reopen itself) are SendBatch's own existing
+// clearMatchingWaitTx and wakePlanningTx calls and this function's own log
+// lines; kindForWaitReason already maps "gate" to QuestionKindGate
+// (Package 7), so withdrawing the gate question here is already everything
+// clearMatchingWaitTx needs to clear that wait on its own next call. It
+// returns the pruned valid slice and how many drafts step 1 discarded.
+func (s *Store) reopenStepTx(ctx context.Context, tx *sql.Tx, ticketID, batchID int64, valid []MessageRow) ([]MessageRow, int, error) {
+	reopenedQIDs, err := reopenableQuestionIDsTx(ctx, tx, ticketID, valid)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(reopenedQIDs) == 0 {
+		return valid, 0, nil
+	}
+
+	gateQID, gateState, hasGate, err := openOrAnsweredGateQuestionTx(ctx, tx, ticketID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	out := valid
+	discarded := 0
+	if hasGate && gateState == questionStateOpen {
+		kept := make([]MessageRow, 0, len(valid))
+		var toDiscard []MessageRow
+		for i := range valid {
+			if valid[i].Type == msgTypeAnswer && valid[i].ParentID != nil && *valid[i].ParentID == gateQID {
+				toDiscard = append(toDiscard, valid[i])
+				continue
+			}
+			kept = append(kept, valid[i])
+		}
+		if len(toDiscard) > 0 {
+			if delErr := deleteStaleDraftsTx(ctx, tx, toDiscard); delErr != nil {
+				return nil, 0, delErr
+			}
+			out = kept
+			discarded = len(toDiscard)
+		}
+	}
+
+	for _, qid := range reopenedQIDs {
+		res, execErr := tx.ExecContext(ctx,
+			`UPDATE messages SET state = ? WHERE id = ? AND type = ? AND state = ?`,
+			questionStateOpen, qid, msgTypeQuestion, questionStateResolved)
+		if execErr != nil {
+			return nil, 0, fmt.Errorf("send batch: reopen question %d: %w", qid, execErr)
+		}
+		n, raErr := res.RowsAffected()
+		if raErr != nil {
+			return nil, 0, fmt.Errorf("send batch: reopen question %d: %w", qid, raErr)
+		}
+		if n == 0 {
+			continue // already reopened (or resolved again) concurrently: converge, no second followup
+		}
+		if insErr := s.insertMessageTx(ctx, tx, Message{
+			TicketID: ticketID, ParentID: &qid, Type: msgTypeFollowup, Author: authorYou, Body: "reopened", BatchID: &batchID,
+		}); insErr != nil {
+			return nil, 0, fmt.Errorf("send batch: insert followup for question %d: %w", qid, insErr)
+		}
+		slog.InfoContext(ctx, "thread reopened", "ticket_id", ticketID, "question_id", qid, "batch_id", batchID)
+	}
+
+	if hasGate {
+		switch gateState {
+		case questionStateOpen:
+			if wErr := s.withdrawQuestionTx(ctx, tx, ticketID, gateQID); wErr != nil {
+				return nil, 0, fmt.Errorf("send batch: withdraw gate question %d: %w", gateQID, wErr)
+			}
+			slog.InfoContext(ctx, "gate withdrawn", "ticket_id", ticketID, "question_id", gateQID)
+		case questionStateAnswered:
+			approving, apErr := gateApprovalInProgressTx(ctx, tx, gateQID)
+			if apErr != nil {
+				return nil, 0, apErr
+			}
+			if !approving {
+				break
+			}
+			if wErr := s.withdrawQuestionTx(ctx, tx, ticketID, gateQID); wErr != nil {
+				return nil, 0, fmt.Errorf("send batch: withdraw gate question %d: %w", gateQID, wErr)
+			}
+			if insErr := s.insertMessageTx(ctx, tx, Message{
+				TicketID: ticketID, ParentID: &gateQID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: fmt.Sprintf("gate approval cancelled gate %d batch %d", gateQID, batchID),
+			}); insErr != nil {
+				return nil, 0, fmt.Errorf("send batch: insert cancellation marker for gate %d: %w", gateQID, insErr)
+			}
+			slog.InfoContext(ctx, "gate withdrawn", "ticket_id", ticketID, "question_id", gateQID)
+		}
+	}
+
+	return out, discarded, nil
 }
 
 // SetSettings writes one or more settings rows in a single transaction

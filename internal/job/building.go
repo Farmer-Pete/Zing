@@ -1623,7 +1623,12 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	titlePrefix := fmt.Sprintf("Task %d: ", u.TaskN)
 	bt := prompt.BuildTask{N: u.TaskN, Total: totalTasks, Title: strings.TrimPrefix(u.Title, titlePrefix), Text: tk.Text, Test: tk.Test}
 
-	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, accepted, extra)
+	approvalNotes, err := d.Store.ApprovalNotes(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: approval notes: %w", err)
+	}
+
+	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, approvalNotes, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
 	}

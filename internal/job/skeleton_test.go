@@ -67,6 +67,7 @@ const (
 	testArtifactTypePlanreview = "planreview"
 
 	testMsgTypeUpdate = "update"
+	testAuthorSystem  = "system"
 	testKindBug       = "bug"
 	testKindFeature   = "feature"
 	testTicketTitle   = "Add a hello endpoint"

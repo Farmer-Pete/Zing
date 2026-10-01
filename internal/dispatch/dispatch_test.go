@@ -65,6 +65,8 @@ const (
 	testRuntimeFake     = "fake"
 
 	testMsgTypeEscalation = "escalation"
+	testMsgTypeUpdate     = "update"
+	testArtifactTypePlan  = "plan"
 	testOutcomeError      = "error"
 	testModelClaudeX      = "claude-x"
 )
@@ -503,7 +505,7 @@ func judgeRoundMarkerBodies(t *testing.T, s *store.Store, ticketID int64) []stri
 	}
 	var bodies []string
 	for i := range msgs {
-		if msgs[i].Type == "update" {
+		if msgs[i].Type == testMsgTypeUpdate {
 			bodies = append(bodies, msgs[i].Body)
 		}
 	}
@@ -2195,7 +2197,11 @@ func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
 	defer cancel()
 
 	reg := job.Registry()
-	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateBuilding, reason: testReasonPlanReady}
+	// Next is "done", not "building": D32's own seal invariant (design
+	// section 22.12.3a) gates a planning -> building commit on a
+	// GateApproval, which this test has no reason to carry -- it only
+	// cares that a commit lands despite the cancelled tick context.
+	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateDone, reason: testReasonPlanReady}
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
@@ -2204,8 +2210,8 @@ func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
 	}
 
 	final := getTicket(t, s, ticketID)
-	if final.State != testStateBuilding {
-		t.Errorf("final ticket state = %q, want building (the post-handler commit must survive ctx's own cancellation)", final.State)
+	if final.State != testStateDone {
+		t.Errorf("final ticket state = %q, want done (the post-handler commit must survive ctx's own cancellation)", final.State)
 	}
 }
 
@@ -2944,7 +2950,9 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 // staleOwnerHandler runs one real fake-runtime turn (job planning), then
 // simulates a concurrent reconcile stealing this ticket's lease mid-run by
 // expiring every claim as of just past its own Expires, and finally returns
-// a commit that would otherwise be perfectly legal (planning -> building).
+// a commit that would otherwise be perfectly legal (planning -> done; not
+// "building", which D32's own seal invariant, design section 22.12.3a, now
+// gates on a GateApproval this test has no reason to carry).
 // CommitHandlerResult's fence then no longer matches, so the dispatcher must
 // fail closed rather than re-drive the fake session it already advanced.
 type staleOwnerHandler struct{}
@@ -2960,7 +2968,7 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateBuilding, Reason: testReasonPlanReady}, nil
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateDone, Reason: testReasonPlanReady}, nil
 }
 
 // staleOwnerReleaseHandler runs one real fake-runtime turn (job planning),
@@ -3089,11 +3097,55 @@ func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) 
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
+
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval; this handler tests sealCohortTx's own mismatch, not the
+	// gate flow, so it seeds a fresh, valid one on every call (including a
+	// retry after a prior mismatch rolled its own fixture back).
+	gateQID, approveAID, gaErr := gateApprovalFixture(ctx, d.Store, t.ID)
+	if gaErr != nil {
+		return store.HandlerCommit{}, gaErr
+	}
+
 	return store.HandlerCommit{
 		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
-		Artifacts: []store.Artifact{{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)}},
-		Seal:      &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+		Artifacts:    []store.Artifact{{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)}},
+		Seal:         &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+		GateApproval: &store.GateApproval{QuestionID: gateQID, AnswerID: approveAID, PlanVersion: 1},
 	}, nil
+}
+
+// gateApprovalFixture seeds the minimal gate approval the seal invariant
+// needs (D32, design section 22.12.1, 22.12.3a): a gate question, its
+// approving answer, and the confirming marker binding both to plan version
+// 1. Used by test handlers whose own point is sealCohortTx's or the
+// dispatcher's behavior, not the gate flow itself.
+func gateApprovalFixture(ctx context.Context, s *store.Store, ticketID int64) (gateQID, approveAID int64, err error) {
+	const authorZing = "zing" // avoids a third bare "zing" literal (goconst)
+	gatePayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateAnswered,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	gateQID, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, Type: "question", Author: authorZing, State: new("answered"), Body: "Q1", Payload: gatePayload,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	approveAID, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "answer", Author: "you", State: new("sent"), Payload: []byte(`{"option":"a"}`),
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	_, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: testMsgTypeUpdate, Author: "system",
+		Body: fmt.Sprintf("gate confirmed run 1 plan v1 gate %d answer %d", gateQID, approveAID),
+	})
+	return gateQID, approveAID, err
 }
 
 // countSealMismatchMarkers counts msgs' "update" messages whose body starts
@@ -3103,7 +3155,7 @@ func countSealMismatchMarkers(msgs []store.MessageRow) int {
 	const prefix = "seal mismatch cohort"
 	n := 0
 	for i := range msgs {
-		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, prefix) {
+		if msgs[i].Type == testMsgTypeUpdate && strings.HasPrefix(msgs[i].Body, prefix) {
 			n++
 		}
 	}
@@ -3166,6 +3218,84 @@ func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
 	}
 }
 
+// sealRefusedHandler proposes a Seal that sealCohortTx would otherwise
+// accept (its ExpectedCount matches the one scenario it seeds), carrying no
+// GateApproval at all: the seal invariant's own check 1 refuses it (design
+// section 22.12.3a) before sealCohortTx ever runs, isolating that refusal
+// from a sealCohortTx mismatch.
+type sealRefusedHandler struct{}
+
+func (sealRefusedHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	scPayload, err := json.Marshal(response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "the server is running", When: "a request arrives", Then: "it responds",
+	})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Artifacts: []store.Artifact{
+			{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)},
+			{RunID: &rsv.RunID, Type: "scenario", Payload: scPayload},
+		},
+		Seal: &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+	}, nil
+}
+
+// TestSealRefusedReleasesClaimAndMarks proves the D32 dispatcher rule
+// (design section 22.12.3a): a seal invariant refusal (here, "no gate
+// approval check") releases the claim, writes the "seal refused gate <QID>"
+// marker (QID 0, since the commit carried no GateApproval at all) with the
+// reason on its own line, never escalates, and never stops the dispatcher.
+func TestSealRefusedReleasesClaimAndMarks(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = sealRefusedHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a seal refusal must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (a seal refusal must not fail closed)")
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Type == testMsgTypeUpdate && m.Body == "seal refused gate 0\nno gate approval check" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %+v, want a \"seal refused gate 0\\nno gate approval check\" marker", msgs)
+	}
+}
+
 // seedGateReadyTicket seeds one project, one ticket already sitting in
 // "planning" with kind "feature" (bypassing classify and the interview,
 // which the real gate approve pre-check never touches), a plan cohort of n
@@ -3201,7 +3331,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 
 	extID := "seed-gate-ready-ext"
 	artifacts := make([]store.Artifact, 0, 1+n)
-	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)})
+	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)})
 	for i := range n {
 		sc := response.Scenario{
 			ID: fmt.Sprintf("s%d", i+1), Kind: response.ScenarioKindBehavior,
@@ -3243,6 +3373,30 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	}
 	if res, ansErr := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); ansErr != nil || !res.Accepted {
 		t.Fatalf("seedGateReadyTicket: AnswerQuestion: %+v, %v", res, ansErr)
+	}
+
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval, so this seeds the confirming marker directly -- the race
+	// and mismatch behavior below is gateApprove's own pre-check, not the
+	// confirming turn, which gets its own dedicated tests.
+	msgs, listErr := s.ListMessages(ctx, ticketID)
+	if listErr != nil {
+		t.Fatalf("seedGateReadyTicket: ListMessages: %v", listErr)
+	}
+	var aID int64
+	for i := range msgs {
+		if msgs[i].Type == "answer" && msgs[i].ParentID != nil && *msgs[i].ParentID == qID {
+			aID = msgs[i].ID
+		}
+	}
+	if aID == 0 {
+		t.Fatal("seedGateReadyTicket: no approving answer found")
+	}
+	if _, insErr := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeUpdate, Author: "system",
+		Body: fmt.Sprintf("gate confirmed run %d plan v1 gate %d answer %d", rsv.RunID, qID, aID),
+	}); insErr != nil {
+		t.Fatalf("seedGateReadyTicket: insert confirming marker: %v", insErr)
 	}
 
 	return ticketID, rsv.RunID

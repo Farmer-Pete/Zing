@@ -195,6 +195,53 @@ func TestBuildThreeTasksThreeSignedCommits(t *testing.T) {
 	}
 }
 
+// findConfirmedGateQuestionID returns the gate question id the ticket's own
+// confirming marker names (D32, design section 22.12.1): the marker's own
+// parent_id, the same id confirmedOutcomeCommit (planning.go) attaches it
+// to.
+func findConfirmedGateQuestionID(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range msgs {
+		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, "gate confirmed run ") && msgs[i].ParentID != nil {
+			return *msgs[i].ParentID
+		}
+	}
+	t.Fatal("findConfirmedGateQuestionID: no confirming marker found")
+	return 0
+}
+
+// TestBuildPromptCarriesApprovalNotes proves design section 22.12.3b end to
+// end: the owner's reply on the gate question, sent alongside Approve,
+// reaches the build turn's own prompt as the fenced "approval" input, right
+// after plan.
+func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, rt, ticketID := buildTicketInBuilding(t)
+
+	gateQID := findConfirmedGateQuestionID(t, s, ticketID)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "reply", Author: "you",
+		State: new("sent"), Body: "the JSON must stay stable",
+	}); err != nil {
+		t.Fatalf("InsertMessage(approval note): %v", err)
+	}
+
+	rec := &recordingRuntime{rt: rt}
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, rec, ticketID)
+	if _, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps); err != nil {
+		t.Fatalf("building Run: %v", err)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "approval", "the JSON must stay stable")
+}
+
 // ---- RUN --------------------------------------------------------------------
 
 // TestBuildRunGoesThroughRunJob proves RUN's first turn goes through runJob

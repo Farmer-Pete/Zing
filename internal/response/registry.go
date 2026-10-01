@@ -24,6 +24,7 @@ func buildRegistry() map[registryKey]func() Response {
 		{JobClassify, OutcomeFeature}:     func() Response { return &ClassifyResponse{} },
 		{JobPlanning, OutcomeQuestions}:   func() Response { return &PlanningQuestionsResponse{} },
 		{JobPlanning, OutcomeReplies}:     func() Response { return &RepliesResponse{} },
+		{JobPlanning, OutcomeConfirmed}:   func() Response { return &ConfirmedResponse{} },
 		{JobPlanning, OutcomeReady}:       func() Response { return &ReadyResponse{} },
 		{JobPlanning, OutcomeChildren}:    func() Response { return &ChildrenResponse{} },
 		{JobPlanning, OutcomeNothingToDo}: func() Response { return &NothingToDoResponse{} },

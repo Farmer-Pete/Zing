@@ -154,7 +154,7 @@ func goldenCases() []goldenCase {
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
 				plan := healthCheckPlan
 				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
-				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
+				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, "", accepted, nil)
 				if err != nil {
 					t.Fatalf("ForBuild: %v", err)
 				}
@@ -189,7 +189,7 @@ func goldenCases() []goldenCase {
 				plan := healthCheckPlan
 				findings := "problem: internal/health/ping.go returns 500 on success."
 				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
-					"go test ./...", "make lint", ticket, plan, nil, nil)
+					"go test ./...", "make lint", ticket, plan, "", nil, nil)
 				if err != nil {
 					t.Fatalf("ForFix: %v", err)
 				}

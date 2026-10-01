@@ -263,7 +263,7 @@ func TestRenderTemplate_OutcomeNoteIsJobScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderTemplate(planning, ready): %v", err)
 	}
-	if !strings.Contains(out, "one of: questions | replies | ready | children | nothing_to_do | question | error") {
+	if !strings.Contains(out, "one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error") {
 		t.Errorf("planning/ready template's outcome note does not list replies among planning's own outcomes:\n%s", out)
 	}
 }

@@ -116,24 +116,29 @@ const (
 	// per failing branch (0, 1, 2, 3, 6; branches 4 and 5 succeed). Why is
 	// shared across every branch: what actually differs, the What text,
 	// already names the specific failure.
-	sealFailedNoCohortWhat      = "no current plan cohort"
-	sealFailedNoRunWhat         = "cohort has no producing run"
-	sealFailedMismatchTwiceWhat = "seal transaction mismatched twice"
-	sealFailedBadCountWhatFmt   = "cohort has %d scenarios, want 2 to 30"
-	sealFailedPartialWhatFmt    = "cohort is partially or inconsistently sealed (%d of %d)"
-	sealFailedWhy               = "the gate's approval pre-check found the plan cohort is not ready to seal"
-	reasonGateApproved          = "gate approved"
-	reasonGateApprovedAlready   = "gate approved (already sealed)"
+	sealFailedNoCohortWhat       = "no current plan cohort"
+	sealFailedNoRunWhat          = "cohort has no producing run"
+	sealFailedNoConfirmationWhat = "no confirmation for the current plan"
+	sealFailedMismatchTwiceWhat  = "seal transaction mismatched twice"
+	sealFailedBadCountWhatFmt    = "cohort has %d scenarios, want 2 to 30"
+	sealFailedPartialWhatFmt     = "cohort is partially or inconsistently sealed (%d of %d)"
+	sealFailedWhy                = "the gate's approval pre-check found the plan cohort is not ready to seal"
+	reasonGateApproved           = "gate approved"
+	reasonGateApprovedAlready    = "gate approved (already sealed)"
 
 	// reasonAbandonedFmt is section 6.7 choice "c"'s own Reason text (design
 	// D10): "owner abandoned after <code>", the escalation's own Code.
 	reasonAbandonedFmt = "owner abandoned after %s"
 
 	// gateApproveExplains is F013's own addition to the gate question's
-	// body (design section 6.6, D8): the objective alone does not say what
-	// choosing "Approve" actually does, so this paragraph follows it,
-	// separated by a blank line.
-	gateApproveExplains = "Approve seals this scenario set and moves the ticket to building. This cannot be undone. Findings at or below the quality floor were already fixed automatically; only findings above the floor are shown here."
+	// body (design section 6.6, D8), rewritten by D32 (design section
+	// 22.12.3): the objective alone does not say what choosing "Approve"
+	// actually does, so this paragraph follows it, separated by a blank
+	// line.
+	gateApproveExplains = "Approve asks the planning agent whether any question is still open. If none is, " +
+		"Zing seals this scenario set and moves the ticket to building. This cannot be undone. Until you " +
+		"approve, writing in any settled question reopens it and withdraws this gate. Findings at or below " +
+		"the quality floor were already fixed automatically; only findings above the floor are shown here."
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -516,7 +521,7 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 	resp := rr.Res.Response
 	rl, hasReplies := resp.(replyLister)
 	if hasReplies {
-		if errs := checkConversation(resp.Header().Outcome, rl.ReplyList(), buildThreadState(conv)); len(errs) > 0 {
+		if errs := checkConversation(resp.Header().Outcome, rl.ReplyList(), buildThreadState(conv), false); len(errs) > 0 {
 			return conversationValidationErrorCommit(t, d, rr, sessionCommit, resolveIDs, errs), nil
 		}
 	}
@@ -1086,7 +1091,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
 	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return planReviewSuccessCommit(t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
+			return planReviewSuccessCommit(ctx, t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
 		}, nil, 0)
 }
 
@@ -1097,14 +1102,14 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 // (already unmarshaled by the caller, runPlanReview, to render planXML), so
 // a clean review's gate post (design section 6.6) can read its objective
 // without a second store round trip.
-func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
 		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
 	case *response.FindingsResponse:
-		return planReviewOkCommit(t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
+		return planReviewOkCommit(ctx, t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
@@ -1119,7 +1124,7 @@ func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.
 // (design section 6.6's "Post" step, task 7c); otherwise this writes the
 // "planreview vN pending" marker and leaves the ticket in planning, not
 // waiting, for entry step 7 to pick up.
-func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	kept := make([]response.Finding, 0, len(resp.Findings))
 	dropped := 0
 	for _, f := range resp.Findings {
@@ -1163,6 +1168,17 @@ func planReviewOkCommit(t store.Ticket, d Deps, rr runResult, resp *response.Fin
 		c.AttachRunToMsgs = true
 		waiting := waitingFlagGate
 		c.Waiting = &waiting
+		// D32 (design section 22.12.2): the owner can reopen a thread while
+		// this very review tick is in flight, racing this gate post. The
+		// fence inside CommitHandlerResult's own applyConversationTx needs
+		// the watermark to tell a reopen's own late owner row apart from
+		// one already delivered; this carries no Settle entries, since a
+		// plan-review run settles nothing.
+		conv, convErr := d.Store.PlanningConversation(ctx, t.ID)
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planreview: planning conversation: %w", convErr)
+		}
+		c.Conversation = &store.ConversationCommit{ThroughBatch: conv.Delivered}
 		slog.Info("gate posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", cohort.PlanVersion)
 		return c, nil
 	}
@@ -1269,35 +1285,74 @@ func gateQuestionMessage(ticketID int64, objective string) (store.Message, error
 	}, nil
 }
 
-// enterFromGateRound is section 5.1 step 1(a): round is the answered gate
-// round enterFromRound just identified by its newest question's kind.
-// Option a (approve) runs the seal pre-check (gateApprove); option b, or a
-// round carrying replies and no option at all, is a reject -- "resume or
-// fresh" with the replies' bodies as notes (design section 6.6, 6.7).
+// enterFromGateRound is section 5.1 step 1(a), rewritten by D32 (design
+// section 22.12.3): round is the answered gate round enterFromRound just
+// identified by its newest question's kind. Option b, or a round carrying
+// replies and no option at all, is a reject -- "resume or fresh" with the
+// replies' bodies as notes (design section 6.6, 6.7), unchanged. Option a
+// (approve) used to run the seal pre-check directly; now it does only once
+// already confirmed (no cohort or no producing run still goes straight to
+// gateApprove, which re-derives and escalates the same failure, design
+// D16's branches 1 and 2); otherwise it runs the gate's own confirming turn
+// (gateConfirmEntry) before ever sealing.
 func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
 	resolveIDs := questionIDs(round)
-	if gateRoundApproved(round) {
+	if !gateRoundApproved(round) {
+		notes := joinReplies(round.Replies)
+		slog.Info("gate rejected", "ticket_id", t.ID)
+		return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+	}
+
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: current cohort: %w", err)
+	}
+	if !ok || cohort.RunID == nil {
 		return gateApprove(ctx, t, d, resolveIDs)
 	}
+
+	_, confirmed, err := d.Store.ConfirmedApprovalForVersion(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirmed approval: %w", err)
+	}
+	if confirmed {
+		return gateApprove(ctx, t, d, resolveIDs)
+	}
+
+	gateQID := round.Questions[len(round.Questions)-1].ID
+	approveRow, _, ok := newestChosenAnswer(round.Answers)
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: approved round %d has no approving answer", gateQID)
+	}
 	notes := joinReplies(round.Replies)
-	slog.Info("gate rejected", "ticket_id", t.ID)
-	return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+	slog.Info("gate approval starts confirming turn", "ticket_id", t.ID, "question_id", gateQID, "plan_version", cohort.PlanVersion)
+	return gateConfirmEntry(ctx, t, d, gateQID, approveRow.ID, cohort, notes)
 }
 
-// newestChosenOption returns the option key of the newest sent answer among
-// answers that named one, "" when none did (design section 6.6, 6.7's own
-// "final choice wins" rule): a round answered more than once (a corrected
-// chip click before the batch resolves) reads its final choice, not its
-// first. Shared by gateRoundApproved (the gate's own a/b choice) and
-// roundChoice (an escalation round's a/b/c choice).
-func newestChosenOption(answers []store.MessageRow) string {
-	option := ""
+// newestChosenAnswer returns the row and option key of answers' newest sent
+// row that named an option, ok false when none did (design section 6.6,
+// 6.7's own "final choice wins" rule): a round answered more than once (a
+// corrected chip click before the batch resolves) reads its final choice,
+// not its first. newestChosenOption is a thin wrapper kept for
+// roundChoice's own a/b/c read; gateApprove's own GateApproval (D32, design
+// section 22.12.1) needs the row itself (its id is AID, its BatchID is BA),
+// so both read this one scan rather than two that could drift.
+func newestChosenAnswer(answers []store.MessageRow) (row store.MessageRow, option string, ok bool) {
 	for i := range answers {
 		var ap response.AnswerPayload
 		if err := json.Unmarshal(answers[i].Payload, &ap); err == nil && ap.Option != nil {
-			option = *ap.Option
+			row, option, ok = answers[i], *ap.Option, true
 		}
 	}
+	return row, option, ok
+}
+
+// newestChosenOption returns the option key of the newest sent answer among
+// answers that named one, "" when none did. Shared by gateRoundApproved
+// (the gate's own a/b choice) and roundChoice (an escalation round's a/b/c
+// choice).
+func newestChosenOption(answers []store.MessageRow) string {
+	_, option, _ := newestChosenAnswer(answers)
 	return option
 }
 
@@ -1519,16 +1574,24 @@ func resolveCapResumesEscalation(ctx context.Context, t store.Ticket, d Deps, no
 }
 
 // gateApprove is section 6.6's approve pre-check, in exact branch order
-// (design D16): branch 0 (two seal-mismatch markers for the cohort) is
-// evaluated once the cohort's run id is known, but wins over branches 3-6;
-// every failing branch (0, 1, 2, 3, 6) escalates seal_failed with RunID nil,
-// Origin seal, and resolves resolveIDs; branch 4 seals the cohort and moves
-// to building; branch 5 (already consistently sealed) moves to building
-// with no new seal. GateApproveSealRaceHook, nil in production, is a
-// test-only seam (design D16's own TOCTOU commentary): called with the
-// cohort's run id right after this function's own read of CohortSealState,
-// so a test can seal one row through a second store handle in the window
-// between that read and the commit this function builds from it.
+// (design D16, widened by D32, design section 22.12.1, 22.12.3a): branch 0
+// (two seal-mismatch markers for the cohort) is evaluated once the cohort's
+// run id is known, but wins over branches 3-6; every failing branch (0, 1,
+// 2, 3, 6) escalates seal_failed with RunID nil, Origin seal, and resolves
+// resolveIDs; branch 4 seals the cohort and moves to building; branch 5
+// (already consistently sealed) moves to building with no new seal. D32
+// inserts one more check, after branches 1 and 2 (no cohort, no producing
+// run): the cohort's current plan version must be confirmed
+// (ConfirmedApprovalForVersion), or this escalates seal_failed too, with
+// What "no confirmation for the current plan" -- the retry path (a
+// seal_failed or gate_approve escalation choosing retry, design section
+// 22.12.3) has no round in hand, so it re-derives the same GateApproval
+// this read builds, rather than carry one in from its caller.
+// GateApproveSealRaceHook, nil in production, is a test-only seam (design
+// D16's own TOCTOU commentary): called with the cohort's run id right after
+// this function's own read of CohortSealState, so a test can seal one row
+// through a second store handle in the window between that read and the
+// commit this function builds from it.
 func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
 	if err != nil {
@@ -1541,6 +1604,14 @@ func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64
 		return sealFailedEscalation(t, d, sealFailedNoRunWhat, resolveIDs), nil
 	}
 	runID := *cohort.RunID
+
+	approval, confirmed, err := d.Store.ConfirmedApprovalForVersion(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirmed approval: %w", err)
+	}
+	if !confirmed {
+		return sealFailedEscalation(t, d, sealFailedNoConfirmationWhat, resolveIDs), nil
+	}
 
 	mismatches, err := d.Store.CountSealMismatches(ctx, t.ID, runID)
 	if err != nil {
@@ -1567,6 +1638,7 @@ func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64
 	switch {
 	case sealed == 0:
 		c.Seal = &store.SealRequest{RunID: runID, PlanVersion: cohort.PlanVersion, ExpectedCount: total, At: time.Now().UTC()}
+		c.GateApproval = &approval
 		c.Next = stateBuilding
 		c.Reason = reasonGateApproved
 		slog.Info("gate approved", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
@@ -1574,6 +1646,7 @@ func gateApprove(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64
 			"count", total, "sealed_at", c.Seal.At)
 		return c, nil
 	case sealed == total && commonAt != nil:
+		c.GateApproval = &approval
 		c.Next = stateBuilding
 		c.Reason = reasonGateApprovedAlready
 		slog.Info("gate already sealed", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
@@ -1595,6 +1668,217 @@ var GateApproveSealRaceHook func(runID int64)
 func sealFailedEscalation(t store.Ticket, d Deps, what string, resolveIDs []int64) store.HandlerCommit {
 	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeSealFailed), what, sealFailedWhy, "", response.EscalationOriginSeal)
 	c.ResolveQuestions = resolveIDs
+	return c
+}
+
+// ---- D32: the gate's confirming turn (design section 22.12.3) ------------
+
+// gateConfirmEntry builds and runs the gate's own confirming turn from
+// scratch: it reads the cohort's producing session (the error
+// `job: gate: cohort session <id> has no external id` when that session
+// was never externalized, a bug since a ready commit always stores one),
+// then carries notes (the approval's own reply text, only when non-empty),
+// the D14 invalid-output retry, a live validation-errors marker, and the
+// undelivered conversation, in that priority order (design section 22.12.3,
+// 22.4's own entry-step order), charging the resume (BumpResumes) only when
+// an agent-driven reason rode along.
+func gateConfirmEntry(ctx context.Context, t store.Ticket, d Deps, gateQID, approveAID int64, cohort store.Cohort, notes string) (store.HandlerCommit, error) {
+	maxResumes := d.Machine.Jobs[jobPlanningName].MaxResumes
+	run, err := d.Store.RunByID(ctx, *cohort.RunID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: cohort run %d: %w", *cohort.RunID, err)
+	}
+	sess, _, err := d.Store.SessionByID(ctx, run.SessionID, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: cohort session: %w", err)
+	}
+	if sess.ExternalID == nil || *sess.ExternalID == "" {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: cohort session %d has no external id", sess.ID)
+	}
+
+	var inputs []prompt.NamedInput
+	if notes != "" {
+		inputs = append(inputs, prompt.Notes(notes))
+	}
+
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPlanningName, &sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: consecutive invalid outputs: %w", err)
+	}
+	if n == 1 {
+		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
+		conv, convErr := d.Store.PlanningConversation(ctx, t.ID)
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: gate: planning conversation: %w", convErr)
+		}
+		convExtra, throughBatch := conversationResumeInput(conv)
+		inputs = append(inputs, convExtra...)
+		return runGateConfirm(ctx, t, d, sess, inputs, n, true, conv, throughBatch, gateQID, approveAID, cohort.PlanVersion)
+	}
+
+	if m, live, liveErr := d.Store.LiveMarker(ctx, t.ID, validationErrorsPendingPrefix, validationErrorsDeliveredPrefix); liveErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: live marker: %w", liveErr)
+	} else if live {
+		firstLine, errsText, _ := strings.Cut(m.Body, "\n")
+		rid := strings.TrimPrefix(firstLine, validationErrorsPendingPrefix+" run ")
+		inputs = append(inputs, prompt.Validation(errsText))
+		conv, convErr := d.Store.PlanningConversation(ctx, t.ID)
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: gate: planning conversation: %w", convErr)
+		}
+		convExtra, throughBatch := conversationResumeInput(conv)
+		inputs = append(inputs, convExtra...)
+		commit, runErr := runGateConfirm(ctx, t, d, sess, inputs, 0, true, conv, throughBatch, gateQID, approveAID, cohort.PlanVersion)
+		if runErr != nil {
+			return commit, runErr
+		}
+		commit.Messages = append(commit.Messages, store.Message{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: validationErrorsDeliveredPrefix + " run " + rid,
+		})
+		return commit, nil
+	}
+
+	conv, err := d.Store.PlanningConversation(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: planning conversation: %w", err)
+	}
+	convExtra, throughBatch := conversationResumeInput(conv)
+	inputs = append(inputs, convExtra...)
+	// A confirming turn triggered by the owner's own Approve, carrying
+	// nothing agent-driven, is a free resume (design section 22.12.3,
+	// 22.4's charging table): BumpResumes stays false even when it also
+	// carries notes, since notes are the owner's own text, not a reason the
+	// agent itself produced.
+	return runGateConfirm(ctx, t, d, sess, inputs, 0, false, conv, throughBatch, gateQID, approveAID, cohort.PlanVersion)
+}
+
+// runGateConfirm assembles and runs the confirming turn's own prompt
+// (prompt.ConfirmHeader in place of a job prompt, confirmSchemas in place
+// of planningSchemas) and routes its result through
+// confirmingTurnSuccessCommit. gateQID, approveAID, and planVersion carry
+// through to that commit's own confirmed marker and, for every other
+// outcome, the cancellation marker and gate resolution (design section
+// 22.12.3).
+func runGateConfirm(
+	ctx context.Context, t store.Ticket, d Deps, sess store.Session, inputs []prompt.NamedInput, priorInvalid int, charge bool,
+	conv store.PlanningConversation, throughBatch int64, gateQID, approveAID int64, planVersion int,
+) (store.HandlerCommit, error) {
+	schemas, err := confirmSchemas()
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirm: %w", err)
+	}
+
+	in := prompt.ForPlanningConfirm(inputs)
+	in.Schemas = schemas
+	assembled := prompt.Assemble(in)
+
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: charge}
+	req := runtime.RunRequest{Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: assembled}
+	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
+	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, nil, response.EscalationOriginGateApprove,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return confirmingTurnSuccessCommit(ctx, t, d, rr, sessionRecord(rr), conv, throughBatch, gateQID, approveAID, planVersion)
+		}, nil, throughBatch)
+}
+
+// confirmingTurnSuccessCommit routes the confirming turn's parsed response
+// (design section 22.12.3's own outcome table): confirmed is the turn's own
+// clean answer (confirmedOutcomeCommit); questions, ready, and error reuse
+// planning's ordinary routing, then cancelApprovalCommit adds the
+// cancellation marker and resolves the gate question, since the owner's
+// approval no longer has anything left to seal. checkConversation runs
+// first, with confirming=true, exactly like planningSuccessCommit's own
+// Layer 2 gate.
+func confirmingTurnSuccessCommit(
+	ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert,
+	conv store.PlanningConversation, throughBatch int64, gateQID, approveAID int64, planVersion int,
+) (store.HandlerCommit, error) {
+	resp := rr.Res.Response
+	rl, hasReplies := resp.(replyLister)
+	if hasReplies {
+		if errs := checkConversation(resp.Header().Outcome, rl.ReplyList(), buildThreadState(conv), true); len(errs) > 0 {
+			return conversationValidationErrorCommit(t, d, rr, sessionCommit, nil, errs), nil
+		}
+	}
+
+	switch r := resp.(type) {
+	case *response.ConfirmedResponse:
+		return confirmedOutcomeCommit(t, d, rr, r, sessionCommit, conv, throughBatch, gateQID, approveAID, planVersion), nil
+	case *response.PlanningQuestionsResponse:
+		c, err := questionOutcomeCommit(t, d, rr, r.Questions, sessionCommit, nil)
+		if err != nil {
+			return c, err
+		}
+		return cancelApprovalCommit(t, c, rr, gateQID, rl, conv, throughBatch), nil
+	case *response.ReadyResponse:
+		c, err := readyCommit(ctx, t, d, rr, r, sessionCommit, nil)
+		if err != nil {
+			return c, err
+		}
+		return cancelApprovalCommit(t, c, rr, gateQID, rl, conv, throughBatch), nil
+	case *response.ErrorResponse:
+		c := errorOutcomeCommit(t, d, rr, r, sessionCommit, nil, response.EscalationOriginGateApprove)
+		return cancelApprovalCommit(t, c, rr, gateQID, nil, conv, throughBatch), nil
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirming turn outcome %s not handled", resp.Header().Outcome)
+	}
+}
+
+// confirmingMarkerBody renders the exact body checkGateApprovalTx (store
+// package) parses back (design section 22.12.1): "gate confirmed run <R>
+// plan v<V> gate <QID> answer <AID>".
+func confirmingMarkerBody(runID int64, planVersion int, gateQID, approveAID int64) string {
+	return fmt.Sprintf("gate confirmed run %d plan v%d gate %d answer %d", runID, planVersion, gateQID, approveAID)
+}
+
+// confirmedOutcomeCommit is the confirming turn's own clean answer (design
+// section 22.12.3's table row "confirmed"): the run terminalizes "ok", the
+// gate question stays "answered" (no ResolveQuestions: it is not done until
+// the seal itself resolves it), and the commit writes the confirming
+// marker binding this run, the cohort's plan version, and the gate's own
+// QID/AID -- the next tick's enterFromGateRound finds it confirmed through
+// ConfirmedApprovalForVersion and calls gateApprove.
+func confirmedOutcomeCommit(
+	t store.Ticket, d Deps, rr runResult, resp *response.ConfirmedResponse, sessionCommit *store.SessionUpsert,
+	conv store.PlanningConversation, throughBatch int64, gateQID, approveAID int64, planVersion int,
+) store.HandlerCommit {
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+	c.Session = sessionCommit
+	c.Messages = []store.Message{{
+		TicketID: t.ID, ParentID: &gateQID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: confirmingMarkerBody(rr.Reserved.RunID, planVersion, gateQID, approveAID),
+	}}
+	msgs, cc := conversationEffects(t.ID, rr.Reserved.RunID, throughBatch, resp.Replies, conv)
+	c.Messages = append(c.Messages, msgs...)
+	c.Conversation = &cc
+	slog.Info("gate confirmed", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "question_id", gateQID, "plan_version", planVersion)
+	return c
+}
+
+// cancelApprovalCommit augments c -- an ordinary questions, ready, or error
+// outcome commit the confirming turn produced -- with design section
+// 22.12.3's own cancellation side effects: the gate question resolves
+// (ResolveQuestions) and a cancellation marker records that the agent
+// itself found something open, so the owner gets a fresh gate once
+// planning reaches ready again. rl is nil for the error outcome, which
+// carries no Conversation and so needs no conversationEffects.
+func cancelApprovalCommit(
+	t store.Ticket, c store.HandlerCommit, rr runResult, gateQID int64, rl replyLister,
+	conv store.PlanningConversation, throughBatch int64,
+) store.HandlerCommit {
+	c.ResolveQuestions = append(c.ResolveQuestions, gateQID)
+	c.Messages = append(c.Messages, store.Message{
+		TicketID: t.ID, ParentID: &gateQID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("gate approval cancelled gate %d run %d", gateQID, rr.Reserved.RunID),
+	})
+	if rl != nil {
+		msgs, cc := conversationEffects(t.ID, rr.Reserved.RunID, throughBatch, rl.ReplyList(), conv)
+		c.Messages = append(c.Messages, msgs...)
+		c.Conversation = &cc
+	}
+	slog.Info("gate approval cancelled", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "question_id", gateQID)
 	return c
 }
 
@@ -2119,7 +2403,15 @@ func renderSchemas(job response.Job, outcomes ...response.Outcome) ([]string, er
 // (design section 4.2): questions, ready, children, nothing_to_do, then
 // question, error.
 func planningSchemas() ([]string, error) {
-	return renderSchemas(response.JobPlanning, response.OutcomeQuestions, response.OutcomeReady, response.OutcomeChildren, response.OutcomeNothingToDo)
+	return renderSchemas(response.JobPlanning, response.OutcomeQuestions, response.OutcomeReplies, response.OutcomeReady, response.OutcomeChildren, response.OutcomeNothingToDo)
+}
+
+// confirmSchemas is renderSchemas for the gate's own confirming turn (D32,
+// design section 22.12.3): confirmed, questions, ready, then question,
+// error. "Other planning turns never list confirmed": ordinary turns keep
+// using planningSchemas, which never names it.
+func confirmSchemas() ([]string, error) {
+	return renderSchemas(response.JobPlanning, response.OutcomeConfirmed, response.OutcomeQuestions, response.OutcomeReady)
 }
 
 // sessionStateName renders a store.SessionState for the entry-decision log

@@ -402,7 +402,13 @@ func TestEscalationResolve_Seal_RetryReRunsApproveBranchesAndSealsAHealthyCohort
 	assertSealFailedEscalation(t, firstCommit, gateQID, "no current plan cohort")
 	apply(t, s, getTicket(t, s, ticketID), firstCommit)
 
-	_, newRunID := seedCohort(t, s, ticketID, validPlan("Now a healthy cohort."), validScenarios(2, "sealretry"))
+	newPlanVersion, newRunID := seedCohort(t, s, ticketID, validPlan("Now a healthy cohort."), validScenarios(2, "sealretry"))
+	// The retry skips the confirming turn and calls gateApprove directly
+	// (design section 22.12.3), but the seal invariant still requires a
+	// confirmation for this new cohort's own plan version (design section
+	// 22.12.3a): seed it against the original gate question, independent of
+	// that question's own current (resolved) state.
+	seedConfirmedGate(t, s, ticketID, gateQID, newPlanVersion)
 
 	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
 	if err != nil || len(open) != 1 {

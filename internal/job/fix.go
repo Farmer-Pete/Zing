@@ -341,7 +341,12 @@ func runFixFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt o
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: %w", err)
 	}
 
-	in, err := prompt.ForFix(promptText, subject, label, req.Text, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, accepted, extra)
+	approvalNotes, err := d.Store.ApprovalNotes(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: fix: approval notes: %w", err)
+	}
+
+	in, err := prompt.ForFix(promptText, subject, label, req.Text, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, approvalNotes, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: %w", err)
 	}

@@ -141,6 +141,8 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 		return append(errs, checkReplies(r.Replies, present)...)
 	case *RepliesResponse:
 		return checkReplies(r.Replies, present)
+	case *ConfirmedResponse:
+		return checkReplies(r.Replies, present)
 	case *BuildResponse:
 		return checkBuildShape(r, present)
 	case *FindingsResponse:

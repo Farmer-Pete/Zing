@@ -151,12 +151,46 @@ func seedSealedScenarioCohort(t *testing.T, s *store.Store, ticketID int64, n in
 		}
 	}
 
+	// The seal invariant (D32, design section 22.12.3a) needs a confirmed
+	// gate approval for plan version 1: this test cares about the judge, not
+	// the gate flow, so it seeds the minimal fixture directly -- a gate
+	// question, its approving answer, and the confirming marker binding both
+	// to this seal.
+	gatePayload, payloadErr := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateAnswered,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if payloadErr != nil {
+		t.Fatalf("seedSealedScenarioCohort: marshal gate payload: %v", payloadErr)
+	}
+	gateQID, insertErr := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+		State: new("answered"), Body: "Q1", Payload: gatePayload,
+	})
+	if insertErr != nil {
+		t.Fatalf("seedSealedScenarioCohort: insert gate question: %v", insertErr)
+	}
+	approveAID, insertErr := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: msgTypeAnswer, Author: authorYou,
+		State: new(answerStateSent), Payload: []byte(`{"option":"a"}`),
+	})
+	if insertErr != nil {
+		t.Fatalf("seedSealedScenarioCohort: insert approving answer: %v", insertErr)
+	}
+	if _, insertErr = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: confirmingMarkerBody(runID, 1, gateQID, approveAID),
+	}); insertErr != nil {
+		t.Fatalf("seedSealedScenarioCohort: insert confirming marker: %v", insertErr)
+	}
+
 	// InsertArtifact writes outside the claim ceremony, so the ticket is
 	// still claimed under (owner, expires) here, exactly what Seal's own
 	// fence needs.
 	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Seal: &store.SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: n, At: time.Now()},
+		Seal:         &store.SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: n, At: time.Now()},
+		GateApproval: &store.GateApproval{QuestionID: gateQID, AnswerID: approveAID, PlanVersion: 1},
 	})
 	if err != nil || !applied {
 		t.Fatalf("seedSealedScenarioCohort: seal: applied=%v err=%v", applied, err)

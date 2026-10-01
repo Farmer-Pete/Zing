@@ -21,6 +21,7 @@ var (
 	_ Response = (*QuestionResponse)(nil)
 	_ Response = (*PlanningQuestionsResponse)(nil)
 	_ Response = (*RepliesResponse)(nil)
+	_ Response = (*ConfirmedResponse)(nil)
 	_ Response = (*ReadyResponse)(nil)
 	_ Response = (*ChildrenResponse)(nil)
 	_ Response = (*NothingToDoResponse)(nil)

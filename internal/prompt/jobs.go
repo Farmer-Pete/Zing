@@ -153,6 +153,32 @@ func Conversation(text string) NamedInput {
 	return NamedInput{Label: "conversation", Text: text, Untrusted: true}
 }
 
+// ConfirmHeader replaces the prompt file on the gate's confirming turn
+// (D32, design section 22.12.3): the owner has approved, but Zing asks the
+// planning session to say so itself before it seals, byte-for-byte from the
+// plan.
+const ConfirmHeader = "The owner wants to approve this plan and close the gate. Before Zing seals the scenarios, " +
+	"say whether any question is still open: a decision the plan depends on that the owner has not made, " +
+	"a thread you settled without the owner's word, or anything in the owner's notes below that changes the " +
+	"plan. Do not guess an answer to fill a gap. If nothing is open, return confirmed. If something is open, " +
+	"ask it as questions; the approval is then cancelled, and the owner gets a fresh gate after you return " +
+	"ready. If the plan must change and you need nothing from the owner, return ready with the new plan. " +
+	"If the owner's notes ask for any change to the plan, return ready with the revised plan, never confirmed; " +
+	"it goes to plan review and a fresh gate. Return confirmed only when the notes change nothing in the " +
+	"plan. The builder receives the owner's notes with every task."
+
+// ForPlanningConfirm builds the gate's confirming turn Input: ConfirmHeader
+// in place of a prompt file, inputs passed through unchanged -- built by the
+// caller with Notes (when the approval carried reply text), Invalid,
+// Validation, and Conversation, in that order (design section 22.12.3).
+// Called by internal/job's confirming-turn runner; calls Assemble once
+// Schemas is set from response.RenderTemplate(JobPlanning, ...) in the
+// confirming turn's own schema order (confirmed, questions, ready, then
+// question, error).
+func ForPlanningConfirm(inputs []NamedInput) Input {
+	return Input{JobPrompt: ConfirmHeader, Inputs: inputs}
+}
+
 // BuildResumeHeader replaces the prompt file on a build resume turn: there
 // is no fresh job prompt to load, only this fixed instruction to continue
 // the open worktree session (plan section 6.3), byte-for-byte from the
@@ -209,15 +235,26 @@ type BuildTask struct {
 	Test     string // the task's named test, raw
 }
 
+// labelApproval is the gate approval notes input's label (D32, design
+// section 22.12.3b): buildInputs emits it right after plan, omitted when
+// empty, so a build or fix prompt that carries no approval notes renders no
+// "approval:" block at all.
+const labelApproval = "approval"
+
 // buildInputs assembles the inputs shared by ForBuild and ForFix: ticket
-// fenced, plan raw, accepted raw (omitted when empty), the task or fix
-// input as given, then extra (plan section 9.1).
-func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput, extra []NamedInput) []NamedInput {
-	inputs := make([]NamedInput, 0, 3+len(extra))
+// fenced, plan raw, the gate's approval notes fenced right after plan
+// (omitted when empty, D32), accepted raw (omitted when empty), the task or
+// fix input as given, then extra (plan section 9.1, design section
+// 22.12.3b).
+func buildInputs(ticket, planXML, approvalNotes string, accepted []string, taskInput NamedInput, extra []NamedInput) []NamedInput {
+	inputs := make([]NamedInput, 0, 4+len(extra))
 	inputs = append(inputs,
 		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
 		NamedInput{Label: labelPlan, Text: planXML},
 	)
+	if approvalNotes != "" {
+		inputs = append(inputs, NamedInput{Label: labelApproval, Text: approvalNotes, Untrusted: true})
+	}
 	if len(accepted) > 0 {
 		inputs = append(inputs, NamedInput{Label: "accepted", Text: strings.Join(accepted, "\n")})
 	}
@@ -228,14 +265,15 @@ func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput
 
 // ForBuild fills the build job prompt's five placeholders (`{n}`,
 // `{total}`, `{task title}`, `{test_cmd}`, `{lint_cmd}`) and lists the
-// inputs: ticket (fenced), plan (raw), accepted (raw, omitted when none),
-// task (raw, "Task <n> of <total>\nTest: <test>\n\n<text>"), then extra.
+// inputs: ticket (fenced), plan (raw), approval notes (fenced, omitted when
+// empty, D32), accepted (raw, omitted when none), task (raw, "Task <n> of
+// <total>\nTest: <test>\n\n<text>"), then extra.
 // A jobPrompt missing one of the five placeholders is the error
 // `prompt: build prompt lacks placeholder <name>`. Called by
 // internal/job's build turn (plan section 6.3); calls Assemble once
 // Schemas is set from response.RenderTemplate(JobBuild, ...) in build
 // schema order.
-func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
+func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML, approvalNotes string, accepted []string, extra []NamedInput) (Input, error) {
 	filled, err := fillPlaceholders(jobPrompt, "build", []placeholderPair{
 		{"{n}", strconv.Itoa(task.N)},
 		{"{total}", strconv.Itoa(task.Total)},
@@ -248,7 +286,7 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 	}
 
 	taskText := fmt.Sprintf("Task %d of %d\nTest: %s\n\n%s", task.N, task.Total, task.Test, task.Text)
-	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: "task", Text: taskText}, extra)
+	inputs := buildInputs(ticket, planXML, approvalNotes, accepted, NamedInput{Label: "task", Text: taskText}, extra)
 
 	return Input{JobPrompt: filled, Inputs: inputs}, nil
 }
@@ -260,7 +298,7 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 // fixed error ForBuild returns. Called by internal/job's fix turn (plan
 // section 8); calls Assemble once Schemas is set from
 // response.RenderTemplate(JobBuild, ...) in build schema order.
-func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
+func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, approvalNotes string, accepted []string, extra []NamedInput) (Input, error) {
 	if !strings.Contains(jobPrompt, buildTaskLine) {
 		return Input{}, fmt.Errorf("prompt: build prompt lacks placeholder %s", buildTaskLine)
 	}
@@ -274,7 +312,7 @@ func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML s
 		return Input{}, err
 	}
 
-	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: label, Text: text, Untrusted: true}, extra)
+	inputs := buildInputs(ticket, planXML, approvalNotes, accepted, NamedInput{Label: label, Text: text, Untrusted: true}, extra)
 
 	return Input{JobPrompt: filled, Inputs: inputs}, nil
 }

@@ -726,3 +726,34 @@ func TestRepliesDuplicateQuestion(t *testing.T) {
 		}
 	})
 }
+
+// TestConfirmedOutcomeShape proves confirmed's own Layer 1 rule (notes is
+// required, design section 22.12.3) and that it still carries replies like
+// every other planning outcome that can.
+func TestConfirmedOutcomeShape(t *testing.T) {
+	t.Parallel()
+
+	t.Run("notes required", func(t *testing.T) {
+		t.Parallel()
+		xmlDoc := `<zing job="planning" outcome="confirmed"><notes></notes></zing>`
+		doc := mustParse(t, xmlDoc)
+		errs := Validate(doc, ValidateContext{Job: JobPlanning})
+		want := "notes: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate(confirmed, empty notes) = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("replies allowed", func(t *testing.T) {
+		t.Parallel()
+		xmlDoc := `<zing job="planning" outcome="confirmed">` +
+			`<notes>Nothing is open.</notes>` +
+			`<replies><reply question="Q1">Still here.</reply></replies>` +
+			`</zing>`
+		doc := mustParse(t, xmlDoc)
+		errs := Validate(doc, ValidateContext{Job: JobPlanning})
+		if len(errs) != 0 {
+			t.Fatalf("Validate(confirmed with replies) = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}

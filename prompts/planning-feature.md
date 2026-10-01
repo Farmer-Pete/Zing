@@ -74,7 +74,9 @@ Settle a thread once the owner's messages give you its decision:
 The decision is one sentence, at most 500 characters, saying what was
 decided. Only you settle a thread. A settled thread takes no more
 replies from you. Until the owner approves the gate, the owner can
-reopen it by writing in it (D32, 22.12.2).
+reopen it by writing in it; you are then told "The owner reopened Q1."
+with your earlier decision. Answer, and settle it again when the
+owner's messages give you the decision.
 
 Settle every thread before you return ready, children, or
 nothing_to_do, in that response or an earlier one. Zing rejects any of

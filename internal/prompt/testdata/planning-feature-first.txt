@@ -74,7 +74,9 @@ Settle a thread once the owner's messages give you its decision:
 The decision is one sentence, at most 500 characters, saying what was
 decided. Only you settle a thread. A settled thread takes no more
 replies from you. Until the owner approves the gate, the owner can
-reopen it by writing in it (D32, 22.12.2).
+reopen it by writing in it; you are then told "The owner reopened Q1."
+with your earlier decision. Answer, and settle it again when the
+owner's messages give you the decision.
 
 Settle every thread before you return ready, children, or
 nothing_to_do, in that response or an earlier one. Zing rejects any of
@@ -238,7 +240,7 @@ Title: Add dark mode
 Body: Users want a dark theme toggle in settings.
 <<<END abcdef>>>
 
-<zing job="planning" outcome="questions"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="questions"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
@@ -251,7 +253,7 @@ Body: Users want a dark theme toggle in settings.
   </replies>
 </zing>
 
-<zing job="planning" outcome="ready"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="ready"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <claims>
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
@@ -343,7 +345,7 @@ Body: Users want a dark theme toggle in settings.
   </replies>
 </zing>
 
-<zing job="planning" outcome="children"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="children"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <child key="..."> <!-- Child, at least two, tickets that can each be built and verified alone; key: string -->
     <title>...</title> <!-- string -->
     <body>...</body> <!-- string, specific enough to build alone, markdown -->
@@ -355,7 +357,7 @@ Body: Users want a dark theme toggle in settings.
   </replies>
 </zing>
 
-<zing job="planning" outcome="nothing_to_do"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="nothing_to_do"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <claims>
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more, every code claim is false; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
@@ -365,7 +367,7 @@ Body: Users want a dark theme toggle in settings.
   </replies>
 </zing>
 
-<zing job="planning" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
@@ -378,7 +380,7 @@ Body: Users want a dark theme toggle in settings.
   </replies>
 </zing>
 
-<zing job="planning" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+<zing job="planning" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
   <error code="..."> <!-- RunError; code: ErrorCode, one of: plan_gap | cannot_run | environment | other -->
     <what>...</what> <!-- string, what could not be done -->
     <why>...</why> <!-- string, why, with evidence -->

@@ -352,3 +352,129 @@ func TestThreadByKey(t *testing.T) {
 		t.Error(`ThreadByKey("") ok = true, want false`)
 	}
 }
+
+// ---- D32: ApprovalNotes and ConfirmedApprovalForVersion --------------------
+
+// TestApprovalNotesReadsTheConfirmedGate proves ApprovalNotes (design
+// section 22.12.3b): the owner's sent reply rows on the gate question the
+// ticket's newest confirming marker names, joined by newline in id order.
+func TestApprovalNotesReadsTheConfirmedGate(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertRun(t, s, sess)
+
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+	for _, line := range []string{"the JSON must stay stable", "one more thing"} {
+		if _, err := s.InsertMessage(ctx, Message{
+			TicketID: ticketID, ParentID: &approval.QuestionID, Type: msgTypeReply, Author: authorYou,
+			State: new(answerStateSent), Body: line,
+		}); err != nil {
+			t.Fatalf("insert approval note: %v", err)
+		}
+	}
+
+	notes, err := s.ApprovalNotes(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ApprovalNotes: %v", err)
+	}
+	want := "the JSON must stay stable\none more thing"
+	if notes != want {
+		t.Errorf("ApprovalNotes = %q, want %q", notes, want)
+	}
+}
+
+// TestApprovalNotesEmptyWithNoConfirmingMarker proves the "" fallback
+// (design section 22.12.3b): a ticket that was never confirmed (no
+// confirming marker at all) reads back no notes.
+func TestApprovalNotesEmptyWithNoConfirmingMarker(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	notes, err := s.ApprovalNotes(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("ApprovalNotes: %v", err)
+	}
+	if notes != "" {
+		t.Errorf("ApprovalNotes = %q, want \"\"", notes)
+	}
+}
+
+// TestConfirmedApprovalForVersion proves the three cases checkGateApprovalTx
+// and the confirming-turn routing both depend on (design section 22.12.1,
+// 22.12.3): a matching confirming marker is confirmed; no marker for that
+// version is not; a marker superseded by a later cancellation is not.
+func TestConfirmedApprovalForVersion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("confirmed", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		sess := insertSession(t, s, ticketID, testStatePlanning)
+		runID := insertRun(t, s, sess)
+		want := seedConfirmedGateApproval(t, s, ticketID, runID, 3, 7)
+
+		got, ok, err := s.ConfirmedApprovalForVersion(ctx, ticketID, 3)
+		if err != nil {
+			t.Fatalf("ConfirmedApprovalForVersion: %v", err)
+		}
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if got != want {
+			t.Errorf("ConfirmedApprovalForVersion = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("no marker for this version", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		sess := insertSession(t, s, ticketID, testStatePlanning)
+		runID := insertRun(t, s, sess)
+		seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+
+		_, ok, err := s.ConfirmedApprovalForVersion(ctx, ticketID, 2)
+		if err != nil {
+			t.Fatalf("ConfirmedApprovalForVersion: %v", err)
+		}
+		if ok {
+			t.Error("ok = true, want false (no confirming marker names plan version 2)")
+		}
+	})
+
+	t.Run("cancelled since", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		sess := insertSession(t, s, ticketID, testStatePlanning)
+		runID := insertRun(t, s, sess)
+		approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+		if _, err := s.InsertMessage(ctx, Message{
+			TicketID: ticketID, ParentID: &approval.QuestionID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("gate approval cancelled gate %d batch 2", approval.QuestionID),
+		}); err != nil {
+			t.Fatalf("insert cancellation marker: %v", err)
+		}
+
+		_, ok, err := s.ConfirmedApprovalForVersion(ctx, ticketID, 1)
+		if err != nil {
+			t.Fatalf("ConfirmedApprovalForVersion: %v", err)
+		}
+		if ok {
+			t.Error("ok = true, want false (a later cancellation marker supersedes it)")
+		}
+	})
+}

@@ -29,6 +29,13 @@ const (
 	testReasonPlanReady  = "plan ready"
 	testOutcomeBug       = "bug"
 	testTypePlan         = "plan"
+
+	// testStateGeneric is an arbitrary Next value for a fence or claim test
+	// that cares only about ownership and expiry, not about any real
+	// transition's own side effects: deliberately not "building", which
+	// checkGateApprovalTx's own seal invariant (D32) now gates on a
+	// HandlerCommit carrying GateApproval when the ticket is in "planning".
+	testStateGeneric = "reviewing"
 )
 
 // claimForCommit claims ticketID for testOwner with a lease truncated to
@@ -263,7 +270,7 @@ func TestCommitHandlerResult_TruncatesExpiresLikeClaim(t *testing.T) {
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: testOwner, Expires: rawExpires,
-		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Next: testStateGeneric, Reason: testReasonPlanReady,
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -276,8 +283,8 @@ func TestCommitHandlerResult_TruncatesExpiresLikeClaim(t *testing.T) {
 	if getErr != nil {
 		t.Fatalf("GetTicket: %v", getErr)
 	}
-	if got.State != testStateBuilding {
-		t.Errorf("ticket state = %q, want building", got.State)
+	if got.State != testStateGeneric {
+		t.Errorf("ticket state = %q, want %s", got.State, testStateGeneric)
 	}
 }
 
@@ -291,7 +298,7 @@ func TestCommitHandlerResult_StaleOwnerAppliesNothing(t *testing.T) {
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: testOwnerOther, Expires: expires,
-		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Next: testStateGeneric, Reason: testReasonPlanReady,
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -326,7 +333,7 @@ func TestCommitHandlerResult_ChangedExpiryAppliesNothing(t *testing.T) {
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: differentExpires,
-		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Next: testStateGeneric, Reason: testReasonPlanReady,
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -407,7 +414,7 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Next: testStateGeneric, Reason: testReasonPlanReady,
 		Session:          &SessionUpsert{ID: &sessID, BumpResumes: true},
 		Runs:             []Run{{Turn: 1, Outcome: new("ready")}},
 		ResolveQuestions: []int64{q1ID, q2ID},
@@ -423,8 +430,8 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	if getErr != nil {
 		t.Fatalf("GetTicket: %v", getErr)
 	}
-	if got.State != testStateBuilding {
-		t.Errorf("ticket state = %q, want %s", got.State, testStateBuilding)
+	if got.State != testStateGeneric {
+		t.Errorf("ticket state = %q, want %s", got.State, testStateGeneric)
 	}
 	if got.WaitingOn != nil {
 		t.Errorf("ticket waiting_on = %v, want nil", *got.WaitingOn)
@@ -467,8 +474,8 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 	if stateErr != nil {
 		t.Fatalf("read state message: %v", stateErr)
 	}
-	if from != testStatePlanning || to != testStateBuilding || reason != testReasonPlanReady {
-		t.Errorf("state message = (%s, %s, %s), want (%s, %s, %s)", from, to, reason, testStatePlanning, testStateBuilding, testReasonPlanReady)
+	if from != testStatePlanning || to != testStateGeneric || reason != testReasonPlanReady {
+		t.Errorf("state message = (%s, %s, %s), want (%s, %s, %s)", from, to, reason, testStatePlanning, testStateGeneric, testReasonPlanReady)
 	}
 }
 
@@ -2656,6 +2663,33 @@ func insertRun(t *testing.T, s *Store, sessionID int64) int64 {
 	return id
 }
 
+// seedConfirmedGateApproval seeds a complete, confirmed gate approval for
+// ticketID (D32, design section 22.12.1, 22.12.3a): an "answered" gate
+// question, its newest sent answer (option "a", batch), and the confirming
+// marker binding both to planVersion under confirmRunID. It returns the
+// GateApproval a Seal test passes on HandlerCommit, matching exactly what
+// the real flow would have produced by the time gateApprove seals.
+func seedConfirmedGateApproval(t *testing.T, s *Store, ticketID, confirmRunID int64, planVersion int, batch int64) GateApproval {
+	t.Helper()
+	ctx := t.Context()
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindGate, optionsAB, nil)
+	markAnswered(t, s, qID)
+	aID, err := s.InsertMessage(ctx, Message{
+		TicketID: ticketID, ParentID: &qID, Type: msgTypeAnswer, Author: authorYou,
+		State: new(answerStateSent), Payload: []byte(`{"option":"a"}`), BatchID: &batch,
+	})
+	if err != nil {
+		t.Fatalf("seed gate approve answer: %v", err)
+	}
+	marker := fmt.Sprintf("gate confirmed run %d plan v%d gate %d answer %d", confirmRunID, planVersion, qID, aID)
+	if _, err := s.InsertMessage(ctx, Message{
+		TicketID: ticketID, ParentID: &qID, Type: msgTypeUpdate, Author: authorSystem, Body: marker,
+	}); err != nil {
+		t.Fatalf("seed confirming marker: %v", err)
+	}
+	return GateApproval{QuestionID: qID, AnswerID: aID, ApproveBatch: batch, PlanVersion: planVersion}
+}
+
 // seedSealableCohort inserts one "plan" artifact at planVersion owned by
 // runID, plus n "scenario" artifacts also owned by runID: the cohort a Seal
 // test's SealRequest targets.
@@ -2719,12 +2753,14 @@ func TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched(t
 	runB := insertRun(t, s, sess)
 	seedSealableCohort(t, s, ticketID, runA, 1, 3)
 	seedSealableCohort(t, s, ticketID, runB, 2, 4)
+	approval := seedConfirmedGateApproval(t, s, ticketID, runB, 2, 1)
 
 	owner, expires := claimForCommit(t, s, ticketID)
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Next: testStateBuilding, Reason: testReasonPlanReady,
-		Seal: &SealRequest{RunID: runB, PlanVersion: 2, ExpectedCount: 4, At: time.Now()},
+		Seal:         &SealRequest{RunID: runB, PlanVersion: 2, ExpectedCount: 4, At: time.Now()},
+		GateApproval: &approval,
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -2759,11 +2795,13 @@ func TestCommitHandlerResult_SealPlanVersionMismatch(t *testing.T) {
 	sess := insertSession(t, s, ticketID, testStatePlanning)
 	runID := insertRun(t, s, sess)
 	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 2, 1)
 
 	owner, expires := claimForCommit(t, s, ticketID)
 	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Seal: &SealRequest{RunID: runID, PlanVersion: 2, ExpectedCount: 3, At: time.Now()},
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 2, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
 	})
 	assertSealMismatch(t, err, "plan", 3, 0)
 }
@@ -2790,11 +2828,13 @@ func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
 			sess := insertSession(t, s, ticketID, testStatePlanning)
 			runID := insertRun(t, s, sess)
 			seedSealableCohort(t, s, ticketID, runID, 1, tt.n)
+			approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
 
 			owner, expires := claimForCommit(t, s, ticketID)
 			_, err := s.CommitHandlerResult(ctx, HandlerCommit{
 				TicketID: ticketID, Owner: owner, Expires: expires,
-				Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: tt.n, At: time.Now()},
+				Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: tt.n, At: time.Now()},
+				GateApproval: &approval,
 			})
 			assertSealMismatch(t, err, "count", tt.n, 0)
 		})
@@ -2826,11 +2866,13 @@ func TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate(t *testing.T) 
 		`UPDATE artifacts SET sealed_at = ? WHERE id = ?`, formatTime(time.Now()), oneID); err != nil {
 		t.Fatalf("pre-seal one scenario artifact: %v", err)
 	}
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
 
 	owner, expires := claimForCommit(t, s, ticketID)
 	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
 	})
 	assertSealMismatch(t, err, "update", 3, 2)
 }
@@ -2849,6 +2891,7 @@ func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
 	sess := insertSession(t, s, ticketID, testStatePlanning)
 	runID := insertRun(t, s, sess)
 	seedSealableCohort(t, s, ticketID, runID, 1, 1) // one scenario: out of range
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
 
 	before, err := s.GetTicket(ctx, ticketID)
 	if err != nil {
@@ -2859,8 +2902,9 @@ func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Next: testStateBuilding, Reason: testReasonPlanReady,
-		Messages: []Message{{TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress}},
-		Seal:     &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+		Messages:     []Message{{TicketID: ticketID, Type: testTypeUpdate, Author: testAuthorZing, Body: testBodyProgress}},
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+		GateApproval: &approval,
 	})
 	assertSealMismatch(t, err, "count", 1, 0)
 	if applied {
@@ -2877,10 +2921,191 @@ func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
 	if after.ClaimOwner == nil || *after.ClaimOwner != owner {
 		t.Error("the claim was released by a rolled-back commit, want it still held")
 	}
-	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 0 {
-		t.Errorf("messages after a rolled-back seal mismatch = %d, want 0", n)
+	// 3, not 0: seedConfirmedGateApproval's own fixture (the gate question,
+	// its approving answer, and the confirming marker), committed before this
+	// test's own CommitHandlerResult call -- the rolled-back commit's
+	// Messages entry is what must still be absent.
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketID); n != 3 {
+		t.Errorf("messages after a rolled-back seal mismatch = %d, want 3 (only the gate approval fixture)", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ? AND body = ?`,
+		ticketID, testTypeUpdate, testBodyProgress); n != 0 {
+		t.Errorf("progress messages after a rolled-back seal mismatch = %d, want 0", n)
 	}
 }
+
+// --- CommitHandlerResult: the seal invariant (D32, design section 22.12.3a) -
+
+// assertSealRefused asserts err is a *SealRefusedError with the exact
+// reason wantReason, that it also satisfies errors.Is(err, ErrSealRefused),
+// and that its Error() text is exactly "seal refused: " + wantReason
+// (design section 22.12.3a, the dispatcher's own marker text).
+func assertSealRefused(t *testing.T, err error, wantReason string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("err = nil, want a *SealRefusedError")
+	}
+	if !errors.Is(err, ErrSealRefused) {
+		t.Errorf("errors.Is(err, ErrSealRefused) = false, want true (err: %v)", err)
+	}
+	var refused *SealRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("errors.As(err, *SealRefusedError) = false, want true (err: %v)", err)
+	}
+	if refused.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q", refused.Reason, wantReason)
+	}
+	if got := refused.Error(); got != "seal refused: "+wantReason {
+		t.Errorf("Error() = %q, want %q", got, "seal refused: "+wantReason)
+	}
+}
+
+// sealableFixture seeds a ticket in planning with a sealable 3-scenario
+// cohort at plan version 1 under runID, and claims it, the shared setup
+// every seal-invariant test below starts from.
+func sealableFixture(t *testing.T, s *Store) (ticketID, runID int64, owner string, expires time.Time) {
+	t.Helper()
+	_, ticketID = seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	sess := insertSession(t, s, ticketID, testStatePlanning)
+	runID = insertRun(t, s, sess)
+	seedSealableCohort(t, s, ticketID, runID, 1, 3)
+	owner, expires = claimForCommit(t, s, ticketID)
+	return ticketID, runID, owner, expires
+}
+
+// TestSealRefusedWithoutGateApproval proves check 1 (design section
+// 22.12.3a): a Seal with no GateApproval at all is refused before
+// sealCohortTx ever runs, and nothing is written.
+func TestSealRefusedWithoutGateApproval(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ticketID, runID, owner, expires := sealableFixture(t, s)
+
+	_, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal: &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+	})
+	assertSealRefused(t, err, "no gate approval check")
+
+	got, getErr := s.GetTicket(t.Context(), ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.State != testStatePlanning {
+		t.Errorf("ticket state = %q, want unchanged planning", got.State)
+	}
+}
+
+// TestSealRefusedWithoutMatchingConfirm proves check 3 (design section
+// 22.12.3a): a GateApproval naming a plan version no confirming marker ever
+// named is refused with its exact reason text.
+func TestSealRefusedWithoutMatchingConfirm(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ticketID, runID, owner, expires := sealableFixture(t, s)
+	// A gate question and an approving answer exist, but no confirming
+	// marker was ever written for them.
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindGate, optionsAB, nil)
+	markAnswered(t, s, qID)
+	batch := int64(1)
+	aID, insErr := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, ParentID: &qID, Type: msgTypeAnswer, Author: authorYou,
+		State: new(answerStateSent), Payload: []byte(`{"option":"a"}`), BatchID: &batch,
+	})
+	if insErr != nil {
+		t.Fatalf("insert approve answer: %v", insErr)
+	}
+
+	approval := GateApproval{QuestionID: qID, AnswerID: aID, ApproveBatch: batch, PlanVersion: 1}
+	_, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
+	})
+	assertSealRefused(t, err, fmt.Sprintf("no confirmation for gate question %d answer %d plan v1", qID, aID))
+}
+
+// TestSealRefusedAfterCancellation proves check 4 (design section
+// 22.12.3a): a cancellation marker with a greater id than the confirming
+// marker refuses the seal, even though the confirming marker itself is
+// otherwise a perfect match.
+func TestSealRefusedAfterCancellation(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ticketID, runID, owner, expires := sealableFixture(t, s)
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+	if _, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, ParentID: &approval.QuestionID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("gate approval cancelled gate %d batch 2", approval.QuestionID),
+	}); err != nil {
+		t.Fatalf("insert cancellation marker: %v", err)
+	}
+
+	_, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
+	})
+	assertSealRefused(t, err, fmt.Sprintf("approval of gate question %d was cancelled", approval.QuestionID))
+}
+
+// TestSealRefusedOnOwnerRowAfterApproval proves check 5, the owner fence
+// (design section 22.12.3a): any sent owner row on a planning question with
+// a batch above the approval's own batch refuses the seal -- nothing the
+// owner sent after Approve may be sealed past.
+func TestSealRefusedOnOwnerRowAfterApproval(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ticketID, runID, owner, expires := sealableFixture(t, s)
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	planningQID := insertOpenQuestion(t, s, ticketID, planningRun, "Q2")
+	markAnswered(t, s, planningQID) // resolved by CommitHandlerResult's own Conversation path in real use; state irrelevant here
+	laterBatch := int64(2)
+	if _, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, ParentID: &planningQID, Type: msgTypeReply, Author: authorYou,
+		State: new(answerStateSent), Body: "print JSON too", BatchID: &laterBatch,
+	}); err != nil {
+		t.Fatalf("insert late owner reply: %v", err)
+	}
+
+	_, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 1, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
+	})
+	assertSealRefused(t, err, "owner wrote after approval (batch 2 > 1)")
+}
+
+// TestSealRefusedWithPlanVersionMismatch proves check 6 (design section
+// 22.12.3a): a Seal whose PlanVersion does not match the approval's own is
+// refused before sealCohortTx ever runs its own, different plan check.
+func TestSealRefusedWithPlanVersionMismatch(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ticketID, runID, owner, expires := sealableFixture(t, s)
+	approval := seedConfirmedGateApproval(t, s, ticketID, runID, 1, 1)
+
+	_, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: testStateBuilding, Reason: testReasonPlanReady,
+		Seal:         &SealRequest{RunID: runID, PlanVersion: 2, ExpectedCount: 3, At: time.Now()},
+		GateApproval: &approval,
+	})
+	assertSealRefused(t, err, "seal is for plan v2, approval is for v1")
+}
+
+// TestSealRefusedReleasesClaimAndMarks is covered by internal/dispatch's own
+// TestSealRefusedReleasesClaimAndMarks (dispatch_test.go): the dispatcher,
+// not the store, owns releasing the claim and writing the "seal refused"
+// marker after CommitHandlerResult returns this error.
 
 // --- CommitHandlerResult: Escalation (design D10, section 6.7) -------------
 
@@ -3367,6 +3592,70 @@ func TestCommitConversationClearsQuestionsWaitOnLateMessage(t *testing.T) {
 	}
 	if got.WaitingOn != nil {
 		t.Errorf("ticket waiting_on = %q, want nil (fenced by the late message)", *got.WaitingOn)
+	}
+}
+
+// TestCommitFenceWithdrawsGateOnLateReopen proves the D32 widening of the
+// same fence to "gate" (design section 22.12.2): a plan-review run can be
+// in flight when the owner reopens a thread elsewhere, and its own clean
+// commit posts a fresh gate question while that thread is still open. The
+// fence clears waiting_on to nil exactly as it does for "questions", and
+// also withdraws the gate question this same commit just inserted, in the
+// same transaction.
+func TestCommitFenceWithdrawsGateOnLateReopen(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+	insertSentOwnerBatch(t, s, ticketID, qID, 5, "one more thing")
+
+	gatePayload, err := json.Marshal(response.QuestionPayload{
+		Kind: response.QuestionKindGate, State: response.QuestionStateOpen,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal gate payload: %v", err)
+	}
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	gateWaiting := waitingFlagGate
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Waiting: &gateWaiting,
+		Messages: []Message{{
+			TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+			State: new(questionStateOpen), Body: "the plan objective", Payload: gatePayload,
+		}},
+		Conversation: &ConversationCommit{ThroughBatch: 3},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	got, err := s.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if got.WaitingOn != nil {
+		t.Errorf("ticket waiting_on = %q, want nil (fenced by the late reopen)", *got.WaitingOn)
+	}
+
+	var gateState string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT state FROM messages WHERE ticket_id = ? AND type = ? AND json_extract(payload, '$.kind') = 'gate'`,
+		ticketID, msgTypeQuestion).Scan(&gateState); err != nil {
+		t.Fatalf("read gate question state: %v", err)
+	}
+	if gateState != questionStateResolved {
+		t.Errorf("gate question state = %q, want resolved (withdrawn)", gateState)
 	}
 }
 
