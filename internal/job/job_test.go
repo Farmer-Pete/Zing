@@ -246,6 +246,20 @@ func TestValidateCommitCountsPollFields(t *testing.T) {
 	}
 }
 
+// TestValidateCommitCountsConversation proves the emptiness check (design
+// section 22.3, D31) grew to cover Conversation too: a commit that sets
+// only Conversation is not the wholly empty case ValidateCommit rejects.
+func TestValidateCommitCountsConversation(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	commit := store.HandlerCommit{TicketID: 1, Conversation: &store.ConversationCommit{}}
+
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(Conversation only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 

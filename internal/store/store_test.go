@@ -29,6 +29,11 @@ const (
 	testJobBuild       = "build"
 	testModelClaudeX   = "claude-x"
 	testModelOpus48    = "claude-opus-4-8"
+
+	// testEscalationBodyWallClock is a cap-escalation body repeated across
+	// commit_test.go, planning_reads_test.go, and conversation_reads_test.go
+	// cousins (goconst).
+	testEscalationBodyWallClock = "wall_clock: over budget"
 )
 
 var wantTables = []string{

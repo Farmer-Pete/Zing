@@ -141,6 +141,30 @@ type HandlerCommit struct {
 	// dispatcher runs it against the ticket's tracker only after a
 	// successful commit (design D12).
 	TrackerEffect *TrackerEffect
+	// Conversation applies a planning turn's thread effects (D31, section
+	// 22.3): settling the threads this turn's response decided, and the
+	// fence that keeps a message sent during the run from being stranded
+	// behind a Waiting this commit would otherwise set. Applied right after
+	// Messages and before ResolveQuestions.
+	Conversation *ConversationCommit
+}
+
+// ConversationCommit is one planning turn's thread effects (design section
+// 22.3): ThroughBatch is the delivery watermark after this run -- the
+// newest owner batch the run received, or W when it received none -- and
+// Settle names the threads this turn's response settled.
+type ConversationCommit struct {
+	ThroughBatch int64
+	Settle       []SettleQuestion
+}
+
+// SettleQuestion is one thread a planning response settled (design section
+// 22.3): QuestionID must name an open or answered planning question of the
+// commit's own ticket, and Decision is the one-sentence decision text
+// stored on the inserted "resolved" row.
+type SettleQuestion struct {
+	QuestionID int64
+	Decision   string
 }
 
 // SealRequest names the cohort a Seal step must prove and seal: the run that
@@ -228,9 +252,12 @@ type SessionUpsert struct {
 // branch; set pr url; insert the artifacts; seal the cohort when Seal is
 // set; record the escalation and its linked question when Escalation is
 // set; resolve every question when ResolveAll is set; insert the messages,
-// attaching the single run's id when AttachRunToMsgs is set; resolve each
-// ResolveQuestions id and insert its resolved message; write the state
-// message; then apply Next, Waiting, the three poll columns (Poll,
+// attaching the single run's id when AttachRunToMsgs is set; apply
+// Conversation when set (settle threads, and fence Waiting against a late
+// owner message, design section 22.3); resolve each ResolveQuestions id
+// and insert its resolved message; write the state message; then apply
+// Next, Waiting (as the Conversation fence may have rewritten it), the
+// three poll columns (Poll,
 // PollSchedule, or ClearPoll, design section 4.2, D8), and the claim clear
 // in the one fenced ticket UPDATE that also serves as the final fence
 // check.
@@ -329,6 +356,15 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		attachRunID = &runIDs[0]
 	}
 
+	// conversationRunID is "the commit's run" a settled thread's decision
+	// row is attached to (design section 22.3): the same run attachRunID
+	// above derives from, but read regardless of AttachRunToMsgs, since a
+	// planning commit's Conversation stands on its own.
+	var conversationRunID *int64
+	if len(runIDs) > 0 {
+		conversationRunID = &runIDs[0]
+	}
+
 	if c.SetKind != nil {
 		if err = setKindTx(ctx, tx, c.TicketID, *c.SetKind); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
@@ -419,6 +455,17 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		}
 	}
 
+	// waitingOn is what the final ticket UPDATE below actually writes:
+	// c.Waiting, unless applyConversationTx's fence clears it (design
+	// section 22.3 step 3).
+	waitingOn := c.Waiting
+	if c.Conversation != nil {
+		waitingOn, err = applyConversationTx(ctx, tx, s, c.TicketID, *c.Conversation, c.Waiting, c.Escalation, conversationRunID)
+		if err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
 	for _, qid := range c.ResolveQuestions {
 		if err = verifyQuestionForTicket(ctx, tx, c.TicketID, qid); err != nil {
 			return false, fmt.Errorf("commit handler result: resolve question %d: %w", qid, err)
@@ -488,7 +535,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			claim_owner = NULL,
 			claim_expires_at = NULL
 		 WHERE id = ? AND claim_owner = ? AND claim_expires_at = ?`,
-		c.Next, c.Next, c.Waiting, nextPollAt, pollIntervalS, pollFingerprint, c.TicketID, c.Owner, formatTime(expires),
+		c.Next, c.Next, waitingOn, nextPollAt, pollIntervalS, pollFingerprint, c.TicketID, c.Owner, formatTime(expires),
 	)
 	if err != nil {
 		return false, fmt.Errorf("commit handler result: update ticket: %w", err)
@@ -1033,6 +1080,114 @@ func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ec E
 		return fmt.Errorf("escalation: insert question message: %w", err)
 	}
 	return nil
+}
+
+// applyConversationTx applies a HandlerCommit's Conversation (design
+// section 22.3): each Settle entry resolves its question with a decision
+// row, unless a late owner message defers it; then, when waiting would
+// have the commit wait on questions with no escalation, and any planning
+// question (settled by this call or not) still carries a late owner
+// message, the wait is skipped, so a message sent during the run is never
+// stranded behind it. It returns the waiting_on value the caller should
+// actually write: waiting unchanged, unless the fence clears it.
+func applyConversationTx(ctx context.Context, tx *sql.Tx, s *Store, ticketID int64, conv ConversationCommit, waiting *string, escalation *EscalationCommit, runID *int64) (*string, error) {
+	for _, settle := range conv.Settle {
+		if err := verifyOpenPlanningQuestionTx(ctx, tx, ticketID, settle.QuestionID); err != nil {
+			return nil, err
+		}
+		late, err := lateOwnerMessageTx(ctx, tx, settle.QuestionID, conv.ThroughBatch)
+		if err != nil {
+			return nil, err
+		}
+		if late {
+			slog.Info("settle deferred", "ticket_id", ticketID, "question_id", settle.QuestionID, "through_batch", conv.ThroughBatch)
+			continue
+		}
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE messages SET state = ? WHERE id = ?`, questionStateResolved, settle.QuestionID,
+		); err != nil {
+			return nil, fmt.Errorf("settle question %d: %w", settle.QuestionID, err)
+		}
+		if err = s.insertMessageTx(ctx, tx, Message{
+			TicketID: ticketID, ParentID: &settle.QuestionID, Type: msgTypeResolved, Author: authorZing,
+			RunID: runID, Body: settle.Decision,
+		}); err != nil {
+			return nil, fmt.Errorf("settle question %d: insert decision: %w", settle.QuestionID, err)
+		}
+	}
+
+	out := waiting
+	if waiting != nil && *waiting == waitingFlagQuestions && escalation == nil {
+		anyLate, err := anyUnsettledPlanningQuestionHasLateMessageTx(ctx, tx, ticketID, conv.ThroughBatch)
+		if err != nil {
+			return nil, err
+		}
+		if anyLate {
+			slog.Info("planning wait skipped", "ticket_id", ticketID, "through_batch", conv.ThroughBatch)
+			out = nil
+		}
+	}
+	return out, nil
+}
+
+// verifyOpenPlanningQuestionTx errors unless questionID names an open or
+// answered planning question (planningQuestionsSQL, conversation_reads.go)
+// of ticketID: the check every Conversation.Settle entry must pass before
+// this transaction settles it (design section 22.3).
+func verifyOpenPlanningQuestionTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) error {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM messages m WHERE m.id = ? AND m.state IN (?, ?) AND m.id IN (`+planningQuestionsSQL+`)`,
+		questionID, questionStateOpen, questionStateAnswered, ticketID,
+	).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("settle question %d: not an open planning question of ticket %d", questionID, ticketID)
+	case err != nil:
+		return fmt.Errorf("settle question %d: %w", questionID, err)
+	}
+	return nil
+}
+
+// lateOwnerMessageTx reports whether questionID carries a sent owner
+// message (answer or reply) with a batch above throughBatch (design section
+// 22.3): the fixed point a settle was asked for, but the owner has since
+// written past it.
+func lateOwnerMessageTx(ctx context.Context, tx *sql.Tx, questionID, throughBatch int64) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM messages WHERE parent_id = ? AND author = ? AND type IN (?, ?) AND state = ? AND batch_id > ? LIMIT 1`,
+		questionID, authorYou, msgTypeAnswer, msgTypeReply, answerStateSent, throughBatch,
+	).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("late owner message for question %d: %w", questionID, err)
+	}
+	return true, nil
+}
+
+// anyUnsettledPlanningQuestionHasLateMessageTx reports whether ticketID
+// carries at least one planning question still open or answered -- after
+// whatever this commit's own Settle entries just resolved -- with a sent
+// owner message above throughBatch (design section 22.3 step 3): the fence
+// that keeps a questions wait from stranding a message the run never saw.
+func anyUnsettledPlanningQuestionHasLateMessageTx(ctx context.Context, tx *sql.Tx, ticketID, throughBatch int64) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM messages m WHERE m.author = ? AND m.type IN (?, ?) AND m.state = ? AND m.batch_id > ?
+		   AND m.parent_id IN (`+planningQuestionsSQL+` AND q.state IN (?, ?)) LIMIT 1`,
+		authorYou, msgTypeAnswer, msgTypeReply, answerStateSent, throughBatch,
+		ticketID, questionStateOpen, questionStateAnswered,
+	).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("unsettled planning questions with late messages for ticket %d: %w", ticketID, err)
+	}
+	return true, nil
 }
 
 // isUniqueConstraintErr reports whether err came from a SQLite UNIQUE

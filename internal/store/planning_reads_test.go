@@ -460,7 +460,7 @@ func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Waiting: new(testWaitingQuestions),
 		Escalation: &EscalationCommit{
-			RunID: nil, Body: "wall_clock: over budget",
+			RunID: nil, Body: testEscalationBodyWallClock,
 			Payload: escalationTestPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget),
 		},
 	}); err != nil {

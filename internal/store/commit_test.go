@@ -2914,7 +2914,7 @@ func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
 	setTicketState(t, s, ticketID, testStatePlanning)
 
 	owner, expires := claimForCommit(t, s, ticketID)
-	body := "wall_clock: over budget"
+	body := testEscalationBodyWallClock
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Escalation: &EscalationCommit{
@@ -3217,5 +3217,231 @@ func TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty(t 
 	}
 	if keyByBody["C"] != "Q7" {
 		t.Errorf("C's key (already set) = %q, want unchanged Q7", keyByBody["C"])
+	}
+}
+
+// --- CommitHandlerResult: Conversation (design section 22.3, D31) ---------
+
+// TestCommitConversationSettlesWithDecisionRow proves a Settle entry with
+// no late owner message moves the question to "resolved" and inserts one
+// zing-authored "resolved" row, parented to the question, carrying the
+// commit's own run id and the decision text.
+func TestCommitConversationSettlesWithDecisionRow(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	decision := "Agreed, no ldflags."
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID},
+		Runs:    []Run{{Turn: 1, Outcome: new(testTypeQuestion)}},
+		Conversation: &ConversationCommit{
+			ThroughBatch: 0,
+			Settle:       []SettleQuestion{{QuestionID: qID, Decision: decision}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	var state string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM messages WHERE id = ?`, qID).Scan(&state); err != nil {
+		t.Fatalf("read question state: %v", err)
+	}
+	if state != questionStateResolved {
+		t.Errorf("question state = %q, want %q", state, questionStateResolved)
+	}
+
+	var author string
+	var runID int64
+	var body string
+	row := s.db.QueryRowContext(ctx,
+		`SELECT author, run_id, body FROM messages WHERE type = ? AND parent_id = ?`, msgTypeResolved, qID)
+	if err := row.Scan(&author, &runID, &body); err != nil {
+		t.Fatalf("read decision row: %v", err)
+	}
+	if author != authorZing {
+		t.Errorf("decision row author = %q, want %q", author, authorZing)
+	}
+	if body != decision {
+		t.Errorf("decision row body = %q, want %q", body, decision)
+	}
+	if runID == 0 {
+		t.Error("decision row run_id = 0, want the commit's own run")
+	}
+}
+
+// TestCommitConversationDefersSettleOnLateMessage proves a Settle entry
+// whose question carries a sent owner message above ThroughBatch is
+// skipped: the question stays open, and no decision row is inserted
+// (design section 22.3 step 2).
+func TestCommitConversationDefersSettleOnLateMessage(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+	insertSentOwnerBatch(t, s, ticketID, qID, 5, "actually, wait")
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID},
+		Runs:    []Run{{Turn: 1, Outcome: new(testTypeQuestion)}},
+		Conversation: &ConversationCommit{
+			ThroughBatch: 3, // below the late message's batch of 5
+			Settle:       []SettleQuestion{{QuestionID: qID, Decision: "too late"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	var state string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM messages WHERE id = ?`, qID).Scan(&state); err != nil {
+		t.Fatalf("read question state: %v", err)
+	}
+	if state != questionStateOpen {
+		t.Errorf("question state = %q, want unchanged %q (settle deferred)", state, questionStateOpen)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE type = ? AND parent_id = ?`, msgTypeResolved, qID); n != 0 {
+		t.Errorf("resolved rows for a deferred settle = %d, want 0", n)
+	}
+}
+
+// TestCommitConversationClearsQuestionsWaitOnLateMessage proves the fence
+// of design section 22.3 step 3: a commit that would wait on "questions",
+// with no Escalation, writes waiting_on NULL instead when an unsettled
+// planning question carries a late owner message.
+func TestCommitConversationClearsQuestionsWaitOnLateMessage(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+	insertSentOwnerBatch(t, s, ticketID, qID, 5, "one more thing")
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Waiting: new(testWaitingQuestions),
+		Conversation: &ConversationCommit{
+			ThroughBatch: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	got, err := s.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if got.WaitingOn != nil {
+		t.Errorf("ticket waiting_on = %q, want nil (fenced by the late message)", *got.WaitingOn)
+	}
+}
+
+// TestCommitConversationKeepsEscalationWait proves the fence above never
+// fires when the commit also carries an Escalation: the same late-message
+// fixture, but waiting_on stays "questions".
+func TestCommitConversationKeepsEscalationWait(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+	insertSentOwnerBatch(t, s, ticketID, qID, 5, "one more thing")
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Waiting: new(testWaitingQuestions),
+		Escalation: &EscalationCommit{
+			RunID: nil, Body: testEscalationBodyWallClock,
+			Payload: escalationTestPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget),
+		},
+		Conversation: &ConversationCommit{
+			ThroughBatch: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	got, err := s.GetTicket(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if got.WaitingOn == nil || *got.WaitingOn != testWaitingQuestions {
+		t.Errorf("ticket waiting_on = %v, want %q (escalation open: the fence must not fire)", got.WaitingOn, testWaitingQuestions)
+	}
+}
+
+// TestCommitConversationRejectsNonPlanningQuestion proves a Settle entry
+// naming a question that is not a planning question (a gate question
+// here) fails with the exact error text design section 22.3 specifies,
+// rather than settling it.
+func TestCommitConversationRejectsNonPlanningQuestion(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	gateID := insertQuestionOfKindWithRun(t, s, ticketID, run0ID, "Q1", response.QuestionKindGate)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Conversation: &ConversationCommit{
+			Settle: []SettleQuestion{{QuestionID: gateID, Decision: "not actually planning"}},
+		},
+	})
+	wantErr := fmt.Sprintf("commit handler result: settle question %d: not an open planning question of ticket %d", gateID, ticketID)
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("CommitHandlerResult error = %v, want %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
 	}
 }

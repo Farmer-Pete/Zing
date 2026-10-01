@@ -246,10 +246,10 @@ var legalWaiting = map[string]bool{
 // it was built against, the commit must do something (it is never wholly
 // empty: at least one of Next, Waiting, Messages, Runs, ResolveQuestions,
 // Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal,
-// Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, or ClearPoll must
-// be set), when Next is set it names a legal successor of t.State and
-// carries a non-empty Reason, and it does not also set a non-error Waiting;
-// any set Waiting is one of the eight closed-set flags.
+// Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, or
+// Conversation must be set), when Next is set it names a legal successor of
+// t.State and carries a non-empty Reason, and it does not also set a
+// non-error Waiting; any set Waiting is one of the eight closed-set flags.
 func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 	if c.TicketID != t.ID {
 		return fmt.Errorf("job: commit is for ticket %d, not ticket %d", c.TicketID, t.ID)
@@ -259,8 +259,8 @@ func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 		c.SetKind == nil && c.SetBranch == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
 		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil &&
 		c.SetPRURL == nil && c.Poll == nil && c.PollSchedule == nil && !c.ClearPoll &&
-		len(c.WithdrawQuestions) == 0 {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, or WithdrawQuestions", t.ID)
+		len(c.WithdrawQuestions) == 0 && c.Conversation == nil {
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, WithdrawQuestions, or Conversation", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

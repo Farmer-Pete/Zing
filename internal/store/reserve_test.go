@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -476,5 +477,57 @@ func TestCommittedResumeChargedOnce(t *testing.T) {
 
 	if got := sessionResumes(t, s, first.SessionID); got != 1 {
 		t.Errorf("resumes after reserve then commit = %d, want 1 (charged exactly once)", got)
+	}
+}
+
+// --- Reserve: the conversation pending marker (design section 22.3, D31) ---
+
+// TestReserveWritesPendingConversationMarker proves a RunSeed.ThroughBatch
+// above 0 writes "conversation pending run <R> batch <B>" once the run row
+// exists.
+func TestReserveWritesPendingConversationMarker(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake},
+		RunSeed{Model: testModelClaudeX, ThroughBatch: 5})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	want := fmt.Sprintf("%s%d batch %d", conversationPendingPrefix, reserved.RunID, 5)
+	var body string
+	row := s.db.QueryRowContext(ctx,
+		`SELECT body FROM messages WHERE ticket_id = ? AND type = ? AND author = ?`, ticketID, msgTypeUpdate, authorSystem)
+	if err := row.Scan(&body); err != nil {
+		t.Fatalf("read pending marker: %v", err)
+	}
+	if body != want {
+		t.Errorf("pending marker body = %q, want %q", body, want)
+	}
+}
+
+// TestReserveWritesNoMarkerAtZero proves a RunSeed carrying the zero value
+// of ThroughBatch (every non-planning caller) writes no pending marker.
+func TestReserveWritesNoMarkerAtZero(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	if _, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ?`, ticketID, msgTypeUpdate); n != 0 {
+		t.Errorf("update messages after Reserve with ThroughBatch 0 = %d, want 0", n)
 	}
 }
