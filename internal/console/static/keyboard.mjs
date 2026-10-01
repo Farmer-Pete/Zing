@@ -318,6 +318,29 @@ export function reduceNav(currentNav, history, detail) {
 }
 
 /**
+ * nextPendingNav decides what console.js's zing-nav bridge should remember
+ * as "not yet applied" after reducing one zing-nav event (bug fix: the
+ * first click on a Threads-sidebar row right after a page load could fire
+ * before GET /stream's first frame proves Datastar's own data-on:zing-nav
+ * listener on #stream-ctl is actually wired up, which silently dropped the
+ * nav -- the main pane stayed on the project list until a second click).
+ * console.js's onZingNav calls this after reduceNav on every event,
+ * keyboard- or click-triggered alike; its caller re-dispatches the
+ * returned nav once the stream's first real patch lands (installPatchObserver's
+ * markStreamConnected), so a nav that arrived too early is applied anyway
+ * instead of lost. Once the stream has connected, Datastar's own listener
+ * is known to be live, so there is nothing left to remember.
+ *
+ * @param {boolean} streamConnected
+ * @param {{view: string, open: number, project: number}} nav - reduceNav's
+ *   own result for this event, the destination to re-apply if needed
+ * @returns {{view: string, open: number, project: number}|null}
+ */
+export function nextPendingNav(streamConnected, nav) {
+	return streamConnected ? null : { view: nav.view, open: nav.open, project: nav.project };
+}
+
+/**
  * stepComposerIndex returns the next composer-control index for Tab (delta
  * 1) or Shift-Tab (delta -1) stepping over count controls, given the
  * currently focused control's index or -1 when none of them has focus

@@ -26,6 +26,7 @@ import {
 	collectPatchWork,
 	navChanged,
 	reduceNav,
+	nextPendingNav,
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
@@ -361,6 +362,21 @@ test('reduceNav: a back navigation (isBack) updates nav without pushing another 
 	assert.deepEqual(result.nav, { view: 'inbox', open: 0, project: 0 });
 	assert.deepEqual(result.history, history);
 	assert.equal(result.changed, true);
+});
+
+// nextPendingNav: console.js's onZingNav calls this after reduceNav on
+// every zing-nav event (bug fix: the first Threads-sidebar click right
+// after a page load did nothing because it could race GET /stream's first
+// frame, the only proof Datastar's own listener is wired up).
+
+test('nextPendingNav: before the stream connects, the event becomes the pending nav to re-apply', () => {
+	const nav = { view: 'thread', open: 7, project: 0 };
+	assert.deepEqual(nextPendingNav(false, nav), { view: 'thread', open: 7, project: 0 });
+});
+
+test('nextPendingNav: once the stream has connected, there is nothing to remember', () => {
+	const nav = { view: 'thread', open: 7, project: 0 };
+	assert.equal(nextPendingNav(true, nav), null);
 });
 
 // stepComposerIndex: console.js's moveComposerFocus() over the composer's

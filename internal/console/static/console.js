@@ -31,6 +31,7 @@ import {
 	buildItemDraftBody,
 	collectPatchWork,
 	describeAction,
+	nextPendingNav,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -65,6 +66,20 @@ const state = {
 	previousFocusableIDs: [],
 	railOpen: false,
 	helpOpen: false,
+	// streamConnected and pendingNav (bug fix): #stream-ctl's data-init
+	// fires the first GET /stream before console.js's own script can prove
+	// Datastar has finished wiring up #stream-ctl's data-on:zing-nav
+	// listener (and every nav-link's data-on:click). A zing-nav dispatched
+	// in that window -- the first click on a Threads-sidebar row right
+	// after a page load -- could be caught by nothing and silently
+	// dropped, leaving the main pane on the project list until a second
+	// click. streamConnected flips true the first time the patch observer
+	// sees a real mutation from the live stream (installPatchObserver's
+	// markStreamConnected), proving the page is fully wired up; pendingNav
+	// holds the last nav seen before that point so it can be re-applied
+	// once it is.
+	streamConnected: false,
+	pendingNav: null,
 };
 
 // ---- keys.json loading -----------------------------------------------
@@ -139,6 +154,31 @@ function onZingNav(event) {
 	if (changed) {
 		setFocusedID('');
 		state.previousFocusableIDs = [];
+	}
+	// nextPendingNav (keyboard.mjs, bug fix): remember this destination
+	// until the stream proves connected, in case Datastar's own
+	// data-on:zing-nav listener was not actually bound yet to act on the
+	// event this handler just saw.
+	state.pendingNav = nextPendingNav(state.streamConnected, nav);
+}
+
+// markStreamConnected flips state.streamConnected on the first real patch
+// from the live stream (installPatchObserver's MutationObserver callback,
+// never its one-time initial scan) and re-dispatches any nav queued before
+// that point (bug fix: see state.pendingNav above). dispatchNav, not
+// navigate, because the destination already went through reduceNav once;
+// re-running it through onZingNav a second time is what actually applies
+// it now that the stream -- and so Datastar's own listener -- is known to
+// be live.
+function markStreamConnected() {
+	if (state.streamConnected) {
+		return;
+	}
+	state.streamConnected = true;
+	if (state.pendingNav) {
+		const pending = state.pendingNav;
+		state.pendingNav = null;
+		dispatchNav(pending, false);
 	}
 }
 
@@ -805,7 +845,15 @@ function runPatchWork() {
 // not react to its own class or attribute changes"). It runs one initial
 // scan on install, matching "It does one initial scan on install".
 function installPatchObserver() {
-	const observer = new MutationObserver(() => runPatchWork());
+	// The callback only ever runs for an actual #main/#rail mutation, never
+	// for the installPatchObserver's own initial scan below, which calls
+	// runPatchWork() directly -- so reaching this callback is itself proof
+	// that a real /stream frame patched the page, the signal
+	// markStreamConnected (bug fix, state.streamConnected above) needs.
+	const observer = new MutationObserver(() => {
+		markStreamConnected();
+		runPatchWork();
+	});
 	for (const id of ['main', 'rail']) {
 		const el = document.getElementById(id);
 		if (el) {
@@ -827,15 +875,23 @@ function installNavBridge() {
 	ctl?.addEventListener('zing-nav', onZingNav);
 }
 
+// install wires every delegated listener synchronously, before awaiting
+// loadBindings' own /static/keys.json fetch (bug fix): none of
+// installNavBridge, installPatchObserver, installSideBox,
+// installLogControls, installChipActivation, or installPickupBox reads
+// state.bindings, so there was no reason their listeners -- installNavBridge
+// above all, the zing-nav bridge a Threads-sidebar click needs live as
+// early as possible -- sat behind an unrelated network round trip. Only
+// onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 async function install() {
-	await loadBindings();
-	document.addEventListener('keydown', onKeyDown);
 	installNavBridge();
 	installPatchObserver();
 	installSideBox();
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	await loadBindings();
+	document.addEventListener('keydown', onKeyDown);
 }
 
 install();
