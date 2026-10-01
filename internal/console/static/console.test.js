@@ -21,6 +21,8 @@ import {
 	sendChordToken,
 	sendChordLabel,
 	draftConflictMessage,
+	TOAST_DISMISS_MS,
+	scheduleToastDismiss,
 	resolveToken,
 	stepFocus,
 	reconcileFocus,
@@ -178,6 +180,27 @@ test('draftConflictMessage: "question closed" reads as a plain sentence', () => 
 test('draftConflictMessage: any other reason is shown as-is', () => {
 	assert.equal(draftConflictMessage('missing option'), 'missing option');
 	assert.equal(draftConflictMessage('ambiguous draft mode'), 'ambiguous draft mode');
+});
+
+// scheduleToastDismiss (bug fix 12): the bottom "Sent N answer(s)."/"Nothing
+// to send." toast never auto-dismissed, and two sends close together could
+// otherwise arm two independent dismiss timers that race each other.
+test('scheduleToastDismiss: no previous timer, just arms the next one', () => {
+	const cleared = [];
+	const id = scheduleToastDismiss(null, () => 42, (timerID) => cleared.push(timerID));
+	assert.equal(id, 42);
+	assert.deepEqual(cleared, []);
+});
+
+test('scheduleToastDismiss: a pending timer is cleared before the next one arms', () => {
+	const cleared = [];
+	const id = scheduleToastDismiss(7, () => 8, (timerID) => cleared.push(timerID));
+	assert.equal(id, 8);
+	assert.deepEqual(cleared, [7]);
+});
+
+test('TOAST_DISMISS_MS is about 4 seconds', () => {
+	assert.equal(TOAST_DISMISS_MS, 4000);
 });
 
 // resolveToken: outside an input, a single key held with Ctrl, Meta, or Alt

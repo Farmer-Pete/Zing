@@ -173,6 +173,36 @@ export function draftConflictMessage(reason) {
 	return reason;
 }
 
+// TOAST_DISMISS_MS is how long showSendResult's bottom toast stays on
+// screen before auto-dismissing (bug fix 12): the owner's "Sent 1 answer."
+// or "Nothing to send." line never went away on its own, so it kept
+// reporting a send that had happened minutes earlier as if it just had.
+// 4000ms is long enough to read, short enough not to linger into the next
+// action.
+export const TOAST_DISMISS_MS = 4000;
+
+/**
+ * scheduleToastDismiss arms showSendResult's next auto-dismiss, canceling
+ * whatever dismiss it is replacing first (bug fix 12: sending twice in
+ * close succession armed two independent timers, and the first one's firing
+ * could clear a toast the second send had only just shown -- "replace, not
+ * stack"). schedule and clear are the caller's setTimeout/clearTimeout (or a
+ * test's fakes), so the cancel-then-arm decision stays testable without a
+ * real timer.
+ *
+ * @param {number|null} prevTimerID the previous pending dismiss's id, or
+ *   null when none is pending yet
+ * @param {() => number} schedule arms the next dismiss and returns its id
+ * @param {(id: number) => void} clear cancels a pending dismiss by id
+ * @returns {number} the new pending dismiss's id
+ */
+export function scheduleToastDismiss(prevTimerID, schedule, clear) {
+	if (prevTimerID !== null) {
+		clear(prevTimerID);
+	}
+	return schedule();
+}
+
 /**
  * resolveToken turns one plain keydown descriptor, plus whether it landed in
  * an input, into the token keys.json binds (design section 6.4, 8; PR review

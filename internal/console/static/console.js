@@ -33,6 +33,8 @@ import {
 	describeAction,
 	nextPendingNav,
 	draftConflictMessage,
+	TOAST_DISMISS_MS,
+	scheduleToastDismiss,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -467,6 +469,16 @@ function pickChip(n) {
 // banner is built from, so an element server-rendered inside #main would
 // be morphed back to empty before a reader could see it. A plain,
 // client-owned node outside every patched region has nothing to race.
+//
+// sendResultTimerID (bug fix 12: the toast never went away on its own, so a
+// "Sent 1 answer." from minutes ago kept looking current) tracks the one
+// pending auto-dismiss across calls. showSendResult reuses the single
+// #send-result element and always overwrites its text, so a second toast
+// already replaces the first on screen; scheduleToastDismiss (keyboard.mjs)
+// additionally cancels the first toast's own dismiss timer, so it cannot
+// fire after the fact and remove the second toast early.
+let sendResultTimerID = null;
+
 function showSendResult(text) {
 	let el = document.getElementById('send-result');
 	if (!el) {
@@ -478,6 +490,15 @@ function showSendResult(text) {
 		document.body.appendChild(el);
 	}
 	el.textContent = text;
+	sendResultTimerID = scheduleToastDismiss(
+		sendResultTimerID,
+		() =>
+			setTimeout(() => {
+				el.textContent = '';
+				sendResultTimerID = null;
+			}, TOAST_DISMISS_MS),
+		clearTimeout,
+	);
 }
 
 // sendBatch handles the send chord (design section 6.4, 6.7): POST /send
