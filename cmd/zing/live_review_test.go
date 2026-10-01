@@ -21,7 +21,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -173,7 +172,7 @@ func moveLiveReviewTicketToReviewing(t *testing.T, st *store.Store, ticketID int
 //	ZING_LIVE_CLI=1 go test ./cmd/zing -run TestLiveReview -v -timeout 20m
 func TestLiveReview(t *testing.T) {
 	t.Parallel()
-	if reason := liveBuildSkipReason(goruntime.GOOS, os.Getenv("ZING_LIVE_CLI")); reason != "" {
+	if reason := liveBuildSkipReason(os.Getenv("ZING_LIVE_CLI")); reason != "" {
 		t.Skip(reason)
 	}
 	oauthToken := liveClaudeOAuthToken(t)
@@ -187,7 +186,7 @@ func TestLiveReview(t *testing.T) {
 	if err := gitfixture.AddFile(t.Context(), dir, "go.mod", []byte("module greeter\n\ngo 1.25\n")); err != nil {
 		t.Fatalf("add go.mod: %v", err)
 	}
-	if err := gitfixture.AddFile(t.Context(), dir, "greet.go", []byte(liveReviewGreetGoBase)); err != nil {
+	if err := gitfixture.AddFile(t.Context(), dir, liveGreetGoFilename, []byte(liveReviewGreetGoBase)); err != nil {
 		t.Fatalf("add greet.go: %v", err)
 	}
 
@@ -209,7 +208,7 @@ func TestLiveReview(t *testing.T) {
 
 	projectID, err := st.EnsureProject(t.Context(), store.Project{
 		Name: liveReviewRepoName, RepoURL: "https://example.invalid/" + liveReviewRepoName, LocalPath: dir,
-		Tracker: "github", DefaultBranch: liveDefaultBranch,
+		Tracker: testServeTracker, DefaultBranch: liveDefaultBranch,
 	})
 	if err != nil {
 		t.Fatalf("ensure project: %v", err)
@@ -231,7 +230,7 @@ func TestLiveReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure worktree: %v", err)
 	}
-	if plantErr := gitfixture.AddFile(t.Context(), wt.Dir(), "greet.go", []byte(liveReviewGreetGoDefect)); plantErr != nil {
+	if plantErr := gitfixture.AddFile(t.Context(), wt.Dir(), liveGreetGoFilename, []byte(liveReviewGreetGoDefect)); plantErr != nil {
 		t.Fatalf("plant the defect: %v", plantErr)
 	}
 	sha, err := orch.HeadSHA(t.Context(), wt)
@@ -239,7 +238,7 @@ func TestLiveReview(t *testing.T) {
 		t.Fatalf("head sha: %v", err)
 	}
 
-	claims := response.BuildClaims{FilesChanged: []string{"greet.go"}, TestExit: 0, LintExit: 0}
+	claims := response.BuildClaims{FilesChanged: []string{liveGreetGoFilename}, TestExit: 0, LintExit: 0}
 	report := response.BuildReport{
 		TaskN:       1,
 		BuildClaims: claims,

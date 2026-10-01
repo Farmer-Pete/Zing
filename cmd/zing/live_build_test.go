@@ -183,18 +183,22 @@ func liveModulePathFor(name string) string {
 	return filepath.Join("testdata", "live", "module", name)
 }
 
-// liveBuildSkipReason reports why TestLiveBuild would skip given goos and
-// the ZING_LIVE_CLI value, or "" to run it for real (PKG8-PLAN.md section
-// 18 task 16). Splitting this out of TestLiveBuild lets
+// liveBuildSkipReason reports why TestLiveBuild would skip given the
+// ZING_LIVE_CLI value, or "" to run it for real (PKG8-PLAN.md section 18
+// task 16). It reads runtime.GOOS directly rather than taking it as a
+// parameter: every caller in this package passes the real goruntime.GOOS
+// anyway (none fakes a different OS to test the darwin-only branch in
+// isolation), so a parameter here would only be unparam's own flagged
+// "always the same value" case. Splitting this out of TestLiveBuild lets
 // TestLiveBuildSkipsWithoutGate prove the gate's own logic -- including
 // that its message names the variable -- without needing ZING_LIVE_CLI
 // itself set one way or the other in the process actually running the
 // test suite.
-func liveBuildSkipReason(goos, liveCLI string) string {
+func liveBuildSkipReason(liveCLI string) string {
 	if liveCLI != "1" {
 		return "set ZING_LIVE_CLI=1 to run the live build harness against the real claude CLI"
 	}
-	if goos != "darwin" {
+	if goruntime.GOOS != "darwin" {
 		return "the live build harness only runs on macOS: the sandbox is darwin-only (PKG8-PLAN.md section 5)"
 	}
 	return ""
@@ -227,7 +231,7 @@ func liveClaudeOAuthToken(t *testing.T) string {
 // TestLiveBuild rather than spending real Claude usage.
 func TestLiveBuildSkipsWithoutGate(t *testing.T) {
 	t.Parallel()
-	reason := liveBuildSkipReason(goruntime.GOOS, "")
+	reason := liveBuildSkipReason("")
 	if reason == "" {
 		t.Fatal("liveBuildSkipReason returned no reason with ZING_LIVE_CLI unset, want a skip reason")
 	}
@@ -314,6 +318,19 @@ const liveTestCmd = "go test ./..."
 // "build" literal alongside the unrelated "go build" exec argv above.
 const liveJobBuild = "build"
 
+// liveJobPlanning is the sessions.job and tickets.state value "planning"
+// (machine.toml's own job name and response.TicketStatePlanning's string
+// form), named once so goconst has one definition every live harness --
+// seedLiveBuildTicket here, seedLiveJudgeCohort in live_judge_test.go --
+// points at instead of its own raw "planning" literal.
+const liveJobPlanning = "planning"
+
+// liveGreetGoFilename is "greet.go", the one fixture source file name every
+// live harness in this package plants, declares as a build claim, or both
+// (this file, live_review_test.go, live_judge_test.go), named once so
+// goconst has one definition to point at.
+const liveGreetGoFilename = "greet.go"
+
 // liveFakePollInterval is runLiveBuildHarness's own poll interval for every
 // caller driving the fake runtime (through runLiveBuildHarnessRecording):
 // there is no real agent to avoid hammering, only a local store and the
@@ -369,7 +386,7 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 	}
 
 	reserved, err := st.Reserve(ctx, ticketID, planOwner, planExpires,
-		store.SessionUpsert{Job: "planning", Runtime: "claude"}, store.RunSeed{Model: model})
+		store.SessionUpsert{Job: liveJobPlanning, Runtime: "claude"}, store.RunSeed{Model: model})
 	if err != nil {
 		return fmt.Errorf("reserve the seeded plan run: %w", err)
 	}
@@ -406,7 +423,7 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		Expires:   planExpires,
 		Runs:      []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
 		Artifacts: artifacts,
-		Next:      "planning",
+		Next:      liveJobPlanning,
 		Reason:    "live harness: seeded a ready cohort",
 	})
 	if err != nil {
@@ -465,7 +482,7 @@ func newLiveFixtureRepo(t *testing.T) string {
 	if err := gitfixture.NewSigningRepo(ctx, dir); err != nil {
 		t.Fatalf("build gitfixture repo: %v", err)
 	}
-	for _, name := range []string{"go.mod", "README.md", "greet.go"} {
+	for _, name := range []string{"go.mod", "README.md", liveGreetGoFilename} {
 		content, err := os.ReadFile(liveModulePathFor(name))
 		if err != nil {
 			t.Fatalf("read fixture module %s: %v", name, err)
@@ -760,7 +777,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
 		Name: "greeter", RepoURL: "https://example.invalid/greeter", LocalPath: projDir,
-		Tracker: "github", DefaultBranch: liveDefaultBranch,
+		Tracker: testServeTracker, DefaultBranch: liveDefaultBranch,
 	})
 	if err != nil {
 		t.Fatalf("ensure project: %v", err)
@@ -1044,7 +1061,7 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 // binary, and it already skips by default (ZING_LIVE_CLI), so it never
 // shares the suite's wall clock budget with the parallel tests anyway.
 func TestLiveBuild(t *testing.T) {
-	if reason := liveBuildSkipReason(goruntime.GOOS, os.Getenv("ZING_LIVE_CLI")); reason != "" {
+	if reason := liveBuildSkipReason(os.Getenv("ZING_LIVE_CLI")); reason != "" {
 		t.Skip(reason)
 	}
 

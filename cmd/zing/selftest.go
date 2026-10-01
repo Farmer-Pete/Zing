@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	zing "zing"
@@ -138,37 +139,55 @@ func selftest() error {
 
 // e2eMaxTicks bounds selftestResumeE2E's tick loop: enough ticks for intake
 // plus one handler call per pipeline transition (design section 7.1: queued,
-// planning x2, building, reviewing, judging, shipping is 7 handler calls --
-// judging alone now takes several of those on its own, design section 7:
-// START, RUN, one CHECK per scenario with a check command, and EVALUATE),
-// with generous headroom, so a stuck dispatcher fails the selftest promptly
+// planning x2, building, reviewing, judging, shipping is 7 handler calls),
+// plus judging's own round 1 (START, RUN, one CHECK per scenario with a
+// check command, EVALUATE) failing once and driving a fix to landing
+// (RUN, CHECK, LAND) before judging's own round 2 (START, RUN, CHECK,
+// EVALUATE) passes it on to shipping (PKG9-PLAN.md section 19.3 task 9:
+// "the e2e passes review, a judge failure, a fix, and a judge pass"), with
+// generous headroom, so a stuck dispatcher fails the selftest promptly
 // instead of hanging.
-const e2eMaxTicks = 50
+const e2eMaxTicks = 80
 
 // e2eJudgeCheckCmd is the one shell command fixtures/scripts/planning/2.xml's
 // own scenario s1 carries as its check_cmd: CHECK (design section 7.5)
 // re-runs it for real, but this suite's fixture project never starts a
 // real HTTP server on port 8080, so a live curl would always fail.
-// selftestCommands intercepts exactly this one command and reports the
-// pass CHECK's own real exit-code contract would have reported had a
-// server been listening, at the same CommandRunner seam building's own
-// CHECK step already takes its commands through (job.Deps.Commands) --
-// never a live network call.
+// selftestCommands intercepts exactly this one command, never a live
+// network call, and reports what a real server would have, at the same
+// CommandRunner seam building's own CHECK step already takes its commands
+// through (job.Deps.Commands).
 const e2eJudgeCheckCmd = "curl -sf localhost:8080/hello"
 
 // selftestCommands wraps the real CommandRunner so the judge's own CHECK
 // step never dials out: every command but e2eJudgeCheckCmd runs for real
 // (the building state's own "test -f hello.txt" and "true" included, so
-// selftest still proves those run for real), and e2eJudgeCheckCmd always
-// reports exit 0 with no error, matching fixtures/scripts/judge/1/1.xml's
-// own scripted pass verdict for s1.
+// selftest still proves those run for real). e2eJudgeCheckCmd itself is
+// stateful (PKG9-PLAN.md section 19.3 task 9): its first call reports the
+// exit 1 a server not yet listening would give, failing judge round 1 and
+// driving fixtures/scripts/build/fix/1.xml's own fix to landing; every
+// later call -- round 2's own re-run, after the fix -- reports the exit 0
+// a live server would, matching fixtures/scripts/judge/2/1.xml's own
+// scripted pass verdict for s1. checkCalls is a pointer, not a plain int,
+// so every job.Deps copy this value is handed into still shares the one
+// counter underneath it.
 type selftestCommands struct {
-	real job.CommandRunner
+	real       job.CommandRunner
+	checkCalls *int32
+}
+
+// newSelftestCommands returns a selftestCommands wrapping real, its own
+// e2eJudgeCheckCmd call counter freshly zeroed.
+func newSelftestCommands(realRunner job.CommandRunner) selftestCommands {
+	return selftestCommands{real: realRunner, checkCalls: new(int32)}
 }
 
 func (c selftestCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
 	if shellCmd == e2eJudgeCheckCmd {
-		return 0, nil
+		if atomic.AddInt32(c.checkCalls, 1) == 1 {
+			return 1, nil // round 1: the scenario's own check fails, forcing a fix
+		}
+		return 0, nil // round 2, after the fix lands: the check passes
 	}
 	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
 }
@@ -453,7 +472,7 @@ func selftestResumeE2E(ctx context.Context) error {
 			// RequireSandbox false lets a sandboxed job (build, perimeter)
 			// run unwrapped instead of refusing (design D5, section 10).
 			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
-			Commands:       selftestCommands{real: job.NewCommandRunner(sandbox.Off(), false)},
+			Commands:       newSelftestCommands(job.NewCommandRunner(sandbox.Off(), false)),
 			DataDir:        dir,
 			LensesParallel: e2eLensesParallel,
 			// Projects carries what the real building handler needs for
@@ -915,7 +934,42 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if resolved != wantQuestionsAnswersResolved {
 		return fmt.Errorf("resolved messages = %d, want exactly %d", resolved, wantQuestionsAnswersResolved)
 	}
+	if err := verifySelftestJudgeFailedFixedThenPassed(msgs); err != nil {
+		return err
+	}
 	return verifySelftestCohortSealed(ctx, st, ticketID)
+}
+
+// verifySelftestJudgeFailedFixedThenPassed asserts msgs (ticketID's own, in
+// id order) actually walked the path PKG9-PLAN.md section 19.3 task 9 names
+// -- "a judge failure, a fix, and a judge pass" -- rather than merely
+// reaching done some other way: judge round 1's own "judge round 1 failed"
+// marker, a "fix landed" marker for the request it opened, and judge round
+// 2's own "judge round 2 passed" marker, each after the one before it.
+func verifySelftestJudgeFailedFixedThenPassed(msgs []store.MessageRow) error {
+	var sawFailed, sawLanded, sawPassed bool
+	for i := range msgs {
+		if msgs[i].Type != "update" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(msgs[i].Body, "judge round 1 failed"):
+			sawFailed = true
+		case strings.HasPrefix(msgs[i].Body, "fix landed ") && sawFailed && !sawPassed:
+			sawLanded = true
+		case msgs[i].Body == "judge round 2 passed":
+			sawPassed = true
+		}
+	}
+	switch {
+	case !sawFailed:
+		return errors.New(`e2e: no "judge round 1 failed" marker, want judge round 1 to fail (PKG9-PLAN.md section 19.3 task 9)`)
+	case !sawLanded:
+		return errors.New(`e2e: no "fix landed" marker after judge round 1 failed, want the fix request to land`)
+	case !sawPassed:
+		return errors.New(`e2e: no "judge round 2 passed" marker, want round 2 to pass after the fix landed`)
+	}
+	return nil
 }
 
 // verifySelftestCohortSealed asserts every scenario artifact of ticketID's

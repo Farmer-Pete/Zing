@@ -378,11 +378,14 @@ func (c dispatchJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd s
 	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
 }
 
-// advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:
-// START, RUN, one CHECK (the fixture cohort's own single checked scenario,
-// s1), and EVALUATE is four calls; the headroom catches a stuck handler
-// instead of hanging the test.
-const advanceJudgingMaxCalls = 8
+// advanceJudgingMaxCalls bounds advanceJudging's (and
+// advanceJudgingWithCommands') own handler-call loop: START, RUN, one CHECK
+// (the fixture cohort's own single checked scenario, s1), and EVALUATE is
+// four calls for a round that passes outright; a round that fails once,
+// drives a fix to landing, and passes on a second round (PKG9-PLAN.md
+// section 19.3 task 9) takes roughly twice that. The headroom above either
+// catches a stuck handler instead of hanging the test.
+const advanceJudgingMaxCalls = 16
 
 // advanceJudging drives the real judging handler through as many calls as
 // it now takes to land a passing round and transition to shipping (design
@@ -390,8 +393,22 @@ const advanceJudgingMaxCalls = 8
 // only advances one step (START, RUN, one scenario's own CHECK, or
 // EVALUATE), so this loops until the ticket leaves "judging". Its own
 // Deps.Commands (dispatchJudgeCommands) keeps CHECK's re-run of the fixture
-// cohort's one check command from ever dialing a real server.
+// cohort's one check command from ever dialing a real server, always
+// reporting the pass a live one would have.
 func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	advanceJudgingWithCommands(t, s, rt, ticketID, dispatchJudgeCommands{real: job.NewCommandRunner(sandbox.Off(), false)})
+}
+
+// advanceJudgingWithCommands is advanceJudging's own loop, parameterized
+// over cmds (PKG9-PLAN.md section 19.3 task 9): a caller whose own
+// CommandRunner must see every one of judging's own CHECK calls in order
+// -- a stateful one, failing round 1's own check and passing round 2's,
+// the way dispatchJudgeFailThenPassCommands does -- builds it once, ahead
+// of this loop, and shares that one instance across every call the loop
+// makes; advanceJudging's own cmds is stateless, so a fresh one each call
+// would behave identically, but sharing one here either way costs nothing.
+func advanceJudgingWithCommands(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, cmds job.CommandRunner) {
 	t.Helper()
 	for range advanceJudgingMaxCalls {
 		ticket := getTicket(t, s, ticketID)
@@ -402,7 +419,7 @@ func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 			t.Fatalf("advanceJudging: claim: claimed=%v err=%v", claimed, err)
 		}
 		deps := testDeps(t, s, rt, owner, expires)
-		deps.Commands = dispatchJudgeCommands{real: deps.Commands}
+		deps.Commands = cmds
 		commit, err := job.Registry()[testStateJudging].Run(t.Context(), ticket, deps)
 		if err != nil {
 			t.Fatalf("advanceJudging: Run: %v", err)
@@ -419,6 +436,104 @@ func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 		}
 	}
 	t.Fatalf("advanceJudging: still in judging after %d handler calls", advanceJudgingMaxCalls)
+}
+
+// dispatchJudgeFailThenPassCommands is dispatchJudgeCommands with a
+// checkCalls counter shared across every call (PKG9-PLAN.md section 19.3
+// task 9: "the e2e passes review, a judge failure, a fix, and a judge
+// pass"): its first call to judgeCheckFixtureCmd reports the exit 1 a
+// server not yet listening would give, failing judge round 1 and driving
+// fixtures/scripts/build/fix/1.xml's own fix to landing; every later call
+// -- round 2's own re-run, after the fix -- reports the exit 0 a live one
+// would, matching fixtures/scripts/judge/2/1.xml's own scripted pass
+// verdict for s1. checkCalls is a pointer, not a plain int, so every
+// job.Deps copy this value is handed into still shares the one counter.
+type dispatchJudgeFailThenPassCommands struct {
+	real       job.CommandRunner
+	checkCalls *int32
+}
+
+// newDispatchJudgeFailThenPassCommands returns a
+// dispatchJudgeFailThenPassCommands wrapping real, its own
+// judgeCheckFixtureCmd call counter freshly zeroed.
+func newDispatchJudgeFailThenPassCommands(realRunner job.CommandRunner) dispatchJudgeFailThenPassCommands {
+	return dispatchJudgeFailThenPassCommands{real: realRunner, checkCalls: new(int32)}
+}
+
+func (c dispatchJudgeFailThenPassCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		if atomic.AddInt32(c.checkCalls, 1) == 1 {
+			return 1, nil // round 1: the scenario's own check fails, forcing a fix
+		}
+		return 0, nil // round 2, after the fix lands: the check passes
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// judgeRoundMarkerBodies returns ticketID's own "update" message bodies, in
+// id order, for TestJudgeFailureFixThenPass' own marker assertions below.
+func judgeRoundMarkerBodies(t *testing.T, s *store.Store, ticketID int64) []string {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var bodies []string
+	for i := range msgs {
+		if msgs[i].Type == "update" {
+			bodies = append(bodies, msgs[i].Body)
+		}
+	}
+	return bodies
+}
+
+// TestJudgeFailureFixThenPass proves PKG9-PLAN.md section 19.3 task 9's own
+// e2e, at the real dispatcher's own cut point (a handler driven through
+// Registry() with a real store, the fake runtime, and real git, mirroring
+// every other test in this file rather than the fake-runtime-only unit
+// proof internal/job/judging_test.go's own TestJudgeFixThenPass already
+// gives): review passes (every lens fixture returns zero findings), judge
+// round 1 fails (dispatchJudgeFailThenPassCommands' own first call),
+// building lands the fix request fixtures/scripts/build/fix/1.xml scripts,
+// and judge round 2 -- fixtures/scripts/judge/2/1.xml's own first turn --
+// passes, carrying the ticket on to shipping.
+func TestJudgeFailureFixThenPass(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
+
+	cmds := newDispatchJudgeFailThenPassCommands(job.NewCommandRunner(sandbox.Off(), false))
+	advanceJudgingWithCommands(t, s, rt, ticketID, cmds)
+
+	ticket := getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("ticket state = %q, want %q (judge round 2 must pass after the fix lands)", ticket.State, testStateShipping)
+	}
+
+	bodies := judgeRoundMarkerBodies(t, s, ticketID)
+	var sawFailed, sawLanded, sawPassed bool
+	for _, body := range bodies {
+		switch {
+		case strings.HasPrefix(body, "judge round 1 failed"):
+			sawFailed = true
+		case strings.HasPrefix(body, "fix landed ") && sawFailed && !sawPassed:
+			sawLanded = true
+		case body == "judge round 2 passed":
+			sawPassed = true
+		}
+	}
+	if !sawFailed {
+		t.Error(`no "judge round 1 failed" marker, want judge round 1 to fail`)
+	}
+	if !sawLanded {
+		t.Error(`no "fix landed" marker after judge round 1 failed, want the fix request to land`)
+	}
+	if !sawPassed {
+		t.Error(`no "judge round 2 passed" marker, want round 2 to pass after the fix landed`)
+	}
 }
 
 // advanceBuildingMaxCalls bounds advanceBuilding's own handler-call loop

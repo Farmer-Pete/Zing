@@ -922,6 +922,56 @@ func TestJudgeAllowsScenariosFileRead(t *testing.T) {
 	}
 }
 
+// TestJudgeScenariosFileMatchesThroughDataDirSymlink proves
+// cmd/zing/serve.go's own data-directory resolution formula -- raw :=
+// filepath.Dir(dbPath); dataDir, err := filepath.EvalSymlinks(raw), the
+// one resolved value then threaded into both the judge sandbox profile and
+// every judge run's own scenarios file (PKG9-PLAN.md section 19.3 task 9).
+// A live TestLiveJudge run first found this: LoadProfile already resolves
+// DATA_DIR's own symlinks internally (resolveHost, review F044), but a
+// scenarios file path built from an unresolved, symlink-reached data
+// directory never matched the kernel-resolved path the judge profile's
+// literal SCENARIOS_FILE rule compares against, so a real judge's own
+// `zing scenarios` failed with "operation not permitted" against a file
+// that genuinely existed. This reproduces serve's own formula starting
+// from a dbPath reached through a symlink to the data directory, loads the
+// judge profile with the resolved result (exactly as serveSandbox does),
+// and proves a scenarios file built from that same resolved value is
+// readable under it.
+func TestJudgeScenariosFileMatchesThroughDataDirSymlink(t *testing.T) {
+	t.Parallel()
+	requireNotSandboxed(t)
+
+	dirs := newTestDirs(t)
+	link := filepath.Join(filepath.Dir(dirs.dataDir), "data-link")
+	if err := os.Symlink(dirs.dataDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	dbPath := filepath.Join(link, "zing.db")
+	resolvedDataDir, err := filepath.EvalSymlinks(filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("resolve data dir: %v", err)
+	}
+	if resolvedDataDir != dirs.dataDir {
+		t.Fatalf("resolved data dir = %s, want %s (newTestDirs' own, already resolved)", resolvedDataDir, dirs.dataDir)
+	}
+
+	profile, err := zing.Assets.ReadFile("sandbox/judge.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/judge.sb: %v", err)
+	}
+	sb := LoadProfile(profileNameJudge, profile, resolvedDataDir, nil, 7424)
+	if !sb.Available() {
+		t.Fatalf("LoadProfile(judge): unavailable, reason %q", sb.Reason())
+	}
+
+	p := dirs.judgeParams(t)
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", p.ScenariosFile); exitCode != 0 {
+		t.Fatalf("cat SCENARIOS_FILE, loaded through a data dir reached via a symlink: exit %d, want 0 (output %q)", exitCode, out)
+	}
+}
+
 // TestJudgeDeniesDatabase proves the judge profile denies zing.db under
 // DATA_DIR whole, the same as build.sb and readonly.sb (section 4.7, N6:
 // "No profile reads zing.db").

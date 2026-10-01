@@ -210,7 +210,22 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	// profile never loads against a CODEX_HOME that cannot possibly be
 	// right. dataDir is computed here, ahead of its other use further
 	// down, because this check needs it too.
-	dataDir := filepath.Dir(dbPath)
+	//
+	// Symlinks resolved once, right away, and every later use below takes
+	// this same resolved value: sandbox.LoadProfile resolves DATA_DIR
+	// internally for the profile's own literal SCENARIOS_FILE match
+	// (macOS's own /var -> /private/var, review F044), but a judge run's
+	// own writeScenariosFile hook (internal/job/judging.go) builds the file
+	// it writes from Deps.DataDir verbatim; an unresolved dataDir here and
+	// the sandbox's own resolved one would then disagree, and the judge's
+	// own "zing scenarios" would fail inside the sandbox with "operation
+	// not permitted" even though the file genuinely exists.
+	rawDataDir := filepath.Dir(dbPath)
+	dataDir, err := filepath.EvalSymlinks(rawDataDir)
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: resolve data directory %s: %w", rawDataDir, err)
+	}
 	judgeCodexHome, err := resolveJudgeCodexHome(dataDir, cfg.JudgeCodexHome)
 	if err != nil {
 		_ = st.Close()
