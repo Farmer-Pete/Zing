@@ -12,12 +12,75 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-// signingKeyName is the file ssh-keygen writes the fixture's ed25519
-// signing key to, under the repository's own .git directory, so the key
+// signingKeyName is the file each fixture's own copy of the shared signing
+// key lives at, under the repository's own .git directory, so the key
 // never leaves the repository it signs for.
 const signingKeyName = "zing-fixture-key"
+
+// sharedSigningKeyOnce guards generating the one ed25519 key every
+// NewSigningRepo call in this process signs with. ssh-keygen is a process
+// spawn per call, and a test binary can build hundreds of fixtures
+// (internal/job alone seeds several per table test), so this runs it once
+// per binary and NewSigningRepo copies the result into each fixture's own
+// .git directory instead of regenerating it. Every fixture still carries
+// its own on-disk key at its usual repo-local path; only the bytes are
+// shared. Nothing asserts the key differs between fixtures (checked
+// against internal/gitfixture's own tests and every caller).
+var (
+	sharedSigningKeyOnce sync.Once
+	sharedSigningKeyPath string
+	sharedSigningKeyErr  error
+)
+
+// sharedSigningKey returns the path to the process-wide ed25519 signing
+// key, generating it on the first call. The key lives under a directory
+// os.MkdirTemp creates and this process never removes: it holds nothing
+// but a disposable test-and-selftest signing key, so leaving it for the OS
+// to reclaim is simpler than threading a cleanup hook through every
+// caller.
+func sharedSigningKey() (string, error) {
+	sharedSigningKeyOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "zing-fixture-key-")
+		if err != nil {
+			sharedSigningKeyErr = fmt.Errorf("gitfixture: temp dir for shared signing key: %w", err)
+			return
+		}
+		keyPath := filepath.Join(dir, signingKeyName)
+		// context.Background(), not a caller's ctx: this runs at most once
+		// per process, and must not be left half-done by the first
+		// caller's deadline or cancellation when later callers still need
+		// the result.
+		out, genErr := exec.CommandContext(context.Background(), "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-fixture", "-f", keyPath).CombinedOutput()
+		if genErr != nil {
+			sharedSigningKeyErr = fmt.Errorf("gitfixture: ssh-keygen: %w: %s", genErr, out)
+			return
+		}
+		sharedSigningKeyPath = keyPath
+	})
+	return sharedSigningKeyPath, sharedSigningKeyErr
+}
+
+// copySharedSigningKey copies the shared private key and its public
+// counterpart to dest and dest+".pub", each with mode 0600.
+func copySharedSigningKey(dest string) error {
+	src, err := sharedSigningKey()
+	if err != nil {
+		return err
+	}
+	for _, ext := range []string{"", ".pub"} {
+		content, readErr := os.ReadFile(src + ext)
+		if readErr != nil {
+			return fmt.Errorf("gitfixture: read shared signing key: %w", readErr)
+		}
+		if writeErr := os.WriteFile(dest+ext, content, 0o600); writeErr != nil { //nolint:gosec // G703: dest is NewSigningRepo's own keyPath, built from its caller's dir under "<dir>/.git/"; no path component comes from outside this package
+			return fmt.Errorf("gitfixture: write signing key copy: %w", writeErr)
+		}
+	}
+	return nil
+}
 
 // gitLocationEnv names the environment variables that redirect where git
 // finds its repository, index, and object store (mirroring
@@ -52,20 +115,20 @@ func Git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 }
 
 // NewSigningRepo inits a git repository at dir on branch "main" with one
-// signed commit. It generates a fresh ed25519 signing key with
-// ssh-keygen under "<dir>/.git/zing-fixture-key" and configures it
-// entirely through that repository's own local git config (user.name,
-// user.email, commit.gpgsign, gpg.format, user.signingKey). It never
-// runs "git config --global" and never writes outside dir.
+// signed commit. It copies this process's shared ed25519 signing key (one
+// ssh-keygen per binary, not per repo; see sharedSigningKey) to
+// "<dir>/.git/zing-fixture-key" and configures it entirely through that
+// repository's own local git config (user.name, user.email,
+// commit.gpgsign, gpg.format, user.signingKey). It never runs "git config
+// --global" and never writes outside dir.
 func NewSigningRepo(ctx context.Context, dir string) error {
 	if err := runGit(ctx, dir, "init", "-q", "-b", "main"); err != nil {
 		return err
 	}
 
 	keyPath := filepath.Join(dir, ".git", signingKeyName)
-	out, err := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-fixture", "-f", keyPath).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gitfixture: ssh-keygen: %w: %s", err, out)
+	if err := copySharedSigningKey(keyPath); err != nil {
+		return err
 	}
 
 	config := [][2]string{

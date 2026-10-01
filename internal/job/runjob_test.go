@@ -208,6 +208,7 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 // TestRunJob_UnknownJobReturnsErrConfigNoReserve proves an unknown job name
 // fails at step 1 (design section 4.6), before Deps.Reserve is ever called.
 func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -233,6 +234,7 @@ func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
 // (classify) is well-formed (design section 4.6: the runtime is resolved
 // before a run is ever reserved).
 func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -262,6 +264,7 @@ func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
 // TestRunJob_MissingModelAliasReturnsErrConfigNoReserve proves a Models map
 // missing the job's model alias fails at step 3, before Reserve.
 func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -293,6 +296,7 @@ func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
 // ticket's spent agent-time already meets the cap (design section 4.6: >=,
 // not >).
 func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	seedAgentSeconds(t, s, ticketID, 10)
@@ -329,6 +333,7 @@ func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
 // as an error that still satisfies errors.Is(err, store.ErrClaimLost),
 // wrapped but never swallowed.
 func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -370,6 +375,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 // and classify's own machine.toml job, the child context's deadline equals
 // the job timeout, and the Fake's result comes back unchanged.
 func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -516,6 +522,7 @@ func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectI
 // job's request with the sandbox's own ExecPrefix and Env when the sandbox
 // is available, regardless of RequireSandbox.
 func TestRunJobWrapsWhenAvailable(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -554,6 +561,7 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 // returns ErrSandbox with nothing reserved and the runtime never called
 // (design section 5.5).
 func TestRunJobErrSandboxWhenRequired(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -581,6 +589,7 @@ func TestRunJobErrSandboxWhenRequired(t *testing.T) {
 // RequireSandbox false runs the job unwrapped (design D5: suites on the
 // fake runtime), rather than failing.
 func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -607,6 +616,7 @@ func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
 // wrapping step creates is removed once runJob returns (its deferred
 // cleanup, design section 5.5).
 func TestRunJobRemovesRunDir(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -648,6 +658,7 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 // /private/var symlink never matched a seatbelt subpath rule built from the
 // unresolved path).
 func TestRunJobUsesResolvedWorkDir(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -986,6 +997,7 @@ func TestUnsandboxedRunGetsPrivateTemp(t *testing.T) {
 // run's own task_n column, and a nil one (planning's own four callers)
 // leaves it NULL.
 func TestRunJobSeedsTaskN(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)

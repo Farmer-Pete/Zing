@@ -10,7 +10,9 @@ import (
 
 // captureStderr runs fn with os.Stderr redirected to a pipe and returns
 // fn's result plus everything written to stderr. It cannot run in
-// parallel with anything else that touches the process os.Stderr.
+// parallel with anything else that touches the process os.Stderr, so
+// every TestRunValidate_* test below, all of which call it, stays serial
+// (no t.Parallel) rather than naming the reason nine times over.
 func captureStderr(t *testing.T, fn func() int) (code int, stderr string) {
 	t.Helper()
 

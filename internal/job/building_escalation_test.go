@@ -61,7 +61,9 @@ func runBuilding(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) (s
 // back/reply-only row is TestReplanUnsupportedText, and the abandon row is
 // TestBuildingAbandonResolvesAll.
 func TestBuildingEscalationTable(t *testing.T) {
+	t.Parallel()
 	t.Run("BuildRetryWithRun", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | build, fix with a run": RUN first turn of the same
 		// unit, fresh session, inputs notes and error (fenced), resolving
 		// the round.
@@ -93,6 +95,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("BuildRetryNoRun", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | build with no run (step 0, CHECK, LAND, RESOLVE
 		// failures)": resolve the round, commit the marker "retry
 		// requested", stay; no runtime call.
@@ -116,6 +119,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("PerimeterRetry", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | perimeter": resolve the round, commit the marker
 		// "retry requested", stay; the next tick's DESCRIBE retakes the
 		// same path on its own, so no runtime call happens here either.
@@ -136,6 +140,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("CapBudgetRetry", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | cap_budget | recapBudgetEscalation": re-escalate
 		// wall_clock in this same commit, resolving the round, with no
 		// runtime call.
@@ -165,6 +170,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 // regardless of the escalation's own origin -- here perimeter, to prove the
 // code, not the origin, decides.
 func TestSandboxUnavailableEscalates(t *testing.T) {
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeSandboxUnavailable, response.EscalationOriginPerimeter)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
@@ -186,6 +192,7 @@ func TestSandboxUnavailableEscalates(t *testing.T) {
 // replan_unsupported, origin unchanged, with the plan's exact What/Why
 // text, resolving the round.
 func TestReplanUnsupportedText(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		option *string
@@ -194,6 +201,7 @@ func TestReplanUnsupportedText(t *testing.T) {
 		{"ReplyOnly", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s, rt, ticketID := buildTicketInBuilding(t)
 			qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
 			answerGateQuestion(t, s, ticketID, qID, tc.option, "let's replan instead")
@@ -232,6 +240,7 @@ func TestReplanUnsupportedText(t *testing.T) {
 // open or answered question resolves (ResolveAll), and job.ValidateCommit
 // (apply's own check) accepts the building -> abandoned edge.
 func TestBuildingAbandonResolvesAll(t *testing.T) {
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
 	answerGateQuestion(t, s, ticketID, qID, new("c"), "I'm done with this one")
@@ -275,6 +284,7 @@ func TestBuildingAbandonResolvesAll(t *testing.T) {
 // from the tree, and both the escalation round and the preserved perimeter
 // round resolve.
 func TestCapResumesRetryCarriesAnswers(t *testing.T) {
+	t.Parallel()
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK

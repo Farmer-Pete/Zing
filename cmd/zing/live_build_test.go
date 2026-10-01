@@ -226,6 +226,7 @@ func liveClaudeOAuthToken(t *testing.T) string {
 // that names the variable, so a plain `go test ./...` run always skips
 // TestLiveBuild rather than spending real Claude usage.
 func TestLiveBuildSkipsWithoutGate(t *testing.T) {
+	t.Parallel()
 	reason := liveBuildSkipReason(goruntime.GOOS, "")
 	if reason == "" {
 		t.Fatal("liveBuildSkipReason returned no reason with ZING_LIVE_CLI unset, want a skip reason")
@@ -243,6 +244,7 @@ func TestLiveBuildSkipsWithoutGate(t *testing.T) {
 // file the fixture module already carries; a "create" file need not exist
 // yet, since building it is exactly what the task does.
 func TestLiveBuildFixtureIsValid(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("testdata", "live", "plan.xml"))
 	if err != nil {
 		t.Fatalf("read plan.xml: %v", err)
@@ -311,6 +313,13 @@ const liveTestCmd = "go test ./..."
 // once so goconst has one definition to point at rather than a second raw
 // "build" literal alongside the unrelated "go build" exec argv above.
 const liveJobBuild = "build"
+
+// liveFakePollInterval is runLiveBuildHarness's own poll interval for every
+// caller driving the fake runtime (through runLiveBuildHarnessRecording):
+// there is no real agent to avoid hammering, only a local store and the
+// fake's own canned turns, so the loop can tick as fast as it finishes
+// work instead of waiting out TestLiveBuild's one-real-second pace.
+const liveFakePollInterval = 10 * time.Millisecond
 
 // normalizeLivePlanArrays mirrors internal/job/planning.go's own
 // (unexported) normalizePlanArrays: a Plan decoded from XML leaves an
@@ -725,7 +734,13 @@ func listRunRootEntries(runRoot string) ([]string, error) {
 // never ran to remove it). Once the ticket reaches "reviewing", any entry
 // that was not already there fails the run with its name; a stale entry
 // never does.
-func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait time.Duration) liveBuildResult {
+//
+// pollInterval is how long each loop pass sleeps between ticks: TestLiveBuild
+// passes a full second so a real agent run is not hammered with ticks while
+// it thinks; the fake-runtime callers, with nothing to wait on but a local
+// store and the fake's own canned turns, pass a short interval instead so
+// the fixture's handful of turns do not cost a real second apiece.
+func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait, pollInterval time.Duration) liveBuildResult {
 	t.Helper()
 
 	staleRunEntries, err := listRunRootEntries(runRoot)
@@ -896,7 +911,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 			t.Fatalf("ticket %d did not reach reviewing within %s (state=%s, waiting_on=%v, open questions: %s)",
 				ticketID, maxWait, ticket.State, ticket.WaitingOn, desc)
 		}
-		time.Sleep(time.Second)
+		time.Sleep(pollInterval)
 	}
 }
 
@@ -986,6 +1001,7 @@ func newLiveFakeRunRoot(t *testing.T) string {
 // question all land, and the ticket reaches "reviewing" with three signed
 // commits.
 func TestLiveBuildHarnessOnFake(t *testing.T) {
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
@@ -1004,7 +1020,7 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 	}
 
 	sb := sandbox.Off()
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute, liveFakePollInterval)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -1023,6 +1039,10 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 // gone; and its four canaries -- one in the home root, one in the fixture
 // repository's .git, one in the host TMPDIR, one in the host Go build cache
 // -- are byte-identical after the run.
+//
+// Not parallel: it calls t.Setenv("PATH", ...) to prepend a stub claude
+// binary, and it already skips by default (ZING_LIVE_CLI), so it never
+// shares the suite's wall clock budget with the parallel tests anyway.
 func TestLiveBuild(t *testing.T) {
 	if reason := liveBuildSkipReason(goruntime.GOOS, os.Getenv("ZING_LIVE_CLI")); reason != "" {
 		t.Skip(reason)
@@ -1079,7 +1099,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	runRoot := filepath.Join(mustSandboxCacheRoot(t, sb), "run")
 
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, runRoot, 60*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, runRoot, 60*time.Minute, time.Second)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -1162,7 +1182,7 @@ func runLiveBuildHarnessRecording(t *testing.T, st *store.Store, projDir string,
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait)
+		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait, liveFakePollInterval)
 	}()
 	<-done
 	rec.runCleanups()
@@ -1193,6 +1213,7 @@ func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir st
 // and the newest escalation's own What text -- and no fourth run is ever
 // reserved.
 func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
@@ -1262,6 +1283,8 @@ func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
 // the harness never drafts or sends an answer, which a still-"open"
 // question in the store after the timeout proves directly -- and the
 // timeout's own Fatalf names that open question.
+//
+// Not parallel: it calls t.Setenv(liveOwnerAnswerEnv, ...) below.
 func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 	t.Setenv(liveOwnerAnswerEnv, liveOwnerAnswerValue)
 
@@ -1335,6 +1358,7 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 // TestLiveBuildHarnessOnFake drives, logging the pre-existing entry's name
 // once, and must not fail over it.
 func TestLiveBuildHarnessIgnoresStaleRunDir(t *testing.T) {
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 

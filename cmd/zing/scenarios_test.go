@@ -202,6 +202,7 @@ func insertScenario(t *testing.T, st *store.Store, ticketID, runID int64, sealed
 // carries '&' and '<', escaped the standard way; the fourth, unsealed
 // scenario (s4) never appears.
 func TestScenarios_JudgeFixturePrintsSealedScenariosInInsertionOrder(t *testing.T) {
+	t.Parallel()
 	st := newScenariosTestStore(t)
 	ticketID, expires := seedClaimedTicket(t, st)
 
@@ -244,6 +245,7 @@ func TestScenarios_JudgeFixturePrintsSealedScenariosInInsertionOrder(t *testing.
 // stdout, even though the ticket has a perfectly good sealed cohort (design
 // section 8 step 3).
 func TestScenarios_NonJudgeRunExitsTwo(t *testing.T) {
+	t.Parallel()
 	st := newScenariosTestStore(t)
 	ticketID, expires := seedClaimedTicket(t, st)
 	buildRunID := reserveRun(t, st, ticketID, expires, "build")
@@ -273,6 +275,7 @@ func TestScenarios_NonJudgeRunExitsTwo(t *testing.T) {
 // naming a run that does not exist -- each exits 2 with the exact stderr
 // text.
 func TestScenarios_NoRunContext(t *testing.T) {
+	t.Parallel()
 	st := newScenariosTestStore(t)
 
 	cases := map[string]string{
@@ -282,6 +285,7 @@ func TestScenarios_NoRunContext(t *testing.T) {
 	}
 	for name, token := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var out, errOut bytes.Buffer
 			getenv := func(k string) string {
 				if k == scenariosTokenEnv {
@@ -309,6 +313,7 @@ func TestScenarios_NoRunContext(t *testing.T) {
 // exit-2 "no run context" path a missing or unknown token takes (design
 // section 8 step 2): only sql.ErrNoRows is a user-input problem.
 func TestScenarios_RunContextInfraErrorExitsOne(t *testing.T) {
+	t.Parallel()
 	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -342,6 +347,7 @@ func TestScenarios_RunContextInfraErrorExitsOne(t *testing.T) {
 // step 5): the gate has not sealed it, so the judge sees no scenarios,
 // never a partial cohort.
 func TestScenarios_NoSealedRowsPrintsNothing(t *testing.T) {
+	t.Parallel()
 	st := newScenariosTestStore(t)
 	ticketID, expires := seedClaimedTicket(t, st)
 
@@ -373,6 +379,7 @@ func TestScenarios_NoSealedRowsPrintsNothing(t *testing.T) {
 // prints nothing and exits 0, rather than erroring: CurrentCohort still
 // reports ok=true, but a nil RunID short-circuits before ScenariosForRun.
 func TestScenarios_NullCohortRunIDPrintsNothing(t *testing.T) {
+	t.Parallel()
 	st := newScenariosTestStore(t)
 	ticketID, expires := seedClaimedTicket(t, st)
 	insertPlan(t, st, ticketID, nil, 1)

@@ -94,7 +94,9 @@ func extrasToChanges(changed []Change, extras []Extra) []Change {
 // temp remote, and a temp signing key, becomes a signed draft pull request
 // with three commits.
 func TestEndToEnd(t *testing.T) {
+	t.Parallel()
 	t.Run("a throwaway ticket becomes a signed draft pull request", func(t *testing.T) {
+		t.Parallel()
 		cases := []struct {
 			name               string
 			ticketID           int64
@@ -120,6 +122,7 @@ func TestEndToEnd(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				fixture := newSigningFixture(t, tc.withAllowedSigners)
 				repo := newSigningTestRepo(t, fixture)
 				ctx := t.Context()
@@ -319,7 +322,9 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("push refuses the default branch and a forged branch", func(t *testing.T) {
+		t.Parallel()
 		t.Run("default branch", func(t *testing.T) {
+			t.Parallel()
 			o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
 			wt := Worktree{dir: absLocalPath, branch: mainBranch}
 			if err := o.Push(t.Context(), wt); err == nil {
@@ -328,6 +333,7 @@ func TestEndToEnd(t *testing.T) {
 		})
 
 		t.Run("forged non-zing branch", func(t *testing.T) {
+			t.Parallel()
 			o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
 			wt := Worktree{dir: absLocalPath, branch: "not-zing/anything"}
 			if err := o.Push(t.Context(), wt); err == nil {
@@ -337,6 +343,7 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("a genuinely unsigned commit resets HEAD and leaves no extra commit", func(t *testing.T) {
+		t.Parallel()
 		repo := newUnsignedTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, stripDashSRunner{inner: execRunner{}})

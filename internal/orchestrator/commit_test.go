@@ -30,7 +30,9 @@ const (
 // -----------------------------------------------------------------------
 
 func TestCommitMessageRender(t *testing.T) {
+	t.Parallel()
 	t.Run("worked example 12.1", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{
 			Title: "Add the perimeter diff",
 			FuncLines: []string{
@@ -59,6 +61,7 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("no fences renders without the fence block", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{
 			Title:     "Fix the worktree exclude",
 			FuncLines: []string{"ensureWorktreeExclude appends the line, called by PrepareWorktree"},
@@ -82,6 +85,7 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("empty title is an error", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{FuncLines: []string{testSingleFuncLine}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for an empty title, got nil")
@@ -89,6 +93,7 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("multiline title is an error", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{Title: testTwoLineValue, FuncLines: []string{testSingleFuncLine}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for a multiline title, got nil")
@@ -96,6 +101,7 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("empty func line is an error", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{Title: testGenericTitle, FuncLines: []string{testSingleFuncLine, ""}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for an empty func line, got nil")
@@ -103,6 +109,7 @@ func TestCommitMessageRender(t *testing.T) {
 	})
 
 	t.Run("multiline func line is an error", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{Title: testGenericTitle, FuncLines: []string{testTwoLineValue}}
 		if _, err := m.Render(); err == nil {
 			t.Fatal("Render: expected an error for a multiline func line, got nil")
@@ -114,6 +121,7 @@ func TestCommitMessageRender(t *testing.T) {
 	// commit lines. Fences comes from Package 8's model output, so it must
 	// be validated the same way.
 	t.Run("a fence with a multiline ExistedBecause is an error", func(t *testing.T) {
+		t.Parallel()
 		m := CommitMessage{
 			Title:     testGenericTitle,
 			FuncLines: []string{testSingleFuncLine},
@@ -138,6 +146,7 @@ func TestCommitMessageRender(t *testing.T) {
 // rejected before CommitTask stages anything -- noCallRunner proves no git
 // command runs at all, so a fake, never-prepared Worktree is enough.
 func TestCommitTask_RejectsInvalidApprovedPaths(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		approved []string
@@ -150,6 +159,7 @@ func TestCommitTask_RejectsInvalidApprovedPaths(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
 			wt := Worktree{dir: absLocalPath, branch: branch7MySlug}
 			msg := CommitMessage{Title: testGenericTitle, FuncLines: []string{testSingleFuncLine}}
@@ -337,7 +347,9 @@ func stripDashS(name string, args []string) []string {
 }
 
 func TestCommitTask(t *testing.T) {
+	t.Parallel()
 	t.Run("with allowed signers: commits, verifies, stages only approved", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -397,6 +409,7 @@ func TestCommitTask(t *testing.T) {
 	// the commit too. This proves an unrelated file staged before CommitTask
 	// runs is left out of the commit and stays staged afterward.
 	t.Run("with allowed signers: an unrelated already-staged file is not included in the commit", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -429,6 +442,7 @@ func TestCommitTask(t *testing.T) {
 	})
 
 	t.Run("without allowed signers: commits and signs, unverifiable locally", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, false)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -474,6 +488,7 @@ func TestCommitTask(t *testing.T) {
 	})
 
 	t.Run("a genuinely unsigned commit resets HEAD and errors", func(t *testing.T) {
+		t.Parallel()
 		repo := newUnsignedTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, stripDashSRunner{inner: execRunner{}})
@@ -564,6 +579,7 @@ func (r scriptedSignedStatusRunner) Output(_ context.Context, _, _ string, args 
 // presence check; "B" and "R" are real signing problems; anything else is an
 // error.
 func TestSignedStatus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		gCode        string
@@ -589,6 +605,7 @@ func TestSignedStatus(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			run := scriptedSignedStatusRunner{gCode: c.gCode, catFile: c.catFile}
 			o := newTestOrchestrator(t, absLocalPath, run)
 
@@ -617,6 +634,7 @@ func TestSignedStatus(t *testing.T) {
 // block, stopping at the first blank line, so this genuinely unsigned
 // commit is correctly reported unsigned.
 func TestSignedStatusFallback_HeaderScanStopsAtBlankLine(t *testing.T) {
+	t.Parallel()
 	repo := newUnsignedTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -678,6 +696,7 @@ func (r cancelAfterCommitRunner) Output(ctx context.Context, dir, name string, a
 // reset run -- yet HEAD still ends up reset, since the reset now runs on a
 // context.WithoutCancel(ctx) detached from ctx's cancellation.
 func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
+	t.Parallel()
 	repo := newUnsignedTestRepo(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	run := cancelAfterCommitRunner{inner: stripDashSRunner{inner: execRunner{}}, cancel: cancel}
@@ -712,6 +731,7 @@ func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
 // lives here, not in internal/response, because orchestrator imports
 // response, and the reverse import would be a cycle.
 func TestRenderAcceptsValidatedFences(t *testing.T) {
+	t.Parallel()
 	xmlDoc := `<zing job="build" outcome="ok">` +
 		`<claims><files_changed><path>a.go</path></files_changed><test_exit>0</test_exit><lint_exit>0</lint_exit></claims>` +
 		`<fence path="internal/orchestrator/old.go" symbol="scanTree">existed because the walking skeleton diffed by hand</fence>` +
@@ -744,6 +764,7 @@ func TestRenderAcceptsValidatedFences(t *testing.T) {
 // hooks-disabling prefix: a repo-local pre-commit hook that writes a marker
 // file leaves no marker after a successful CommitTask.
 func TestCommitTaskRunsNoHook(t *testing.T) {
+	t.Parallel()
 	fixture := newSigningFixture(t, true)
 	repo := newSigningTestRepo(t, fixture)
 	ctx := t.Context()
@@ -779,6 +800,7 @@ func TestCommitTaskRunsNoHook(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestCommitChanges(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -836,6 +858,7 @@ func changePaths(changes []Change) []string {
 }
 
 func TestCommitSubject(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -867,6 +890,7 @@ func TestCommitSubject(t *testing.T) {
 // ".git" pointer file was rewritten must be rejected by all three, with the
 // same "unexpected .git pointer" error revalidate itself already produces.
 func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -889,6 +913,7 @@ func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
 	const wantErrSubstr = "unexpected .git pointer"
 
 	t.Run("CommitChanges", func(t *testing.T) {
+		t.Parallel()
 		if _, err := o.CommitChanges(ctx, wt, sha); err == nil {
 			t.Fatal("CommitChanges: expected an error for a rewritten .git pointer, got nil")
 		} else if !strings.Contains(err.Error(), wantErrSubstr) {
@@ -897,6 +922,7 @@ func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
 	})
 
 	t.Run("CommitSubject", func(t *testing.T) {
+		t.Parallel()
 		if _, err := o.CommitSubject(ctx, wt, sha); err == nil {
 			t.Fatal("CommitSubject: expected an error for a rewritten .git pointer, got nil")
 		} else if !strings.Contains(err.Error(), wantErrSubstr) {
@@ -905,6 +931,7 @@ func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
 	})
 
 	t.Run("SignedStatus", func(t *testing.T) {
+		t.Parallel()
 		if _, err := o.SignedStatus(ctx, wt, sha); err == nil {
 			t.Fatal("SignedStatus: expected an error for a rewritten .git pointer, got nil")
 		} else if !strings.Contains(err.Error(), wantErrSubstr) {
@@ -914,7 +941,9 @@ func TestContentMethodsRevalidateRewrittenGitPointer(t *testing.T) {
 }
 
 func TestSignedStatusExported(t *testing.T) {
+	t.Parallel()
 	t.Run("a signed commit", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -941,6 +970,7 @@ func TestSignedStatusExported(t *testing.T) {
 	})
 
 	t.Run("an unsigned commit", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, execRunner{})

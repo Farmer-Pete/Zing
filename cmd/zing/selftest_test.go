@@ -15,6 +15,7 @@ import (
 // 11 dispatcher-to-done e2e suite (selftestE2E) included: runSelftest
 // prints "selftest: OK" and exits 0.
 func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
+	t.Parallel()
 	if got := runSelftest(); got != 0 {
 		t.Errorf("runSelftest() = %d, want 0", got)
 	}
@@ -25,6 +26,7 @@ func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
 // names the e2e path specifically rather than surfacing only as
 // runSelftest's generic non-zero exit.
 func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
+	t.Parallel()
 	if err := selftestE2E(t.Context()); err != nil {
 		t.Errorf("selftestE2E() = %v, want nil", err)
 	}
@@ -35,6 +37,7 @@ func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
 // committed schema, using an in-memory filesystem so the real committed
 // files stay untouched.
 func TestSchemagenDiff_CatchesTamperedSchema(t *testing.T) {
+	t.Parallel()
 	generated, err := schemagen.Generate()
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -100,6 +103,7 @@ func TestSelftestChecksProfileOnDarwin(t *testing.T) {
 // list task 6 hardcodes (registeredPairs) actually renders end to end: an
 // unregistered or misnamed pair here would make RenderTemplate error.
 func TestCheckResponseTemplates_RendersEveryRegisteredPair(t *testing.T) {
+	t.Parallel()
 	if err := checkResponseTemplates(); err != nil {
 		t.Errorf("checkResponseTemplates() = %v, want nil", err)
 	}
@@ -109,6 +113,7 @@ func TestCheckResponseTemplates_RendersEveryRegisteredPair(t *testing.T) {
 // examples (internal/response/examples/*.xml) all parse and validate, the
 // same check selftest itself runs.
 func TestCheckResponseExamples_RealExamplesPass(t *testing.T) {
+	t.Parallel()
 	if err := checkResponseExamples(response.ExampleFS); err != nil {
 		t.Errorf("checkResponseExamples(response.ExampleFS) = %v, want nil", err)
 	}
@@ -119,6 +124,7 @@ func TestCheckResponseExamples_RealExamplesPass(t *testing.T) {
 // detects a broken example, using an in-memory copy so the real committed
 // files stay untouched.
 func TestCheckResponseExamples_CatchesTamperedExample(t *testing.T) {
+	t.Parallel()
 	files, err := response.ExampleFiles()
 	if err != nil {
 		t.Fatalf("ExampleFiles: %v", err)

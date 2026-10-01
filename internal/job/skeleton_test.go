@@ -357,6 +357,7 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 // calls write no state message, since none of them carries a Next; only the
 // review tick's clean shortcut does.
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
@@ -521,6 +522,7 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64) {
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
 // queuedHandler's commit shape (design section 6.5).
 func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	ticket := getTicket(t, s, ticketID)
@@ -696,6 +698,7 @@ func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
 // code-only handlers (design section 6.5).
 
 func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding)
@@ -716,6 +719,7 @@ func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
 }
 
 func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
@@ -736,6 +740,7 @@ func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
 }
 
 func TestShippingHandler_TransitionsToDone(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging)

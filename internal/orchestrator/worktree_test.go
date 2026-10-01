@@ -171,10 +171,12 @@ func newTestOrchestrator(t *testing.T, localPath string, run Runner) *Orchestrat
 }
 
 func TestNew(t *testing.T) {
+	t.Parallel()
 	log := slog.New(slog.DiscardHandler)
 	valid := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: mainBranch}
 
 	t.Run("valid project", func(t *testing.T) {
+		t.Parallel()
 		o, err := New(valid, fakeGitHub{}, execRunner{}, log)
 		if err != nil {
 			t.Fatalf("New: unexpected error: %v", err)
@@ -195,6 +197,7 @@ func TestNew(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := New(c.proj, fakeGitHub{}, execRunner{}, log)
 			if err == nil {
 				t.Fatalf("New(%+v): expected an error, got nil", c.proj)
@@ -206,12 +209,14 @@ func TestNew(t *testing.T) {
 	// run was nil, which would panic the first time a method reached one of
 	// them, rather than failing here at construction.
 	t.Run("nil GitHub is rejected", func(t *testing.T) {
+		t.Parallel()
 		if _, err := New(valid, nil, execRunner{}, log); err == nil {
 			t.Fatal("New: expected an error for a nil GitHub, got nil")
 		}
 	})
 
 	t.Run("nil Runner is rejected", func(t *testing.T) {
+		t.Parallel()
 		if _, err := New(valid, fakeGitHub{}, nil, log); err == nil {
 			t.Fatal("New: expected an error for a nil Runner, got nil")
 		}
@@ -219,7 +224,9 @@ func TestNew(t *testing.T) {
 }
 
 func TestBranchName(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		cases := []struct {
 			name     string
 			ticketID int64
@@ -235,6 +242,7 @@ func TestBranchName(t *testing.T) {
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
 				got, err := branchName(t.Context(), c.ticketID, c.slug)
 				if err != nil {
 					t.Fatalf("branchName(%d, %q): unexpected error: %v", c.ticketID, c.slug, err)
@@ -247,6 +255,7 @@ func TestBranchName(t *testing.T) {
 	})
 
 	t.Run("invalid ticket id", func(t *testing.T) {
+		t.Parallel()
 		for _, id := range []int64{0, -1, -100} {
 			if _, err := branchName(t.Context(), id, "slug"); err == nil {
 				t.Errorf("branchName(%d, \"slug\"): expected an error, got nil", id)
@@ -255,6 +264,7 @@ func TestBranchName(t *testing.T) {
 	})
 
 	t.Run("a trailing .lock is rejected by check-ref-format", func(t *testing.T) {
+		t.Parallel()
 		// "lock" is a legal slug character, so sanitizeSlug leaves it
 		// untouched; the candidate matches zingBranchPattern but git's
 		// own ref-name rule (no ref may end in ".lock") still rejects it.
@@ -264,6 +274,7 @@ func TestBranchName(t *testing.T) {
 	})
 
 	t.Run("a run of internal dots is rejected by check-ref-format", func(t *testing.T) {
+		t.Parallel()
 		// sanitizeSlug only trims leading/trailing dots, so an internal
 		// ".." survives to the candidate; git rejects two consecutive
 		// dots anywhere in a ref name.
@@ -278,6 +289,7 @@ func TestBranchName(t *testing.T) {
 // never has occasion to produce (a bare "." component). It is the second,
 // independent validation layer branchName relies on.
 func TestCheckRefFormat(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		ref     string
@@ -289,6 +301,7 @@ func TestCheckRefFormat(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			err := checkRefFormat(t.Context(), c.ref)
 			if c.wantErr && err == nil {
 				t.Errorf("checkRefFormat(%q): expected an error, got nil", c.ref)
@@ -301,6 +314,7 @@ func TestCheckRefFormat(t *testing.T) {
 }
 
 func TestRevalidate(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	o := newTestOrchestrator(t, repo, execRunner{})
 	ctx := t.Context()
@@ -311,12 +325,14 @@ func TestRevalidate(t *testing.T) {
 	}
 
 	t.Run("valid worktree passes", func(t *testing.T) {
+		t.Parallel()
 		if err := o.revalidate(ctx, wt); err != nil {
 			t.Errorf("revalidate: unexpected error: %v", err)
 		}
 	})
 
 	t.Run("non-zing branch is rejected", func(t *testing.T) {
+		t.Parallel()
 		bad := Worktree{dir: wt.dir, branch: "feature/not-zing"}
 		if err := o.revalidate(ctx, bad); err == nil {
 			t.Error("revalidate: expected an error for a non-zing branch, got nil")
@@ -324,6 +340,7 @@ func TestRevalidate(t *testing.T) {
 	})
 
 	t.Run("the default branch is rejected", func(t *testing.T) {
+		t.Parallel()
 		bad := Worktree{dir: wt.dir, branch: mainBranch}
 		if err := o.revalidate(ctx, bad); err == nil {
 			t.Error("revalidate: expected an error for the default branch, got nil")
@@ -331,15 +348,26 @@ func TestRevalidate(t *testing.T) {
 	})
 
 	t.Run("a worktree whose checked-out HEAD drifted is rejected", func(t *testing.T) {
-		runGit(ctx, t, wt.dir, "checkout", "-b", "zing/1-drifted")
-		if err := o.revalidate(ctx, wt); err == nil {
+		t.Parallel()
+		// Its own worktree, not the shared wt above: this is the only
+		// subtest that mutates its worktree's checked-out branch (the
+		// others only read), and sharing wt with a parallel sibling that
+		// reads it (valid worktree passes) would race.
+		drifted, err := o.PrepareWorktree(ctx, 2, "drifted-source", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+		runGit(ctx, t, drifted.dir, "checkout", "-b", "zing/1-drifted")
+		if err := o.revalidate(ctx, drifted); err == nil {
 			t.Error("revalidate: expected an error when HEAD no longer matches wt.branch, got nil")
 		}
 	})
 }
 
 func TestPrepareWorktree(t *testing.T) {
+	t.Parallel()
 	t.Run("creates the worktree and branch, full checkout", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -375,6 +403,7 @@ func TestPrepareWorktree(t *testing.T) {
 	})
 
 	t.Run("applies a sparse cone", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -396,6 +425,7 @@ func TestPrepareWorktree(t *testing.T) {
 	})
 
 	t.Run("adds .zing/ to .git/info/exclude", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -421,6 +451,7 @@ func TestPrepareWorktree(t *testing.T) {
 	})
 
 	t.Run("does not duplicate the exclude line on a second call", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -449,6 +480,7 @@ func TestPrepareWorktree(t *testing.T) {
 	})
 
 	t.Run("rejects an already-existing worktree directory", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -476,6 +508,7 @@ func TestPrepareWorktree(t *testing.T) {
 	})
 
 	t.Run("cleans up after a failure past worktree add", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		// The forced failure lands on the phase-2 config read
 		// (readWorktreeGitConfig's FilterDrivers call, "git config
@@ -514,6 +547,7 @@ func TestPrepareWorktree(t *testing.T) {
 	// PrepareWorktree must reject this before touching git or the
 	// filesystem, which noCallRunner and an unused LocalPath both prove.
 	t.Run("rejects a computed branch that equals the default branch", func(t *testing.T) {
+		t.Parallel()
 		proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: "zing/1"}
 		log := slog.New(slog.DiscardHandler)
 		o, err := New(proj, fakeGitHub{}, noCallRunner{t: t}, log)
@@ -534,6 +568,7 @@ func TestPrepareWorktree(t *testing.T) {
 	// all, so a dash-prefixed path is included as a literal path like any
 	// other.
 	t.Run("a cone entry beginning with a dash is a literal path, not an option", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 
@@ -561,6 +596,7 @@ func TestPrepareWorktree(t *testing.T) {
 	// "git rev-parse --git-path info/exclude" finds the repository's real,
 	// shared info/exclude regardless of where LocalPath sits.
 	t.Run("resolves info/exclude correctly when LocalPath is itself a linked worktree", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 
@@ -599,7 +635,9 @@ func TestPrepareWorktree(t *testing.T) {
 }
 
 func TestRemoveWorktree(t *testing.T) {
+	t.Parallel()
 	t.Run("removes the worktree and branch", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -623,6 +661,7 @@ func TestRemoveWorktree(t *testing.T) {
 	})
 
 	t.Run("is safe when the worktree is already gone but the branch remains", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -647,6 +686,7 @@ func TestRemoveWorktree(t *testing.T) {
 	})
 
 	t.Run("rejects the default branch without removing anything", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
 		ctx := t.Context()
@@ -658,6 +698,7 @@ func TestRemoveWorktree(t *testing.T) {
 	})
 
 	t.Run("rejects a non-zing branch without removing anything", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
 		ctx := t.Context()
@@ -678,6 +719,7 @@ func TestRemoveWorktree(t *testing.T) {
 	// noCallRunner still proves the rejection happens before any git
 	// command goes through o.run.
 	t.Run("rejects a zing/-shaped branch that check-ref-format rejects", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, noCallRunner{t: t})
 		ctx := t.Context()
@@ -697,6 +739,7 @@ func TestRemoveWorktree(t *testing.T) {
 	// which clears that stale registration on its own, so the branch still
 	// gets deleted.
 	t.Run("a worktree deleted outside git still gets its branch deleted", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -728,6 +771,7 @@ func TestRemoveWorktree(t *testing.T) {
 	// to wt.dir alone, so removing one ticket's worktree must never disturb
 	// an unrelated ticket's registration.
 	t.Run("does not prune an unrelated registered worktree", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -781,6 +825,7 @@ func TestRemoveWorktree(t *testing.T) {
 	// since Zing prepared it (repurposed out from under Zing) must be
 	// refused, not force-removed.
 	t.Run("refuses to remove a worktree whose HEAD was switched to another branch", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -847,6 +892,7 @@ func (r cancelingFailingRunner) Output(ctx context.Context, dir, name string, ar
 // removed, since cleanupWorktree now runs on a context.WithoutCancel(ctx)
 // detached from ctx's cancellation.
 func TestPrepareWorktree_CleanupSurvivesCancelledContext(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	failing := cancelingFailingRunner{
@@ -884,6 +930,7 @@ func TestPrepareWorktree_CleanupSurvivesCancelledContext(t *testing.T) {
 // deliberately builds the Orchestrator's LocalPath from a symlink rather
 // than pre-resolving it, unlike every other test in this file.
 func TestWorktreePresentAcrossASymlinkedLocalPath(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 
 	parent := t.TempDir()
@@ -919,6 +966,9 @@ func TestWorktreePresentAcrossASymlinkedLocalPath(t *testing.T) {
 // without scrubbing, every test and orchestrator git command was redirected
 // at the real repository -- committing to it and running sparse-checkout on
 // it. With scrubbing, an inherited GIT_DIR is ignored.
+//
+// Not parallel: it calls t.Setenv on GIT_DIR and GIT_WORK_TREE, which
+// t.Parallel forbids.
 func TestExecRunnerIgnoresInheritedGitDir(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := t.Context()
@@ -955,6 +1005,7 @@ func TestExecRunnerIgnoresInheritedGitDir(t *testing.T) {
 
 // TestScrubGitLocationEnv is a focused unit test of the env scrubber.
 func TestScrubGitLocationEnv(t *testing.T) {
+	t.Parallel()
 	in := []string{
 		"PATH=/usr/bin",
 		"GIT_DIR=/somewhere/.git",
@@ -983,7 +1034,9 @@ func TestScrubGitLocationEnv(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestHardenedGitArgs(t *testing.T) {
+	t.Parallel()
 	t.Run("no drivers", func(t *testing.T) {
+		t.Parallel()
 		got := hardenedGitArgs(nil, statusArg)
 		want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, statusArg}
 		if !slices.Equal(got, want) {
@@ -992,6 +1045,7 @@ func TestHardenedGitArgs(t *testing.T) {
 	})
 
 	t.Run("two drivers in sorted order", func(t *testing.T) {
+		t.Parallel()
 		got := hardenedGitArgs([]string{driverZebra, driverAlpha}, statusArg)
 		want := []string{
 			"-c", hooksPathArg, "-c", fsmonitorArg,
@@ -1005,6 +1059,7 @@ func TestHardenedGitArgs(t *testing.T) {
 	})
 
 	t.Run("does not mutate the caller's drivers slice", func(t *testing.T) {
+		t.Parallel()
 		drivers := []string{driverZebra, driverAlpha}
 		_ = hardenedGitArgs(drivers, statusArg)
 		if drivers[0] != driverZebra || drivers[1] != driverAlpha {
@@ -1018,7 +1073,9 @@ func TestHardenedGitArgs(t *testing.T) {
 // execRunner makes, whatever the caller asked for, carries the hooks- and
 // fsmonitor-disabling prefix -- and leaves a non-git command's argv alone.
 func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
+	t.Parallel()
 	t.Run("a git call's argv starts with the two -c pairs", func(t *testing.T) {
+		t.Parallel()
 		cmd := execRunner{}.command(t.Context(), absLocalPath, gitName, statusArg, "--porcelain")
 		want := []string{gitName, "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
 		if !slices.Equal(cmd.Args, want) {
@@ -1027,6 +1084,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 	})
 
 	t.Run("drivers add their own -c pairs after the hooks pair", func(t *testing.T) {
+		t.Parallel()
 		cmd := execRunner{drivers: []string{ownDriverName}}.command(t.Context(), absLocalPath, gitName, "add", "-A")
 		want := []string{
 			gitName, "-c", hooksPathArg, "-c", fsmonitorArg,
@@ -1039,6 +1097,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 	})
 
 	t.Run("a non-git command is unchanged", func(t *testing.T) {
+		t.Parallel()
 		cmd := execRunner{}.command(t.Context(), absLocalPath, "echo", "hi")
 		want := []string{"echo", "hi"}
 		if !slices.Equal(cmd.Args, want) {
@@ -1052,6 +1111,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 // builds a fresh execRunner{drivers: wt's drivers} rather than relying on
 // this shared one to carry them.
 func TestNewRunner(t *testing.T) {
+	t.Parallel()
 	run, ok := NewRunner().(execRunner)
 	if !ok {
 		t.Fatalf("NewRunner() = %T, want execRunner", NewRunner())
@@ -1064,6 +1124,7 @@ func TestNewRunner(t *testing.T) {
 // TestCheckRefFormatArgv proves checkRefFormat's argv (checkRefFormatArgs)
 // carries the hardening prefix, even though it reads no repository.
 func TestCheckRefFormatArgv(t *testing.T) {
+	t.Parallel()
 	got := checkRefFormatArgs(branch7MySlug)
 	want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "check-ref-format", "refs/heads/" + branch7MySlug}
 	if !slices.Equal(got, want) {
@@ -1076,7 +1137,9 @@ func TestCheckRefFormatArgv(t *testing.T) {
 // "sparse-checkout set" materializes files exactly as "git checkout" does,
 // so it needs the same driver override.
 func TestSparseCheckoutArgv(t *testing.T) {
+	t.Parallel()
 	t.Run("no drivers", func(t *testing.T) {
+		t.Parallel()
 		got := sparseCheckoutSetArgs(nil)
 		want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "sparse-checkout", "set", "--stdin"}
 		if !slices.Equal(got, want) {
@@ -1085,6 +1148,7 @@ func TestSparseCheckoutArgv(t *testing.T) {
 	})
 
 	t.Run("with drivers", func(t *testing.T) {
+		t.Parallel()
 		got := sparseCheckoutSetArgs([]string{ownDriverName})
 		want := []string{
 			"-c", hooksPathArg, "-c", fsmonitorArg,
@@ -1102,7 +1166,9 @@ func TestSparseCheckoutArgv(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestFilterDrivers(t *testing.T) {
+	t.Parallel()
 	t.Run("none configured", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -1116,6 +1182,7 @@ func TestFilterDrivers(t *testing.T) {
 	})
 
 	t.Run("two drivers, sorted", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 		runGit(ctx, t, repo, "config", "filter.zebra.clean", "zebra-clean")
@@ -1133,6 +1200,7 @@ func TestFilterDrivers(t *testing.T) {
 	})
 
 	t.Run("one driver defined at two config levels is reported once", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 		runGit(ctx, t, repo, "config", "extensions.worktreeConfig", "true")
@@ -1157,6 +1225,7 @@ func TestFilterDrivers(t *testing.T) {
 }
 
 func TestGitCommonDir(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -1183,7 +1252,9 @@ func TestGitCommonDir(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestEnsureWorktree(t *testing.T) {
+	t.Parallel()
 	t.Run("absent creates a fresh worktree", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -1210,6 +1281,7 @@ func TestEnsureWorktree(t *testing.T) {
 	})
 
 	t.Run("present reopens with the branch read from the worktree, not slug", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -1235,6 +1307,7 @@ func TestEnsureWorktree(t *testing.T) {
 	})
 
 	t.Run("a foreign directory errors", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 		ctx := t.Context()
@@ -1260,6 +1333,7 @@ func TestEnsureWorktree(t *testing.T) {
 	// and the refused error text (not a config- or HEAD-read error) is the
 	// second, independent proof.
 	t.Run("a rewritten .git pointer is refused before git symbolic-ref or git config ever runs in the worktree", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 		o := newTestOrchestrator(t, repo, execRunner{})
@@ -1318,6 +1392,7 @@ func (r forbiddenArgsRunner) Output(ctx context.Context, dir, name string, args 
 // re-attached to its existing branch, and the branch's landed commit
 // survives.
 func TestEnsureWorktreeReattachesAfterDeletion(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	o := newTestOrchestrator(t, repo, execRunner{})
 	ctx := t.Context()
@@ -1357,6 +1432,7 @@ func TestEnsureWorktreeReattachesAfterDeletion(t *testing.T) {
 }
 
 func TestEnsureWorktreeTwoBranchesErrors(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	o := newTestOrchestrator(t, repo, execRunner{})
 	ctx := t.Context()
@@ -1376,7 +1452,12 @@ func TestEnsureWorktreeTwoBranchesErrors(t *testing.T) {
 // TestSigningProgramCheck drives checkSigningPrograms's closed grammar
 // (PKG8-PLAN.md section 7.2) directly against a real repo's local config,
 // through EnsureWorktree so the check runs exactly as production calls it.
-func TestSigningProgramCheck(t *testing.T) {
+//
+// Not parallel itself: two of its own subtests below call t.Setenv (PATH,
+// HOME), which t.Parallel forbids for the whole ancestor chain. Its other
+// subtests, which touch no environment variable, are parallel on their
+// own.
+func TestSigningProgramCheck(t *testing.T) { //nolint:tparallel // two of its own subtests below call t.Setenv, so the parent itself cannot call Parallel
 	cases := []struct {
 		name    string
 		key     string
@@ -1435,6 +1516,7 @@ func TestSigningProgramCheck(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			repo := newTestRepo(t)
 			ctx := t.Context()
 			if c.key != "" {
@@ -1452,6 +1534,7 @@ func TestSigningProgramCheck(t *testing.T) {
 		})
 	}
 
+	// Not parallel: it calls t.Setenv("PATH", ...) below.
 	t.Run("a bare name that PATH resolves into the repository is refused", func(t *testing.T) {
 		repo := newTestRepo(t)
 		ctx := t.Context()
@@ -1476,6 +1559,7 @@ func TestSigningProgramCheck(t *testing.T) {
 	})
 
 	t.Run("a symlink that resolves into the repository is refused", func(t *testing.T) {
+		t.Parallel()
 		repo := newTestRepo(t)
 		ctx := t.Context()
 
@@ -1535,6 +1619,7 @@ func TestSigningProgramCheck(t *testing.T) {
 // sandboxed build run can also write (design section 15), on top of
 // LocalPath and the Claude Code transcripts folder it already covered.
 func TestSigningCheckCoversBuildWritableRoots(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 
@@ -1562,6 +1647,7 @@ func TestSigningCheckCoversBuildWritableRoots(t *testing.T) {
 // BuildWritableRoots entry is absolute, the same rule it already applies to
 // LocalPath (task 8).
 func TestNewRejectsRelativeWritableRoot(t *testing.T) {
+	t.Parallel()
 	log := slog.New(slog.DiscardHandler)
 	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: absLocalPath, DefaultBranch: mainBranch, BuildWritableRoots: []string{"relative/cache"}}
 
@@ -1598,6 +1684,7 @@ func assertMarkerAbsent(t *testing.T, marker string) {
 // filter drivers overridden to empty, so a configured smudge filter -- run
 // naturally by an unhardened "git checkout" -- never executes.
 func TestPrepareWorktreeRunsNoSmudgeFilter(t *testing.T) {
+	t.Parallel()
 	setUpFilteredRepo := func(t *testing.T) (repo, marker string, ctx context.Context) {
 		t.Helper()
 		repo = newTestRepo(t)
@@ -1624,6 +1711,7 @@ func TestPrepareWorktreeRunsNoSmudgeFilter(t *testing.T) {
 	}
 
 	t.Run("full checkout", func(t *testing.T) {
+		t.Parallel()
 		repo, marker, ctx := setUpFilteredRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -1638,6 +1726,7 @@ func TestPrepareWorktreeRunsNoSmudgeFilter(t *testing.T) {
 	})
 
 	t.Run("sparse checkout", func(t *testing.T) {
+		t.Parallel()
 		repo, marker, ctx := setUpFilteredRepo(t)
 		o := newTestOrchestrator(t, repo, execRunner{})
 
@@ -1660,6 +1749,7 @@ func TestPrepareWorktreeRunsNoSmudgeFilter(t *testing.T) {
 // only through config.worktree (which only exists for one specific linked
 // worktree) are both seen.
 func TestWorktreeConfigIsReadInWorktree(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -1701,6 +1791,7 @@ func TestWorktreeConfigIsReadInWorktree(t *testing.T) {
 // check fails for a freshly created worktree, PrepareWorktree's cleanup
 // removes both the directory and the branch it just created.
 func TestFailedCheckRemovesNewWorktree(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	runGit(ctx, t, repo, "config", "gpg.program", "node signer.js")
@@ -1725,6 +1816,7 @@ func TestFailedCheckRemovesNewWorktree(t *testing.T) {
 // worktree whose ".git" pointer file no longer names this repository's real
 // gitdir is rejected on every later call.
 func TestRevalidateRejectsRewrittenGitPointer(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	o := newTestOrchestrator(t, repo, execRunner{})
 	ctx := t.Context()
@@ -1755,6 +1847,7 @@ func TestRevalidateRejectsRewrittenGitPointer(t *testing.T) {
 // instead of "5"). checkGitPointer must still accept the pointer, since it
 // is git's own real pointer for this worktree, not a rewritten one.
 func TestCheckGitPointerToleratesNumericSuffix(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 
@@ -1785,6 +1878,7 @@ func TestCheckGitPointerToleratesNumericSuffix(t *testing.T) {
 // this one) must still be rejected. Otherwise a pointer rewritten to name
 // any other registered worktree's admin dir would slip past the F018 fix.
 func TestCheckGitPointerRejectsAnotherTicketsAdminDir(t *testing.T) {
+	t.Parallel()
 	repo := newTestRepo(t)
 	ctx := t.Context()
 	o := newTestOrchestrator(t, repo, execRunner{})
@@ -1817,6 +1911,7 @@ func TestCheckGitPointerRejectsAnotherTicketsAdminDir(t *testing.T) {
 // method that reads or changes a worktree: CommitTask, RevertPaths,
 // ChangedPaths, and Hunk.
 func TestFilterDriverNeverRuns(t *testing.T) {
+	t.Parallel()
 	fixture := newSigningFixture(t, true)
 	repo := newSigningTestRepo(t, fixture)
 	ctx := t.Context()

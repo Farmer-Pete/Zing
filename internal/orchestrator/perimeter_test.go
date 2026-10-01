@@ -54,7 +54,9 @@ func wantExtras(t *testing.T, got, want []Extra) {
 // -----------------------------------------------------------------------
 
 func TestPerimeter(t *testing.T) {
+	t.Parallel()
 	t.Run("worked example 12.2", func(t *testing.T) {
+		t.Parallel()
 		changed := []Change{
 			{Path: perimeterGoPath, Code: Modified},
 			{Path: scratchGoPath, Code: Untracked},
@@ -76,6 +78,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("a declared path is omitted by exact match, an undeclared path is an extra", func(t *testing.T) {
+		t.Parallel()
 		changed := []Change{
 			{Path: aGoPath, Code: Modified},
 			{Path: bGoPath, Code: Added},
@@ -86,6 +89,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("declared match is exact path, not a glob", func(t *testing.T) {
+		t.Parallel()
 		// "internal/**" as a declared entry is not a pattern: it must match
 		// a changed path byte for byte to be omitted.
 		changed := []Change{{Path: "internal/orchestrator/x.go", Code: Modified}}
@@ -95,6 +99,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("a path matching both trust-root and style-guide is marked trust root", func(t *testing.T) {
+		t.Parallel()
 		changed := []Change{{Path: sharedMDPath, Code: Modified}}
 		got := Perimeter(changed, nil, []string{sharedMDPath}, []string{sharedMDPath})
 		want := []Extra{{Path: sharedMDPath, Marker: markerTrustRoot}}
@@ -102,6 +107,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("a trust-root glob marks an extra", func(t *testing.T) {
+		t.Parallel()
 		changed := []Change{{Path: sandboxDeepPath, Code: Untracked}}
 		got := Perimeter(changed, nil, []string{sandboxGlob}, nil)
 		want := []Extra{{Path: sandboxDeepPath, Marker: markerTrustRoot}}
@@ -109,6 +115,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("result is sorted by path regardless of input order", func(t *testing.T) {
+		t.Parallel()
 		changed := []Change{
 			{Path: "z.go", Code: Modified},
 			{Path: aGoPath, Code: Modified},
@@ -121,6 +128,7 @@ func TestPerimeter(t *testing.T) {
 	})
 
 	t.Run("no changes gives no extras", func(t *testing.T) {
+		t.Parallel()
 		got := Perimeter(nil, []string{aGoPath}, nil, nil)
 		if len(got) != 0 {
 			t.Errorf("Perimeter() = %+v, want empty", got)
@@ -133,6 +141,7 @@ func TestPerimeter(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestMatchPattern(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		pattern string
@@ -151,6 +160,7 @@ func TestMatchPattern(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			if got := matchPattern(c.pattern, c.path); got != c.want {
 				t.Errorf("matchPattern(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
 			}
@@ -167,7 +177,9 @@ func TestMatchPattern(t *testing.T) {
 // Modified, and a code shorter than two characters must be a parse error
 // rather than a panic from indexing xy[0].
 func TestStatusFromXY(t *testing.T) {
+	t.Parallel()
 	t.Run("T (typechange) maps to Modified", func(t *testing.T) {
+		t.Parallel()
 		got, err := statusFromXY(" T")
 		if err != nil {
 			t.Fatalf("statusFromXY(\" T\"): unexpected error: %v", err)
@@ -178,12 +190,14 @@ func TestStatusFromXY(t *testing.T) {
 	})
 
 	t.Run("empty input is a parse error, not a panic", func(t *testing.T) {
+		t.Parallel()
 		if _, err := statusFromXY(""); err == nil {
 			t.Fatal("statusFromXY(\"\"): expected an error, got nil")
 		}
 	})
 
 	t.Run("a single-character code is a parse error, not a panic", func(t *testing.T) {
+		t.Parallel()
 		if _, err := statusFromXY("A"); err == nil {
 			t.Fatal("statusFromXY(\"A\"): expected an error, got nil")
 		}
@@ -198,6 +212,7 @@ func TestStatusFromXY(t *testing.T) {
 // section 6.5's ASK message and PerimeterNotice both use it): one through
 // nine spell out, and anything past nine falls back to its digits.
 func TestCountWord(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		n    int
 		want string
@@ -226,7 +241,9 @@ func TestCountWord(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestPerimeterNotice(t *testing.T) {
+	t.Parallel()
 	t.Run("worked example 12.3 content", func(t *testing.T) {
+		t.Parallel()
 		reverted := []Extra{
 			{Path: claudeMDPath, Marker: markerStyleGuide},
 			{Path: scratchGoPath, Marker: ""},
@@ -247,6 +264,7 @@ func TestPerimeterNotice(t *testing.T) {
 	})
 
 	t.Run("names each path and its marker", func(t *testing.T) {
+		t.Parallel()
 		reverted := []Extra{
 			{Path: aGoPath, Marker: markerTrustRoot},
 			{Path: "b.md", Marker: markerStyleGuide},
@@ -261,6 +279,7 @@ func TestPerimeterNotice(t *testing.T) {
 	})
 
 	t.Run("gives both the repair option and the question option", func(t *testing.T) {
+		t.Parallel()
 		got := PerimeterNotice([]Extra{{Path: aGoPath}})
 		if !strings.Contains(got, "Repair") {
 			t.Errorf("PerimeterNotice() missing the repair option, got:\n%s", got)
@@ -271,6 +290,7 @@ func TestPerimeterNotice(t *testing.T) {
 	})
 
 	t.Run("says reverted, so the reader knows the change is gone", func(t *testing.T) {
+		t.Parallel()
 		got := PerimeterNotice([]Extra{{Path: aGoPath}})
 		if !strings.Contains(got, "reverted") {
 			t.Errorf("PerimeterNotice() does not say the change was reverted, got:\n%s", got)
@@ -312,7 +332,9 @@ func changeByPath(t *testing.T, changes []Change, p string) Change {
 }
 
 func TestChangedPaths(t *testing.T) {
+	t.Parallel()
 	t.Run("sees a modified, an added, an untracked, and a deleted path", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 101)
 
 		// Modified: an existing tracked file, edited but not staged.
@@ -354,6 +376,7 @@ func TestChangedPaths(t *testing.T) {
 	})
 
 	t.Run("a rename is reported as a deleted old path and an added new path", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 102)
 
 		runGit(ctx, t, wt.Dir(), "mv", readmePath, "README2.md")
@@ -372,6 +395,7 @@ func TestChangedPaths(t *testing.T) {
 	})
 
 	t.Run("a conflict errors, naming the path", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 103)
 
 		// Diverge app/main.go on a second branch built off the same base,
@@ -399,7 +423,9 @@ func TestChangedPaths(t *testing.T) {
 }
 
 func TestRevertPaths(t *testing.T) {
+	t.Parallel()
 	t.Run("undoes a modified file", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 201)
 
 		original, err := os.ReadFile(filepath.Join(wt.Dir(), readmePath))
@@ -432,6 +458,7 @@ func TestRevertPaths(t *testing.T) {
 	})
 
 	t.Run("undoes a staged-new file", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 202)
 
 		writeTestFile(t, filepath.Join(wt.Dir(), "app", "newfile.go"), "package app\n")
@@ -457,6 +484,7 @@ func TestRevertPaths(t *testing.T) {
 	})
 
 	t.Run("undoes an untracked file", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 203)
 
 		writeTestFile(t, filepath.Join(wt.Dir(), "scratch.txt"), "scratch\n")
@@ -471,6 +499,7 @@ func TestRevertPaths(t *testing.T) {
 	})
 
 	t.Run("errors if a path is left changed", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 204)
 
 		// README.md is genuinely Modified, but we deliberately pass the
@@ -494,6 +523,7 @@ func TestRevertPaths(t *testing.T) {
 	// path that escapes the worktree via "../" must be rejected before any
 	// file is touched.
 	t.Run("errors on a path that escapes the worktree", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 205)
 
 		err := o.RevertPaths(ctx, wt, []Change{{Path: "../escape", Code: Untracked}})
@@ -506,6 +536,7 @@ func TestRevertPaths(t *testing.T) {
 	// could act on a worktree whose checked-out branch no longer matches
 	// wt.branch.
 	t.Run("errors for a worktree whose checked-out branch drifted", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 206)
 
 		runGit(ctx, t, wt.Dir(), "checkout", "-b", "zing/206-drifted")
@@ -524,6 +555,7 @@ func TestRevertPaths(t *testing.T) {
 	// unrelated temp directory outside it, with an ordinary filename
 	// appended after the symlink component in Path.
 	t.Run("errors on a symlink-escape attempt", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 207)
 
 		outside := t.TempDir()
@@ -549,6 +581,7 @@ func TestRevertPaths(t *testing.T) {
 	// the caller asked for). validateRevertPath now rejects Path when it
 	// names a directory.
 	t.Run("errors when the path is a directory", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 208)
 
 		err := o.RevertPaths(ctx, wt, []Change{{Path: "app", Code: Untracked}})
@@ -566,6 +599,7 @@ func TestRevertPaths(t *testing.T) {
 // hooks-disabling prefix: a repo-local post-checkout hook that writes a
 // marker file leaves no marker after a successful RevertPaths.
 func TestRevertPathsRunsNoHook(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 209)
 
 	marker := filepath.Join(t.TempDir(), "marker")
@@ -592,7 +626,9 @@ func TestRevertPathsRunsNoHook(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestHunk(t *testing.T) {
+	t.Parallel()
 	t.Run("modified", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 700)
 		writeTestFile(t, filepath.Join(wt.Dir(), readmePath), "# changed\n")
 
@@ -606,6 +642,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("deleted", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 701)
 		if err := os.Remove(filepath.Join(wt.Dir(), "docs", "extra.md")); err != nil {
 			t.Fatalf("remove docs/extra.md: %v", err)
@@ -621,6 +658,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("added", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 702)
 		writeTestFile(t, filepath.Join(wt.Dir(), "app", "newfile.go"), "package app\n")
 		runGit(ctx, t, wt.Dir(), "add", newFileGoPath)
@@ -635,6 +673,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("untracked", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 703)
 		writeTestFile(t, filepath.Join(wt.Dir(), "scratch.txt"), "scratch content\n")
 
@@ -648,6 +687,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("binary", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 704)
 		binPath := filepath.Join(wt.Dir(), "image.bin")
 		if err := os.WriteFile(binPath, []byte{0x00, 0x01, 0x02, 0x00, 0xFF}, 0o644); err != nil {
@@ -673,6 +713,7 @@ func TestHunk(t *testing.T) {
 	// start, so a content line containing that text mid-diff no longer
 	// matches.
 	t.Run("a text file whose content contains the binary marker text is not mistaken for binary", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 7040)
 
 		const content = "Binary files a/x and b/x differ\n"
@@ -692,6 +733,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("a hunk larger than 64 KiB is cut", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 705)
 
 		var b strings.Builder
@@ -728,6 +770,7 @@ func TestHunk(t *testing.T) {
 	// falls on a continuation byte, and proves the fix backs off to the
 	// rune boundary instead of splitting it.
 	t.Run("a hunk cut is backed off to a rune boundary", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 7050)
 		const path = "multiboundary.txt"
 
@@ -778,6 +821,7 @@ func TestHunk(t *testing.T) {
 	})
 
 	t.Run("an unrecognized status is an error", func(t *testing.T) {
+		t.Parallel()
 		o, wt, ctx := preparePerimeterWorktree(t, 706)
 		if _, err := o.Hunk(ctx, wt, Change{Path: "x", Code: Status(99)}); err == nil {
 			t.Fatal("Hunk: expected an error for an unrecognized status, got nil")
@@ -802,6 +846,7 @@ func configureMarkerTextconv(ctx context.Context, t *testing.T, repo, driver, ma
 // "diff.<driver>.textconv" configured for the changed path's extension,
 // with a command that writes a marker file, leaves no marker after Hunk.
 func TestHunkIgnoresTextconv(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 707)
 
 	repoDir := filepath.Dir(filepath.Dir(filepath.Dir(wt.Dir())))
@@ -824,6 +869,7 @@ func TestHunkIgnoresTextconv(t *testing.T) {
 // TestBranchCommitsOrder proves BranchCommits returns the ticket branch's
 // own commits, oldest first.
 func TestBranchCommitsOrder(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 710)
 
 	names := []string{"one.txt", "two.txt", "three.txt"}

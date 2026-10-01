@@ -410,6 +410,7 @@ func driveTicketToBuilding(t *testing.T, st *store.Store, m *machine.Machine, rt
 // escalates sandbox_unavailable and never calls the runtime or the command
 // runner (design section 5.5, N9).
 func TestProductionBuildNeedsSandbox(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	st, err := store.Open(t.Context(), filepath.Join(dir, "zing.db"))
 	if err != nil {

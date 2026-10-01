@@ -38,7 +38,9 @@ func newTestGHClient(t *testing.T, mux *http.ServeMux) ghClient {
 }
 
 func TestNewGitHub(t *testing.T) {
+	t.Parallel()
 	t.Run("empty token is an error", func(t *testing.T) {
+		t.Parallel()
 		_, err := NewGitHub("")
 		if err == nil {
 			t.Fatal("NewGitHub(\"\"): expected an error, got nil")
@@ -49,6 +51,7 @@ func TestNewGitHub(t *testing.T) {
 	})
 
 	t.Run("a non-empty token succeeds", func(t *testing.T) {
+		t.Parallel()
 		gh, err := NewGitHub("a-token")
 		if err != nil {
 			t.Fatalf("NewGitHub: unexpected error: %v", err)
@@ -60,6 +63,7 @@ func TestNewGitHub(t *testing.T) {
 }
 
 func TestGHClientRepoDefaultBranch(t *testing.T) {
+	t.Parallel()
 	var gotAuth string
 
 	mux := http.NewServeMux()
@@ -83,6 +87,7 @@ func TestGHClientRepoDefaultBranch(t *testing.T) {
 }
 
 func TestGHClientCreateDraftPR(t *testing.T) {
+	t.Parallel()
 	var (
 		gotMethod string
 		gotAuth   string
@@ -136,7 +141,9 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 }
 
 func TestGHClientRequiredChecks(t *testing.T) {
+	t.Parallel()
 	t.Run("unions modern checks and legacy contexts, deduplicated", func(t *testing.T) {
+		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{
@@ -167,6 +174,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 	})
 
 	t.Run("branch not protected yields an empty slice and no error", func(t *testing.T) {
+		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
@@ -185,6 +193,7 @@ func TestGHClientRequiredChecks(t *testing.T) {
 	})
 
 	t.Run("a different 404 is an error, not an empty result", func(t *testing.T) {
+		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
@@ -201,7 +210,9 @@ func TestGHClientRequiredChecks(t *testing.T) {
 }
 
 func TestGHClientFindPRByHead(t *testing.T) {
+	t.Parallel()
 	t.Run("returns the match", func(t *testing.T) {
+		t.Parallel()
 		var gotHead, gotBase, gotState string
 
 		mux := http.NewServeMux()
@@ -239,6 +250,7 @@ func TestGHClientFindPRByHead(t *testing.T) {
 	})
 
 	t.Run("no match returns ok=false and no error", func(t *testing.T) {
+		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `[]`)
@@ -261,6 +273,7 @@ func TestGHClientFindPRByHead(t *testing.T) {
 	// a PR whose base does not match) to prove FindPRByHead, given a base
 	// that does not match the PR on the server, comes back ok=false.
 	t.Run("a PR whose base does not match the requested base is not returned", func(t *testing.T) {
+		t.Parallel()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("base") != mainBranch {
@@ -282,6 +295,7 @@ func TestGHClientFindPRByHead(t *testing.T) {
 	})
 
 	t.Run("passes base as its own query parameter, not just head", func(t *testing.T) {
+		t.Parallel()
 		var gotBase string
 
 		mux := http.NewServeMux()

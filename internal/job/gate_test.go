@@ -105,6 +105,7 @@ func assertSealFailedEscalation(t *testing.T, commit store.HandlerCommit, questi
 // cohort's scenario rows (an older cohort's rows stay unsealed), transitions
 // to building, and resolves the gate round.
 func TestPlanningHandler_Gate_Approve_SealsExactlyTheCohortAndTransitionsToBuilding(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 
@@ -170,6 +171,7 @@ func TestPlanningHandler_Gate_Approve_SealsExactlyTheCohortAndTransitionsToBuild
 // transitions to building with no new Seal request, and still resolves the
 // gate round.
 func TestPlanningHandler_Gate_Approve_AlreadySealedTransitionsWithNoNewSeal(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	_, runID := seedSealedCohort(t, s, ticketID, validPlan("Already sealed."), validScenarios(2, "sealed"))
@@ -198,6 +200,7 @@ func TestPlanningHandler_Gate_Approve_AlreadySealedTransitionsWithNoNewSeal(t *t
 // 1: no plan artifact at all escalates seal_failed with RunID nil and the
 // exact "no current plan cohort" What.
 func TestPlanningHandler_Gate_Approve_Branch1_NoCohortEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 
@@ -215,6 +218,7 @@ func TestPlanningHandler_Gate_Approve_Branch1_NoCohortEscalates(t *testing.T) {
 // branch 2: a plan artifact with a null run_id (a legacy cohort) escalates
 // seal_failed with the exact "cohort has no producing run" What.
 func TestPlanningHandler_Gate_Approve_Branch2_NoProducingRunEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 
@@ -243,6 +247,7 @@ func TestPlanningHandler_Gate_Approve_Branch2_NoProducingRunEscalates(t *testing
 // 31-scenario cohort each escalate seal_failed with the exact "cohort has
 // <n> scenarios, want 2 to 30" What.
 func TestPlanningHandler_Gate_Approve_Branch3_ScenarioCountOutOfRangeEscalates(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		n    int
@@ -252,6 +257,7 @@ func TestPlanningHandler_Gate_Approve_Branch3_ScenarioCountOutOfRangeEscalates(t
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s := newJobTestStore(t)
 			ticketID := seedFeatureTicketInPlanning(t, s)
 			_, runID := seedCohort(t, s, ticketID, validPlan("Out of range."), validScenarios(tc.n, "range"))
@@ -274,6 +280,7 @@ func TestPlanningHandler_Gate_Approve_Branch3_ScenarioCountOutOfRangeEscalates(t
 // escalates seal_failed with the exact "cohort is partially or
 // inconsistently sealed (1 of 3)" What.
 func TestPlanningHandler_Gate_Approve_Branch6_PartiallySealedEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	runID := seedPartiallySealedCohort(t, s, ticketID, validPlan("Partially sealed."), validScenarios(3, "partial"), 1)
@@ -294,6 +301,7 @@ func TestPlanningHandler_Gate_Approve_Branch6_PartiallySealedEscalates(t *testin
 // mismatched twice" What, even though the cohort itself is otherwise a
 // clean, sealable one (branch 0 wins over branches 3-6).
 func TestPlanningHandler_Gate_Approve_Branch0_TwoMismatchMarkersEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	_, runID := seedCohort(t, s, ticketID, validPlan("Twice mismatched."), validScenarios(2, "mismatch"))
@@ -318,6 +326,7 @@ func TestPlanningHandler_Gate_Approve_Branch0_TwoMismatchMarkersEscalates(t *tes
 // planning session with the reply's body fenced as notes, and resolves the
 // gate round.
 func TestPlanningHandler_Gate_Reject_OptionBWithNotesResumesOpenSession(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -364,6 +373,7 @@ func TestPlanningHandler_Gate_Reject_OptionBWithNotesResumesOpenSession(t *testi
 // same as option "b" -- it also resumes the open session with the reply's
 // body fenced as notes.
 func TestPlanningHandler_Gate_Reject_ReplyOnlyResumesOpenSession(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -408,6 +418,7 @@ func TestPlanningHandler_Gate_Reject_ReplyOnlyResumesOpenSession(t *testing.T) {
 // rejection starts the planning first turn fresh with the notes, rather
 // than resuming.
 func TestPlanningHandler_Gate_Reject_NoOpenSessionGoesToFreshFirstTurn(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 

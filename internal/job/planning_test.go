@@ -167,6 +167,7 @@ func runPlanning(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) (s
 // Fake's own outcome, and the fresh session's external_id, with the ticket
 // left in planning, not waiting (design section 6.8's classify row).
 func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -208,6 +209,7 @@ func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
 // Q<n> key, and the ticket waiting on "questions" (design section 6.8's
 // planning "questions" row).
 func TestPlanningHandler_FirstTurn_PostsRealQuestionsBatchWithAllocatedKeys(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -293,6 +295,7 @@ func mustPlanning(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) s
 // file's own text reaches the runtime as the assembled prompt's exact
 // prefix.
 func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		outcome response.Outcome
@@ -303,6 +306,7 @@ func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s := newJobTestStore(t)
 			ticketID := seedQueuedTicket(t, s)
 			advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -338,6 +342,7 @@ func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 // prompt fences the owner's answer text behind the untrusted-input markers
 // (design D15, section 4.2).
 func TestPlanningHandler_Resume_AnsweredRoundBumpsResumesAndFencesTheAnswer(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -433,6 +438,7 @@ func (r *recordingRuntime) Run(ctx context.Context, req runtime.RunRequest) (run
 // ticket in planning, not waiting, for the review tick (entry step 6) to
 // pick up on the next tick, rather than jumping straight to building.
 func TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -494,6 +500,7 @@ func answeredRoundReadyForResume(t *testing.T, s *store.Store, ticketID int64) *
 // commit (design D12) -- proved end to end through dispatch.Tick by
 // internal/dispatch's own TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment.
 func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	answeredRoundReadyForResume(t, s, ticketID)
@@ -548,6 +555,7 @@ func TestPlanningHandler_NothingToDo_AllCodeClaimsFalseGoesToDone(t *testing.T) 
 // agent process) is a defensive error, not an escalation the handler
 // silently accepted the model's word for.
 func TestPlanningHandler_NothingToDo_TrueCodeClaimErrorsRatherThanEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	answeredRoundReadyForResume(t, s, ticketID)
@@ -576,6 +584,7 @@ func TestPlanningHandler_NothingToDo_TrueCodeClaimErrorsRatherThanEscalates(t *t
 // nothing to build either, so What names the zero case by name rather than
 // counting a true claim that does not exist.
 func TestPlanningHandler_NothingToDo_NoCodeClaimsEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	answeredRoundReadyForResume(t, s, ticketID)
@@ -615,6 +624,7 @@ func TestPlanningHandler_NothingToDo_NoCodeClaimsEscalates(t *testing.T) {
 // split_unsupported naming the run that returned it, and leaves the ticket
 // waiting on the owner rather than transitioning it.
 func TestPlanningHandler_Children_EscalatesSplitUnsupported(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	answeredRoundReadyForResume(t, s, ticketID)
@@ -667,6 +677,7 @@ func TestPlanningHandler_Children_EscalatesSplitUnsupported(t *testing.T) {
 // answered restarts classify fresh with the round's rendered answers, and
 // resolves the round in that same commit.
 func TestPlanningHandler_Classify_AnsweredQuestionRoundRerunsClassifyFresh(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -723,6 +734,7 @@ func TestPlanningHandler_Classify_AnsweredQuestionRoundRerunsClassifyFresh(t *te
 // second consecutive invalid output (classify re-runs fresh, since kind is
 // still nil) escalates response_invalid in that same commit.
 func TestPlanningHandler_Classify_D14_SecondConsecutiveInvalidEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -798,6 +810,7 @@ func mustEscalationPayload(t *testing.T, commit store.HandlerCommit) []byte {
 // output -- which must NOT escalate, since the valid run in between reset
 // the consecutive count to zero.
 func TestPlanningHandler_Classify_D14_InvalidThenValidThenInvalidDoesNotEscalate(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -845,6 +858,7 @@ func TestPlanningHandler_Classify_D14_InvalidThenValidThenInvalidDoesNotEscalate
 // closed reason wrapped in the fixed retry sentence, rather than starting a
 // new session.
 func TestPlanningHandler_FirstTurn_InvalidRecordsSessionAndStep4ResumesWithReason(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -902,6 +916,7 @@ func TestPlanningHandler_FirstTurn_InvalidRecordsSessionAndStep4ResumesWithReaso
 // learns a session id -- the session stays idless, which LatestSession
 // treats the same as none.
 func TestPlanningHandler_FirstTurn_ErrStartLeavesAnIdlessSessionAndEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -945,6 +960,7 @@ func TestPlanningHandler_FirstTurn_ErrStartLeavesAnIdlessSessionAndEscalates(t *
 // commit, so the caller applies nothing and the dispatcher leaves the
 // claim for ExpireClaims to reconcile.
 func TestPlanningHandler_Classify_ErrCanceledReturnsWithNoCommit(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -991,6 +1007,7 @@ func bumpResumesToCap(t *testing.T, s *store.Store, ticketID, sessionID int64, m
 // already recorded (HasEscalation), returns ErrNoAction rather than
 // escalating again.
 func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -1048,6 +1065,7 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 // itself (already proved by TestPlanningHandler_Ready_..., task 7a/7b); this
 // test only needs the cohort in place with its producing session exhausted.
 func TestPlanningHandler_SessionExhausted_ReadyCohortRunsReviewInsteadOfEscalating(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	seedCohort(t, s, ticketID, validPlan("A ready cohort survives resume exhaustion."), validScenarios(2, "exhausted"))
@@ -1195,6 +1213,7 @@ func readyStep(resp response.Response, sessionID string) scriptedStep {
 // TestPlanningHandler_Resume_ReadyOutcomeStoresCohortAndStaysInPlanning),
 // so the review tick can pick up the new cohort on the next tick.
 func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -1297,6 +1316,7 @@ func TestPlanningHandler_Ready_StoresPlanClaimsAndScenariosThenStaysInPlanning(t
 // handler itself returns a nil error, so the commit reaches the dispatcher
 // as an ordinary commit rather than a failure to release.
 func TestReadyCommit_PostRunStoreFailureTerminalizesRun(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 
 	proj := testProject
@@ -1359,6 +1379,7 @@ func TestReadyCommit_PostRunStoreFailureTerminalizesRun(t *testing.T) {
 // run's session, answered exactly as AnsweredRounds expects, whether or not
 // a real model turn asked it.
 func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -1460,6 +1481,7 @@ func TestPlanningHandler_Ready_SecondReadyStoresNewCohortLeavingOldRowsUntouched
 // the pending marker names the claim's own element path, nothing is
 // stored, and the ticket stays in planning, not waiting.
 func TestPlanningHandler_Ready_ClaimThroughOutwardSymlinkFailsAndPends(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 
 	outsideDir := t.TempDir()
@@ -1522,6 +1544,7 @@ func TestPlanningHandler_Ready_ClaimThroughOutwardSymlinkFailsAndPends(t *testin
 // empty then, each failing with the pending marker naming the specific
 // element path and rule.
 func TestPlanningHandler_Ready_ScenarioShapeFailuresNameTheElementPath(t *testing.T) {
+	t.Parallel()
 	emptyThen := validScenarios(2, "empty")
 	emptyThen[0].Then = ""
 
@@ -1536,6 +1559,7 @@ func TestPlanningHandler_Ready_ScenarioShapeFailuresNameTheElementPath(t *testin
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s := newJobTestStore(t)
 			ticketID := seedQueuedTicket(t, s)
 			fake := fakeRuntime(t)
@@ -1560,6 +1584,7 @@ func TestPlanningHandler_Ready_ScenarioShapeFailuresNameTheElementPath(t *testin
 // a plan checker failure (a TODO placeholder) writes the pending marker
 // with the checker's own element path and rule.
 func TestPlanningHandler_Ready_PlanCheckerFailureNamesElementPathAndRule(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -1588,6 +1613,7 @@ func TestPlanningHandler_Ready_PlanCheckerFailureNamesElementPathAndRule(t *test
 // "validation errors delivered" marker in that same commit, and a later
 // tick -- with the marker now delivered -- does not resume again.
 func TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDelivers(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	fake := fakeRuntime(t)
@@ -1803,6 +1829,7 @@ func seedPlanreviewArtifact(t *testing.T, s *store.Store, ticketID int64, versio
 // through a recordingRuntime) -- with only the lens files' own "## In a
 // plan" sections appended, never an "## In code" line.
 func TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Review the plan on its own tick."), validScenarios(2, "review"))
@@ -1896,6 +1923,7 @@ func TestPlanReviewHasNoCodexHome(t *testing.T) {
 // element path in the stored plan (response.ResolvesInPlan) is dropped from
 // the stored artifact, while a finding at a real path survives.
 func TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Drop unresolved findings."), validScenarios(2, "drop"))
@@ -1933,6 +1961,7 @@ func TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings(t *testing.T
 // fences into the next resume (prompt.Findings), this drives one more tick
 // after the review lands and inspects that resumed prompt.
 func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *testing.T) {
+	t.Parallel()
 	const blockerText, majorText, minorText, nitText = "blocker text", "major text", "minor text", "nit text"
 	findings := []response.Finding{
 		finding(response.SeverityBlocker, "plan/design/shape", blockerText, "fix"),
@@ -1954,6 +1983,7 @@ func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *te
 
 	for _, tc := range cases {
 		t.Run(string(tc.floor), func(t *testing.T) {
+			t.Parallel()
 			s := newJobTestStore(t)
 			ticketID := seedFeatureTicketInPlanning(t, s)
 			seedCohort(t, s, ticketID, validPlan("Floor split."), validScenarios(2, "floor"))
@@ -1993,6 +2023,7 @@ func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *te
 // -- and leaves the ticket in planning, waiting on "gate", rather than
 // task 7b's removed shortcut straight to building.
 func TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	const objective = "Clean review posts the gate."
@@ -2095,6 +2126,7 @@ func storedQuestionKeys(t *testing.T, s *store.Store, ticketID int64) []string {
 // question on the same ticket continues that same count as Q3, rather than
 // colliding with either one.
 func TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 
@@ -2143,6 +2175,7 @@ func TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions(
 // writes "planreview vN delivered" in that same commit; a following tick
 // does not resume again (no live pending marker left).
 func TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenStop(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Floor loop."), validScenarios(2, "loop"))
@@ -2201,6 +2234,7 @@ func TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenSt
 // findings, escalates loops_exhausted with a nil RunID (design section 6.7)
 // rather than resuming a third time.
 func TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Max loops."), validScenarios(2, "maxloops"))
@@ -2242,6 +2276,7 @@ func TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted(t *testing.T
 // marker, so CountDeliveredReviews stays at 0 throughout -- the loop
 // allowance (design section 5.1 step 7) is untouched by either.
 func TestPlanningHandler_ReviewTick_QuestionAndD14RetryDoNotConsumeLoopAllowance(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	seedCohort(t, s, ticketID, validPlan("Question then D14 then ok."), validScenarios(2, "consume"))
@@ -2297,6 +2332,7 @@ func TestPlanningHandler_ReviewTick_QuestionAndD14RetryDoNotConsumeLoopAllowance
 // review tick opens a fresh session) escalates response_invalid in that
 // same commit, with Origin planreview.
 func TestPlanningHandler_ReviewTick_D14_SecondConsecutiveInvalidEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	seedCohort(t, s, ticketID, validPlan("D14 planreview."), validScenarios(2, "d14"))
@@ -2348,6 +2384,7 @@ func TestPlanningHandler_ReviewTick_D14_SecondConsecutiveInvalidEscalates(t *tes
 // output -- which must NOT escalate, since the valid run in between reset
 // the consecutive count to zero.
 func TestPlanningHandler_ReviewTick_D14_InvalidThenValidThenInvalidDoesNotEscalate(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	seedCohort(t, s, ticketID, validPlan("D14 reset."), validScenarios(2, "d14reset"))
@@ -2441,6 +2478,7 @@ func assertWallClockEscalation(t *testing.T, commit store.HandlerCommit) {
 // of budget, and no run is ever reserved for it.
 
 func TestPlanningHandler_Budget_ExhaustedBeforeClassifyEscalatesWallClock(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	advanceQueuedToPlanning(t, s, fakeRuntime(t), ticketID)
@@ -2453,6 +2491,7 @@ func TestPlanningHandler_Budget_ExhaustedBeforeClassifyEscalatesWallClock(t *tes
 }
 
 func TestPlanningHandler_Budget_ExhaustedBeforeFirstTurnEscalatesWallClock(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -2467,6 +2506,7 @@ func TestPlanningHandler_Budget_ExhaustedBeforeFirstTurnEscalatesWallClock(t *te
 }
 
 func TestPlanningHandler_Budget_ExhaustedBeforeResumeEscalatesWallClock(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := answeredRoundReadyForResume(t, s, ticketID)
@@ -2479,6 +2519,7 @@ func TestPlanningHandler_Budget_ExhaustedBeforeResumeEscalatesWallClock(t *testi
 }
 
 func TestPlanningHandler_Budget_ExhaustedBeforeReviewTickEscalatesWallClock(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := answeredRoundReadyForResume(t, s, ticketID)
@@ -2496,6 +2537,7 @@ func TestPlanningHandler_Budget_ExhaustedBeforeReviewTickEscalatesWallClock(t *t
 // the wall_clock escalation resolves the same answered question ids the
 // resume itself would have (design section 6.7, 6.8; PR #23 review).
 func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := answeredRoundReadyForResume(t, s, ticketID)

@@ -18,6 +18,7 @@ import (
 // approving does, not just the bare plan objective, while leaving the two
 // chip options unchanged.
 func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
+	t.Parallel()
 	const objective = "Add a hello endpoint so a caller can get a plain-text greeting back over HTTP."
 	msg, err := gateQuestionMessage(1, objective)
 	if err != nil {
