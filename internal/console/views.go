@@ -499,10 +499,15 @@ func visibleRows(rows []store.MessageRow) []store.MessageRow {
 }
 
 // questionStateLabel maps messages.state to the pill label the mock's group
-// summary shows (design section 6.6): "resolved" when resolved, "waiting on
-// you" when open, "resuming" when answered. A missing or unrecognized state
-// renders as-is (or empty), rather than guessing.
-func questionStateLabel(state *string) string {
+// summary shows (design section 6.6): "waiting on you" when open, "resolved"
+// when resolved. An answered question (bug fix 9: it was badged "resuming"
+// unconditionally, which read as the agent already being on its way back,
+// even while the ticket still waited on other questions in the same round)
+// splits on revisable, the same D30 flag buildThreadQuestion already
+// computes: "answered · can change" while the round isn't done with it yet,
+// "answered" once it's locked and nothing more can change here. A missing or
+// unrecognized state renders as-is (or empty), rather than guessing.
+func questionStateLabel(state *string, revisable bool) string {
 	if state == nil {
 		return ""
 	}
@@ -510,7 +515,10 @@ func questionStateLabel(state *string) string {
 	case "open":
 		return "waiting on you"
 	case "answered":
-		return "resuming"
+		if revisable {
+			return "answered · can change"
+		}
+		return "answered"
 	case "resolved":
 		return "resolved"
 	default:
@@ -774,7 +782,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 	q := &templates.ThreadQuestion{
 		Key: payload.Key, Title: title, Kind: string(payload.Kind),
 		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
-		Options: options, Items: items, StateLabel: questionStateLabel(m.State),
+		Options: options, Items: items, StateLabel: questionStateLabel(m.State, revisable),
 		MessageCount: messageCount,
 		// Interactive is true for a still-open question (code review fix, PR
 		// #16: questionGroup (thread.templ) used to render option chips,

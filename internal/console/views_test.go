@@ -321,7 +321,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name, title, pill string
 	}{
-		{"answered", "Answered question", "resuming"}, // questionStateLabel's answered->resuming mapping (views.go)
+		{answeredState, "Answered question", answeredState}, // questionStateLabel's locked-answered mapping (views.go, bug fix 9)
 		{resolvedState, "Resolved question", resolvedState},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

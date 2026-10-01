@@ -221,7 +221,7 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
-				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "resuming",
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "answered",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
 				Interactive: false, AnsweredText: "a",
 			},
@@ -280,7 +280,7 @@ func TestQuestionGroupShowsReviseNoteWhileStillRevisable(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
-				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "resuming",
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "answered · can change",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
 				Options:     []ThreadOption{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
 				Interactive: true, Revisable: true, DraftOption: "a",

@@ -416,3 +416,68 @@ func TestBuildWaitProgress(t *testing.T) {
 		}
 	})
 }
+
+// TestQuestionStateLabel proves the bug fix for F9: an answered question
+// was badged "resuming" regardless of whether anything was actually about
+// to resume. "resuming" implied the agent was already on its way back,
+// which was false whenever the ticket still waited on other questions in
+// the same round (D30's revisable state) -- nothing resumes until every
+// question in the round is answered. questionStateLabel now takes the same
+// revisable flag buildThreadQuestion already computes, and answered splits
+// into "answered · can change" (still revisable) and "answered" (locked,
+// the round is done with this question).
+func TestQuestionStateLabel(t *testing.T) {
+	t.Parallel()
+	answered := msgStateAnswered
+	open := msgStateOpen
+	resolved := "resolved"
+	other := "weird"
+	for _, tc := range []struct {
+		name      string
+		state     *string
+		revisable bool
+		want      string
+	}{
+		{"nil state renders empty", nil, false, ""},
+		{"open renders waiting on you", &open, false, "waiting on you"},
+		{"answered and revisable renders answered, can change", &answered, true, "answered · can change"},
+		{"answered and locked renders plain answered", &answered, false, "answered"},
+		{"resolved renders resolved", &resolved, false, "resolved"},
+		{"an unrecognized state renders as-is", &other, false, "weird"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := questionStateLabel(tc.state, tc.revisable)
+			if got != tc.want {
+				t.Errorf("questionStateLabel(%v, %v) = %q, want %q", tc.state, tc.revisable, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked is
+// TestQuestionStateLabel's render-level proof: buildThreadRows, the real
+// seam the Thread view renders through, gives a still-revisable answered
+// question (ticket.WaitingOn == "questions") a different badge than the
+// same question once the ticket is no longer waiting on it.
+func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.T) {
+	t.Parallel()
+	rows := []store.MessageRow{questionRowForWait(t, msgStateAnswered, response.QuestionKindQuestion)}
+
+	waiting := waitReasonQuestions
+	revisableRows, err := buildThreadRows(&store.Ticket{WaitingOn: &waiting}, rows, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildThreadRows (revisable): %v", err)
+	}
+	if got := revisableRows[0].Question.StateLabel; got != "answered · can change" {
+		t.Errorf("revisable answered question StateLabel = %q, want %q", got, "answered · can change")
+	}
+
+	lockedRows, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildThreadRows (locked): %v", err)
+	}
+	if got := lockedRows[0].Question.StateLabel; got != "answered" {
+		t.Errorf("locked answered question StateLabel = %q, want %q", got, "answered")
+	}
+}
