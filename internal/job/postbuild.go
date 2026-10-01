@@ -149,9 +149,11 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // follows design section 5.6's own choice-by-origin table: fix (with and
 // without a run), perimeter, cap_resumes on a build, perimeter, or review
 // session (retryCapResumes' own job switch), cap_budget, sandbox_unavailable,
-// and review (loops_exhausted's own fix request, any other code's own
-// "retry requested" marker). A row this task does not yet cover (judge,
-// shipping, respond) is a loud, named error: later tasks add those rows.
+// review, and judge (each with the same loops_exhausted fix request, any
+// other code's own "retry requested" marker, or, judge only, "with a run"'s
+// own fresh round retry -- judging.go's retryFreshRound). A row this task
+// does not yet cover (shipping, respond) is a loud, named error: later
+// tasks add those rows.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -196,6 +198,15 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit, err = reviewingHandler{}.retryReviewLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
 
 	case origin == response.EscalationOriginReview:
+		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginJudge && payload.Code == string(response.EscalationCodeLoopsExhausted):
+		commit, err = judgeHandler{}.retryJudgeLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
+
+	case origin == response.EscalationOriginJudge && escMsg.RunID != nil:
+		commit, err = judgeHandler{}.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+
+	case origin == response.EscalationOriginJudge:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	default:

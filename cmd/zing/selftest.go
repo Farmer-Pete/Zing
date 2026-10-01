@@ -137,11 +137,41 @@ func selftest() error {
 }
 
 // e2eMaxTicks bounds selftestResumeE2E's tick loop: enough ticks for intake
-// plus one handler call per pipeline transition (design section 7.1:
-// queued, planning x2, building, reviewing, judging, shipping is 7 handler
-// calls), with generous headroom, so a stuck dispatcher fails the selftest
-// promptly instead of hanging.
+// plus one handler call per pipeline transition (design section 7.1: queued,
+// planning x2, building, reviewing, judging, shipping is 7 handler calls --
+// judging alone now takes several of those on its own, design section 7:
+// START, RUN, one CHECK per scenario with a check command, and EVALUATE),
+// with generous headroom, so a stuck dispatcher fails the selftest promptly
+// instead of hanging.
 const e2eMaxTicks = 50
+
+// e2eJudgeCheckCmd is the one shell command fixtures/scripts/planning/2.xml's
+// own scenario s1 carries as its check_cmd: CHECK (design section 7.5)
+// re-runs it for real, but this suite's fixture project never starts a
+// real HTTP server on port 8080, so a live curl would always fail.
+// selftestCommands intercepts exactly this one command and reports the
+// pass CHECK's own real exit-code contract would have reported had a
+// server been listening, at the same CommandRunner seam building's own
+// CHECK step already takes its commands through (job.Deps.Commands) --
+// never a live network call.
+const e2eJudgeCheckCmd = "curl -sf localhost:8080/hello"
+
+// selftestCommands wraps the real CommandRunner so the judge's own CHECK
+// step never dials out: every command but e2eJudgeCheckCmd runs for real
+// (the building state's own "test -f hello.txt" and "true" included, so
+// selftest still proves those run for real), and e2eJudgeCheckCmd always
+// reports exit 0 with no error, matching fixtures/scripts/judge/1/1.xml's
+// own scripted pass verdict for s1.
+type selftestCommands struct {
+	real job.CommandRunner
+}
+
+func (c selftestCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == e2eJudgeCheckCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
 
 // e2eOwner is this selftest run's claim owner id (design section 7.2's
 // shape is <hostname>-<pid>; a fixed literal is simpler and just as unique
@@ -423,7 +453,7 @@ func selftestResumeE2E(ctx context.Context) error {
 			// RequireSandbox false lets a sandboxed job (build, perimeter)
 			// run unwrapped instead of refusing (design D5, section 10).
 			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
-			Commands:       job.NewCommandRunner(sandbox.Off(), false),
+			Commands:       selftestCommands{real: job.NewCommandRunner(sandbox.Off(), false)},
 			DataDir:        dir,
 			LensesParallel: e2eLensesParallel,
 			// Projects carries what the real building handler needs for

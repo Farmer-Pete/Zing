@@ -430,25 +430,40 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	}
 	advanceBuilding(t, s, rt, ticketID)
 
-	// the remaining code-only states.
-	order := []string{testStateReviewing, testStateJudging, testStateShipping}
-	for _, state := range order {
-		ticket = getTicket(t, s, ticketID)
-		if ticket.State != state {
-			t.Fatalf("before handler %s: ticket state = %q, want %q", state, ticket.State, state)
-		}
-		deps = claim(t, s, rt, ticketID)
-
-		handler, ok := reg[state]
-		if !ok {
-			t.Fatalf("Registry() has no handler for state %s", state)
-		}
-		commit, err = handler.Run(t.Context(), ticket, deps)
-		if err != nil {
-			t.Fatalf("%s handler.Run: %v", state, err)
-		}
-		apply(t, s, ticket, commit)
+	// reviewing: the real handler (design section 6) still completes ROUND
+	// in one call -- every one of the seven clean lens scripts returns ok --
+	// so one Run call is still enough.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateReviewing {
+		t.Fatalf("before reviewing: ticket state = %q, want %q", ticket.State, testStateReviewing)
 	}
+	deps = claim(t, s, rt, ticketID)
+	commit, err = reg[testStateReviewing].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("reviewing handler.Run: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	// judging: the real handler (design section 7) takes a START call, a RUN
+	// call, one CHECK call per scenario with a check command, and an
+	// EVALUATE call, not the skeleton's one-shot fake pass-through.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateJudging {
+		t.Fatalf("before judging: ticket state = %q, want %q", ticket.State, testStateJudging)
+	}
+	advanceJudging(t, s, rt, ticketID)
+
+	// shipping: still the skeleton's one-shot code-only transition.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("before shipping: ticket state = %q, want %q", ticket.State, testStateShipping)
+	}
+	deps = claim(t, s, rt, ticketID)
+	commit, err = reg[testStateShipping].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("shipping handler.Run: %v", err)
+	}
+	apply(t, s, ticket, commit)
 
 	final := getTicket(t, s, ticketID)
 	if final.State != testStateDone {
@@ -579,6 +594,10 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 			advanceBuilding(t, s, fakeRuntime(t), ticketID)
 			continue
 		}
+		if state == testStateJudging {
+			advanceJudging(t, s, fakeRuntime(t), ticketID)
+			continue
+		}
 
 		deps := claim(t, s, fakeRuntime(t), ticketID)
 		commit, err := reg[state].Run(t.Context(), ticket, deps)
@@ -616,6 +635,64 @@ func advanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 		}
 	}
 	t.Fatalf("advanceBuilding: still in building after %d handler calls", advanceBuildingMaxCalls)
+}
+
+// judgeCheckFixtureCmd is the one shell command fixtures/scripts/
+// planning/2.xml's own scenario s1 carries as its check_cmd: CHECK (design
+// section 7.5) re-runs it for real, but no fixture project in this suite
+// ever starts a real HTTP server on port 8080, so a live curl would always
+// fail. testJudgeCommands intercepts exactly this command and reports the
+// pass CHECK's own real exit-code contract would have reported had a
+// server been listening -- the same CommandRunner seam building's own
+// CHECK step already takes its commands through (job.Deps.Commands),
+// never a live network call.
+const judgeCheckFixtureCmd = "curl -sf localhost:8080/hello"
+
+// testJudgeCommands wraps a real CommandRunner so judging's own CHECK step
+// never dials out: every command but judgeCheckFixtureCmd runs for real
+// (building's own "test -f hello.txt" and "true" included), and
+// judgeCheckFixtureCmd always reports exit 0 with no error.
+type testJudgeCommands struct {
+	real job.CommandRunner
+}
+
+func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:
+// START, RUN, one CHECK (the fixture cohort's own single checked scenario,
+// s1), and EVALUATE is four calls; the headroom catches a stuck handler
+// instead of hanging the test.
+const advanceJudgingMaxCalls = 8
+
+// advanceJudging drives the real judging handler through as many calls as
+// it now takes to land a passing round and transition to shipping (design
+// section 7): unlike the skeleton's one-shot fake pass-through, each call
+// only advances one step (START, RUN, one scenario's own CHECK, or
+// EVALUATE), so this loops until the ticket leaves "judging". Its own
+// Deps.Commands (testJudgeCommands) keeps CHECK's re-run of the fixture
+// cohort's one check command from ever dialing a real server.
+func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	reg := job.Registry()
+	for range advanceJudgingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		deps := claim(t, s, rt, ticketID)
+		deps.Commands = testJudgeCommands{real: deps.Commands}
+		commit, err := reg[testStateJudging].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("judging Run: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		if getTicket(t, s, ticketID).State != testStateJudging {
+			return
+		}
+	}
+	t.Fatalf("advanceJudging: still in judging after %d handler calls", advanceJudgingMaxCalls)
 }
 
 // advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
@@ -718,26 +795,11 @@ func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
 	}
 }
 
-func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
-	t.Parallel()
-	s := newJobTestStore(t)
-	ticketID := seedQueuedGitBackedTicket(t, s)
-	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
-
-	ticket := getTicket(t, s, ticketID)
-	deps := claim(t, s, fakeRuntime(t), ticketID)
-	commit, err := job.Registry()[testStateJudging].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if commit.Next != testStateShipping || commit.Reason != "judge passed" {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (shipping, judge passed)", commit.Next, commit.Reason)
-	}
-	apply(t, s, ticket, commit)
-	if final := getTicket(t, s, ticketID); final.State != testStateShipping {
-		t.Errorf("final ticket state = %q, want shipping", final.State)
-	}
-}
+// judging's own one-shot skeleton smoke test is gone along with
+// skeleton.go's own judgingHandler (M2 task 8): judging_test.go's
+// TestJudgePassMovesToShipping covers the real handler's own pass branch,
+// and advanceJudging (above) is what every multi-state test in this file
+// now uses to reach "shipping" for real.
 
 func TestShippingHandler_TransitionsToDone(t *testing.T) {
 	t.Parallel()

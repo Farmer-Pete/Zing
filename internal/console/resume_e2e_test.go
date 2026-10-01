@@ -78,6 +78,26 @@ const (
 // cmd/zing/selftest.go's e2eWantStates asserts.
 var resumeE2EWantStates = []string{testPlanningLiteral, "building", "reviewing", "judging", "shipping", "done"}
 
+// resumeE2EJudgeCheckCmd and resumeE2ECommands mirror cmd/zing/selftest.go's
+// own e2eJudgeCheckCmd and selftestCommands: the fixture cohort's scenario
+// s1 carries "curl -sf localhost:8080/hello" as its check_cmd, and judging's
+// own CHECK step (design section 7.5) re-runs it for real, but this e2e's
+// fixture project never starts a real HTTP server on port 8080. Every other
+// command (the building state's own "test -f hello.txt" and "true") still
+// runs for real, at the same CommandRunner seam (job.Deps.Commands).
+const resumeE2EJudgeCheckCmd = "curl -sf localhost:8080/hello"
+
+type resumeE2ECommands struct {
+	real job.CommandRunner
+}
+
+func (c resumeE2ECommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == resumeE2EJudgeCheckCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
 // resumeE2EModels and resumeE2EBudget mirror cmd/zing/selftest.go's own
 // e2eModels/e2eBudget: the job.Deps.Models alias table and Budget classify
 // and planning need to resolve a model and pass the agent-time budget check
@@ -171,7 +191,7 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 			// This e2e drives the fake runtime, never a real sandboxed
 			// process (design D5, section 10).
 			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
-			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			Commands: resumeE2ECommands{real: job.NewCommandRunner(sandbox.Off(), false)},
 			Projects: map[int64]job.Project{
 				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
 			},

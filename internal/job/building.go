@@ -899,6 +899,8 @@ func (h buildingHandler) retryCapResumes(ctx context.Context, t store.Ticket, d 
 		return h.retryCapResumesPerimeter(ctx, t, d, resolveIDs, notes, preservedRounds)
 	case jobReviewName:
 		return reviewingHandler{}.retryCapResumesReview(ctx, t, d, resolveIDs, notes, sessionID)
+	case jobJudgeName:
+		return judgeHandler{}.retryCapResumesJudge(ctx, t, d, resolveIDs, sessionID, preservedRounds)
 	default:
 		return h.retryCapResumesBuild(ctx, t, d, resolveIDs, notes, preservedRounds)
 	}

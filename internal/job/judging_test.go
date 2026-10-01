@@ -19,6 +19,7 @@ import (
 	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -1073,5 +1074,595 @@ func TestJudgeWorktreeRemoveFailureLogged(t *testing.T) {
 	}
 	if !strings.Contains(logged, fmt.Sprintf("run_id=%d", commit.Runs[0].ID)) {
 		t.Errorf("log missing run_id=%d; got:\n%s", commit.Runs[0].ID, logged)
+	}
+}
+
+// ---- M2 task 8: CHECK, EVALUATE, and judge escalations --------------------
+
+// judgeCheckScenarioCmd is the fixture cohort's own one check command
+// (fixtures/scripts/planning/2.xml's own s1, design section 7.5): every
+// CHECK test below scripts exactly this command's own result instead of
+// letting a real curl dial a server this suite never starts.
+const judgeCheckScenarioCmd = "curl -sf localhost:8080/hello"
+
+// judgeCheckStep is one scripted result judgeScriptedCheckCommands returns
+// for one call to judgeCheckScenarioCmd, in order.
+type judgeCheckStep struct {
+	exit int
+	err  error
+}
+
+// judgeScriptedCheckCommands wraps a real CommandRunner (real for any
+// command that is not judgeCheckScenarioCmd, nil for a test that never
+// exercises the fix driver's own CHECK step) so CHECK's own re-run of the
+// fixture cohort's one check command returns a scripted result instead of
+// dialing out. gotDir is the last dir CHECK ran judgeCheckScenarioCmd in,
+// for TestJudgeCheckRunsInFreshCheckout.
+type judgeScriptedCheckCommands struct {
+	real   CommandRunner
+	steps  []judgeCheckStep
+	i      int
+	gotDir string
+}
+
+func (c *judgeScriptedCheckCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckScenarioCmd {
+		if c.i >= len(c.steps) {
+			return 0, fmt.Errorf("judgeScriptedCheckCommands: no more scripted steps for %q", shellCmd)
+		}
+		step := c.steps[c.i]
+		c.i++
+		c.gotDir = dir
+		return step.exit, step.err
+	}
+	if c.real != nil {
+		return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	}
+	return 0, nil
+}
+
+// TestJudgeCheckOverridesVerdict proves CHECK's own override row (design
+// section 7.4, 7.5): the judge said pass, the re-run exits 1, and the
+// scenario's newest verdict row becomes fail, CheckExit 1, with the
+// re-run note appended to the judge's own evidence.
+func TestJudgeCheckOverridesVerdict(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+
+	checks := &judgeScriptedCheckCommands{steps: []judgeCheckStep{{exit: 1}}}
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	deps2.Commands = checks
+	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one override row", checkCommit.Artifacts)
+	}
+	var override response.VerdictArtifact
+	if unmarshalErr := json.Unmarshal(checkCommit.Artifacts[0].Payload, &override); unmarshalErr != nil {
+		t.Fatalf("unmarshal override: %v", unmarshalErr)
+	}
+	if override.Scenario != "s1" {
+		t.Errorf("override.Scenario = %q, want s1", override.Scenario)
+	}
+	if override.Result != response.ResultFail {
+		t.Errorf("override.Result = %q, want fail", override.Result)
+	}
+	if override.CheckExit == nil || *override.CheckExit != 1 {
+		t.Errorf("override.CheckExit = %v, want 1", override.CheckExit)
+	}
+	if !strings.HasSuffix(override.Evidence, "Zing re-ran the check command: exit 1.") {
+		t.Errorf("override.Evidence = %q, want it to end with the re-run note", override.Evidence)
+	}
+	pbApply(t, s, ticket, checkCommit)
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "judge check 1 s1 exit")
+	if !ok {
+		t.Fatal(`no "judge check 1 s1 exit" marker`)
+	}
+	if marker.Body != "judge check 1 s1 exit 1" {
+		t.Errorf("marker body = %q, want %q", marker.Body, "judge check 1 s1 exit 1")
+	}
+
+	rows, err := s.Verdicts(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Verdicts: %v", err)
+	}
+	row, ok := judgeNewestVerdict(rows, 1, "s1")
+	if !ok {
+		t.Fatal("no newest verdict for s1 round 1")
+	}
+	if row.Verdict.Result != response.ResultFail {
+		t.Errorf("newest s1 verdict result = %q, want fail (the override must win)", row.Verdict.Result)
+	}
+}
+
+// TestJudgeCheckTimeout proves CHECK's own timeout row (design section
+// 7.5 step 3): ErrCommandTimeout becomes exit -1, CheckExit -1, and the
+// evidence's own re-run note names the timeout, not an exit code.
+func TestJudgeCheckTimeout(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+
+	checks := &judgeScriptedCheckCommands{steps: []judgeCheckStep{{exit: 0, err: ErrCommandTimeout}}}
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	deps2.Commands = checks
+	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one override row", checkCommit.Artifacts)
+	}
+	var override response.VerdictArtifact
+	if unmarshalErr := json.Unmarshal(checkCommit.Artifacts[0].Payload, &override); unmarshalErr != nil {
+		t.Fatalf("unmarshal override: %v", unmarshalErr)
+	}
+	if override.CheckExit == nil || *override.CheckExit != -1 {
+		t.Errorf("override.CheckExit = %v, want -1", override.CheckExit)
+	}
+	if !strings.HasSuffix(override.Evidence, "Zing re-ran the check command: timed out after 10m.") {
+		t.Errorf("override.Evidence = %q, want it to end with the timeout note", override.Evidence)
+	}
+	pbApply(t, s, ticket, checkCommit)
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "judge check 1 s1 exit")
+	if !ok {
+		t.Fatal(`no "judge check 1 s1 exit" marker`)
+	}
+	if marker.Body != "judge check 1 s1 exit -1" {
+		t.Errorf("marker body = %q, want %q", marker.Body, "judge check 1 s1 exit -1")
+	}
+}
+
+// TestJudgeCheckRunsInFreshCheckout proves CHECK opens its own judge
+// checkout at the round's own frozen sha and removes it afterward (design
+// section 7.5 step 1), independent of RUN's own checkout, already removed
+// by the time CHECK runs.
+func TestJudgeCheckRunsInFreshCheckout(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+	assertJudgeWorktreeGone(t, s, ticket.ID) // RUN's own checkout is already gone
+
+	wantDir := judgeWorktreeDir(t, s, ticket.ID)
+	checks := &judgeScriptedCheckCommands{steps: []judgeCheckStep{{exit: 0}}}
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	deps2.Commands = checks
+	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if checks.gotDir != wantDir {
+		t.Errorf("CHECK ran the check command in %q, want the judge checkout %q", checks.gotDir, wantDir)
+	}
+	pbApply(t, s, ticket, checkCommit)
+	assertJudgeWorktreeGone(t, s, ticket.ID)
+}
+
+// TestJudgePassMovesToShipping proves EVALUATE's own pass branch (design
+// section 7.6): every scenario pass (s1's own check confirms it) moves the
+// ticket to shipping with the "judge passed" reason and writes "judge
+// round 1 passed".
+func TestJudgePassMovesToShipping(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+
+	checks := &judgeScriptedCheckCommands{steps: []judgeCheckStep{{exit: 0}}}
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	deps2.Commands = checks
+	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	pbApply(t, s, ticket, checkCommit)
+
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	evalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3)
+	if err != nil {
+		t.Fatalf("EVALUATE: %v", err)
+	}
+	if evalCommit.Next != stateShipping || evalCommit.Reason != reasonJudgePassed {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (shipping, %q)", evalCommit.Next, evalCommit.Reason, reasonJudgePassed)
+	}
+	pbApply(t, s, ticket, evalCommit)
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 passed")
+	if !ok {
+		t.Fatal(`no "judge round 1 passed" marker`)
+	}
+	if marker.Body != "judge round 1 passed" {
+		t.Errorf("marker body = %q, want %q", marker.Body, "judge round 1 passed")
+	}
+	if final := pbGetTicket(t, s, ticket.ID); final.State != stateShipping {
+		t.Errorf("final ticket state = %q, want shipping", final.State)
+	}
+}
+
+// TestJudgePerformanceNeverBlocks proves EVALUATE routes on JudgePasses
+// (design section 7.4, 7.6), not a literal all-pass check: a failing
+// performance row never blocks the pass. evaluate is called directly
+// (its pass branch touches no store read), so this proves EVALUATE's own
+// commit, not just the already-proven JudgePasses rule (judgerules_test.go's
+// own TestJudgePasses).
+func TestJudgePerformanceNeverBlocks(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	sha := strings.Repeat("b", 40)
+	final := []response.VerdictArtifact{
+		{Scenario: "s1", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindBehavior, Round: 1, SHA: sha},
+		{Scenario: "s2", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindNegative, Round: 1, SHA: sha},
+		{Scenario: "s3", Result: response.ResultFail, Evidence: "slow", Kind: response.ScenarioKindPerformance, Round: 1, SHA: sha},
+	}
+	commit, err := (judgeHandler{}).evaluate(t.Context(), ticket, deps, 1, final)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if commit.Next != stateShipping || commit.Reason != reasonJudgePassed {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (shipping, %q): a failing performance row must never block the pass", commit.Next, commit.Reason, reasonJudgePassed)
+	}
+}
+
+// TestJudgeFailRequestsFixWithoutScenarioText proves EVALUATE's own fail
+// branch under the loop gate (design section 7.6): the failed-ids marker,
+// then a "failure" fix request whose text is scrubbed of the scenario's
+// own given/when/then/check text (judgerules.go's scrubScenarioText,
+// reused here through renderFixFailures), so a fix run never sees what
+// the scenario actually checks.
+func TestJudgeFailRequestsFixWithoutScenarioText(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	sha := strings.Repeat("c", 40)
+	const s1Then = `the response is 200 with body "hello, world"`
+	final := []response.VerdictArtifact{
+		{Scenario: "s1", Result: response.ResultFail, Evidence: "ran curl; expected " + s1Then + ", got connection refused", Kind: response.ScenarioKindBehavior, Round: 1, SHA: sha},
+		{Scenario: "s2", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindNegative, Round: 1, SHA: sha},
+	}
+	commit, err := (judgeHandler{}).evaluate(t.Context(), ticket, deps, 1, final)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(commit.Messages) != 2 {
+		t.Fatalf("commit.Messages = %+v, want [failed marker, fix request]", commit.Messages)
+	}
+	if commit.Messages[0].Body != "judge round 1 failed\ns1" {
+		t.Errorf("failed marker = %q, want %q", commit.Messages[0].Body, "judge round 1 failed\ns1")
+	}
+	fixBody := commit.Messages[1].Body
+	if !strings.HasPrefix(fixBody, "fix requested failure after run ") {
+		t.Errorf("fix request body = %q, want the fix requested failure prefix", fixBody)
+	}
+	if strings.Contains(fixBody, s1Then) {
+		t.Errorf("fix request body contains the raw scenario text %q, want it scrubbed", s1Then)
+	}
+	if !strings.Contains(fixBody, "[scenario text removed]") {
+		t.Errorf("fix request body = %q, want it to contain the scrub marker", fixBody)
+	}
+	if !strings.Contains(fixBody, "s1: ") {
+		t.Errorf("fix request body = %q, want the s1 block", fixBody)
+	}
+}
+
+// judgeSeedFixRequestedFailureMarkers inserts n raw "fix requested failure
+// after run <i>" markers directly (fixRequestMessage), so a loop-gate test
+// can put the ticket at exactly k open-or-closed requests without actually
+// driving k fix rounds to landing.
+func judgeSeedFixRequestedFailureMarkers(t *testing.T, s *store.Store, ticket store.Ticket, n int) {
+	t.Helper()
+	for i := range n {
+		msg, msgErr := fixRequestMessage(ticket, FixKindFailure, fmt.Sprintf("seed failure %d", i), int64(i))
+		if msgErr != nil {
+			t.Fatalf("fixRequestMessage: %v", msgErr)
+		}
+		if _, insertErr := s.InsertMessage(t.Context(), msg); insertErr != nil {
+			t.Fatalf("InsertMessage: %v", insertErr)
+		}
+	}
+}
+
+// TestJudgeLoopGate proves EVALUATE's own loop gate (design section 7.6):
+// at jobs.judge.max_loops (machine.toml's judge job, 2) already-seen "fix
+// requested failure" markers, a further failing round escalates
+// loops_exhausted instead of opening a third request.
+func TestJudgeLoopGate(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	judgeSeedFixRequestedFailureMarkers(t, s, ticket, 2)
+
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	sha := strings.Repeat("d", 40)
+	final := []response.VerdictArtifact{
+		{Scenario: "s1", Result: response.ResultFail, Evidence: "still failing", Kind: response.ScenarioKindBehavior, Round: 1, SHA: sha},
+		{Scenario: "s2", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindNegative, Round: 1, SHA: sha},
+	}
+	commit, err := (judgeHandler{}).evaluate(t.Context(), ticket, deps, 1, final)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want loops_exhausted")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
+	}
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != "judge round 1 failed\ns1" {
+		t.Errorf("commit.Messages = %+v, want exactly the failed marker", commit.Messages)
+	}
+}
+
+// TestJudgeLoopsRetry proves resolvePostBuildEscalation's own "judge
+// loops_exhausted" row (design section 5.6): the owner's retry opens a
+// "failure" fix request carrying the escalation's own Tried text, the loop
+// gate skipped for this one request, with no fresh judge run.
+func TestJudgeLoopsRetry(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeLoopsExhausted, response.EscalationOriginJudge)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(commit.Runs) != 0 {
+		t.Errorf("commit.Runs = %+v, want none (no fresh judge run for loops_exhausted)", commit.Runs)
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly one fix request message", commit.Messages)
+	}
+	if !strings.HasPrefix(commit.Messages[0].Body, "fix requested failure after run ") {
+		t.Errorf("message body = %q, want the fix requested failure prefix", commit.Messages[0].Body)
+	}
+	if !strings.Contains(commit.Messages[0].Body, "what was tried") {
+		t.Errorf("message body = %q, want the escalation's own Tried text", commit.Messages[0].Body)
+	}
+}
+
+// TestJudgeCapResumesRetryStartsFresh proves resolvePostBuildEscalation's
+// own "cap_resumes, exhausted session of job judge" row (design section
+// 5.6): the retry writes "judge round <n> retry after run <R>" with no
+// fresh run of its own; the next tick's own decision tree reads it as a
+// fresh start of round n at that round's own sha, reserving a brand-new
+// session rather than resuming the exhausted one.
+func TestJudgeCapResumesRetryStartsFresh(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if runCommit.Session == nil || runCommit.Session.ID == nil {
+		t.Fatalf("RUN commit.Session = %+v, want a freshly reserved session id", runCommit.Session)
+	}
+	sessionID := *runCommit.Session.ID
+	pbApply(t, s, ticket, runCommit)
+
+	owner := "judge-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobJudgeName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, &sessionID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	retryCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(retryCommit.Runs) != 0 {
+		t.Errorf("retryCommit.Runs = %+v, want none (deferred to the next tick)", retryCommit.Runs)
+	}
+	if len(retryCommit.Messages) != 1 || !strings.HasPrefix(retryCommit.Messages[0].Body, "judge round 1 retry after run ") {
+		t.Fatalf("retryCommit.Messages = %+v, want exactly the retry marker", retryCommit.Messages)
+	}
+
+	rt2 := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	deps3 := pbClaim(t, s, rt2, ticket.ID)
+	freshCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3)
+	if err != nil {
+		t.Fatalf("Run after retry: %v", err)
+	}
+	if len(freshCommit.Runs) != 1 {
+		t.Fatalf("freshCommit.Runs = %+v, want exactly one (a fresh first turn)", freshCommit.Runs)
+	}
+	if freshCommit.Session == nil || freshCommit.Session.ID == nil || *freshCommit.Session.ID == sessionID {
+		t.Errorf("freshCommit.Session = %+v, want a freshly minted session (not the exhausted one, %d)", freshCommit.Session, sessionID)
+	}
+}
+
+// judgeFixTestCmd is the fix driver's own project.TestCmd override (design
+// section 5.3's own adopt/CHECK pattern, pbFixTestCmd's own trick):
+// appends a line to hello.txt, which the earlier real build already
+// created with the exact content pbFixTestCmd itself writes, so reusing
+// that constant here would leave the tree byte-identical and CHECK would
+// see no actual change for the claimed path.
+const judgeFixTestCmd = `printf '\nfixed\n' >> hello.txt && test -f hello.txt`
+
+// judgeFixBuildScript is the fix driver's own RUN turn (job "build", label
+// "fix", design section 5.1): one claimed file change, hello.txt, matching
+// judgeFixTestCmd's own edit, so CHECK's own cross-check of claimed against
+// real changed paths agrees.
+const judgeFixBuildScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>hello.txt</path>
+    </files_changed>
+    <test_exit>0</test_exit>
+    <lint_exit>0</lint_exit>
+  </claims>
+  <report>Fixed the failing scenario's own check.</report>
+  <notes></notes>
+</zing>`
+
+// driveJudgeFixToLanding drives an already-open "failure" fix request
+// through the fix driver's own RUN then CHECK-and-LAND ticks (fix.go's own
+// DriveFix, reached through judgeHandler.Run's own postBuildPrelude),
+// mirroring reviewing_test.go's own driveReviewFixToLanding.
+func driveJudgeFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime, cmds CommandRunner) {
+	t.Helper()
+	for i := range 4 {
+		ticket := pbGetTicket(t, s, ticketID)
+		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, judgeFixTestCmd)
+		deps.Commands = cmds
+		commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("driveJudgeFixToLanding: Run (step %d): %v", i, err)
+		}
+		pbApply(t, s, ticket, commit)
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, "fix landed ") {
+				return
+			}
+		}
+	}
+	t.Fatal("driveJudgeFixToLanding: fix did not land within 4 ticks")
+}
+
+// TestJudgeFixThenPass proves the full judge-fails/fix/judge-passes loop
+// (design section 13.2): round 1's own CHECK fails s1, EVALUATE requests a
+// "failure" fix, the fix driver lands it, round 2 starts fresh, and its
+// own CHECK passes s1, so EVALUATE moves the ticket to shipping.
+func TestJudgeFixThenPass(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}, {exit: 0}}}
+
+	ticket = judgeAdvanceStart(t, s, rt, ticket) // START round 1
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN round 1
+	if err != nil {
+		t.Fatalf("RUN round 1: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+
+	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2) // CHECK s1: exit 1
+	if err != nil {
+		t.Fatalf("CHECK round 1: %v", err)
+	}
+	pbApply(t, s, ticket, checkCommit)
+
+	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	evalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // EVALUATE: fail, fix request
+	if err != nil {
+		t.Fatalf("EVALUATE round 1: %v", err)
+	}
+	if len(evalCommit.Messages) != 2 || !strings.HasPrefix(evalCommit.Messages[1].Body, "fix requested failure after run ") {
+		t.Fatalf("EVALUATE round 1 commit.Messages = %+v, want [failed marker, fix requested failure]", evalCommit.Messages)
+	}
+	pbApply(t, s, ticket, evalCommit)
+
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	if ticket.State != stateJudging {
+		t.Fatalf("after the fix landed: ticket state = %q, want judging", ticket.State)
+	}
+
+	deps4 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps4.Commands = checks
+	startCommit2, err := (judgeHandler{}).Run(t.Context(), ticket, deps4) // START round 2
+	if err != nil {
+		t.Fatalf("START round 2: %v", err)
+	}
+	pbApply(t, s, ticket, startCommit2)
+	if _, ok := reviewMarker(t, s, ticket.ID, "judge round 2 started"); !ok {
+		t.Fatal(`no "judge round 2 started" marker`)
+	}
+
+	deps5 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps5.Commands = checks
+	runCommit2, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps5) // RUN round 2
+	if err != nil {
+		t.Fatalf("RUN round 2: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit2)
+
+	deps6 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps6.Commands = checks
+	checkCommit2, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps6) // CHECK s1: exit 0
+	if err != nil {
+		t.Fatalf("CHECK round 2: %v", err)
+	}
+	pbApply(t, s, ticket, checkCommit2)
+
+	deps7 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps7.Commands = checks
+	evalCommit2, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps7) // EVALUATE round 2: pass
+	if err != nil {
+		t.Fatalf("EVALUATE round 2: %v", err)
+	}
+	if evalCommit2.Next != stateShipping || evalCommit2.Reason != reasonJudgePassed {
+		t.Errorf("round 2 commit = (Next=%q, Reason=%q), want (shipping, %q)", evalCommit2.Next, evalCommit2.Reason, reasonJudgePassed)
 	}
 }

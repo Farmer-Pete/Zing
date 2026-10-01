@@ -1,23 +1,13 @@
-// judging.go holds the judging state machine (design section 7): the
+// judging.go holds the whole judging state machine (design section 7): the
 // runJob hook that hands the judge its sealed scenarios (section 7.3, D19,
-// the judge never opens the database, N6) and, as of M2 task 7
-// ("Task 7a" of the handoff split: the handler is real and fully tested
-// here, but Registry() still points "judging" at skeleton.go's fake
-// pass-through, and cmd/zing/selftest.go is untouched, until task 8 wires
-// CHECK and EVALUATE and can safely flip both switches at once -- see the
-// handoff notes for the exact reasoning), START and RUN: the four
-// pre-flight checks, the first turn, and every resume (an answered
-// question, a coverage failure, an invalid output, or an interrupted run).
-// CHECK and EVALUATE -- the two branches under a "judge round <n> verdicts
-// run <rid>" marker -- are task 8's own work; this file's own decision tree
-// returns ErrNoAction for that marker shape until task 8 lands.
-//
-// judgeHandler is a distinct type from skeleton.go's own judgingHandler
-// (same package, so the two names cannot collide) for exactly that reason:
-// task 8 deletes the skeleton's judgingHandler and points job.go's
-// Registry() at this type instead, in the same commit that adds CHECK and
-// EVALUATE, so judging can actually exit the state the moment it starts
-// being driven by the dispatcher and selftest for real.
+// the judge never opens the database, N6), START and RUN (the four
+// pre-flight checks, the first turn, and every resume: an answered
+// question, a coverage failure, an invalid output, or an interrupted run),
+// and, as of M2 task 8, CHECK and EVALUATE -- the two branches under a
+// "judge round <n> verdicts run <rid>" marker (section 7.5, 7.6) -- plus
+// the judge rows of resolvePostBuildEscalation (section 5.6, postbuild.go).
+// judgeHandler is now job.go's own Registry()["judging"] entry: skeleton.go's
+// own fake pass-through judgingHandler is gone.
 package job
 
 import (
@@ -188,9 +178,9 @@ const (
 )
 
 // judgeHandler runs the real judging state (design section 7): START (7.2),
-// RUN's first turn and every resume (7.2), and the decision tree (7.1) that
-// routes a tick to one of them. See this file's own package doc comment for
-// why it is not yet job.go's Registry() entry for "judging".
+// RUN's first turn and every resume (7.2), CHECK and EVALUATE (7.5, 7.6),
+// and the decision tree (7.1) that routes a tick to one of them. It is
+// job.go's own Registry()["judging"] entry.
 type judgeHandler struct{}
 
 // judgeEscalation is escalationCommit (planning.go) plus this file's own
@@ -294,9 +284,16 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		return h.enterAfterStart(ctx, t, d, n, sha, afterRunID)
 
 	case judgeRoundVerdictsLine.MatchString(firstLine):
-		// CHECK (a scenario with a check and no exit marker) and EVALUATE
-		// (none left) are task 8's own work (design section 7.1, 7.5, 7.6).
-		return store.HandlerCommit{}, ErrNoAction
+		sub := judgeRoundVerdictsLine.FindStringSubmatch(firstLine)
+		n, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse verdicts round %q: %w", firstLine, convErr)
+		}
+		sha, shaErr := judgeStartedSHA(markers, n)
+		if shaErr != nil {
+			return store.HandlerCommit{}, shaErr
+		}
+		return h.checkOrEvaluate(ctx, t, d, n, sha)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: unrecognized judge round marker %q", firstLine)
@@ -411,45 +408,50 @@ func judgeScenariosFor(ctx context.Context, t store.Ticket, d Deps) ([]response.
 
 // ---- START (design section 7.2) -------------------------------------------
 
-// start is START (design section 7.2): the same four checks ROUND's own
-// steps 1 to 4 make (reviewing.go's round) -- a stored plan, the worktree,
-// every branch commit recorded, a clean tree -- origin judge, then the
-// no-runtime-call commit: marker "judge round <n> started sha <HeadSHA>
-// after run <MaxRunID>".
-func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) (store.HandlerCommit, error) {
+// judgeStartChecks is START's own four checks, factored out of start so
+// retryFreshRound (5.6, "judge with a run") can run them again ahead of a
+// brand-new round's own START+RUN, without START's own marker-only commit
+// shape getting in the way: a stored plan, the worktree, every branch
+// commit recorded, a clean tree (reviewing.go's ROUND steps 1 to 4), origin
+// judge throughout. escalation is non-nil, with every other return zeroed,
+// the moment any check fails; a nil escalation with a nil error carries a
+// real sha and maxRunID the caller can build on.
+func judgeStartChecks(ctx context.Context, t store.Ticket, d Deps) (sha string, maxRunID int64, escalation *store.HandlerCommit, err error) {
 	_, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: stored plan: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: stored plan: %w", err)
 	}
 	if !havePlan {
-		return judgeEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, ""), nil
+		c := judgeEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, "")
+		return "", 0, &c, nil
 	}
 
-	proj, wt, escalation, err := ensureWorktreeOrEscalate(ctx, t, d, func(errText string) store.HandlerCommit {
+	proj, wt, escCommit, err := ensureWorktreeOrEscalate(ctx, t, d, func(errText string) store.HandlerCommit {
 		return judgeEscalation(t, d, worktreeNotPreparedWhat, worktreeNotPreparedWhy, errText)
 	})
 	if err != nil {
-		return store.HandlerCommit{}, err
+		return "", 0, nil, err
 	}
-	if escalation != nil {
-		return *escalation, nil
+	if escCommit != nil {
+		return "", 0, escCommit, nil
 	}
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: build reports: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: build reports: %w", err)
 	}
 	branchShas, err := proj.Orch.BranchCommits(ctx, wt)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: branch commits: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: branch commits: %w", err)
 	}
 	if !slices.Equal(recordedShas(reports), branchShas) {
-		return withBranch(judgeEscalation(t, d, branchUnrecordedWhat, branchUnrecordedWhy, ""), wt), nil
+		c := withBranch(judgeEscalation(t, d, branchUnrecordedWhat, branchUnrecordedWhy, ""), wt)
+		return "", 0, &c, nil
 	}
 
 	changed, err := proj.Orch.ChangedPaths(ctx, wt)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: changed paths: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: changed paths: %w", err)
 	}
 	if len(changed) > 0 {
 		quoted := make([]string, len(changed))
@@ -457,16 +459,31 @@ func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) 
 			quoted[i] = strconv.Quote(ch.Path)
 		}
 		tried := strings.Join(quoted, ", ")
-		return withBranch(judgeEscalation(t, d, treeDirtyBeforeReviewWhat, treeDirtyBeforeReviewWhy, tried), wt), nil
+		c := withBranch(judgeEscalation(t, d, treeDirtyBeforeReviewWhat, treeDirtyBeforeReviewWhy, tried), wt)
+		return "", 0, &c, nil
 	}
 
-	sha, err := proj.Orch.HeadSHA(ctx, wt)
+	sha, err = proj.Orch.HeadSHA(ctx, wt)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: head sha: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: head sha: %w", err)
 	}
-	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	maxRunID, err = d.Store.MaxRunID(ctx, t.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: max run id: %w", err)
+		return "", 0, nil, fmt.Errorf("job: judging: max run id: %w", err)
+	}
+	return sha, maxRunID, nil, nil
+}
+
+// start is START (design section 7.2): judgeStartChecks' own four checks,
+// then the no-runtime-call commit: marker "judge round <n> started sha
+// <HeadSHA> after run <MaxRunID>".
+func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) (store.HandlerCommit, error) {
+	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if escalation != nil {
+		return *escalation, nil
 	}
 
 	c := baseCommit(t, d)
@@ -490,7 +507,7 @@ func (h judgeHandler) enterAfterStart(ctx context.Context, t store.Ticket, d Dep
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: session after: %w", err)
 	}
 	if !found {
-		return h.runFirst(ctx, t, d, n, sha)
+		return h.runFirst(ctx, t, d, n, sha, nil)
 	}
 
 	outcome := ""
@@ -668,8 +685,10 @@ func judgeCoverageInput(text string) prompt.NamedInput {
 // runFirst is RUN's own first turn (design section 7.2 steps 1 to 4): the
 // sealed cohort check, the judge checkout, the prompt (no plan, N6), and
 // the runtime call, through judgeRunAndRoute and the writeScenariosFile
-// hook (section 7.3).
-func (h judgeHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, n int, sha string) (store.HandlerCommit, error) {
+// hook (section 7.3). extra is nil for a normal first turn; retryFreshRound
+// (5.6, "judge with a run") passes notes and error (fenced) instead, the
+// same way a fresh fix run's own first turn carries them.
+func (h judgeHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, n int, sha string, extra []prompt.NamedInput) (store.HandlerCommit, error) {
 	scenarios, err := judgeScenariosFor(ctx, t, d)
 	if err != nil {
 		return store.HandlerCommit{}, err
@@ -704,7 +723,7 @@ func (h judgeHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, n in
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: %w", err)
 	}
 
-	in := prompt.ForJudge(jobPromptText, t.Title+"\n\n"+t.Body, nil)
+	in := prompt.ForJudge(jobPromptText, t.Title+"\n\n"+t.Body, extra)
 	in.Schemas = schemas
 
 	req := runtime.RunRequest{
@@ -911,4 +930,371 @@ func judgeOkCommit(t store.Ticket, d Deps, n int, sha string, scenarios []respon
 	waiting := waitingFlagQuestions
 	c.Waiting = &waiting
 	return c, nil
+}
+
+// ---- CHECK, EVALUATE (design section 7.5, 7.6, M2 task 8) ----------------
+
+// judgeCheckMarkerPrefix is every "judge check " marker's shared prefix
+// (design section 5.1): these never carry the "judge round " prefix (7.1's
+// own note), so they need their own read.
+const judgeCheckMarkerPrefix = "judge check "
+
+// judgeCheckLine matches one "judge check <n> <id> exit <code>" marker's
+// first line (design section 5.1); <code> is -1 for a timeout, otherwise a
+// real process exit code.
+var judgeCheckLine = regexp.MustCompile(`^judge check ([1-9]\d*) (s\d+) exit (-?\d+)$`)
+
+// judgeCheckCouldNotRunWhat is CHECK's own "any other error" escalation text
+// (design section 7.5 step 3): the command runner itself failed to run the
+// scenario's own check command, as distinct from the command running and
+// exiting non-zero, which is simply a fail verdict, not an escalation.
+const judgeCheckCouldNotRunWhat = "a scenario check could not run"
+
+// judgeCheckedScenarios returns the scenario ids round n's own CHECK has
+// already written a "judge check <n> <id> exit <code>" marker for (design
+// section 5.1, 7.1): the decision tree's own "a scenario with a check and
+// no exit marker" test (7.1) is membership in the complement of this set.
+func judgeCheckedScenarios(markers []store.MessageRow, n int) (map[string]bool, error) {
+	out := make(map[string]bool, len(markers))
+	for i := range markers {
+		firstLine, _, _ := strings.Cut(markers[i].Body, "\n")
+		sub := judgeCheckLine.FindStringSubmatch(firstLine)
+		if sub == nil {
+			return nil, fmt.Errorf("job: judging: unrecognized judge check marker %q", firstLine)
+		}
+		roundN, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return nil, fmt.Errorf("job: judging: parse judge check marker %q: %w", firstLine, convErr)
+		}
+		if roundN == n {
+			out[sub[2]] = true
+		}
+	}
+	return out, nil
+}
+
+// judgeNewestVerdict scans rows (Store.Verdicts' own ORDER BY artifacts.id)
+// for the newest row of round n belonging to scenario id (design section
+// 7.4's own append-only dedup rule: "the newest row per (Round, Scenario)
+// wins"). ok is false when round n carries no row for that scenario at all.
+func judgeNewestVerdict(rows []store.VerdictRow, n int, scenarioID string) (row store.VerdictRow, ok bool) {
+	for _, r := range rows {
+		if r.Verdict.Round == n && r.Verdict.Scenario == scenarioID {
+			row, ok = r, true
+		}
+	}
+	return row, ok
+}
+
+// judgeFinalVerdicts is EVALUATE's own "final" (design section 7.6 step 1):
+// the newest verdict row per scenario of round n, in the cohort's own
+// order. A scenario round n never got a verdict for (CheckCoverage already
+// refused that at RUN time, so this should not happen on a round that ever
+// reached CHECK or EVALUATE) is silently skipped; JudgePasses only ever
+// sees the rows that exist.
+func judgeFinalVerdicts(rows []store.VerdictRow, scenarios []response.Scenario, n int) []response.VerdictArtifact {
+	final := make([]response.VerdictArtifact, 0, len(scenarios))
+	for _, sc := range scenarios {
+		if row, ok := judgeNewestVerdict(rows, n, sc.ID); ok {
+			final = append(final, row.Verdict)
+		}
+	}
+	return final
+}
+
+// checkOrEvaluate is decision tree step (2)'s "judge round <n> verdicts run
+// <rid>" branch (design section 7.1): the cohort's first scenario, in
+// cohort order, that carries a check command and no "judge check <n> <id>
+// exit" marker yet goes to CHECK; once every such scenario has one, EVALUATE
+// runs.
+func (h judgeHandler) checkOrEvaluate(ctx context.Context, t store.Ticket, d Deps, n int, sha string) (store.HandlerCommit, error) {
+	scenarios, err := judgeScenariosFor(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if len(scenarios) == 0 {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d: round %d has no sealed scenarios on check/evaluate", t.ID, n)
+	}
+
+	checkMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeCheckMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: judge check markers: %w", err)
+	}
+	checked, err := judgeCheckedScenarios(checkMarkers, n)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
+	rows, err := d.Store.Verdicts(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: verdicts: %w", err)
+	}
+
+	for _, sc := range scenarios {
+		if sc.Check == "" || checked[sc.ID] {
+			continue
+		}
+		judged, ok := judgeNewestVerdict(rows, n, sc.ID)
+		if !ok {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d: round %d has no verdict for scenario %s", t.ID, n, sc.ID)
+		}
+		return h.check(ctx, t, d, n, sha, sc, judged)
+	}
+
+	return h.evaluate(ctx, t, d, n, judgeFinalVerdicts(rows, scenarios, n))
+}
+
+// check is CHECK (design section 7.5): a fresh judge checkout at the
+// round's own frozen sha, one command re-run through d.Commands (wired to
+// Sandboxes.Build: a check command is plan-written, so it runs sandboxed,
+// and it has no reason to read scenarios), then the override row
+// (judgerules.go's applyCheckExit) and the "judge check <n> <id> exit
+// <code>" marker.
+func (h judgeHandler) check(ctx context.Context, t store.Ticket, d Deps, n int, sha string, sc response.Scenario, judged store.VerdictRow) (store.HandlerCommit, error) {
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+
+	jt, jtErr := proj.Orch.JudgeWorktree(ctx, t.ID, sha)
+	if jtErr != nil {
+		return judgeEscalation(t, d, judgeCheckoutNotPreparedWhat, judgeCheckoutNotPreparedWhy, jtErr.Error()), nil
+	}
+	defer func() {
+		if rmErr := jt.Remove(context.WithoutCancel(ctx)); rmErr != nil {
+			slog.Warn("judge worktree removal failed", "ticket_id", t.ID, "run_id", int64OrZero(judged.RunID), "error", rmErr)
+		}
+	}()
+
+	exit, runErr := d.Commands.Run(ctx, jt.Dir(), proj.RepoGit, sc.Check, checkCommandTimeout)
+	switch {
+	case runErr == nil:
+		// exit already holds the real exit code.
+	case errors.Is(runErr, ErrCommandTimeout):
+		exit = -1
+	case errors.Is(runErr, ErrSandbox):
+		return sandboxEscalationCommit(t, d, nil, response.EscalationOriginJudge, d.Sandboxes.Build.Reason()), nil
+	case errors.Is(runErr, context.Canceled):
+		return store.HandlerCommit{}, runtime.ErrCanceled
+	default:
+		return judgeEscalation(t, d, judgeCheckCouldNotRunWhat, runErr.Error(), sc.ID), nil
+	}
+
+	row := applyCheckExit(judged.Verdict, exit)
+	payload, marshalErr := json.Marshal(row)
+	if marshalErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: marshal check override for scenario %s: %w", sc.ID, marshalErr)
+	}
+
+	c := baseCommit(t, d)
+	c.Artifacts = []store.Artifact{{Type: artifactTypeVerdict, RunID: judged.RunID, Payload: payload}}
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge check %d %s exit %d", n, sc.ID, exit),
+	}}
+	return c, nil
+}
+
+// fixRequestedFailurePrefix is the "fix requested failure after run " marker
+// family EVALUATE's own fail branch writes (fixRequestMessage's own format,
+// fix.go): the loop gate counts these the same way reviewing.go's fixreq
+// counts "fix requested findings" markers.
+const fixRequestedFailurePrefix = "fix requested failure after run "
+
+// judgeLoopsExhausted is EVALUATE's own loops_exhausted escalation (design
+// section 7.6): no run caused it, so RunID and SessionID are both nil,
+// mirroring reviewLoopsExhausted (reviewing.go).
+func judgeLoopsExhausted(t store.Ticket, d Deps, what, why, tried string) store.HandlerCommit {
+	code := string(response.EscalationCodeLoopsExhausted)
+	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginJudge))
+	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginJudge)
+}
+
+// retryJudgeLoopsExhausted is design section 5.6's "judge loops_exhausted"
+// row: a fix request of kind failure with the remaining failures (the
+// escalation's own Tried text, EVALUATE's renderFixFailures output) and the
+// owner's notes appended, bypassing the loop gate for this one request --
+// mirroring reviewingHandler's own retryReviewLoopsExhausted.
+func (h judgeHandler) retryJudgeLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, tried string) (store.HandlerCommit, error) {
+	text := tried
+	if notes != "" {
+		text = strings.TrimRight(text, "\n") + "\n\n" + notes
+	}
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: loops_exhausted retry: max run id: %w", err)
+	}
+	msg, msgErr := fixRequestMessage(t, FixKindFailure, text, maxRunID)
+	if msgErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: loops_exhausted retry: fix request message: %w", msgErr)
+	}
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{msg}
+	return c, nil
+}
+
+// evaluate is EVALUATE (design section 7.6): JudgePasses decides the round;
+// a pass moves the ticket to shipping; a fail always writes "judge round <n>
+// failed" with the failing scenario ids, then gates on jobs.judge.max_loops
+// the same way reviewing.go's fixreq gates on jobs.review.max_loops -- under
+// it, a "failure" fix request; at or over it, loops_exhausted.
+func (h judgeHandler) evaluate(ctx context.Context, t store.Ticket, d Deps, n int, final []response.VerdictArtifact) (store.HandlerCommit, error) {
+	pass, failures := JudgePasses(final)
+	if pass {
+		c := baseCommit(t, d)
+		c.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("judge round %d passed", n),
+		}}
+		c.Next, c.Reason = stateShipping, reasonJudgePassed
+		return c, nil
+	}
+
+	ids := make([]string, len(failures))
+	for i, f := range failures {
+		ids[i] = f.Scenario
+	}
+	failedMarker := store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round %d failed\n%s", n, strings.Join(ids, ",")),
+	}
+
+	allReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedFailurePrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: fix requested failure markers: %w", err)
+	}
+	k := len(allReqs)
+	maxLoops := d.Machine.Jobs[jobJudgeName].MaxLoops
+
+	scenarios, err := judgeScenariosFor(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	failText := renderFixFailures(failures, scenarios)
+
+	if k >= maxLoops {
+		what := fmt.Sprintf("scenarios still fail after %d fix runs", k)
+		why := fmt.Sprintf("max_loops for judge is %d", maxLoops)
+		c := judgeLoopsExhausted(t, d, what, why, failText)
+		c.Messages = []store.Message{failedMarker}
+		return c, nil
+	}
+
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: max run id: %w", err)
+	}
+	msg, msgErr := fixRequestMessage(t, FixKindFailure, failText, maxRunID)
+	if msgErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: fix request message: %w", msgErr)
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{failedMarker, msg}
+	return c, nil
+}
+
+// ---- the judge rows of resolvePostBuildEscalation (design section 5.6) ---
+
+// judgeNewestRoundNumber reads the round number back from markers' own
+// newest "judge round " marker, whichever of the four shapes it is (design
+// section 5.1): retryFreshRound needs the round just abandoned to number
+// the brand-new one it starts.
+func judgeNewestRoundNumber(markers []store.MessageRow) (int, error) {
+	if len(markers) == 0 {
+		return 0, errors.New("job: judging: escalation retry: no judge round marker")
+	}
+	firstLine, _, _ := strings.Cut(markers[len(markers)-1].Body, "\n")
+	for _, re := range []*regexp.Regexp{judgeRoundStartedLine, judgeRoundRetryLine, judgeRoundFailedLine, judgeRoundVerdictsLine} {
+		sub := re.FindStringSubmatch(firstLine)
+		if sub == nil {
+			continue
+		}
+		n, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return 0, fmt.Errorf("job: judging: parse judge round marker %q: %w", firstLine, convErr)
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("job: judging: escalation retry: unrecognized judge round marker %q", firstLine)
+}
+
+// retryCapResumesJudge is retryCapResumes' own judge-session branch (design
+// section 5.6, "cap_resumes, exhausted session of job judge"): marker
+// "judge round <n> retry after run <MaxRunID>", n the round the exhausted
+// session belonged to (judgeRoundOwning), preserved rounds resolved. No
+// fresh run starts here: the judging tree reads the marker as a fresh
+// start of round n at that round's own sha (7.1) -- SessionAfter with the
+// new watermark finds no session, so the next tick runs a first turn,
+// which is also why, unlike retryFreshRound's own "with a run" row, no
+// notes or error ever reach this one.
+func (h judgeHandler) retryCapResumesJudge(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, sessionID int64, preservedRounds []store.Round) (store.HandlerCommit, int, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: judging: cap_resumes retry: judge round markers: %w", err)
+	}
+	n, _, err := judgeRoundOwning(ctx, t, d, markers, sessionID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: judging: cap_resumes retry: %w", err)
+	}
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: judging: cap_resumes retry: max run id: %w", err)
+	}
+
+	allResolveIDs := append([]int64{}, resolveIDs...)
+	for _, r := range preservedRounds {
+		allResolveIDs = append(allResolveIDs, questionIDs(r)...)
+	}
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = allResolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round %d retry after run %d", n, maxRunID),
+	}}
+	return c, len(preservedRounds), nil
+}
+
+// retryFreshRound is design section 5.6's "judge with a run" row: the
+// session RUN's last turn reserved is dead (an agent error outcome, an exec
+// failure, or a second response_invalid in a row -- every judge-origin code
+// that is not cap_resumes or loops_exhausted, both resolved elsewhere in
+// that table), so retrying means a brand-new round rather than another
+// resume of that session. judgeStartChecks' own four checks and marker, then
+// RUN's first turn with inputs notes and error (fenced), land in the one
+// commit that also resolves the escalation round.
+func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: escalation retry: judge round markers: %w", err)
+	}
+	prevN, err := judgeNewestRoundNumber(markers)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
+	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if escalation != nil {
+		return *escalation, nil
+	}
+
+	n := prevN + 1
+	startMsg := store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, maxRunID),
+	}
+
+	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
+	commit, runErr := h.runFirst(ctx, t, d, n, sha, extra)
+	if runErr != nil {
+		return store.HandlerCommit{}, runErr
+	}
+	commit.Messages = append([]store.Message{startMsg}, commit.Messages...)
+	commit.ResolveQuestions = resolveIDs
+	return commit, nil
 }

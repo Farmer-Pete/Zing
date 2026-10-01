@@ -49,16 +49,6 @@ func (queuedHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Handl
 	return c, nil
 }
 
-// judgingHandler advances straight to shipping; the skeleton runs no judge
-// job (design section 6.5, the early-exit rule in section 0).
-type judgingHandler struct{}
-
-func (judgingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateShipping, reasonJudgePassed
-	return c, nil
-}
-
 // shippingHandler advances a ticket to done; the skeleton does no git, no
 // worktree, and no pull request (design section 4, non-goals).
 type shippingHandler struct{}
@@ -69,9 +59,10 @@ func (shippingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Han
 	return c, nil
 }
 
-// building and reviewing have their own real handlers now (building.go,
-// task 9; reviewing.go, task 10): the skeleton's own buildingHandler and
-// reviewingHandler existed because the walking skeleton needed both states
-// to advance on nothing more than a scripted fake run, or, for reviewing,
-// no run at all; those handlers now run the real state machine (design
-// section 6) instead.
+// building, reviewing, and judging have their own real handlers now
+// (building.go, task 9; reviewing.go, task 10; judging.go, M2 task 8): the
+// skeleton's own buildingHandler, reviewingHandler, and judgingHandler
+// existed because the walking skeleton needed every state to advance on
+// nothing more than a scripted fake run, or, for reviewing and judging, no
+// run at all until each state's own real machine landed; those handlers now
+// run the real state machine (design sections 6, 7) instead.

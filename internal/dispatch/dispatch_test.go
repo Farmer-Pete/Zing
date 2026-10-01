@@ -350,8 +350,75 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 			advanceBuilding(t, s, rt, ticketID)
 			continue
 		}
+		if state == testStateJudging {
+			advanceJudging(t, s, rt, ticketID)
+			continue
+		}
 		runHandlerOnce(t, s, rt, ticketID, state)
 	}
+}
+
+// judgeCheckFixtureCmd and dispatchJudgeCommands mirror cmd/zing/selftest.go's
+// own e2eJudgeCheckCmd and selftestCommands: the fixture cohort's scenario
+// s1 carries "curl -sf localhost:8080/hello" as its check_cmd, and judging's
+// own CHECK step (design section 7.5) re-runs it for real, but this suite's
+// fixture project never starts a real HTTP server on port 8080. Every other
+// command (the building state's own "test -f hello.txt" and "true") still
+// runs for real, at the same CommandRunner seam (job.Deps.Commands).
+const judgeCheckFixtureCmd = "curl -sf localhost:8080/hello"
+
+type dispatchJudgeCommands struct {
+	real job.CommandRunner
+}
+
+func (c dispatchJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:
+// START, RUN, one CHECK (the fixture cohort's own single checked scenario,
+// s1), and EVALUATE is four calls; the headroom catches a stuck handler
+// instead of hanging the test.
+const advanceJudgingMaxCalls = 8
+
+// advanceJudging drives the real judging handler through as many calls as
+// it now takes to land a passing round and transition to shipping (design
+// section 7): unlike the skeleton's one-shot fake pass-through, each call
+// only advances one step (START, RUN, one scenario's own CHECK, or
+// EVALUATE), so this loops until the ticket leaves "judging". Its own
+// Deps.Commands (dispatchJudgeCommands) keeps CHECK's re-run of the fixture
+// cohort's one check command from ever dialing a real server.
+func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	for range advanceJudgingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		owner := fmt.Sprintf("advance-%d-judging", ticketID)
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("advanceJudging: claim: claimed=%v err=%v", claimed, err)
+		}
+		deps := testDeps(t, s, rt, owner, expires)
+		deps.Commands = dispatchJudgeCommands{real: deps.Commands}
+		commit, err := job.Registry()[testStateJudging].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("advanceJudging: Run: %v", err)
+		}
+		if err = job.ValidateCommit(ticket, commit); err != nil {
+			t.Fatalf("advanceJudging: ValidateCommit: %v", err)
+		}
+		applied, err := s.CommitHandlerResult(t.Context(), commit)
+		if err != nil || !applied {
+			t.Fatalf("advanceJudging: CommitHandlerResult: applied=%v err=%v", applied, err)
+		}
+		if getTicket(t, s, ticketID).State != testStateJudging {
+			return
+		}
+	}
+	t.Fatalf("advanceJudging: still in judging after %d handler calls", advanceJudgingMaxCalls)
 }
 
 // advanceBuildingMaxCalls bounds advanceBuilding's own handler-call loop
