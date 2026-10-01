@@ -119,7 +119,10 @@ func (g *GitHubClient) RequiredChecks(ctx context.Context, owner, repo, branch s
 	return checks, nil
 }
 
-// CreateDraftPR calls PullRequests.Create with Draft set true.
+// CreateDraftPR calls PullRequests.Create with Draft set true. A failure is
+// classified through classifyGitHubErr, the same as every other M3 task 2
+// method, so PUBLISH (internal/job/shipping.go) can tell auth from
+// unavailable from rate limit on a live failure.
 func (g *GitHubClient) CreateDraftPR(ctx context.Context, owner, repo, head, base, title, body string) (url string, number int, err error) {
 	pr, _, err := g.c.PullRequests.Create(ctx, owner, repo, github.CreatePullRequest{
 		Title: new(title),
@@ -129,7 +132,7 @@ func (g *GitHubClient) CreateDraftPR(ctx context.Context, owner, repo, head, bas
 		Draft: new(true),
 	})
 	if err != nil {
-		return "", 0, fmt.Errorf("orchestrator: create draft pr: %w", err)
+		return "", 0, classifyGitHubErr(err)
 	}
 	return pr.GetHTMLURL(), pr.GetNumber(), nil
 }
@@ -138,7 +141,10 @@ func (g *GitHubClient) CreateDraftPR(ctx context.Context, owner, repo, head, bas
 // Base filter of base, and State "open", returning the first match. The Base
 // filter matters: without it, OpenDraftPR's fallback could return an open PR
 // from wt.Branch into some other base entirely, not the default branch it
-// meant to open one against.
+// meant to open one against. A request failure is classified through
+// classifyGitHubErr, the same as every other M3 task 2 method, so PUBLISH
+// can tell auth from unavailable from rate limit on a live failure; an empty
+// result still returns ok=false and no error, unchanged.
 func (g *GitHubClient) FindPRByHead(ctx context.Context, owner, repo, head, base string) (url string, number int, ok bool, err error) {
 	prs, _, err := g.c.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
 		Head:  owner + ":" + head,
@@ -146,7 +152,7 @@ func (g *GitHubClient) FindPRByHead(ctx context.Context, owner, repo, head, base
 		State: "open",
 	})
 	if err != nil {
-		return "", 0, false, fmt.Errorf("orchestrator: find pr by head: %w", err)
+		return "", 0, false, classifyGitHubErr(err)
 	}
 	if len(prs) == 0 {
 		return "", 0, false, nil

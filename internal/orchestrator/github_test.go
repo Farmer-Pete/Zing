@@ -150,6 +150,66 @@ func TestGHClientCreateDraftPR(t *testing.T) {
 	}
 }
 
+// TestGHClientCreateDraftPRClassifiesErrors proves CreateDraftPR routes a
+// failed PullRequests.Create through classifyGitHubErr (PKG9-PLAN.md
+// section 10.3), the same as GetPR and the other M3 task 2 methods, so
+// PUBLISH (internal/job/shipping.go) can tell auth from unavailable from
+// rate limit on a live failure instead of only ever seeing a plain wrapped
+// error.
+func TestGHClientCreateDraftPRClassifiesErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("401 is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message": "Bad credentials"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, err := g.CreateDraftPR(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch, "A title", "A body")
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+	})
+
+	t.Run("502 is ErrGitHubUnavailable", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, `{"message": "Bad Gateway"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, err := g.CreateDraftPR(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch, "A title", "A body")
+		if !errors.Is(err, ErrGitHubUnavailable) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubUnavailable)", err)
+		}
+	})
+
+	t.Run("429 is RateLimitedError", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message": "too many requests"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, err := g.CreateDraftPR(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch, "A title", "A body")
+		rle, ok := errors.AsType[RateLimitedError](err)
+		if !ok {
+			t.Fatalf("error = %v, want errors.As(err, *RateLimitedError)", err)
+		}
+		if rle.ResetAt.IsZero() {
+			t.Errorf("ResetAt = %v, want a non-zero reset time from Retry-After", rle.ResetAt)
+		}
+	})
+}
+
 // handleNoRules registers a 404 handler for mainBranch's rules/branches
 // route on mux, the response a repository with no applicable ruleset
 // returns (D28): every TestGHClientRequiredChecks and TestRequiredCheckRules
@@ -349,6 +409,67 @@ func TestGHClientFindPRByHead(t *testing.T) {
 		}
 		if gotBase != "release" {
 			t.Errorf("base query = %q, want %q", gotBase, "release")
+		}
+	})
+}
+
+// TestGHClientFindPRByHeadClassifiesErrors proves FindPRByHead routes a
+// failed PullRequests.List through classifyGitHubErr (PKG9-PLAN.md section
+// 10.3), the same as GetPR and the other M3 task 2 methods, so PUBLISH
+// (internal/job/shipping.go) can tell auth from unavailable from rate limit
+// on a live failure instead of only ever seeing a plain wrapped error. The
+// not-found case (an empty list, ok=false, no error) stays covered by
+// TestGHClientFindPRByHead above and is untouched by this change.
+func TestGHClientFindPRByHeadClassifiesErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("401 is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message": "Bad credentials"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, _, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch)
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+	})
+
+	t.Run("502 is ErrGitHubUnavailable", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, `{"message": "Bad Gateway"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, _, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch)
+		if !errors.Is(err, ErrGitHubUnavailable) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubUnavailable)", err)
+		}
+	})
+
+	t.Run("429 is RateLimitedError", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message": "too many requests"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, _, _, err := g.FindPRByHead(t.Context(), "acme", "widgets", "zing/1-slug", mainBranch)
+		rle, ok := errors.AsType[RateLimitedError](err)
+		if !ok {
+			t.Fatalf("error = %v, want errors.As(err, *RateLimitedError)", err)
+		}
+		if rle.ResetAt.IsZero() {
+			t.Errorf("ResetAt = %v, want a non-zero reset time from Retry-After", rle.ResetAt)
 		}
 	})
 }
