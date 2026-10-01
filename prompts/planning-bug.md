@@ -60,7 +60,9 @@ Answer every owner message you receive, in that same turn, with one
 reply per thread inside replies:
 <replies><reply question="Q7">your answer</reply></replies>.
 Every outcome except error can carry replies. When replies are all you
-have this turn, return outcome replies.
+have this turn, return outcome replies. Outcome replies needs at least
+one thread left open: if your replies settle every thread, return ready
+(or children, or nothing_to_do) with the replies attached.
 
 Settle a thread once the owner's messages give you its decision:
 <reply question="Q7" settled="true" decision="...">...</reply>.
