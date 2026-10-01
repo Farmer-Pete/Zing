@@ -428,9 +428,17 @@ func liveShipClaim(t *testing.T, d liveShipDeps, ticketID int64, owner string, e
 		},
 		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: cmds,
+		// Threads is filled from the same *orchestrator.GitHubClient as
+		// PullRequests and Checks, the way serve.go's own buildJobProjects
+		// fills every job.Project field from its one shared client
+		// (PKG9-PLAN.md section 10.3): since M4 task 4, POLL reads
+		// Project.Threads.ListThreads and Viewer on every poll (design
+		// section 8.3 step 5), so a Project missing it would panic on a nil
+		// interface the first time POLL runs. Flips is not filled here: POLL
+		// does not call it yet (M4 task 7 wires MarkReady/ConvertToDraft).
 		Projects: map[int64]job.Project{d.projectID: {
 			Orch: d.orch, RepoGit: d.repoGit, TestCmd: liveShipTestCmd, LintCmd: liveShipLintCmd,
-			Owner: d.owner, Repo: d.repo, PullRequests: d.gh, Checks: d.gh,
+			Owner: d.owner, Repo: d.repo, PullRequests: d.gh, Checks: d.gh, Threads: d.gh,
 		}},
 		DataDir: t.TempDir(), LensesParallel: 7,
 		Tracker: d.tracker,
