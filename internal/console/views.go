@@ -693,6 +693,14 @@ func questionStateLabel(state *string, revisable bool) string {
 	}
 }
 
+// isWithdrawnGate reports whether a question is a gate that closed without
+// an owner answer (bug fix: a gate withdrawn by a reopen showed "resolved",
+// which reads as approved). An approved or rejected gate carries the
+// owner's sent answer.
+func isWithdrawnGate(kind response.QuestionKind, state *string, answered bool) bool {
+	return kind == response.QuestionKindGate && state != nil && *state == msgStateResolved && !answered
+}
+
 // msgStateResolved mirrors store's own unexported questionStateResolved
 // (internal/store/commit.go), the same package-local-copy pattern
 // msgStateOpen and msgStateAnswered (seed.go) already use: console cannot
@@ -1419,6 +1427,9 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		// server-side; this is the rendering half).
 		interactive = (m.State != nil && *m.State == msgStateOpen) || revisable
 		stateLabel = questionStateLabel(m.State, revisable)
+	}
+	if _, answered := sentAnswers[m.ID]; isWithdrawnGate(payload.Kind, m.State, answered) {
+		stateLabel = "withdrawn"
 	}
 
 	q := &templates.ThreadQuestion{
@@ -2160,7 +2171,7 @@ func claimErrorsPendingLine(body string) string {
 // checkScenarioShape), not user- or model-supplied text.
 func validationErrorsLine(body string) string {
 	_, rest, hasErrors := strings.Cut(body, "\n")
-	lines := []string{"The plan did not pass its final checks. Zing is asking the agent to revise it."}
+	lines := []string{"The agent's last response did not pass Zing's checks. Zing is asking the agent to fix it."}
 	if !hasErrors {
 		return lines[0]
 	}

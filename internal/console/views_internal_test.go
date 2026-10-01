@@ -75,7 +75,7 @@ func TestDisplayBody_ValidationErrorsPendingRendersFieldLines(t *testing.T) {
 	got := displayBody(updateRow(body))
 
 	for _, want := range []string{
-		"The plan did not pass its final checks.",
+		"The agent's last response did not pass Zing's checks.",
 		"Field scenarios/scenario[0]/then: then must not be empty",
 		"Field plan/overview/problem: problem is required",
 	} {
@@ -1597,5 +1597,30 @@ func TestOptionChipTextRendersBackticksAsCode(t *testing.T) {
 	}
 	if !strings.Contains(sb.String(), "<code>zing version</code>") {
 		t.Errorf("option TextHTML = %q, want it to contain <code>zing version</code>", sb.String())
+	}
+}
+
+func TestIsWithdrawnGate(t *testing.T) {
+	t.Parallel()
+	resolved, open := msgStateResolved, "open"
+	tests := []struct {
+		name     string
+		kind     response.QuestionKind
+		state    *string
+		answered bool
+		want     bool
+	}{
+		{"resolved gate with no answer is withdrawn", response.QuestionKindGate, &resolved, false, true},
+		{"resolved gate with an answer is not", response.QuestionKindGate, &resolved, true, false},
+		{"open gate is not", response.QuestionKindGate, &open, false, false},
+		{"resolved question is not", response.QuestionKindQuestion, &resolved, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isWithdrawnGate(tc.kind, tc.state, tc.answered); got != tc.want {
+				t.Errorf("isWithdrawnGate = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
