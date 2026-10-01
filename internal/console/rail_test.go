@@ -176,6 +176,79 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 	}
 }
 
+// TestRail_ScenariosVersionShowsPlanCohortNotRowCount proves a bug the owner
+// found live (ticket 1): the Scenarios slot showed its own scenario
+// artifact's Version, which store.InsertArtifact assigns per row -- "next
+// past (ticket, type)'s current maximum" -- so it climbs by one for every
+// scenario ever written across every planning turn, not once per cohort.
+// Plan and Decisions show the cohort number instead, since planning writes
+// exactly one row of each per turn, so the two drift apart: the owner saw
+// "Scenarios v40" next to "Plan v5". The fix is the plan cohort version the
+// newest scenario's own run_id belongs to (readyArtifacts writes a cohort's
+// plan, claims, and scenario rows together under one run id), which this
+// seeds at a small scale: cohort 1 (run 4, plan v1) writes scenario rows
+// v1-v3; cohort 2 (run 6, plan v2) writes v4-v5. The newest scenario row's
+// own version is 5, but it belongs to plan v2, so the rail must show
+// "Scenarios v2", matching Plan, not "Scenarios v5".
+func TestRail_ScenariosVersionShowsPlanCohortNotRowCount(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#2", "Scenario cohort version")
+
+	// artifacts.run_id references a real runs row, so this needs two actual
+	// runs, not two bare literals: advanceTicketToBuilding claims and commits
+	// one session-and-run each call (the claim it releases on commit, so a
+	// second call on the same ticket succeeds), and RunsForTicket reads their
+	// ids back in insertion order.
+	advanceTicketToBuilding(t, s, ticketID, "sonnet", 1)
+	advanceTicketToBuilding(t, s, ticketID, "opus", 1)
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("RunsForTicket returned %d runs, want 2", len(runs))
+	}
+	run1, run2 := runs[0].ID, runs[1].ID
+
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypePlan, Version: 1, RunID: &run1, Payload: railPlanPayload(t)}); err != nil {
+		t.Fatalf("insert plan v1: %v", err)
+	}
+	for i, v := range []int{1, 2, 3} {
+		id := fmt.Sprintf("s%d", i+1)
+		if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypeScenario, Version: v, RunID: &run1, Payload: railScenarioPayload(id)}); err != nil {
+			t.Fatalf("insert scenario v%d: %v", v, err)
+		}
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypePlan, Version: 2, RunID: &run2, Payload: railPlanPayload(t)}); err != nil {
+		t.Fatalf("insert plan v2: %v", err)
+	}
+	for i, v := range []int{4, 5} {
+		id := fmt.Sprintf("s%d", i+4)
+		if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypeScenario, Version: v, RunID: &run2, Payload: railScenarioPayload(id)}); err != nil {
+			t.Fatalf("insert scenario v%d: %v", v, err)
+		}
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	if !strings.Contains(rail, `<span class="artifact-label">Plan</span>`) || !strings.Contains(rail, `<summary>v2</summary>`) {
+		t.Fatalf("rail missing Plan v2 (test setup); got:\n%s", rail)
+	}
+
+	slot := regexp.MustCompile(`(?s)artifact-label">Scenarios</span>.*?</div>`).FindString(rail)
+	if slot == "" {
+		t.Fatalf("rail missing the Scenarios slot; got:\n%s", rail)
+	}
+	if !strings.Contains(slot, "<summary>v2</summary>") {
+		t.Errorf("Scenarios slot = %q, want it to show v2 (the plan cohort its rows belong to), not its own row version", slot)
+	}
+}
+
 // TestRail_PlanArtifactRendersThroughPlanRendererNotRawJSON proves bug fix
 // 16: the rail's Plan slot used to show its stored artifact as raw indented
 // JSON (prettyPayload), the owner's locked-view complaint. It now renders

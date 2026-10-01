@@ -179,6 +179,11 @@ func (c *console) buildArtifactsRail(ctx context.Context, ticketID int64) ([]tem
 		if a, ok := newest[def.Type]; ok {
 			slot.Present = true
 			slot.Version = a.Version
+			if def.Type == scenarioArtifactType {
+				if v, found := scenarioCohortVersion(all, a.RunID); found {
+					slot.Version = v
+				}
+			}
 			slot.PayloadText = prettyPayload(a.Payload)
 			if def.Type == planArtifactType {
 				rendered, err := c.renderPlanSlot(ctx, ticketID, a.Payload)
@@ -191,6 +196,29 @@ func (c *console) buildArtifactsRail(ctx context.Context, ticketID int64) ([]tem
 		slots = append(slots, slot)
 	}
 	return slots, nil
+}
+
+// scenarioCohortVersion returns the plan cohort version the newest scenario
+// artifact's own run_id belongs to, rather than that scenario row's own
+// Version: readyArtifacts (internal/job/planning.go) writes a cohort's plan
+// and scenario rows together under one run id, but each scenario row is
+// still its own artifacts.type='scenario' row, so InsertArtifact's "next
+// past (ticket, type)'s current maximum" versioning climbs once per
+// scenario, not once per planning turn (bug: the rail showed "Scenarios
+// v40" next to "Plan v5" -- 40 scenario rows written across 5 turns). found
+// is false when scenarioRunID is nil (a legacy artifact stored before every
+// row carried run_id) or no plan artifact shares it, and the caller keeps
+// the scenario row's own version rather than guessing.
+func scenarioCohortVersion(all []store.Artifact, scenarioRunID *int64) (version int, found bool) {
+	if scenarioRunID == nil {
+		return 0, false
+	}
+	for _, a := range all {
+		if a.Type == planArtifactType && a.RunID != nil && *a.RunID == *scenarioRunID {
+			return a.Version, true
+		}
+	}
+	return 0, false
 }
 
 // renderPlanSlot decodes a "plan" artifact's payload and renders it through
