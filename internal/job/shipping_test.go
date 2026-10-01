@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -34,6 +35,7 @@ import (
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // Compile-time assertions: *orchestrator.GitHubClient satisfies every
@@ -133,6 +135,27 @@ type shipGitHub struct {
 	resolves            []string // threadID, in call order
 	requestedReviewers  []string // login, in call order
 	requestReviewersErr map[string]error
+
+	// The fields below back ThreadCommentsContain and ResolveThread (M4 task
+	// 5): markerAuthors, keyed threadID+"|"+needle, is the author of the one
+	// comment that carries that marker, when any does -- a real
+	// ReplyToThread call registers its own marker here under the viewer's
+	// own login, so a later idempotency check (ThreadCommentsContain) finds
+	// what this same fake already posted; a test seeds an entry directly to
+	// simulate a marker a prior, crashed APPLY already posted
+	// (TestApplyIsIdempotentAfterCrash, TestApplyFindsMarkerOlderThan100Comments),
+	// or under a different login to simulate a spoofed comment
+	// (TestApplySpoofedMarkerStillPosts): ThreadCommentsContain only matches
+	// when the author it is asked about agrees, exactly as the real,
+	// author-gated GraphQL call would. containsCalls records every
+	// ThreadCommentsContain call, in order, the same shape as replies and
+	// resolves; containsErr, when set, fails every call instead.
+	// resolveErrFor, keyed by rawID, fails one thread's own ResolveThread
+	// call (TestApplyCrashBetweenReplyAndResolve).
+	markerAuthors map[string]string
+	containsCalls []string
+	containsErr   error
+	resolveErrFor map[string]error
 }
 
 // shipViewerLogin is shipGitHub's own default Viewer() result (M4 task 4):
@@ -235,16 +258,44 @@ func (g *shipGitHub) ListThreads(context.Context, string, string, int) ([]orches
 	return g.threads, nil
 }
 
-func (g *shipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
-	return false, errShipGitHub
+func (g *shipGitHub) ThreadCommentsContain(_ context.Context, threadID, needle, author string) (bool, error) {
+	g.containsCalls = append(g.containsCalls, threadID+"|"+needle)
+	if g.containsErr != nil {
+		return false, g.containsErr
+	}
+	return g.markerAuthors[threadID+"|"+needle] == author, nil
 }
 
+// ReplyToThread records the call and, mirroring a real post landing on
+// GitHub, registers the marker it carries under the viewer's own login, so
+// a later ThreadCommentsContain call (this attempt's own idempotency guard,
+// or a retry's) finds it. It refuses a body that does not start with the
+// viewer's own disclosure prefix (design section 9.3, N3): every reply
+// APPLY posts goes through replyBody first, and TestEveryReplyGoesThroughReplyBody
+// proves this fake would catch one that somehow did not.
 func (g *shipGitHub) ReplyToThread(_ context.Context, threadID, body string) error {
+	login := g.viewerLogin
+	if login == "" {
+		login = shipViewerLogin
+	}
+	if !strings.HasPrefix(body, tracker.ReplyPrefix(login)) {
+		return fmt.Errorf("shipGitHub: ReplyToThread: body does not start with the disclosure prefix: %q", body)
+	}
 	g.replies = append(g.replies, threadID+"|"+body)
+	if idx := strings.LastIndex(body, "<!-- zing:"); idx >= 0 {
+		marker := strings.TrimSpace(body[idx:])
+		if g.markerAuthors == nil {
+			g.markerAuthors = map[string]string{}
+		}
+		g.markerAuthors[threadID+"|"+marker] = login
+	}
 	return nil
 }
 
 func (g *shipGitHub) ResolveThread(_ context.Context, threadID string) error {
+	if err, ok := g.resolveErrFor[threadID]; ok {
+		return err
+	}
 	g.resolves = append(g.resolves, threadID)
 	return nil
 }
@@ -1918,6 +1969,16 @@ const (
 	shipRespondTID      = "t9d07af1e65f013d5"
 )
 
+// shipApplyThreadA, shipApplyThreadB, and shipApplyReplyText are APPLY's
+// own tests' (M4 task 5) shared raw thread ids and reply text, named once
+// since goconst flags a literal repeated this many times across one file.
+const (
+	shipApplyThreadA    = "RT_a"
+	shipApplyThreadB    = "RT_b"
+	shipApplyReplyText  = "fixed as described"
+	shipApplyReplyTextA = "fixed a"
+)
+
 // shipThread builds one orchestrator.Thread for a respond test: unresolved,
 // at the given path and line, carrying comments in order.
 func shipThread(rawID, path string, line int, comments ...orchestrator.ThreadComment) orchestrator.Thread {
@@ -2009,6 +2070,78 @@ func shipRespondReady(t *testing.T, commentAt time.Time) (s *store.Store, ticket
 	}
 	pbApply(t, s, ticket, commit)
 	return s, pbGetTicket(t, s, ticket.ID), gh, tr, local
+}
+
+// shipApplySeeded publishes a ticket (shipPublished), seeds green CI and
+// threads on the fake GitHub, writes a "respond batch 1 started sha <local>
+// after run 0" marker in startRespondBatch's own shape, and inserts one
+// "respond" artifact {actions, batch 1, sha local, seen} directly through
+// Store.InsertArtifact -- APPLY's own tests need full control over which
+// threads exist, which comment each one carries, and which actions the
+// artifact names, more than driving a real RESPOND run through
+// respondScriptsFS would give them. InsertArtifact only enforces the
+// artifact's own JSON Schema, not Layer 2's semantic rules, which is also
+// how TestApplyChecksEveryBodyBeforeWriting below seeds a reserved-marker
+// action the real RESPOND pipeline could never produce in the first place
+// (design section 9.3, checkRespondThreadsShape, response/semantics.go) --
+// the exact defense-in-depth gap replyBody's own second layer exists to
+// close. It does not run APPLY: the caller does, through shipPollRun (Run
+// routes to APPLY on its own, applyArtifact, the moment a pending respond
+// artifact exists).
+func shipApplySeeded(t *testing.T, threads []orchestrator.Thread, actions []response.ThreadAction) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, aid int64) {
+	t.Helper()
+	s, ticket, gh, tr = shipPublished(t)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.threads = threads
+
+	tids := make([]string, len(threads))
+	seenMap := make(map[string]string, len(threads))
+	for i, th := range threads {
+		id := tid(th.ID)
+		tids[i] = id
+		if digest, ok := lastHumanCommentDigest(th, shipViewerLogin); ok {
+			seenMap[id] = digest
+		}
+	}
+	sort.Strings(tids)
+	line2, line3 := respondBatchLines(tids, seenMap)
+
+	ctx := t.Context()
+	owner := "ship-apply-seed-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(ctx, ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("shipApplySeeded: claim: claimed=%v err=%v", claimed, err)
+	}
+	startedBody := fmt.Sprintf("respond batch 1 started sha %s after run 0\n%s\n%s", local, line2, line3)
+	applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Messages: []store.Message{{TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: startedBody}},
+	})
+	if err != nil || !applied {
+		t.Fatalf("shipApplySeeded: seed started marker: applied=%v err=%v", applied, err)
+	}
+
+	seen := make([]response.ThreadSeen, 0, len(tids))
+	for _, id := range tids {
+		if digest, ok := seenMap[id]; ok {
+			seen = append(seen, response.ThreadSeen{TID: id, LastComment: digest})
+		}
+	}
+	artifact := response.RespondArtifact{Threads: actions, Batch: 1, SHA: local, Seen: seen}
+	payload, marshalErr := json.Marshal(artifact)
+	if marshalErr != nil {
+		t.Fatalf("shipApplySeeded: marshal artifact: %v", marshalErr)
+	}
+	aid, insertErr := s.InsertArtifact(ctx, store.Artifact{TicketID: ticket.ID, Type: artifactTypeRespond, Payload: payload})
+	if insertErr != nil {
+		t.Fatalf("shipApplySeeded: insert artifact: %v", insertErr)
+	}
+
+	return s, pbGetTicket(t, s, ticket.ID), gh, tr, aid
 }
 
 // TestPollStartsRespondBatch proves design section 8.5 row 5: an actionable
@@ -2500,6 +2633,515 @@ func TestRespondRetryStaleOnHeadMoved(t *testing.T) {
 	want := "respond batch 1 stale\n" + respondStaleHeadMovedReason
 	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
 		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// -----------------------------------------------------------------------
+// APPLY (M4 task 5, design section 9.3)
+// -----------------------------------------------------------------------
+
+// TestApplyRepliesAndResolves proves design section 9.3 step 2's own reply
+// path: the posted body is exactly replyBody's own output, the thread
+// resolves, and the closing "respond applied <aid>" marker reports what
+// this commit did.
+func TestApplyRepliesAndResolves(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: "Thanks for flagging this -- fixed as described."},
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a reply: %+v", commit.Escalation.Payload)
+	}
+
+	marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", aid, tid(shipApplyThreadA))
+	wantBody, bodyErr := replyBody(shipViewerLogin, "Thanks for flagging this -- fixed as described.", marker)
+	if bodyErr != nil {
+		t.Fatalf("replyBody: %v", bodyErr)
+	}
+	if len(gh.replies) != 1 || gh.replies[0] != "RT_a|"+wantBody {
+		t.Errorf("replies = %+v, want exactly [%q]", gh.replies, "RT_a|"+wantBody)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 0", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestApplyStaleEditedComment proves design section 9.3 step 1a's own first
+// freshness check: a human edits the thread's own last comment in place
+// (same id, a different body and UpdatedAt), so commentDigest disagrees
+// with the batch's own seen snapshot, and APPLY writes "respond batch 1
+// stale" instead of posting.
+func TestApplyStaleEditedComment(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, _ := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	gh.threads[0].Comments[0] = shipHumanComment("c1", "reviewer1", "actually, please also fix this", when.Add(time.Hour))
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "respond batch 1 stale\nthread " + tid(shipApplyThreadA) + " has a new comment"
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Errorf("replies = %+v resolves = %+v, want none -- the artifact is never applied", gh.replies, gh.resolves)
+	}
+}
+
+// TestApplyStaleNewComment proves design section 9.3 step 1a's other
+// freshness check: a human adds a new comment to a batch thread before
+// APPLY runs, so APPLY writes "respond batch 1 stale" and posts nothing,
+// and the next poll starts batch 2 from the threads as they now are
+// (design section 9.2).
+func TestApplyStaleNewComment(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, _ := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	gh.threads[0].Comments = append(gh.threads[0].Comments,
+		shipHumanComment("c2", "reviewer1", "actually, one more thing", when.Add(time.Hour)))
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "respond batch 1 stale\nthread " + tid(shipApplyThreadA) + " has a new comment"
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Errorf("replies = %+v resolves = %+v, want none", gh.replies, gh.resolves)
+	}
+	pbApply(t, s, ticket, commit)
+
+	pollCommit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("poll Run: %v", err)
+	}
+	found := false
+	for _, m := range pollCommit.Messages {
+		if strings.HasPrefix(m.Body, "respond batch 2 started sha ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pollCommit.Messages = %+v, want a respond batch 2 started marker", pollCommit.Messages)
+	}
+}
+
+// TestApplyStaleHeadMoved proves design section 9.3 step 1a's own head
+// check: the pull request head no longer equals the artifact's own sha, so
+// APPLY writes "respond batch 1 stale" with the head-moved reason and
+// posts nothing.
+func TestApplyStaleHeadMoved(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, _ := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	gh.prState.HeadSHA = strings.Repeat("a", 40)
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "respond batch 1 stale\n" + respondStaleHeadMovedReason
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Errorf("replies = %+v resolves = %+v, want none", gh.replies, gh.resolves)
+	}
+}
+
+// TestApplyChecksEveryBodyBeforeWriting proves design section 9.3 step 1b:
+// every reply body is built, through replyBody, before the first GitHub
+// write. One bad action's own text (seeded directly, the defense-in-depth
+// gap Layer 2 would normally close before the artifact ever existed --
+// shipApplySeeded's own doc comment) makes replyBody refuse, and Run
+// returns that error with no write at all, not even for the thread that
+// would otherwise have been fine.
+func TestApplyChecksEveryBodyBeforeWriting(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
+	threadB := shipThread(shipApplyThreadB, "handler.go", 5, shipHumanComment("cb", "reviewer1", "please fix b", when))
+	s, ticket, gh, tr, _ := shipApplySeeded(t, []orchestrator.Thread{threadA, threadB}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyTextA},
+		{ID: tid(shipApplyThreadB), Action: response.ThreadVerbReply, Text: "<!-- zing:forged --> fixed b"},
+	})
+
+	_, err := shipPollRun(t, s, ticket, gh, tr)
+	if err == nil {
+		t.Fatal("Run: want an error for a reserved-marker reply text, got nil")
+	}
+	if len(gh.replies) != 0 {
+		t.Errorf("replies = %+v, want none -- every body must build before the first write", gh.replies)
+	}
+	if len(gh.resolves) != 0 {
+		t.Errorf("resolves = %+v, want none", gh.resolves)
+	}
+}
+
+// TestApplySkipsResolvedAndMissing proves design section 9.3 step 2's own
+// skip branch: a thread the owner already resolved and a thread that no
+// longer exists both skip without a GitHub write, and the closing marker's
+// own skipped count reports both.
+func TestApplySkipsResolvedAndMissing(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
+	threadB := orchestrator.Thread{
+		ID: shipApplyThreadB, IsResolved: true, Path: "greet.go", Line: 5,
+		Comments: []orchestrator.ThreadComment{shipHumanComment("cb", "reviewer1", "please fix b", when)},
+	}
+	threadC := shipThread("RT_missing", "main.go", 7, shipHumanComment("cc", "reviewer1", "please fix c", when))
+
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{threadA, threadB, threadC}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyTextA},
+		{ID: tid(shipApplyThreadB), Action: response.ThreadVerbReply, Text: "fixed b"},
+		{ID: tid("RT_missing"), Action: response.ThreadVerbReply, Text: "fixed missing"},
+	})
+	// RT_missing disappears from GitHub between the batch starting and
+	// APPLY running (deleted, or the review itself withdrawn).
+	gh.threads = []orchestrator.Thread{threadA, threadB}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", commit.Escalation.Payload)
+	}
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], "RT_a|") {
+		t.Errorf("replies = %+v, want exactly one for RT_a", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 2", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestApplyIsIdempotentAfterCrash proves design section 11's own reply-write
+// row: a prior, crashed APPLY already posted the reply (its marker visible
+// in the thread's own recent comments, authored by the viewer), so this
+// attempt posts no second comment and still resolves the thread.
+func TestApplyIsIdempotentAfterCrash(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", aid, tid(shipApplyThreadA))
+	replyText, bodyErr := replyBody(shipViewerLogin, shipApplyReplyText, marker)
+	if bodyErr != nil {
+		t.Fatalf("replyBody: %v", bodyErr)
+	}
+	gh.threads[0].Comments = append(gh.threads[0].Comments,
+		shipHumanComment("c2", shipViewerLogin, replyText, when.Add(time.Minute)))
+	gh.markerAuthors = map[string]string{"RT_a|" + marker: shipViewerLogin}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.replies) != 0 {
+		t.Errorf("replies = %+v, want none -- the marker is already posted", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 0", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestApplyFindsMarkerOlderThan100Comments proves the same idempotency
+// guard holds even when the marker sits outside the thread's own last-100
+// window (th.Comments, what ListThreads returns): APPLY never scans
+// th.Comments for it, only ThreadCommentsContain's own unbounded page
+// walk, which this test's own markerAuthors stands in for (design section
+// 10.4: "pages every comment of the thread, not only the last 100").
+func TestApplyFindsMarkerOlderThan100Comments(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", aid, tid(shipApplyThreadA))
+	gh.markerAuthors = map[string]string{"RT_a|" + marker: shipViewerLogin}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.containsCalls) != 1 || gh.containsCalls[0] != "RT_a|"+marker {
+		t.Errorf("containsCalls = %+v, want exactly [%q]", gh.containsCalls, "RT_a|"+marker)
+	}
+	if len(gh.replies) != 0 {
+		t.Errorf("replies = %+v, want none -- ThreadCommentsContain already found the marker", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 0", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestApplySpoofedMarkerStillPosts proves design section 9.1's own
+// author-gate: a stranger's comment that copies the exact reply marker
+// text never satisfies ThreadCommentsContain (author-gated to the viewer),
+// so APPLY still posts its own reply.
+func TestApplySpoofedMarkerStillPosts(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+
+	marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", aid, tid(shipApplyThreadA))
+	gh.markerAuthors = map[string]string{"RT_a|" + marker: "attacker"}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.replies) != 1 {
+		t.Fatalf("replies = %+v, want exactly one -- a spoofed marker must not block a real post", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 0", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestApplyCrashBetweenReplyAndResolve proves design section 11's own
+// resolve-write row: ResolveThread fails for the second of two threads
+// after both replies already posted, so Run returns the error with no
+// commit; the retry, with GitHub now reading the first thread back
+// resolved and the injected failure gone, posts no second reply for
+// either thread (the first is skipped as already resolved, the second's
+// own marker is already there) and finishes the batch.
+func TestApplyCrashBetweenReplyAndResolve(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
+	threadB := shipThread(shipApplyThreadB, "handler.go", 5, shipHumanComment("cb", "reviewer1", "please fix b", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{threadA, threadB}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyTextA},
+		{ID: tid(shipApplyThreadB), Action: response.ThreadVerbReply, Text: "fixed b"},
+	})
+
+	injected := errors.New("resolve: injected failure")
+	gh.resolveErrFor = map[string]error{shipApplyThreadB: injected}
+
+	_, err := shipPollRun(t, s, ticket, gh, tr)
+	if err == nil {
+		t.Fatal("Run: want an error, got nil")
+	}
+	if len(gh.replies) != 2 {
+		t.Fatalf("replies = %+v, want 2 (both posted before the resolve failure)", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Fatalf("resolves = %+v, want exactly [RT_a]", gh.resolves)
+	}
+	appliedRows, markerErr := s.MarkersWithPrefix(t.Context(), ticket.ID, "respond applied ")
+	if markerErr != nil {
+		t.Fatalf("MarkersWithPrefix: %v", markerErr)
+	}
+	if len(appliedRows) != 0 {
+		t.Fatalf("respond applied markers = %d, want none yet (the failed attempt wrote no commit)", len(appliedRows))
+	}
+
+	gh.threads[0].IsResolved = true
+	gh.resolveErrFor = nil
+
+	// The failed attempt's own Go error, not a HandlerCommit, left the
+	// claim held: nothing released it. ExpireClaims is the same reconcile a
+	// crash or a dispatcher restart runs for real (building_test.go,
+	// fix_test.go give this same pattern).
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute)); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("retry Run: %v", err)
+	}
+	if len(gh.replies) != 2 {
+		t.Errorf("replies after retry = %+v, want still 2 (RT_b's own marker is already posted)", gh.replies)
+	}
+	if len(gh.resolves) != 2 || gh.resolves[1] != shipApplyThreadB {
+		t.Errorf("resolves after retry = %+v, want [RT_a RT_b]", gh.resolves)
+	}
+	want := fmt.Sprintf("respond applied %d\nreplied 1 fixing 0 skipped 1", aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestApplyFixThreadsRequestFix proves design section 9.3 step 3: a
+// collected "fix" action never touches GitHub, and becomes one fix request
+// naming the thread's own tid, location, and text, with the closing marker
+// pointing at it by its own watermark run id.
+func TestApplyFixThreadsRequestFix(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbFix, Text: "Validate the input before using it"},
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a fix request: %+v", commit.Escalation.Payload)
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Errorf("replies = %+v resolves = %+v, want none -- a fix action never posts to GitHub", gh.replies, gh.resolves)
+	}
+	if len(commit.Messages) != 2 {
+		t.Fatalf("commit.Messages = %+v, want exactly 2 (the fix request, then the applied marker)", commit.Messages)
+	}
+	if !strings.HasPrefix(commit.Messages[0].Body, fixRequestedThreadsPrefix) {
+		t.Errorf("Messages[0] = %q, want prefix %q", commit.Messages[0].Body, fixRequestedThreadsPrefix)
+	}
+	wantText := fmt.Sprintf("Review threads from respond batch 1:\nthread %s (greet.go:3): Validate the input before using it", tid(shipApplyThreadA))
+	if !strings.HasSuffix(commit.Messages[0].Body, wantText) {
+		t.Errorf("Messages[0] = %q, want suffix %q", commit.Messages[0].Body, wantText)
+	}
+
+	wantApplied := fmt.Sprintf("respond applied %d\nreplied 0 fixing 1 skipped 0", aid)
+	if !strings.HasPrefix(commit.Messages[1].Body, wantApplied) {
+		t.Errorf("Messages[1] = %q, want prefix %q", commit.Messages[1].Body, wantApplied)
+	}
+	if !strings.Contains(commit.Messages[1].Body, "\nfix request after run ") {
+		t.Errorf("Messages[1] = %q, want a \"fix request after run \" line", commit.Messages[1].Body)
+	}
+}
+
+// TestApplyFixThreadsHitGate proves design section 8.7's own shared gate,
+// reached through APPLY: the ticket already holds max_loops fix requests,
+// so the collected fix action escalates loops_exhausted instead of writing
+// a fourth request, Tried names the respond artifact the gate held open,
+// and no "respond applied <aid>" marker lands -- but the batch's own reply
+// action, already decided before the gate, still posts and resolves.
+func TestApplyFixThreadsHitGate(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	threadFix := shipThread("RT_fix", "greet.go", 3, shipHumanComment("cf", "reviewer1", "please address this", when))
+	threadReply := shipThread("RT_reply", "main.go", 9, shipHumanComment("cr", "reviewer1", "small nit", when))
+
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{threadFix, threadReply}, []response.ThreadAction{
+		{ID: tid("RT_fix"), Action: response.ThreadVerbFix, Text: "Validate the input"},
+		{ID: tid("RT_reply"), Action: response.ThreadVerbReply, Text: "Good catch, thanks"},
+	})
+	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, 3) // jobs.respond.max_loops
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("Run: want an escalation, got none")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("Code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	wantTriedPrefix := fmt.Sprintf("threads\nrespond %d\n", aid)
+	if !strings.HasPrefix(commit.Escalation.Payload.Tried, wantTriedPrefix) {
+		t.Errorf("Tried = %q, want prefix %q", commit.Escalation.Payload.Tried, wantTriedPrefix)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], "RT_reply|") {
+		t.Errorf("replies = %+v, want exactly one for RT_reply", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != "RT_reply" {
+		t.Errorf("resolves = %+v, want exactly [RT_reply]", gh.resolves)
+	}
+	appliedRows, markerErr := s.MarkersWithPrefix(t.Context(), ticket.ID, fmt.Sprintf("respond applied %d", aid))
+	if markerErr != nil {
+		t.Fatalf("MarkersWithPrefix: %v", markerErr)
+	}
+	if len(appliedRows) != 0 {
+		t.Errorf("respond applied markers = %d, want none -- the gate held the artifact open", len(appliedRows))
+	}
+}
+
+// TestEveryReplyGoesThroughReplyBody proves N3 (disclosure) holds even
+// against this package's own test double: shipGitHub.ReplyToThread itself
+// refuses a body that does not start with the viewer's own disclosure
+// prefix, and a real APPLY run's own reply -- built through replyBody --
+// passes it.
+func TestEveryReplyGoesThroughReplyBody(t *testing.T) {
+	t.Parallel()
+	gh := &shipGitHub{}
+	if err := gh.ReplyToThread(t.Context(), "RT_x", "not disclosed"); err == nil {
+		t.Fatal("ReplyToThread: want an error for a body missing the disclosure prefix, got nil")
+	}
+
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
+	s, ticket, gh2, tr, _ := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(shipApplyThreadA), Action: response.ThreadVerbReply, Text: shipApplyReplyText},
+	})
+	commit, err := shipPollRun(t, s, ticket, gh2, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", commit.Escalation.Payload)
+	}
+	if len(gh2.replies) != 1 {
+		t.Fatalf("replies = %d, want 1 (a well-formed reply body passes the fake's own disclosure guard)", len(gh2.replies))
 	}
 }
 

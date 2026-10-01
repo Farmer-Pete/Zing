@@ -17,12 +17,12 @@
 // fingerprint and its row 5 (an actionable thread starts a respond batch),
 // decision tree step (1)'s "job respond" branch, step (2) (RESPOND's first
 // turn and every resume), and the respond rows of resolvePostBuildEscalation.
-// Decision tree step (3) (APPLY, M4 task 5) and 8.5's rows 1 to 3, 6, 6a, 8,
-// and 9 (FIX-REPLIES, RE-REQUEST, the draft/ready flip, the leftover
-// resolve, the unclassified blocking marker, and MERGE) stay later M4
-// tasks'. Reaching one of those unbuilt rows is ErrNoAction, not a silent
-// no-op, since nothing before them can write the marker or round shape that
-// would route there.
+// M4 task 5 (respond.go) adds decision tree step (3), APPLY (9.3). 8.5's
+// rows 1 to 3, 6, 6a, 8, and 9 (FIX-REPLIES, RE-REQUEST, the draft/ready
+// flip, the leftover resolve, the unclassified blocking marker, and MERGE)
+// stay later M4 tasks'. Reaching one of those unbuilt rows is ErrNoAction,
+// not a silent no-op, since nothing before them can write the marker or
+// round shape that would route there.
 package job
 
 import (
@@ -100,14 +100,11 @@ type shipHandler struct{}
 // Run is the shipping state's own decision tree (design section 8.1): the
 // prelude (P), step (1)'s own "job respond" branch (RESPOND resume with
 // answers, M4 task 4), step (2) (RESPOND's first turn and every resume, M4
-// task 4), step (3) (APPLY, M4 task 5), step (4) PUBLISH when pr_url is
-// still NULL, and step (5) POLL otherwise. Step (1)'s own "merge" branch
-// (MERGE-ANSWER) is M4 task 8's: nothing before it ever writes a "merge
-// asked" or "merge held" marker, so an answered round of any other job or
-// kind is a bug this reports loudly rather than guessing at. Step (3)
-// (APPLY) is M4 task 5's: reaching a respond artifact with no "respond
-// applied <aid>" marker here returns ErrNoAction, not a silent no-op,
-// until that task lands.
+// task 4), step (3) (APPLY, M4 task 5, respond.go), step (4) PUBLISH when
+// pr_url is still NULL, and step (5) POLL otherwise. Step (1)'s own "merge"
+// branch (MERGE-ANSWER) is M4 task 8's: nothing before it ever writes a
+// "merge asked" or "merge held" marker, so an answered round of any other
+// job or kind is a bug this reports loudly rather than guessing at.
 func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginShipping)
 	if handled || err != nil {
@@ -138,15 +135,12 @@ func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Han
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond batches: %w", err)
 	}
-	if len(respondRows) > 0 {
-		newest := respondRows[len(respondRows)-1]
-		_, appliedMarked, markerErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond applied %d", newest.ArtifactID))
-		if markerErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond applied marker: %w", markerErr)
-		}
-		if !appliedMarked {
-			return store.HandlerCommit{}, ErrNoAction
-		}
+	a, hasApply, applyErr := applyArtifact(ctx, t, d, respondRows)
+	if applyErr != nil {
+		return store.HandlerCommit{}, applyErr
+	}
+	if hasApply {
+		return h.apply(ctx, t, d, a)
 	}
 
 	if t.PRURL == nil {

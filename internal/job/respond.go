@@ -4,11 +4,10 @@
 // and every resume (design section 9.2), the shipping decision tree's own
 // steps (1)'s "job respond" branch and (2) (section 8.1), POLL's own row 5
 // (section 8.5, starting a batch), and the respond rows of
-// resolvePostBuildEscalation (section 5.6, postbuild.go). APPLY (9.3),
-// FIX-REPLIES, and RE-REQUEST (9.4) are M4 tasks 5 and 6: shipHandler.Run
-// (shipping.go) stops at the newest respond artifact with no "respond
-// applied <aid>" marker and returns ErrNoAction rather than guessing at
-// them.
+// resolvePostBuildEscalation (section 5.6, postbuild.go). M4 task 5 adds
+// APPLY (9.3): the decision tree's own step (3), applyArtifact's selection
+// rule, and shipHandler.apply. FIX-REPLIES and RE-REQUEST (9.4) are M4 task
+// 6's.
 package job
 
 import (
@@ -270,7 +269,7 @@ func findUniqueRespondStarted(markers []store.MessageRow, n int) (store.MessageR
 		}
 	}
 	if len(found) != 1 {
-		return store.MessageRow{}, fmt.Errorf("job: shipping: respond batch %d has no unique started marker", n)
+		return store.MessageRow{}, fmt.Errorf("job: respond batch %d has no unique started marker", n)
 	}
 	return found[0], nil
 }
@@ -1052,4 +1051,233 @@ func (h shipHandler) retryRespondWithRun(ctx context.Context, t store.Ticket, d 
 // batch " marker family and tries again from wherever it left off.
 func (h shipHandler) retryRespondNoRun(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
 	return shipRetryMarkerCommit(t, d, resolveIDs)
+}
+
+// ---- decision tree step (3): APPLY (design section 9.3) -------------------
+
+// applyArtifact is APPLY's own selection rule (design section 9.3 step 1):
+// the newest respond artifact with no "respond applied <ArtifactID>" marker
+// and no "respond batch <n> stale" marker for its own batch n. ok is false
+// when there is no respond artifact at all, the newest one is already
+// applied, or its own batch already went stale -- 9.2's "the next poll
+// starts a fresh batch" means a stale batch is abandoned, never retried
+// through APPLY, so step (3) has nothing to do and the decision tree moves
+// on to PUBLISH or POLL. A new batch never starts (startRespondBatch, POLL
+// row 5) while an unresolved respond artifact is still pending apply, so
+// the newest row is always the one, if any, this rule needs to find.
+func applyArtifact(ctx context.Context, t store.Ticket, d Deps, rows []store.RespondRow) (store.RespondRow, bool, error) {
+	if len(rows) == 0 {
+		return store.RespondRow{}, false, nil
+	}
+	newest := rows[len(rows)-1]
+
+	_, appliedMarked, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond applied %d", newest.ArtifactID))
+	if err != nil {
+		return store.RespondRow{}, false, fmt.Errorf("job: shipping: respond applied marker: %w", err)
+	}
+	if appliedMarked {
+		return store.RespondRow{}, false, nil
+	}
+
+	_, staleMarked, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond batch %d stale", newest.Respond.Batch))
+	if err != nil {
+		return store.RespondRow{}, false, fmt.Errorf("job: shipping: respond batch stale marker: %w", err)
+	}
+	if staleMarked {
+		return store.RespondRow{}, false, nil
+	}
+
+	return newest, true, nil
+}
+
+// respondFixRequestText is design section 9.3 step 3's own text for a
+// collected batch of "fix" thread actions: "Review threads from respond
+// batch <n>:", then one line per action, in artifact order, "thread <tid>
+// (<path>:<line>): <action text>" -- "(<path>)" when the thread's own Line
+// is 0, the same fallback renderThreads (threadrules.go) gives a thread
+// with no line (design section 9.1, 9.2).
+func respondFixRequestText(batch int, actions []response.ThreadAction, byTID map[string]orchestrator.Thread) string {
+	lines := make([]string, 0, len(actions)+1)
+	lines = append(lines, fmt.Sprintf("Review threads from respond batch %d:", batch))
+	for _, action := range actions {
+		th := byTID[action.ID]
+		loc := th.Path
+		if th.Line != 0 {
+			loc = fmt.Sprintf("%s:%d", th.Path, th.Line)
+		}
+		lines = append(lines, fmt.Sprintf("thread %s (%s): %s", action.ID, loc, action.Text))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// applyPendingReply is one reply or addressed action APPLY has decided to
+// post, its body already built by replyBody before any GitHub write (design
+// section 9.3 step 1b).
+type applyPendingReply struct {
+	rawID, marker, body string
+}
+
+// apply is the shipping decision tree's own step (3) (design section 9.3):
+// the freshness check against a's own SHA and seen digests (step 1a, before
+// any write); every reply body built with replyBody before the first write
+// (step 1b); for each action, in artifact order, a missing or resolved
+// thread is skipped and logged, a reply or addressed action posts (guarded
+// by ThreadCommentsContain's own idempotent marker check) and resolves, and
+// a fix action is collected (step 2); the collected fix actions, if any, go
+// through the shared shipping gate of 8.7 before one consolidated fix
+// request is written (step 3); and the closing "respond applied <aid>"
+// marker (step 4). A GitHub write error returns with no commit: the next
+// tick runs APPLY again, and the per-reply marker (ThreadCommentsContain)
+// skips what this attempt already posted.
+func (h shipHandler) apply(ctx context.Context, t store.Ticket, d Deps, a store.RespondRow) (store.HandlerCommit, error) {
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+	number, err := parsePRNumber(*t.PRURL)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: %w", err)
+	}
+	pr, err := proj.PullRequests.GetPR(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: get pr: %w", err)
+	}
+	threads, err := proj.Threads.ListThreads(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: list threads: %w", err)
+	}
+	login, err := proj.Threads.Viewer(ctx)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: viewer: %w", err)
+	}
+
+	// 1a. Freshness, before any write.
+	if pr.HeadSHA != a.Respond.SHA {
+		return respondStaleCommit(t, d, a.Respond.Batch, respondStaleHeadMovedReason), nil
+	}
+	seenIDs := make([]string, len(a.Respond.Seen))
+	seen := make(map[string]string, len(a.Respond.Seen))
+	for i, s := range a.Respond.Seen {
+		seenIDs[i] = s.TID
+		seen[s.TID] = s.LastComment
+	}
+	byTID := threadsByTID(threads)
+	if stale, reason := respondStaleReason(seenIDs, seen, byTID, login); stale {
+		return respondStaleCommit(t, d, a.Respond.Batch, reason), nil
+	}
+
+	// 1b. Every reply body built before the first write; step 2's own
+	// missing/resolved skip and fix collection are pure too, so this whole
+	// pass makes no GitHub call.
+	var replies []applyPendingReply
+	var fixActions []response.ThreadAction
+	skipped := 0
+
+	for _, action := range a.Respond.Threads {
+		th, exists := byTID[action.ID]
+		switch {
+		case !exists:
+			skipped++
+			slog.Info("thread skipped", "ticket_id", t.ID, "tid", action.ID, "reason", "missing")
+			continue
+		case th.IsResolved:
+			skipped++
+			slog.Info("thread skipped", "ticket_id", t.ID, "tid", action.ID, "reason", "resolved")
+			continue
+		}
+
+		switch action.Action {
+		case response.ThreadVerbFix:
+			fixActions = append(fixActions, action)
+		case response.ThreadVerbReply, response.ThreadVerbAddressed:
+			marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", a.ArtifactID, action.ID)
+			body, bodyErr := replyBody(login, action.Text, marker)
+			if bodyErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: reply body: %w", bodyErr)
+			}
+			replies = append(replies, applyPendingReply{rawID: th.ID, marker: marker, body: body})
+		default:
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: thread %s: unrecognized action %q", action.ID, action.Action)
+		}
+	}
+
+	// Step 2's own writes: ReplyToThread guarded by ThreadCommentsContain's
+	// own idempotent marker check, then ResolveThread -- always, since every
+	// thread reaching this loop was already read unresolved above.
+	for _, rep := range replies {
+		contains, containsErr := proj.Threads.ThreadCommentsContain(ctx, rep.rawID, rep.marker, login)
+		if containsErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: thread comments contain: %w", containsErr)
+		}
+		if !contains {
+			if replyErr := proj.Threads.ReplyToThread(ctx, rep.rawID, rep.body); replyErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: reply to thread: %w", replyErr)
+			}
+		}
+		if resolveErr := proj.Threads.ResolveThread(ctx, rep.rawID); resolveErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: resolve thread: %w", resolveErr)
+		}
+	}
+
+	// Step 3: the collected fix actions, gated by the shared shipping
+	// counter of 8.7. A gate hit still keeps every reply and resolve this
+	// attempt already made; it only withholds the "respond applied <aid>"
+	// marker, so the escalation holds the artifact id instead (8.7).
+	fixed := 0
+	var fixMsg *store.Message
+	var requestAfterRunID int64
+	if len(fixActions) > 0 {
+		text := respondFixRequestText(a.Respond.Batch, fixActions, byTID)
+
+		ciReqs, ciErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedCILogPrefix)
+		if ciErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: ci_log fix requests: %w", ciErr)
+		}
+		threadReqs, threadErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedThreadsPrefix)
+		if threadErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: threads fix requests: %w", threadErr)
+		}
+		k := len(ciReqs) + len(threadReqs)
+		maxLoops := d.Machine.Jobs[jobRespondName].MaxLoops
+
+		gateOK, what, why, tried := shippingGate(k, maxLoops, string(FixKindThreads), a.ArtifactID, text)
+		if !gateOK {
+			c := shipLoopsExhausted(t, d, what, why, tried)
+			c.ClearPoll = true
+			return c, nil
+		}
+
+		maxRunID, runErr := d.Store.MaxRunID(ctx, t.ID)
+		if runErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: max run id: %w", runErr)
+		}
+		msg, msgErr := fixRequestMessage(t, FixKindThreads, text, maxRunID)
+		if msgErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: apply: fix request message: %w", msgErr)
+		}
+		fixMsg = &msg
+		requestAfterRunID = maxRunID
+		fixed = 1
+	}
+
+	// Step 4: the closing marker. Its own line 2 reports what this commit
+	// itself did (replies posted or skipped this attempt, and whether a fix
+	// request was written -- 0 or 1, never a thread count: a retried gate
+	// (shipping.go's retryShippingLoopsExhausted) rebuilds this same line
+	// knowing only whether one consolidated request exists, not how many
+	// threads fed it).
+	body := fmt.Sprintf("respond applied %d\nreplied %d fixing %d skipped %d", a.ArtifactID, len(replies), fixed, skipped)
+	if fixMsg != nil {
+		body += fmt.Sprintf("\nfix request after run %d", requestAfterRunID)
+	}
+	appliedMsg := store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body}
+
+	c := baseCommit(t, d)
+	if fixMsg != nil {
+		c.Messages = []store.Message{*fixMsg, appliedMsg}
+	} else {
+		c.Messages = []store.Message{appliedMsg}
+	}
+	c.ClearPoll = true
+	return c, nil
 }
