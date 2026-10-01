@@ -8,6 +8,7 @@ package gitfixture
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,66 +21,118 @@ import (
 // never leaves the repository it signs for.
 const signingKeyName = "zing-fixture-key"
 
-// sharedSigningKeyOnce guards generating the one ed25519 key every
-// NewSigningRepo call in this process signs with. ssh-keygen is a process
-// spawn per call, and a test binary can build hundreds of fixtures
-// (internal/job alone seeds several per table test), so this runs it once
-// per binary and NewSigningRepo copies the result into each fixture's own
-// .git directory instead of regenerating it. Every fixture still carries
-// its own on-disk key at its usual repo-local path; only the bytes are
-// shared. Nothing asserts the key differs between fixtures (checked
-// against internal/gitfixture's own tests and every caller).
+// templateOnce guards building the one template repository every
+// NewSigningRepo call in this process copies. Each git command is a
+// process spawn, and spawning from a race-instrumented test binary is
+// slow (a fork copies its whole shadow address space), while a test
+// binary can build hundreds of fixtures (internal/job seeds one per
+// git-backed test). So the ssh-keygen and the nine git commands run once
+// per binary, and NewSigningRepo copies the result with plain file
+// writes. Every fixture still carries its own copy of the key at its
+// usual repo-local path and its own repo-local config; only the bytes,
+// and so the initial commit's sha, are shared (nothing asserts they
+// differ between fixtures, and fixtures built in the same second already
+// shared it, since an ed25519 signature is deterministic).
 var (
-	sharedSigningKeyOnce sync.Once
-	sharedSigningKeyPath string
-	sharedSigningKeyErr  error
+	templateOnce sync.Once
+	templateDir  string
+	templateErr  error
 )
 
-// sharedSigningKey returns the path to the process-wide ed25519 signing
-// key, generating it on the first call. The key lives under a directory
-// os.MkdirTemp creates and this process never removes: it holds nothing
-// but a disposable test-and-selftest signing key, so leaving it for the OS
-// to reclaim is simpler than threading a cleanup hook through every
-// caller.
-func sharedSigningKey() (string, error) {
-	sharedSigningKeyOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "zing-fixture-key-")
+// template returns the path to the process-wide template repository,
+// building it on the first call. It lives under a directory os.MkdirTemp
+// creates and this process never removes: it holds nothing but a
+// one-commit repository and its disposable test-and-selftest signing key,
+// so leaving it for the OS to reclaim is simpler than threading a cleanup
+// hook through every caller.
+func template() (string, error) {
+	templateOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "zing-fixture-template-")
 		if err != nil {
-			sharedSigningKeyErr = fmt.Errorf("gitfixture: temp dir for shared signing key: %w", err)
+			templateErr = fmt.Errorf("gitfixture: temp dir for template repo: %w", err)
 			return
 		}
-		keyPath := filepath.Join(dir, signingKeyName)
 		// context.Background(), not a caller's ctx: this runs at most once
 		// per process, and must not be left half-done by the first
 		// caller's deadline or cancellation when later callers still need
 		// the result.
-		out, genErr := exec.CommandContext(context.Background(), "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-fixture", "-f", keyPath).CombinedOutput()
-		if genErr != nil {
-			sharedSigningKeyErr = fmt.Errorf("gitfixture: ssh-keygen: %w: %s", genErr, out)
+		if err := buildSigningRepo(context.Background(), dir); err != nil {
+			templateErr = err
 			return
 		}
-		sharedSigningKeyPath = keyPath
+		templateDir = dir
 	})
-	return sharedSigningKeyPath, sharedSigningKeyErr
+	return templateDir, templateErr
 }
 
-// copySharedSigningKey copies the shared private key and its public
-// counterpart to dest and dest+".pub", each with mode 0600.
-func copySharedSigningKey(dest string) error {
-	src, err := sharedSigningKey()
-	if err != nil {
+// buildSigningRepo inits a git repository at dir on branch "main", writes
+// a fresh ed25519 key to "<dir>/.git/zing-fixture-key", configures it
+// through repo-local git config, and makes one signed commit.
+func buildSigningRepo(ctx context.Context, dir string) error {
+	if err := runGit(ctx, dir, "init", "-q", "-b", "main"); err != nil {
 		return err
 	}
-	for _, ext := range []string{"", ".pub"} {
-		content, readErr := os.ReadFile(src + ext)
-		if readErr != nil {
-			return fmt.Errorf("gitfixture: read shared signing key: %w", readErr)
-		}
-		if writeErr := os.WriteFile(dest+ext, content, 0o600); writeErr != nil { //nolint:gosec // G703: dest is NewSigningRepo's own keyPath, built from its caller's dir under "<dir>/.git/"; no path component comes from outside this package
-			return fmt.Errorf("gitfixture: write signing key copy: %w", writeErr)
+
+	keyPath := filepath.Join(dir, ".git", signingKeyName)
+	out, err := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "zing-fixture", "-f", keyPath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gitfixture: ssh-keygen: %w: %s", err, out)
+	}
+
+	config := [][2]string{
+		{"user.name", "Zing Fixture"},
+		{"user.email", "zing-fixture@example.com"},
+		{"commit.gpgsign", "true"},
+		{"gpg.format", "ssh"},
+		{"user.signingKey", keyPath},
+	}
+	for _, kv := range config {
+		if err := runGit(ctx, dir, "config", kv[0], kv[1]); err != nil {
+			return err
 		}
 	}
-	return nil
+
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# fixture repo\n"), 0o600); err != nil {
+		return fmt.Errorf("gitfixture: write README.md: %w", err)
+	}
+	if err := runGit(ctx, dir, "add", "README.md"); err != nil {
+		return err
+	}
+	return runGit(ctx, dir, "commit", "-q", "-S", "-m", "initial commit")
+}
+
+// copyTree copies every directory and regular file under src to the same
+// relative path under dest, keeping each one's permission bits. Anything
+// else (a symlink, a socket) is an error: git init and one commit create
+// neither.
+func copyTree(src, dest string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dest, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case info.Mode().IsRegular():
+			content, err := os.ReadFile(path) //nolint:gosec // G304: path comes from walking this package's own template directory
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, content, info.Mode().Perm()) //nolint:gosec // G306,G703: target is under the caller's own dir, built from the template's relative paths, keeping git's own modes
+		default:
+			return fmt.Errorf("gitfixture: template entry %s is not a file or directory", rel)
+		}
+	})
 }
 
 // gitLocationEnv names the environment variables that redirect where git
@@ -114,47 +167,44 @@ func Git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// NewSigningRepo inits a git repository at dir on branch "main" with one
-// signed commit. It copies this process's shared ed25519 signing key (one
-// ssh-keygen per binary, not per repo; see sharedSigningKey) to
-// "<dir>/.git/zing-fixture-key" and configures it entirely through that
-// repository's own local git config (user.name, user.email,
-// commit.gpgsign, gpg.format, user.signingKey). It never runs "git config
-// --global" and never writes outside dir.
+// NewSigningRepo makes dir a git repository on branch "main" with one
+// signed commit. It copies this process's template repository (built
+// once per binary, not per repo; see template), including its ed25519
+// signing key at "<dir>/.git/zing-fixture-key", then points the copy's
+// repo-local user.signingKey at that copy. All of its config is
+// repository-local (user.name, user.email, commit.gpgsign, gpg.format,
+// user.signingKey): it never runs "git config --global" and never writes
+// outside dir.
 func NewSigningRepo(ctx context.Context, dir string) error {
-	if err := runGit(ctx, dir, "init", "-q", "-b", "main"); err != nil {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+	src, err := template()
+	if err != nil {
 		return err
 	}
-
-	keyPath := filepath.Join(dir, ".git", signingKeyName)
-	if err := copySharedSigningKey(keyPath); err != nil {
-		return err
+	if copyErr := copyTree(src, dir); copyErr != nil {
+		return fmt.Errorf("gitfixture: copy template repo: %w", copyErr)
 	}
 
-	config := [][2]string{
-		{"user.name", "Zing Fixture"},
-		{"user.email", "zing-fixture@example.com"},
-		{"commit.gpgsign", "true"},
-		{"gpg.format", "ssh"},
-		{"user.signingKey", keyPath},
+	// git writes the key path into .git/config unquoted when it holds no
+	// special characters; refuse a template whose config does not carry
+	// it verbatim rather than leave the copy signing with the template's
+	// own key file.
+	configPath := filepath.Join(dir, ".git", "config")
+	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
+	if err != nil {
+		return fmt.Errorf("gitfixture: read copied config: %w", err)
 	}
-	for _, kv := range config {
-		if err := runGit(ctx, dir, "config", kv[0], kv[1]); err != nil {
-			return err
-		}
+	oldKey := filepath.Join(src, ".git", signingKeyName)
+	if !strings.Contains(string(config), "signingKey = "+oldKey+"\n") {
+		return fmt.Errorf("gitfixture: template config does not name its key as %s", oldKey)
 	}
-
-	readme := filepath.Join(dir, "README.md")
-	if err := os.WriteFile(readme, []byte("# fixture repo\n"), 0o600); err != nil {
-		return fmt.Errorf("gitfixture: write README.md: %w", err)
+	newKey := filepath.Join(dir, ".git", signingKeyName)
+	rewritten := strings.Replace(string(config), "signingKey = "+oldKey+"\n", "signingKey = "+newKey+"\n", 1)
+	if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G703: configPath is under the caller's own dir
+		return fmt.Errorf("gitfixture: write copied config: %w", writeErr)
 	}
-	if err := runGit(ctx, dir, "add", "README.md"); err != nil {
-		return err
-	}
-	if err := runGit(ctx, dir, "commit", "-q", "-S", "-m", "initial commit"); err != nil {
-		return err
-	}
-
 	return nil
 }
 

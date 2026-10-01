@@ -432,8 +432,8 @@ func shipOrchestratorFor(t *testing.T, localPath string, gh orchestrator.GitHub)
 	if orchErr != nil {
 		return nil, "", false
 	}
-	repoGit, gitErr := orch.GitCommonDir(t.Context())
-	if gitErr != nil {
+	repoGit, ok = pbGitCommonDir(t, orch, localPath)
+	if !ok {
 		return nil, "", false
 	}
 	return orch, repoGit, true

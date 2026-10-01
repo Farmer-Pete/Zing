@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -146,11 +147,36 @@ func pbOrchestratorFor(t *testing.T, localPath string, run orchestrator.Runner) 
 	if orchErr != nil {
 		return nil, "", false
 	}
-	repoGit, gitErr := orch.GitCommonDir(t.Context())
-	if gitErr != nil {
+	repoGit, ok = pbGitCommonDir(t, orch, localPath)
+	if !ok {
 		return nil, "", false
 	}
 	return orch, repoGit, true
+}
+
+// pbCommonDirs caches each fixture repository's common git dir by its
+// LocalPath. Every pbClaim and shipClaim rebuilds its Projects, and a
+// shipping test claims dozens of times, so asking git each time cost
+// thousands of process spawns per run, which the race detector makes
+// slow. A fixture repository never moves, and every LocalPath is its own
+// test's own temp dir, so the answer never changes for a given key.
+var pbCommonDirs sync.Map
+
+// pbGitCommonDir returns orch.GitCommonDir for localPath, cached in
+// pbCommonDirs. ok is false, and nothing is cached, when localPath is not
+// a git repository.
+func pbGitCommonDir(t *testing.T, orch *orchestrator.Orchestrator, localPath string) (repoGit string, ok bool) {
+	t.Helper()
+	if cached, hit := pbCommonDirs.Load(localPath); hit {
+		repoGit, ok = cached.(string)
+		return repoGit, ok
+	}
+	repoGit, err := orch.GitCommonDir(t.Context())
+	if err != nil {
+		return "", false
+	}
+	pbCommonDirs.Store(localPath, repoGit)
+	return repoGit, true
 }
 
 // pbBuildProjects returns a job.Project for every store project whose
