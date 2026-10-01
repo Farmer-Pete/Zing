@@ -185,6 +185,28 @@ func TestFreeReplyRendersDraftConflictSpan(t *testing.T) {
 	}
 }
 
+// TestFreeReplyRendersDraftSavedSpan proves bug fix 11 (Enter saved the
+// draft but the reply box emptied and stayed empty): freeReply always
+// renders an empty ".draft-saved" span (CSS hides it empty, shell.templ) as
+// a sibling of the reply-input, console.js's postDraftRequest own stable
+// "Saved." target regardless of whether a save has happened yet, and the
+// reply box still starts with any already-saved draft text as its value --
+// the piece of 01e4713 this bug fix builds on, not clears on Enter.
+func TestFreeReplyRendersDraftSavedSpan(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := freeReply(1, 2, "already saved text").Render(t.Context(), &sb); err != nil {
+		t.Fatalf("freeReply.Render: %v", err)
+	}
+	got := sb.String()
+	if !strings.Contains(got, `<p class="draft-saved" aria-live="polite"></p>`) {
+		t.Errorf("rendered freeReply missing the draft-saved span; got:\n%s", got)
+	}
+	if !strings.Contains(got, `value="already saved text"`) {
+		t.Errorf("rendered freeReply lost the draft's own text as the input's value; got:\n%s", got)
+	}
+}
+
 // TestQuestionGroupLocksAnAnsweredQuestion proves the bug fix for "render
 // an answered question's controls as disabled or locked with its answer
 // shown, so you can't type into a closed question at all": a non-interactive

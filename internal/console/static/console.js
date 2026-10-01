@@ -341,21 +341,38 @@ function showDraftConflict(inputEl, message) {
 	}
 }
 
+// findDraftSavedEl/showDraftSaved mirror findDraftConflictEl/
+// showDraftConflict above, for freeReply's own ".draft-saved" span (bug fix
+// 11): the one place postDraftRequest reports a successful save back to the
+// box it came from.
+function findDraftSavedEl(inputEl) {
+	return inputEl.closest('.reply')?.querySelector('.draft-saved') ?? null;
+}
+
+function showDraftSaved(inputEl, message) {
+	const el = findDraftSavedEl(inputEl);
+	if (el) {
+		el.textContent = message;
+	}
+}
+
 // postDraft handles Enter inside a question input (design section 6.4,
 // 6.7): data-draft-ticket/data-draft-question on the focused input, its
-// value as the free-text reply. It clears the input synchronously, the
-// moment the draft is queued, rather than waiting on the fetch to resolve
-// (PR #16 review, cubic console.js:255): clearing in the async .then left a
-// window where fast typing after Enter landed in the input before the
-// response came back, and the old callback then wiped out that new, unsent
-// text along with the already-sent draft.
+// value as the free-text reply.
 //
-// On a 409 (bug fix: Enter on a question that closed out from under a
-// stale, still-rendered reply box got a conflict and the typed text
-// silently vanished with nothing explaining why), postDraftRequest below
-// restores the typed text -- but only if the box is still empty, so a
-// keystroke typed while the request was in flight still wins -- and shows
-// the conflict beside the box via draftConflictMessage (keyboard.mjs).
+// It leaves the input's text in place (bug fix 11: Enter saved the draft --
+// the serve log and the store both showed it -- but the box emptied and
+// stayed empty, looking like the reply was lost). The earlier code cleared
+// the box synchronously on Enter on the assumption that the live /stream's
+// next patch would refill it from the now-saved draft, the way a full page
+// load already does (01e4713); it doesn't, by design (answer.go's
+// handleDraft: a draft publishes no bus wake, so saving one never patches
+// #main), so the clear was never undone. Leaving the text alone sidesteps
+// that gap entirely: the box already shows what got saved, postDraftRequest
+// below reports success beside it (.draft-saved, "Saved."), and the box is
+// only ever cleared by a real re-render -- after a successful send
+// (sendBatch), when the draft drops out of the ticket's in-progress answer
+// and the next patch renders the box empty.
 function postDraft() {
 	const el = document.activeElement;
 	const ticket = el?.dataset?.draftTicket;
@@ -364,12 +381,16 @@ function postDraft() {
 		return false;
 	}
 	const text = el.value;
-	el.value = '';
 	showDraftConflict(el, '');
+	showDraftSaved(el, '');
 	postDraftRequest(el, Number(ticket), question ? Number(question) : null, text);
 	return true;
 }
 
+// postDraftRequest reports its outcome only if el still holds the same text
+// it was sent with: the owner may have kept typing while the request was in
+// flight, and a stale "Saved."/conflict for text that is no longer in the
+// box would be as misleading as the bug this fixes.
 async function postDraftRequest(el, ticket, question, text) {
 	try {
 		const resp = await fetch('/draft', {
@@ -377,14 +398,16 @@ async function postDraftRequest(el, ticket, question, text) {
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
 			body: JSON.stringify({ ticket, question, text }),
 		});
-		if (!resp.ok) {
-			console.error('console.js: POST /draft', resp.status);
-			const reason = (await resp.text()).trim();
-			if (el.value === '') {
-				el.value = text;
-			}
-			showDraftConflict(el, draftConflictMessage(reason));
+		if (el.value !== text) {
+			return;
 		}
+		if (resp.ok) {
+			showDraftSaved(el, 'Saved.');
+			return;
+		}
+		console.error('console.js: POST /draft', resp.status);
+		const reason = (await resp.text()).trim();
+		showDraftConflict(el, draftConflictMessage(reason));
 	} catch (err) {
 		console.error('console.js: POST /draft', err);
 	}

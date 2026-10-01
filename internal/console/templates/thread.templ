@@ -428,6 +428,14 @@ func decisionClass(d, draftDecision response.Decision) string {
 // looking lost, and reply-hint says what sends it, since sending is
 // keyboard-only (Q31) and nothing on screen said so before this fix.
 //
+// .draft-saved (bug fix 11: Enter saved the draft -- the serve log and the
+// store both showed it -- but the box emptied and stayed empty, since
+// handleDraft (answer.go) publishes no bus wake, so nothing ever re-rendered
+// the box with the now-saved text) starts empty, same as .draft-conflict
+// below, and is console.js's postDraftRequest's own "Saved." target: it no
+// longer clears the input on Enter, so this is the only on-screen
+// confirmation that the save actually landed.
+//
 // .draft-conflict (bug fix: Enter on a question that closed out from under
 // a stale, still-rendered reply box got a 409 with the typed text silently
 // gone) starts empty -- :empty hides it (shell.templ) -- and is console.js's
@@ -437,6 +445,7 @@ templ freeReply(ticketID, questionID int64, draftReply string) {
 	<div class="reply">
 		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" value={ draftReply } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
 		<p class="reply-hint">Saved as a draft. <span class="send-chord">⌘+Enter</span> sends.</p>
+		<p class="draft-saved" aria-live="polite"></p>
 		<p class="draft-conflict" aria-live="polite"></p>
 	</div>
 }

@@ -284,6 +284,17 @@ templ palette() {
 			font-size: 0.75rem;
 			margin: 0.25rem 0 0;
 		}
+		/* .draft-saved (bug fix 11, console.js's showDraftSaved): "Saved." next
+		   to a reply box right after Enter actually saves its draft, since the
+		   box itself no longer clears on Enter and needed its own on-screen
+		   confirmation. Empty (the common case) renders nothing, matching
+		   #alerts:empty above. */
+		.draft-saved:empty { display: none; }
+		.draft-saved {
+			color: var(--zing-accent);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
 		/* .draft-conflict (bug fix, console.js's showDraftConflict): a
 		   closed-question 409 beside the reply box that triggered it, e.g.
 		   "This question is already answered." Empty (the common case)
