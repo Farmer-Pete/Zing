@@ -94,6 +94,8 @@ Your final message is exactly one <zing> document that follows the schema
 above. Nothing else in the final message is read. If you need a decision
 from the owner, return the question outcome. If you cannot continue, return
 the error outcome with what, why, and what you tried. Before you finish,
-write the document to a file and run `zing validate <file>`. Fix every error
-it prints and run it again until it prints nothing. Every claim is checked
-by a program, not a person.
+run `zing validate -` with the document on standard input, or
+`zing validate <file>` if you can write files. Fix every error it prints
+and run it again until it prints nothing. If your tools cannot run it,
+return the document anyway: Zing validates every document and sends any
+errors back. Every claim is checked by a program, not a person.

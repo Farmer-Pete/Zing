@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -198,7 +199,7 @@ func TestRunValidate_WrongArgCountExitsTwo(t *testing.T) {
 	if code != 2 {
 		t.Errorf("code = %d, want 2", code)
 	}
-	want := "usage: zing validate [--kind bug|feature] <file>\n"
+	want := "usage: zing validate [--kind bug|feature] <file|->\n"
 	if out != want {
 		t.Errorf("stderr = %q, want %q", out, want)
 	}
@@ -225,5 +226,24 @@ func TestRunValidate_ParseFailureExitsOne(t *testing.T) {
 	want := "validate: no zing element in final message\n"
 	if out != want {
 		t.Errorf("stderr = %q, want %q", out, want)
+	}
+}
+
+// TestRunValidate_DashReadsStdin proves "-" validates a document from
+// standard input, the path a read-only job takes since its sandbox cannot
+// write the file the plain form needs.
+func TestRunValidate_DashReadsStdin(t *testing.T) {
+	code, out := captureStderr(t, func() int {
+		return runValidateFrom([]string{"-"}, strings.NewReader(validExample))
+	})
+	if code != 0 || out != "" {
+		t.Errorf("valid doc on stdin: code = %d, stderr = %q, want 0 and empty", code, out)
+	}
+
+	code, _ = captureStderr(t, func() int {
+		return runValidateFrom([]string{"-"}, strings.NewReader("<zing>"))
+	})
+	if code != 1 {
+		t.Errorf("broken doc on stdin: code = %d, want 1", code)
 	}
 }
