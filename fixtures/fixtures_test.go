@@ -30,10 +30,11 @@ func repoRootFS(t *testing.T) fs.FS {
 // under classify/ is job.Classify (task 6: a fresh, kindless ticket
 // classifies before planning ever opens a session); a script under
 // planreview/ is job.Planreview (task 7b: the plan-review tick, on its own
-// entry step rather than inside a planning turn). This mirrors checkHeader's
-// own "document says X, run is Y" check, so a script whose <zing job="...">
-// disagrees with its own directory fails loudly here instead of validating
-// under the wrong job.
+// entry step rather than inside a planning turn); a script under judge/ is
+// job.Judge (PKG9-PLAN.md section 7.2, M2 task 7a). This mirrors
+// checkHeader's own "document says X, run is Y" check, so a script whose
+// <zing job="..."> disagrees with its own directory fails loudly here
+// instead of validating under the wrong job.
 func jobForScript(t *testing.T, name string) response.Job {
 	t.Helper()
 	switch {
@@ -49,8 +50,10 @@ func jobForScript(t *testing.T, name string) response.Job {
 		return response.JobPerimeter
 	case strings.HasPrefix(name, "review/"):
 		return response.JobReview
+	case strings.HasPrefix(name, "judge/"):
+		return response.JobJudge
 	default:
-		t.Fatalf("script %s is under none of planning/, build/, classify/, planreview/, perimeter/, or review/; add a case to jobForScript", name)
+		t.Fatalf("script %s is under none of planning/, build/, classify/, planreview/, perimeter/, review/, or judge/; add a case to jobForScript", name)
 		return ""
 	}
 }

@@ -26,20 +26,25 @@ import (
 // 3); every ticket starts there.
 const stateQueued = "queued"
 
-// The machine.toml job names the timeout lookup maps a pipeline state to
+// The machine.toml job names claimTimeoutFor maps a pipeline state to
 // (design section 6.8 step 6, PKG9-PLAN.md section 17.1): planning's job is
 // "planning", building's job is "build", reviewing's job is "review" (ROUND
 // runs up to seven lens runs in parallel under one job.review.timeout_minutes
-// horizon, PKG9-PLAN.md section 6.2). Every other candidate state is a
-// code-only handler and uses defaultCodeTimeout.
+// horizon, PKG9-PLAN.md section 6.2), judging's own claim takes the largest
+// of "judge", "build", and "perimeter" (a fix step runs in every post-build
+// state, design section 5.3) and a 10-minute floor. Every other candidate
+// state is a code-only handler and uses defaultCodeTimeout.
 const (
 	statePlanning  = "planning"
 	stateBuilding  = "building"
 	stateReviewing = "reviewing"
+	stateJudging   = "judging"
 
-	jobPlanning = "planning"
-	jobBuild    = "build"
-	jobReview   = "review"
+	jobPlanning  = "planning"
+	jobBuild     = "build"
+	jobReview    = "review"
+	jobJudge     = "judge"
+	jobPerimeter = "perimeter"
 )
 
 // defaultCodeTimeout is the claim/run timeout a code-only state's handler
@@ -253,7 +258,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	// lease's actual coverage, measured from the moment it is really
 	// claimed, would fall short of timeout + claimGrace by however long
 	// those earlier steps took (design section "dispatch" fix 5, cubic P2).
-	timeout := d.timeoutFor(ticket.State)
+	timeout := d.claimTimeoutFor(ticket.State)
 	expires := time.Now().Add(timeout + claimGrace)
 	claimed, err := d.store.Claim(ctx, ticket.ID, d.cfg.Owner, expires)
 	if err != nil {
@@ -361,35 +366,59 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 	return nil
 }
 
-// timeoutFor returns the claim/run timeout for state: the state's job
-// timeout_minutes for planning and building, or defaultCodeTimeout for
-// every other (code-only) state (design section 6.8 step 6).
-func (d *Dispatcher) timeoutFor(state string) time.Duration {
-	jobName, ok := jobNameForState(state)
-	if !ok {
+// claimTimeoutFor returns the claim/run timeout for state (design section
+// 6.8 step 6, PKG9-PLAN.md section 17.1): planning, building, and reviewing
+// each take one job's own timeout_minutes (jobTimeoutMinutes' own
+// defaultCodeTimeout fallback when that job is missing or carries no
+// positive timeout_minutes); judging takes the largest of the judge,
+// build, and perimeter job timeouts and a 10-minute floor
+// (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
+// (design section 5.3) can each run inside "judging", so its own claim
+// must outlast all three -- never falling back to defaultCodeTimeout even
+// when every one of those jobs is misconfigured at 0. Every other
+// (code-only) state uses defaultCodeTimeout.
+func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
+	switch state {
+	case statePlanning:
+		return d.jobTimeoutOrDefault(jobPlanning)
+	case stateBuilding:
+		return d.jobTimeoutOrDefault(jobBuild)
+	case stateReviewing:
+		return d.jobTimeoutOrDefault(jobReview)
+	case stateJudging:
+		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
+	default:
 		return defaultCodeTimeout
 	}
-	j, ok := d.machine.Jobs[jobName]
+}
+
+// jobTimeoutOrDefault returns name's own timeout_minutes, or
+// defaultCodeTimeout when machine.toml names no such job or gives it no
+// positive timeout_minutes (claimTimeoutFor's own single-job states).
+func (d *Dispatcher) jobTimeoutOrDefault(name string) time.Duration {
+	j, ok := d.machine.Jobs[name]
 	if !ok || j.TimeoutMinutes <= 0 {
 		return defaultCodeTimeout
 	}
 	return time.Duration(j.TimeoutMinutes) * time.Minute
 }
 
-// jobNameForState maps the three real-handler pipeline states to the
-// machine.toml job name that names their timeout.
-func jobNameForState(state string) (string, bool) {
-	switch state {
-	case statePlanning:
-		return jobPlanning, true
-	case stateBuilding:
-		return jobBuild, true
-	case stateReviewing:
-		return jobReview, true
-	default:
-		return "", false
+// jobTimeoutMinutes returns name's own timeout_minutes as a Duration, or 0
+// when machine.toml names no such job or gives it no positive
+// timeout_minutes: claimTimeoutFor's own judging row folds this into a
+// max() alongside judgingMinClaimTimeout, so a misconfigured job
+// contributes nothing rather than defaultCodeTimeout's own 5 minutes.
+func (d *Dispatcher) jobTimeoutMinutes(name string) time.Duration {
+	j, ok := d.machine.Jobs[name]
+	if !ok || j.TimeoutMinutes <= 0 {
+		return 0
 	}
+	return time.Duration(j.TimeoutMinutes) * time.Minute
 }
+
+// judgingMinClaimTimeout is claimTimeoutFor's own floor for "judging"
+// (design section 17.1's table: "max(judge, build, perimeter, 10)").
+const judgingMinClaimTimeout = 10 * time.Minute
 
 // runAndCommit is step 7: run ticket's handler under a context whose
 // deadline is (a fresh time.Now(), taken here, right after the claim) +

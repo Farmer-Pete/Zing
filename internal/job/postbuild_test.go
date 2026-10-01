@@ -121,6 +121,38 @@ func newPostbuildTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// pbFixtureOwner and pbFixtureDefaultBranch are this file's own
+// orchestrator.Project fixture fields (goconst, once rather than repeated
+// at every orchestrator.New call site in this package, package job):
+// building a fake GitHub owner/repo pair and a "main" default branch is
+// never read back by anything a test asserts on.
+const (
+	pbFixtureOwner         = "fixture"
+	pbFixtureDefaultBranch = "main"
+)
+
+// pbOrchestratorFor builds an *orchestrator.Orchestrator over localPath
+// under run (judging_test.go's own TestJudgeWorktreeRemoveFailureLogged
+// passes a Runner that selectively fails, in place of pbBuildProjects' own
+// orchestrator.NewRunner()), and reads back its common git dir. ok is false
+// when localPath is not a real git repository (orchestrator.New never fails
+// on a plain directory, but GitCommonDir does), the same silent skip
+// pbBuildProjects already gave a non-git-backed project.
+func pbOrchestratorFor(t *testing.T, localPath string, run orchestrator.Runner) (orch *orchestrator.Orchestrator, repoGit string, ok bool) {
+	t.Helper()
+	orch, orchErr := orchestrator.New(
+		orchestrator.Project{Owner: pbFixtureOwner, Repo: pbFixtureOwner, LocalPath: localPath, DefaultBranch: pbFixtureDefaultBranch},
+		pbGitHub{}, run, nil)
+	if orchErr != nil {
+		return nil, "", false
+	}
+	repoGit, gitErr := orch.GitCommonDir(t.Context())
+	if gitErr != nil {
+		return nil, "", false
+	}
+	return orch, repoGit, true
+}
+
 // pbBuildProjects returns a job.Project for every store project whose
 // LocalPath is a real git repository (skeleton_test.go's own
 // buildJobTestProjects, package job_test, unreachable from here).
@@ -132,14 +164,8 @@ func pbBuildProjects(t *testing.T, s *store.Store) map[int64]Project {
 	}
 	out := make(map[int64]Project, len(projects))
 	for _, p := range projects {
-		orch, orchErr := orchestrator.New(
-			orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: p.LocalPath, DefaultBranch: "main"},
-			pbGitHub{}, orchestrator.NewRunner(), nil)
-		if orchErr != nil {
-			continue
-		}
-		repoGit, gitErr := orch.GitCommonDir(t.Context())
-		if gitErr != nil {
+		orch, repoGit, ok := pbOrchestratorFor(t, p.LocalPath, orchestrator.NewRunner())
+		if !ok {
 			continue
 		}
 		out[p.ID] = Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f " + pbHelloTxt, LintCmd: pbNoopShellCmd}
