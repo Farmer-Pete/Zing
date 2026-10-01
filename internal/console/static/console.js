@@ -398,15 +398,56 @@ function pickChip(n) {
 	return true;
 }
 
-// sendBatch handles the send chord (design section 6.4, 6.7). POST /send
-// does not exist until Task 7; wired ahead of it against the ticket this
-// module's own nav state already tracks.
+// sendResultSelector/showSendResult (bug fix: Cmd+Enter sent the batch, but
+// nothing in the console said so, so the owner thought it had done
+// nothing). The banner is appended to document.body, a sibling of #main and
+// #rail rather than a child of either (buildHelpOverlay, below, uses the
+// same placement): POST /send's own bus.Publish wakes /stream almost
+// immediately, and a #main patch lands right after the response this
+// banner is built from, so an element server-rendered inside #main would
+// be morphed back to empty before a reader could see it. A plain,
+// client-owned node outside every patched region has nothing to race.
+function showSendResult(text) {
+	let el = document.getElementById('send-result');
+	if (!el) {
+		el = document.createElement('div');
+		el.id = 'send-result';
+		el.className = 'send-result';
+		el.setAttribute('role', 'status');
+		el.setAttribute('aria-live', 'polite');
+		document.body.appendChild(el);
+	}
+	el.textContent = text;
+}
+
+// sendBatch handles the send chord (design section 6.4, 6.7): POST /send
+// against the ticket this module's own nav state already tracks, then
+// shows its plain-text result (sendResultText, answer.go) via
+// showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
+// to send.") otherwise -- so Cmd+Enter is never silent.
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postJSON('/send', { ticket: state.nav.open });
+	postSendBatch(state.nav.open);
 	return true;
+}
+
+async function postSendBatch(ticket) {
+	try {
+		const resp = await fetch('/send', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ ticket }),
+		});
+		const text = await resp.text();
+		showSendResult(text);
+		if (!resp.ok && resp.status !== 409) {
+			console.error('console.js: POST /send', resp.status);
+		}
+	} catch (err) {
+		console.error('console.js: POST /send', err);
+	}
 }
 
 // ---- rail, side box, stop, mark-read (Task 9/10/7 backends) -------------

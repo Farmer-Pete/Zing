@@ -275,6 +275,27 @@ templ palette() {
 			margin: 0.25rem 0 0;
 		}
 
+		/* #send-result (bug fix, console.js's showSendResult): a client-owned
+		   banner reporting POST /send's own result line ("Sent N answer(s)."
+		   or "Nothing to send."), appended outside #main/#rail so the patch
+		   POST /send's own bus.Publish triggers right after cannot morph it
+		   back to nothing before a reader sees it. Empty (before the first
+		   send) renders nothing, matching #alerts:empty above. */
+		#send-result:empty { display: none; }
+		#send-result {
+			position: fixed;
+			left: 50%;
+			bottom: 1.5rem;
+			transform: translateX(-50%);
+			z-index: 900;
+			padding: 0.5rem 1rem;
+			border-radius: 0.375rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			color: var(--zing-text);
+			font-size: 0.85rem;
+		}
+
 		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the
 		   side box, in the mock's order. */
 		#rail section { margin-bottom: 1.25rem; }

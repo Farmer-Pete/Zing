@@ -52,8 +52,8 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 	// same question now hits SaveDraft's closed-question conflict.
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", fmt.Sprintf(`{"ticket":%d}`, ticketID)))
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	resp2 := doRequest(t, mutationRequest(t, srv, "/draft", body))
@@ -173,8 +173,11 @@ func TestDraft_RejectsTrailingDataAfterTheJSONBody(t *testing.T) {
 }
 
 // TestSend_SucceedsThenConflictsWhenEmpty proves POST /send's happy path
-// (204, drafts flip to sent) and that sending again with nothing left
-// drafted is 409 Empty (design section 6.7, 7.1).
+// (200, drafts flip to sent, a plain "Sent N answer(s)." body) and that
+// sending again with nothing left drafted is 409 Empty with a "Nothing to
+// send." body (design section 6.7, 7.1; bug fix: Cmd+Enter sent the batch,
+// but the console showed nothing, so the owner thought it had done
+// nothing -- POST /send's 204 carried no way to say what happened).
 func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
@@ -192,9 +195,16 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 
 	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", sendBody))
+	sendRespBody, err := io.ReadAll(sendResp.Body)
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("first POST /send status = %d, want 204", sendResp.StatusCode)
+	if err != nil {
+		t.Fatalf("read first POST /send body: %v", err)
+	}
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("first POST /send status = %d, want 200", sendResp.StatusCode)
+	}
+	if got := string(sendRespBody); got != "Sent 1 answer." {
+		t.Errorf("first POST /send body = %q, want %q", got, "Sent 1 answer.")
 	}
 
 	ticket, err := s.GetTicket(t.Context(), ticketID)
@@ -206,9 +216,16 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	}
 
 	sendResp2 := doRequest(t, mutationRequest(t, srv, "/send", sendBody))
-	defer func() { _ = sendResp2.Body.Close() }()
+	sendRespBody2, err := io.ReadAll(sendResp2.Body)
+	_ = sendResp2.Body.Close()
+	if err != nil {
+		t.Fatalf("read second POST /send body: %v", err)
+	}
 	if sendResp2.StatusCode != http.StatusConflict {
 		t.Fatalf("second POST /send status = %d, want 409 (nothing left to send)", sendResp2.StatusCode)
+	}
+	if got := strings.TrimSpace(string(sendRespBody2)); got != "Nothing to send." {
+		t.Errorf("second POST /send body = %q, want %q", got, "Nothing to send.")
 	}
 }
 
@@ -244,8 +261,8 @@ func TestDraft_DoesNotPublishWhileSendDoes(t *testing.T) {
 
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", fmt.Sprintf(`{"ticket":%d}`, ticketID)))
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	select {

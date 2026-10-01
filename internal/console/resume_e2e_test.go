@@ -444,8 +444,8 @@ func answerOpenQuestionViaConsole(t *testing.T, st *store.Store, srv *httptest.S
 	sendReq.Close = true
 	sendResp := doRequest(t, sendReq)
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	after, err := st.GetTicket(ctx, ticketID)

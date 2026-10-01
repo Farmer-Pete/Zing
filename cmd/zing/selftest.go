@@ -1121,7 +1121,10 @@ func postSelftestConsole(ctx context.Context, base, path, body string) error {
 		return fmt.Errorf("POST %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
+	// 2xx generally, not exactly 204: POST /send answers 200 with a plain
+	// result line (bug fix, answer.go's handleSend) while /draft and /read
+	// still answer 204, and this helper is shared across all three.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			return fmt.Errorf("POST %s: status = %d, and reading the body failed: %w", path, resp.StatusCode, readErr)
