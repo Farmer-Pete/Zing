@@ -202,7 +202,7 @@ func TestQuestionGroupLabelsMessageCount(t *testing.T) {
 func TestFreeReplyRendersDraftConflictSpan(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := freeReply(1, 2, "").Render(t.Context(), &sb); err != nil {
+	if err := freeReply(1, 2, "", defaultReplyPlaceholder).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("freeReply.Render: %v", err)
 	}
 	got := sb.String()
@@ -221,7 +221,7 @@ func TestFreeReplyRendersDraftConflictSpan(t *testing.T) {
 func TestFreeReplyRendersDraftSavedSpan(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := freeReply(1, 2, "already saved text").Render(t.Context(), &sb); err != nil {
+	if err := freeReply(1, 2, "already saved text", defaultReplyPlaceholder).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("freeReply.Render: %v", err)
 	}
 	got := sb.String()

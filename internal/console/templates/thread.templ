@@ -108,10 +108,13 @@ templ threadMessageRow(row ThreadRow) {
 // item kinds -- plus the free reply input every open kind renders. An
 // answered or resolved question shows its context and pill but none of
 // those controls, since a draft against a closed question is refused
-// server-side anyway (store's openQuestionForTicketTx). ticketID feeds
-// every control's data-draft-ticket attribute, so each carries what Task
-// 7's POST /draft needs without this package reaching back into the store
-// itself.
+// server-side anyway (store's openQuestionForTicketTx) -- except a settled,
+// still-reopenable planning question (D32, design section 22.12.2, 22.12.4,
+// row.Question.ReopenPlaceholder): it keeps its free reply input, as a
+// reopen box, for as long as the ticket is still in "planning", locked for
+// good only once the seal moves it to "building". ticketID feeds every
+// control's data-draft-ticket attribute, so each carries what Task 7's POST
+// /draft needs without this package reaching back into the store itself.
 // messageCountLabel labels row.Question.MessageCount plainly (bug fix: the
 // summary line rendered this as a bare digit with no indication of what it
 // counted, reading like stray noise after the title, e.g. "Q1 Where does
@@ -224,7 +227,12 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 			if row.Question.Revisable {
 				@reviseNote()
 			}
-			@freeReply(ticketID, row.ID, row.Question.DraftReply)
+			@freeReply(ticketID, row.ID, row.Question.DraftReply, defaultReplyPlaceholder)
+		} else if row.Question.ReopenPlaceholder != "" {
+			// D32: a settled planning question stays reopenable until the
+			// seal (design section 22.12.2, 22.12.4) -- its reply box
+			// renders on, with a placeholder naming what sending reopens.
+			@freeReply(ticketID, row.ID, row.Question.DraftReply, row.Question.ReopenPlaceholder)
 		}
 		@turnsList(row.Question.Turns)
 		if row.Question.SettledHTML != nil {
@@ -573,9 +581,16 @@ func decisionClass(d, pickedDecision response.Decision) string {
 // gone) starts empty -- :empty hides it (shell.templ) -- and is console.js's
 // own showDraftConflict target, a sibling .reply-input a 409 can always
 // find via el.closest('.reply').
-templ freeReply(ticketID, questionID int64, draftReply string) {
+// defaultReplyPlaceholder is an open question's own free reply input's
+// placeholder (unchanged from before D32). A settled, reopenable planning
+// question's reply box (questionGroup) passes its own ReopenPlaceholder
+// instead -- "Write to reopen Q1", with "and withdraw the gate" appended
+// while a gate question is open (design section 22.12.2, 22.12.4).
+const defaultReplyPlaceholder = "Reply…"
+
+templ freeReply(ticketID, questionID int64, draftReply, placeholder string) {
 	<div class="reply">
-		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" value={ draftReply } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
+		<input type="text" class="reply-input" placeholder={ placeholder } aria-label="Reply" value={ draftReply } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
 		<p class="reply-hint">Saved as a draft. <span class="send-chord">⌘+Enter</span> sends.</p>
 		<p class="draft-saved" aria-live="polite"></p>
 		<p class="draft-conflict" aria-live="polite"></p>

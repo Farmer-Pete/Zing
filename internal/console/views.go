@@ -249,9 +249,9 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		banner := ""
-		if len(conv.Threads) > 0 {
-			banner = buildAgentStatus(conv, agent)
+		banner, bannerErr := c.threadBanner(ctx, open, rows, conv, agent)
+		if bannerErr != nil {
+			return nil, bannerErr
 		}
 		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner), nil
 	case errors.Is(err, sql.ErrNoRows):
@@ -259,6 +259,68 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 	default:
 		return nil, err
 	}
+}
+
+// threadBanner computes the Thread view's own banner text, ahead of
+// buildAgentStatus's own table (design section 22.7, 22.12.4): a gate
+// approval in progress overrides it outright, whether or not the
+// confirming turn has settled it yet, since the owner's attention belongs
+// on the seal, not on which planning thread is or is not waiting on them.
+// Every other ticket falls back to buildAgentStatus, which itself renders
+// nothing once every planning thread is settled and no approval is
+// running.
+func (c *console) threadBanner(ctx context.Context, ticketID int64, rows []store.MessageRow, conv store.PlanningConversation, agent string) (string, error) {
+	if gateApprovalInProgress(rows) {
+		cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
+		if err != nil {
+			return "", fmt.Errorf("console: current cohort for ticket %d: %w", ticketID, err)
+		}
+		confirmed := false
+		if ok {
+			if _, confirmed, err = c.store.ConfirmedApprovalForVersion(ctx, ticketID, cohort.PlanVersion); err != nil {
+				return "", fmt.Errorf("console: confirmed approval for ticket %d: %w", ticketID, err)
+			}
+		}
+		if confirmed {
+			return agent + " found no open questions. Sealing the scenarios.", nil
+		}
+		return "Checking with " + agent + " for open questions before sealing.", nil
+	}
+	if len(conv.Threads) > 0 {
+		return buildAgentStatus(conv, agent), nil
+	}
+	return "", nil
+}
+
+// gateApprovalInProgress reports whether rows carries a gate-kind question
+// currently in state "answered" whose newest sent answer picks option "a"
+// (design section 22.12.1's "Gate approval in progress": the approval
+// starts when the owner sends Approve and ends when the gate question is
+// resolved, by the seal, a cancellation, or an escalation -- all of which
+// move it out of "answered"). collectSentAnswers already gives each
+// question's own newest sent answer (buildThreadRows' own use of it), so
+// this reruns that same read rather than needing buildThreadRows' own
+// internal map passed out.
+func gateApprovalInProgress(rows []store.MessageRow) bool {
+	visible := visibleRows(rows)
+	sentAnswers := collectSentAnswers(visible)
+	for i := range visible {
+		m := &visible[i]
+		if m.Type != msgTypeQuestion || m.State == nil || *m.State != msgStateAnswered {
+			continue
+		}
+		var p response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &p); err != nil {
+			continue
+		}
+		if p.Kind != response.QuestionKindGate {
+			continue
+		}
+		if ap, ok := sentAnswers[m.ID]; ok && ap.Option != nil && *ap.Option == "a" {
+			return true
+		}
+	}
+	return false
 }
 
 // planArtifactType is the artifacts.type literal a planning commit writes
@@ -512,6 +574,25 @@ const (
 	updateMarkerConversationDeliveredPrefix = "conversation delivered run "
 )
 
+// updateMarkerGateConfirmedPrefix, updateMarkerGateApprovalCancelledPrefix,
+// and updateMarkerSealRefusedPrefix mirror the D32 gate markers (design
+// section 22.12.1, 22.12.3a): internal/job/planning.go's own
+// confirmingMarkerBody ("gate confirmed run <R> plan v<V> gate <QID>
+// answer <AID>") and its two cancellation call sites ("gate approval
+// cancelled gate <QID> run <R>" when the agent cancels in the confirming
+// turn, "gate approval cancelled gate <QID> batch <B>" when the owner's
+// SendBatch reopens a thread instead, internal/store/console_writes.go),
+// and internal/dispatch/dispatch.go's own seal-refused marker ("seal
+// refused gate <QID>\n<reason>", two lines). Unlike every other
+// updateMarker* pair above, these three are also parented to the gate
+// question (parent_id = QID), so turnContent renders them inside that
+// question's own turns, not only dividerLine's unparented fallback.
+const (
+	updateMarkerGateConfirmedPrefix         = "gate confirmed run "
+	updateMarkerGateApprovalCancelledPrefix = "gate approval cancelled gate "
+	updateMarkerSealRefusedPrefix           = "seal refused gate "
+)
+
 // updateMarker* mirror the literal prefixes design section 5.1's table
 // names for judging.go, shipping.go, and respond.go (sections 7, 8, 9):
 // judging.go already writes the four "judge round <n> ..." shapes
@@ -618,19 +699,59 @@ func questionStateLabel(state *string, revisable bool) string {
 // import store's unexported constants.
 const msgStateResolved = "resolved"
 
+// ticketStatePlanning mirrors store's own unexported ticketStatePlanning
+// (internal/store/commit.go), the same package-local-copy pattern
+// msgStateResolved above already uses: console cannot import store's
+// unexported constants. D32's own "reopenable" test (design section
+// 22.12.1) reads it directly: a planning question in state resolved is
+// reopenable exactly while its ticket is still in this state, locked for
+// good only once the seal commit moves the ticket to "building".
+const ticketStatePlanning = "planning"
+
+// hasOpenGateQuestion reports whether rows carries a gate-kind question
+// still in state "open" (design section 22.12.2 step 3, 22.12.4): a
+// settled, reopenable planning question's own reply-box placeholder names
+// "and withdraw the gate" only while reopening would actually do that.
+// rows is buildThreadRows' own visibleRows-filtered slice; a gate question
+// is never itself a draft, so filtering changes nothing this scans for.
+func hasOpenGateQuestion(rows []store.MessageRow) bool {
+	for i := range rows {
+		m := &rows[i]
+		if m.Type != msgTypeQuestion || m.State == nil || *m.State != msgStateOpen {
+			continue
+		}
+		var p response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &p); err != nil {
+			continue
+		}
+		if p.Kind == response.QuestionKindGate {
+			return true
+		}
+	}
+	return false
+}
+
+// agentFallback is the generic stand-in agentName returns when it has no
+// real machine config to name, and the same generic name displayBody and
+// MarkerRecognized pass to updateLine: neither reaches the thread view's
+// own real agent name (console.agentName(c.machine), computed only in
+// threadComponent), so a gate marker rendered through those two paths
+// (the Feed view, and cmd/zing's marker-recognition guard) reads "The
+// agent" rather than a specific name it has no way to know.
+const agentFallback = "The agent"
+
 // agentName returns the planning job's own display name (design section
 // 22.7): its configured model with the first letter upper-cased ("fable"
-// gives "Fable"), or "The agent" when m is nil (every test that does not
+// gives "Fable"), or agentFallback when m is nil (every test that does not
 // exercise the rail, and every view built before a machine.toml loads) or
 // the planning job carries no model.
 func agentName(m *machine.Machine) string {
-	const fallback = "The agent"
 	if m == nil {
-		return fallback
+		return agentFallback
 	}
 	model := m.Jobs["planning"].Model
 	if model == "" {
-		return fallback
+		return agentFallback
 	}
 	return strings.ToUpper(model[:1]) + model[1:]
 }
@@ -881,6 +1002,14 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		sentChildren[*rows[i].ParentID] = append(sentChildren[*rows[i].ParentID], rows[i])
 	}
 
+	// gateOpen feeds a settled, reopenable planning question's own reply-box
+	// placeholder (design section 22.12.4): "...and withdraw the gate" only
+	// while reopening would actually do that (22.12.2 step 3), which is
+	// exactly when the ticket still carries an open gate question. Computed
+	// once here, the same precomputed-over-every-row pattern messageCounts
+	// and sentChildren already use, rather than rescanning rows per question.
+	gateOpen := hasOpenGateQuestion(rows)
+
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
 		row := &rows[i]
@@ -889,7 +1018,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		// its own parent_id: type decides before parent_id gets a turn.
 		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
 			convThread := convThreadForQuestion(conv, row.ID)
-			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent)
+			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
 			if err != nil {
 				return nil, err
 			}
@@ -918,7 +1047,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 			continue
 		}
 
-		line, show := dividerLine(row)
+		line, show := dividerLine(row, agent)
 		if !show {
 			continue
 		}
@@ -938,9 +1067,9 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 // "answer" row with no parent) goes through displayBody and is always
 // shown, the same unconditional rendering a state separator already gets
 // today.
-func dividerLine(m *store.MessageRow) (string, bool) {
+func dividerLine(m *store.MessageRow, agent string) (string, bool) {
 	if m.Type == msgTypeUpdate {
-		return updateLine(m)
+		return updateLine(m, agent)
 	}
 	return displayBody(m), true
 }
@@ -1060,6 +1189,20 @@ func turnContent(m *store.MessageRow, options []templates.ThreadOption, key, age
 		return "", "Resolved.", true
 	case msgTypeFollowup:
 		return "", "You reopened " + key + ".", true
+	case msgTypeUpdate:
+		// A D32 gate marker (updateMarkerGateConfirmedPrefix,
+		// updateMarkerGateApprovalCancelledPrefix,
+		// updateMarkerSealRefusedPrefix) is parented to the gate question
+		// (design section 22.12.1's "Placement" rule), so it reaches this
+		// case rather than dividerLine's unparented fallback; updateLine's
+		// own second return still hides a bookkeeping marker outright
+		// (nothing today parents one of those here, but the fallback costs
+		// nothing) rather than showing an empty turn.
+		line, show := updateLine(m, agent)
+		if !show {
+			return "", "", false
+		}
+		return "", line, true
 	default:
 		return "", "", false
 	}
@@ -1196,7 +1339,7 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // 22.1); conv carries that conversation's delivery watermark and in-flight
 // run, for convThread's own pill and Queued tags; agent is the planning
 // job's own display name (views.go's agentName).
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string) (*templates.ThreadQuestion, error) {
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string, gateOpen bool) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -1274,25 +1417,50 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		Revisable:    revisable,
 	}
 
+	// ReopenPlaceholder (D32, design section 22.12.2, 22.12.4): a settled
+	// planning thread keeps its reply box, as a reopen box, for as long as
+	// the ticket is still reopenable -- state "planning", not yet sealed
+	// into "building". 22.7 item 6's "no reply box when settled" now applies
+	// only once the thread is locked for good (questionGroup, thread.templ,
+	// gates this on Interactive||ReopenPlaceholder!=""). The gate clause
+	// names what reopening would actually withdraw (22.12.2 step 3): nothing
+	// when no gate question is currently open.
+	if planning && convThread.Settled && ticket != nil && ticket.State == ticketStatePlanning {
+		placeholder := "Write to reopen " + payload.Key
+		if gateOpen {
+			placeholder += " and withdraw the gate"
+		}
+		q.ReopenPlaceholder = placeholder
+	}
+
 	turns, err := buildTurns(children, convThread, conv, options, payload.Key, agent)
 	if err != nil {
 		return nil, err
 	}
 	q.Turns = turns
 
-	// SettledLabel/SettledHTML (design section 22.7 item 6): a planning
-	// question's own closing line, once the agent has settled it with a
-	// decision. A settle with no decision text (the owner-abandoned path,
-	// section 22.3's resolved/system row) renders no closing line here --
-	// that row is instead an ordinary, unlabeled turn ("Resolved.",
-	// turnContent/mergeThreadOrder above), so a settled thread is never
-	// left with an empty one.
-	if planning && convThread.Settled && convThread.Decision != "" {
+	// SettledLabel/SettledHTML (design section 22.7 item 6, extended by
+	// D32/22.12.4): a planning question's own closing line, once the agent
+	// has settled it with a decision at least once. A settle with no
+	// decision text (the owner-abandoned path, section 22.3's
+	// resolved/system row) renders no closing line here -- that row is
+	// instead an ordinary, unlabeled turn ("Resolved.",
+	// turnContent/mergeThreadOrder above), so a settled thread is never left
+	// with an empty one. store.PlanningConversation keeps Decision at the
+	// newest settle's text even after a reopen moves the question back to
+	// open (conversation_reads.go), so a reopened-but-not-yet-resettled
+	// thread still shows it, labeled "Earlier decision" instead of "Settled
+	// by <agent>" until the agent settles it again.
+	if planning && convThread.Decision != "" {
 		decisionHTML, decErr := Render(convThread.Decision)
 		if decErr != nil {
 			return nil, fmt.Errorf("console: render question %d decision: %w", m.ID, decErr)
 		}
-		q.SettledLabel = "Settled by " + agent
+		if convThread.Settled {
+			q.SettledLabel = "Settled by " + agent
+		} else {
+			q.SettledLabel = "Earlier decision"
+		}
 		q.SettledHTML = decisionHTML
 	}
 
@@ -1401,8 +1569,13 @@ func displayBody(m *store.MessageRow) string {
 		// updateLine hides from the Thread view (buildThreadRows' own
 		// dividerLine, which checks the second return value) still shows its
 		// raw body here, the same defensive fallback an unrecognized marker
-		// already gets.
-		if line, ok := updateLine(m); ok {
+		// already gets. agentFallback, not a real machine config, names the
+		// agent in a gate marker's sentence: the Feed view has no ticket-
+		// specific agent to read (console.agentName(c.machine) is computed
+		// only in threadComponent), and this function's own signature, called
+		// directly by many existing tests, stays single-argument rather than
+		// threading one through for the sake of three marker shapes.
+		if line, ok := updateLine(m, agentFallback); ok {
 			return line
 		}
 		return m.Body
@@ -1427,7 +1600,11 @@ func MarkerRecognized(m store.MessageRow) bool {
 	if m.Type != msgTypeUpdate {
 		return true
 	}
-	line, shown := updateLine(&m)
+	// agentFallback: see displayBody's own identical call, same reasoning --
+	// cmd/zing's selftest guard has no per-ticket agent name to pass, and
+	// recognition never depends on which name a gate marker's sentence
+	// carries, only on whether it differs from the raw body.
+	line, shown := updateLine(&m, agentFallback)
 	return !shown || line != m.Body
 }
 
@@ -1445,13 +1622,19 @@ func MarkerRecognized(m store.MessageRow) bool {
 // answerLine already use for a payload they cannot decode. Every true case
 // renders as a one-line timeline divider (buildThreadRows), not the full
 // card this function's callers used to feed into.
-func updateLine(m *store.MessageRow) (string, bool) {
+func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	body := m.Body
 	switch {
 	case strings.HasPrefix(body, updateMarkerConversationPendingPrefix):
 		return "", false
 	case strings.HasPrefix(body, updateMarkerConversationDeliveredPrefix):
 		return "", false
+	case strings.HasPrefix(body, updateMarkerGateConfirmedPrefix):
+		return agent + " confirmed nothing is open.", true
+	case strings.HasPrefix(body, updateMarkerGateApprovalCancelledPrefix):
+		return gateApprovalCancelledLine(body, agent), true
+	case strings.HasPrefix(body, updateMarkerSealRefusedPrefix):
+		return sealRefusedLine(body), true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
 		return "Plan review found only minor findings. Planning resumes automatically to address them.", true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
@@ -1504,6 +1687,37 @@ func updateLine(m *store.MessageRow) (string, bool) {
 	default:
 		return body, true
 	}
+}
+
+// gateApprovalCancelledLine renders a "gate approval cancelled gate <QID>
+// run <R>" or "gate approval cancelled gate <QID> batch <B>" marker (design
+// section 22.12.1, 22.12.2 step 3, 22.12.3): the confirming turn itself
+// cancels an approval by returning questions, ready, or error (" run <R>",
+// internal/job/planning.go), and the owner cancels one by reopening a
+// settled thread instead (" batch <B>", internal/store/console_writes.go).
+// Both share the same prefix up to the question id, so the word right
+// after it -- "run" or "batch" -- is what tells the two apart; a shape
+// that matches neither (a future marker, or a malformed one) falls back to
+// the agent's own wording, the safer of the two to guess wrong toward,
+// since it names an actor instead of silently crediting the owner for
+// something they did not do.
+func gateApprovalCancelledLine(body, agent string) string {
+	rest := strings.TrimPrefix(body, updateMarkerGateApprovalCancelledPrefix)
+	if strings.Contains(rest, " batch ") {
+		return "You reopened a thread; the approval is cancelled."
+	}
+	return agent + " found open questions; the approval is cancelled."
+}
+
+// sealRefusedLine renders a "seal refused gate <QID>\n<reason>" marker
+// (design section 22.12.3a, dispatch.go's releaseAfterSealMismatch-style
+// write): the reason is the seal invariant's own failure text (for
+// example "answer 9 is not the approval of gate question 8"), kept as the
+// marker's own second line rather than reparsed here, since dispatch.go
+// already composed it from the exact *SealRefusedError the store returned.
+func sealRefusedLine(body string) string {
+	_, reason, _ := strings.Cut(body, "\n")
+	return "Zing did not seal: " + reason + "."
 }
 
 // isReviewMarker reports whether body carries one of reviewing.go's own

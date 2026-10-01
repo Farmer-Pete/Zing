@@ -344,6 +344,58 @@ func TestUpdateLineFixMarkers(t *testing.T) {
 	}
 }
 
+// TestUpdateLineGateMarkers proves D32's own four gate marker shapes
+// (design section 22.12.1, 22.12.3a, 22.12.4; the D31-6 console follow-up)
+// each render with the real agent name updateLine is given, not the
+// generic agentFallback displayBody and MarkerRecognized pass when they
+// have no ticket-specific one to offer: "gate confirmed run <R> plan v<V>
+// gate <QID> answer <AID>", the two "gate approval cancelled gate <QID>
+// ..." shapes (by run, the agent cancelling in its own confirming turn, or
+// by batch, the owner reopening a thread instead), and the two-line "seal
+// refused gate <QID>\n<reason>".
+func TestUpdateLineGateMarkers(t *testing.T) {
+	t.Parallel()
+	const agent = "Fable"
+	cases := []struct{ name, body, want string }{
+		{
+			"gate confirmed",
+			"gate confirmed run 40 plan v2 gate 12 answer 99",
+			"Fable confirmed nothing is open.",
+		},
+		{
+			"gate approval cancelled by the agent (run)",
+			"gate approval cancelled gate 12 run 41",
+			"Fable found open questions; the approval is cancelled.",
+		},
+		{
+			"gate approval cancelled by the owner (batch)",
+			"gate approval cancelled gate 12 batch 7",
+			"You reopened a thread; the approval is cancelled.",
+		},
+		{
+			"seal refused",
+			"seal refused gate 12\napproval of gate question 12 was cancelled",
+			"Zing did not seal: approval of gate question 12 was cancelled.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := updateRow(tc.body)
+			got, show := updateLine(row, agent)
+			if !show {
+				t.Fatalf("updateLine(%q) hidden, want shown", tc.body)
+			}
+			if got != tc.want {
+				t.Errorf("updateLine(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+			if !MarkerRecognized(*row) {
+				t.Errorf("MarkerRecognized(%q) = false, want true", tc.body)
+			}
+		})
+	}
+}
+
 // TestSentAnswerText proves sentAnswerText's own formatting (bug fix,
 // questionGroup's locked note): an option answer shows the option's text,
 // falling back to its bare key when it no longer matches any of the
@@ -1133,6 +1185,183 @@ func TestBuildThreadRowsInterleavesConversation(t *testing.T) {
 	}
 }
 
+// gatePayload marshals a gate-kind question payload for the reopen-box
+// tests below (hasOpenGateQuestion, gateApprovalInProgress): the only
+// field those two read is Kind.
+func gatePayload(t *testing.T) json.RawMessage {
+	t.Helper()
+	p, err := json.Marshal(response.QuestionPayload{Key: "Q2", Kind: response.QuestionKindGate})
+	if err != nil {
+		t.Fatalf("marshal gate payload: %v", err)
+	}
+	return p
+}
+
+// TestReopenPlaceholderOnSettledReopenableThread proves D32's own reply-box
+// rule (design section 22.12.2, 22.12.4, the D31-6 console follow-up): a
+// settled planning question's reply box stays while the ticket is still
+// reopenable (state "planning"), named "Write to reopen Q1" plus "and
+// withdraw the gate" only while a gate question is actually open, and
+// disappears once the ticket has sealed into "building".
+func TestReopenPlaceholderOnSettledReopenableThread(t *testing.T) {
+	t.Parallel()
+	qid := int64(10)
+	questionPayload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	question := store.MessageRow{ID: qid, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}} //nolint:modernize // keyed on purpose
+	conv := store.PlanningConversation{Threads: []store.Thread{{Question: question, Settled: true, Decision: "Plain text only."}}}
+
+	t.Run("reopenable, no gate open: plain reopen placeholder", func(t *testing.T) {
+		t.Parallel()
+		ticket := &store.Ticket{State: ticketStatePlanning}
+		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+		if err != nil {
+			t.Fatalf("buildThreadRows: %v", err)
+		}
+		if len(got) != 1 || got[0].Question == nil {
+			t.Fatalf("buildThreadRows returned %+v, want one question row", got)
+		}
+		q := got[0].Question
+		if q.Interactive {
+			t.Errorf("q.Interactive = true, want false (settled)")
+		}
+		const want = "Write to reopen Q1"
+		if q.ReopenPlaceholder != want {
+			t.Errorf("q.ReopenPlaceholder = %q, want %q", q.ReopenPlaceholder, want)
+		}
+	})
+
+	t.Run("reopenable, a gate question is open: names withdrawing it too", func(t *testing.T) {
+		t.Parallel()
+		openState := msgStateOpen
+		gateQuestion := store.MessageRow{ID: 20, Message: store.Message{Type: msgTypeQuestion, Payload: gatePayload(t), State: &openState}} //nolint:modernize // keyed on purpose
+		ticket := &store.Ticket{State: ticketStatePlanning}
+		got, err := buildThreadRows(ticket, []store.MessageRow{question, gateQuestion}, nil, nil, nil, conv, "Fable")
+		if err != nil {
+			t.Fatalf("buildThreadRows: %v", err)
+		}
+		var q1 *templates.ThreadQuestion
+		for i := range got {
+			if got[i].ID == qid {
+				q1 = got[i].Question
+			}
+		}
+		if q1 == nil {
+			t.Fatalf("buildThreadRows returned %+v, want Q1's own row among them", got)
+		}
+		const want = "Write to reopen Q1 and withdraw the gate"
+		if q1.ReopenPlaceholder != want {
+			t.Errorf("q1.ReopenPlaceholder = %q, want %q", q1.ReopenPlaceholder, want)
+		}
+	})
+
+	t.Run("locked once the ticket left planning", func(t *testing.T) {
+		t.Parallel()
+		ticket := &store.Ticket{State: "building"}
+		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+		if err != nil {
+			t.Fatalf("buildThreadRows: %v", err)
+		}
+		if len(got) != 1 || got[0].Question == nil {
+			t.Fatalf("buildThreadRows returned %+v, want one question row", got)
+		}
+		if q := got[0].Question; q.ReopenPlaceholder != "" {
+			t.Errorf("q.ReopenPlaceholder = %q, want empty once the ticket left planning", q.ReopenPlaceholder)
+		}
+	})
+}
+
+// TestEarlierDecisionShownWhileReopened proves D32's own closing-line rule
+// (design section 22.12.4): a reopened thread (Settled false again) that
+// still carries a past decision shows "Earlier decision: <decision>", not
+// "Settled by <agent>", until the agent settles it again.
+func TestEarlierDecisionShownWhileReopened(t *testing.T) {
+	t.Parallel()
+	qid := int64(10)
+	questionPayload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	question := store.MessageRow{ID: qid, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}} //nolint:modernize // keyed on purpose
+	conv := store.PlanningConversation{Threads: []store.Thread{{Question: question, Settled: false, Decision: "Plain text only."}}}
+
+	got, err := buildThreadRows(&store.Ticket{State: ticketStatePlanning}, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 || got[0].Question == nil {
+		t.Fatalf("buildThreadRows returned %+v, want one question row", got)
+	}
+	q := got[0].Question
+	if q.SettledLabel != "Earlier decision" {
+		t.Errorf("q.SettledLabel = %q, want %q", q.SettledLabel, "Earlier decision")
+	}
+	if q.SettledHTML == nil {
+		t.Errorf("q.SettledHTML is nil, want the earlier decision rendered")
+	}
+	if !q.Interactive {
+		t.Errorf("q.Interactive = false, want true (reopened, unsettled)")
+	}
+}
+
+// TestGateApprovalInProgress proves the pure predicate behind threadBanner's
+// own approval banners (design section 22.12.1, 22.12.4): true only for a
+// gate-kind question in state "answered" whose newest sent answer picks
+// option "a" -- not an open or resolved gate question, not an answered
+// non-gate question, and not an answered gate question whose pick was a
+// reject (any key but "a").
+func TestGateApprovalInProgress(t *testing.T) {
+	t.Parallel()
+	answered := msgStateAnswered
+	open := msgStateOpen
+
+	answerRow := func(parent int64, option string) store.MessageRow {
+		payload, err := json.Marshal(response.AnswerPayload{Option: &option})
+		if err != nil {
+			t.Fatalf("marshal answer payload: %v", err)
+		}
+		return store.MessageRow{Message: store.Message{Type: msgTypeAnswer, ParentID: &parent, Payload: payload}} //nolint:modernize // keyed on purpose
+	}
+
+	t.Run("answered gate question approved (option a): true", func(t *testing.T) {
+		t.Parallel()
+		gate := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeQuestion, Payload: gatePayload(t), State: &answered}} //nolint:modernize // keyed on purpose
+		if !gateApprovalInProgress([]store.MessageRow{gate, answerRow(1, "a")}) {
+			t.Errorf("gateApprovalInProgress = false, want true")
+		}
+	})
+
+	t.Run("answered gate question rejected (option b): false", func(t *testing.T) {
+		t.Parallel()
+		gate := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeQuestion, Payload: gatePayload(t), State: &answered}} //nolint:modernize // keyed on purpose
+		if gateApprovalInProgress([]store.MessageRow{gate, answerRow(1, "b")}) {
+			t.Errorf("gateApprovalInProgress = true, want false")
+		}
+	})
+
+	t.Run("gate question still open: false", func(t *testing.T) {
+		t.Parallel()
+		gate := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeQuestion, Payload: gatePayload(t), State: &open}} //nolint:modernize // keyed on purpose
+		if gateApprovalInProgress([]store.MessageRow{gate}) {
+			t.Errorf("gateApprovalInProgress = true, want false")
+		}
+	})
+
+	t.Run("answered, but not a gate question: false", func(t *testing.T) {
+		t.Parallel()
+		payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+		if err != nil {
+			t.Fatalf("marshal question payload: %v", err)
+		}
+		q := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeQuestion, Payload: payload, State: &answered}} //nolint:modernize // keyed on purpose
+		if gateApprovalInProgress([]store.MessageRow{q, answerRow(1, "a")}) {
+			t.Errorf("gateApprovalInProgress = true, want false")
+		}
+	})
+}
+
 // TestConversationPills proves console.planningPill's own four-way split
 // (design section 22.7 item 1): settled always wins; otherwise "with
 // <agent>" when the in-flight run has already taken delivery of an owner
@@ -1217,8 +1446,8 @@ func TestAgentStatusBanner(t *testing.T) {
 			Threads: []store.Thread{{
 				Question: store.MessageRow{ID: 1, Message: store.Message{Payload: questionPayload(t, "Q1")}}, //nolint:modernize // keyed on purpose
 				Turns: []store.MessageRow{
-					{Message: store.Message{Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
-					{Message: store.Message{Author: authorYou, BatchID: &b5}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Type: msgTypeReply, Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Type: msgTypeReply, Author: authorYou, BatchID: &b5}}, //nolint:modernize // keyed on purpose
 				},
 			}},
 		}
@@ -1236,8 +1465,8 @@ func TestAgentStatusBanner(t *testing.T) {
 			Threads: []store.Thread{{
 				Question: store.MessageRow{ID: 1, Message: store.Message{Payload: questionPayload(t, "Q1")}}, //nolint:modernize // keyed on purpose
 				Turns: []store.MessageRow{
-					{Message: store.Message{Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
-					{Message: store.Message{Author: authorYou, BatchID: &b4}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Type: msgTypeReply, Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Type: msgTypeReply, Author: authorYou, BatchID: &b4}}, //nolint:modernize // keyed on purpose
 				},
 			}},
 		}

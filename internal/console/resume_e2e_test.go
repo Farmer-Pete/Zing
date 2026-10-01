@@ -635,12 +635,14 @@ func assertResumeE2EStateSequence(t *testing.T, st *store.Store, ticketID int64)
 }
 
 // assertResumeE2EResumedOnce asserts the ticket's one planning session
-// resumed exactly once (one runs row past the first turn), but was never
-// charged for it (D31, design section 22.4): the owner's answer to Q1 (a
-// planning question) delivers through a plain owner-delivery resume, and
-// BumpResumes is false for that resume -- owner deliveries are free, so
-// sessions.resumes stays at its start value even though the session did
-// resume.
+// resumed, but was never charged for it (D31, design section 22.4): the
+// owner's answer to Q1 (a planning question) delivers through a plain
+// owner-delivery resume, and BumpResumes is false for that resume -- owner
+// deliveries are free, so sessions.resumes stays at its start value even
+// though the session did resume. Three runs are expected on that session:
+// the first turn, the free resume that delivers and settles Q1, and the
+// free confirming turn the owner's gate approval triggers before the seal
+// (D32, design section 22.12.3).
 func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	t.Helper()
 	sessions, err := st.SessionsForTicket(t.Context(), ticketID)
@@ -669,7 +671,7 @@ func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 			planningRuns++
 		}
 	}
-	if planningRuns != 2 {
-		t.Errorf("planning runs for session %d = %d, want exactly 2 (the first turn, then the one free resume that delivered and settled Q1)", planning[0].ID, planningRuns)
+	if planningRuns != 3 {
+		t.Errorf("planning runs for session %d = %d, want exactly 3 (the first turn, the free resume that delivered and settled Q1, and the free confirming turn before the seal)", planning[0].ID, planningRuns)
 	}
 }

@@ -134,6 +134,17 @@ type ThreadQuestion struct {
 	// still-open (never answered) question, which Interactive alone cannot.
 	Revisable bool
 
+	// ReopenPlaceholder is D32's own reply-box placeholder for a settled,
+	// still-reopenable planning question (design section 22.12.2, 22.12.4):
+	// "Write to reopen Q1", with "and withdraw the gate" appended while a
+	// gate question is currently open. Empty for every other question --
+	// still open (Interactive's own box renders instead, with the default
+	// placeholder), not a planning question, or a planning question already
+	// locked for good because the ticket left "planning" -- so questionGroup
+	// (thread.templ) treats a non-empty value as "show the reply box anyway,
+	// with this placeholder" alongside Interactive, never instead of it.
+	ReopenPlaceholder string
+
 	PRURL string        // merge kind only; empty when the ticket has no PR link yet
 	Plan  *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 
