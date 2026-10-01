@@ -177,23 +177,27 @@ type WaitProgress struct {
 	Answered, Total int
 }
 
-// ThreadRow is one message the read-only Thread view renders: a state
-// separator (Type == "state"), or a plain row (update, escalation, or any
-// other type) with Body as its already-decoded display text, or, when
-// Question is non-nil, a read-only question group in place of Body (design
-// section 6.6).
+// ThreadRow is one message the read-only Thread view renders: a read-only
+// question group in place of Body when Question is non-nil (a "question" or
+// "escalation" row always opens its own thread this way, design section
+// 6.6); a one-line timeline divider when Divider is true -- a state
+// transition, or any other unparented row this view does not otherwise
+// expect, including a recognized or unrecognized "update" marker
+// (design/threading-design.md (d), task D31-4a: "placement by structure,
+// not by type" -- any row with a parent_id renders inside its parent's
+// thread instead of reaching here at all, so the only rows that ever become
+// a ThreadRow of their own are a question, an escalation, a divider, or the
+// one allowed card below); or a plain message card -- only ever an
+// unparented owner reply, buildThreadRows' sole exception to the divider
+// default.
 type ThreadRow struct {
 	ID       int64
 	Type     string
 	Author   string
 	Body     string
+	Divider  bool
 	Question *ThreadQuestion
 }
-
-// IsState reports whether this row is a state-transition separator, the one
-// row type the Thread view centers rather than left-aligning (design
-// section 6.6).
-func (r ThreadRow) IsState() bool { return r.Type == "state" }
 
 // PhaseDot is one state in the rail's Phase section (design section 6.11):
 // machine.States.Order drawn as dots, each before, at, or after the

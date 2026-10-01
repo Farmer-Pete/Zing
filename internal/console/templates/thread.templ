@@ -32,7 +32,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress) {
 				for _, row := range rows {
 					if row.Question != nil {
 						@questionGroup(ticket.ID, row)
-					} else if row.IsState() {
+					} else if row.Divider {
 						@stateSeparator(row)
 					} else {
 						@threadMessageRow(row)

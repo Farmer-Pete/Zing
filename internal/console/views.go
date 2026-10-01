@@ -407,6 +407,38 @@ const msgTypeUpdate = "update"
 // SaveDraft's own insertReplyDraftTx writes one.
 const msgTypeReply = "reply"
 
+// msgTypeFollowup mirrors the messages.type CHECK list's "followup" value
+// (internal/store/migrations/0001_init.sql): D32's own owner-reopen row
+// (plan section 22.12.2, "You reopened <key>."), not written by any job or
+// store code yet on this branch. buildThreadRows and sentChildText already
+// give it a home -- folded under its parent question, same as a resolved
+// row -- so D31-6 needs no further placement work when it starts writing
+// one.
+const msgTypeFollowup = "followup"
+
+// msgTypeResolved mirrors store's own unexported msgTypeResolved
+// (internal/store/commit.go): a question's settling row (D31, section
+// 22.3), author zing with the decision as its Body, or author system with
+// an empty Body for the owner-abandoned and ResolveQuestions paths.
+// sentChildText tells the two apart by author.
+const msgTypeResolved = "resolved"
+
+// authorYou, authorZing, and authorSystem mirror store's own unexported
+// authorYou, authorZing, and authorSystem literals (internal/store/commit.go),
+// the same package-local-copy pattern msgTypeReply above and
+// demoBuildMarkerAuthor (seed.go) already use. buildThreadRows needs
+// authorYou to single out the one unparented row this view still renders as
+// a full message card -- a thread-level owner reply
+// (design/threading-design.md (d)); sentChildText needs authorZing to tell
+// the agent's own settling decision from the system's bare withdrawal (D31,
+// section 22.3's resolved row); authorSystem is every marker's own author,
+// used by the tests that build synthetic marker rows.
+const (
+	authorYou    = "you"
+	authorZing   = "zing"
+	authorSystem = "system"
+)
+
 // updateMarker* mirror the literal prefixes internal/job/planning.go and
 // internal/job/building.go write into type="update" message bodies --
 // planreviewPendingMarker and planreviewDeliveredMarker's "planreview v<N>
@@ -442,6 +474,22 @@ const (
 	updateMarkerReviewNotePrefix               = "review note "
 )
 
+// updateMarkerConversationPendingPrefix and updateMarkerConversationDeliveredPrefix
+// mirror store's own unexported conversationPendingPrefix and
+// conversationDeliveredPrefix (internal/store/conversation_reads.go, D31):
+// "conversation pending run <R> batch <B>", which Reserve writes before a
+// run carrying owner messages, and "conversation delivered run <R> batch
+// <B>", which its commit writes once they land. Neither carries a word the
+// owner would read as content -- they exist only so PlanningConversation can
+// compute the delivery watermark -- so updateLine hides them outright
+// (design/threading-design.md (d): "marker kind is bookkeeping -> hidden"),
+// rather than showing an empty-feeling one-line divider for a run and batch
+// number nobody asked to see.
+const (
+	updateMarkerConversationPendingPrefix   = "conversation pending run "
+	updateMarkerConversationDeliveredPrefix = "conversation delivered run "
+)
+
 // updateMarker* mirror the literal prefixes design section 5.1's table
 // names for judging.go, shipping.go, and respond.go (sections 7, 8, 9):
 // judging.go already writes the four "judge round <n> ..." shapes
@@ -474,6 +522,22 @@ const (
 	updateMarkerRespondCoverageDeliveredPrefix = "respond coverage delivered run "
 	updateMarkerRespondAppliedPrefix           = "respond applied "
 	updateMarkerFixRepliesPostedPrefix         = "fix replies posted "
+)
+
+// updateMarkerFixRequestedPrefix and updateMarkerFixLandedPrefix mirror
+// internal/job/fix.go's own fixRequestedPrefix and fixLandedPrefix
+// literals: "fix requested <kind> after run <R>" (fixRequestMessage) opens
+// a fix unit -- kind one of findings, failure, ci_log, or threads
+// (FixKind.Values) -- and "fix landed <mid> sha <sha>" (building.go's land
+// and its adopted-commit twin) closes it once the unit's own commit lands.
+// Neither had a console case until this task: design/threading-design.md's
+// review found them unrecognized (a loose card today), and cmd/zing's own
+// e2e second guard (verifySelftestMarkersAllRecognized) failed on the first
+// real "fix requested failure after run <R>" marker the selftest pipeline
+// wrote until these two cases were added.
+const (
+	updateMarkerFixRequestedPrefix = "fix requested "
+	updateMarkerFixLandedPrefix    = "fix landed "
 )
 
 // draftMessageState mirrors store's own unexported draft-state literal
@@ -598,26 +662,41 @@ func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow) templates.
 	return progress
 }
 
+// buildThreadRows places every row by structure, not by type
+// (design/threading-design.md (d), task D31-4a): a question or escalation
+// row always opens its own thread -- the one case design section 6.6's
+// interactive group applies to, and the only other case (escalation) that
+// still renders a plain card -- whatever its own parent_id (an
+// escalation-linked question's parent is the escalation it belongs to, and
+// still gets its own group, unaffected by the rule below). Any other row
+// that names a parent folds into that parent's thread instead of becoming a
+// row of its own, whatever its type: the smell this task fixes is that a
+// resolved row, an agent reply, or any future kind with an anchor in the
+// database used to be thrown away by a renderer that only looked for reply
+// and answer. The one row that still gets a full message card with no
+// parent is a thread-level owner reply (reply/you); every other unparented
+// row -- a state transition, a recognized or unrecognized "update" marker,
+// or any other type this view does not otherwise expect loose -- renders as
+// a one-line timeline divider instead, or nothing at all when updateLine
+// reports the marker is pure bookkeeping. No row is ever dropped silently:
+// a parented row is accounted for under its parent's MessageCount even when
+// sentChildText has nothing to say about its type, and an unparented row
+// always becomes either a divider or the one allowed card -- never an empty
+// top-level row.
 func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
 	sentAnswers := collectSentAnswers(rows)
 
-	// messageCounts holds, per question message id, how many other messages
-	// in this ticket name it as their parent (design section 6.6: the
-	// <details> summary shows "the message count"). Precomputed once over
-	// every row rather than per question, so counting stays O(n) instead of
-	// O(n*questions).
-	//
-	// sentChildren holds, per question message id, its own sent (never
-	// draft, visibleRows already dropped those) reply and answer rows, in
-	// message order (bug fix 10): a sent reply or answer used to also get
-	// its own standalone ThreadRow below, rendering as a thread-level "reply
-	// you"/"answer you" card detached from the question it actually
-	// answered. buildThreadQuestion formats these into SentReplies instead,
-	// and the main loop below skips emitting a second row for them. A
-	// thread-level reply (ParentID nil) names no question here and keeps
-	// its own row, unaffected.
+	// messageCounts holds, per parent message id, how many other messages in
+	// this ticket name it as their parent (design section 6.6: the <details>
+	// summary shows "the message count"). sentChildren holds those same rows
+	// themselves, in message order, for buildThreadQuestion's own SentReplies
+	// formatting (bug fix 10, extended by D31-4a to every type, not just
+	// reply and answer: "whatever its type" is this function's own rule, so
+	// the children map it builds from must not filter on type either). Both
+	// are precomputed once over every row rather than per question, so this
+	// stays O(n) instead of O(n*questions).
 	messageCounts := make(map[int64]int, len(rows))
 	sentChildren := make(map[int64][]store.MessageRow, len(rows))
 	for i := range rows {
@@ -625,27 +704,70 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 			continue
 		}
 		messageCounts[*rows[i].ParentID]++
-		if rows[i].Type == msgTypeReply || rows[i].Type == msgTypeAnswer {
-			sentChildren[*rows[i].ParentID] = append(sentChildren[*rows[i].ParentID], rows[i])
-		}
+		sentChildren[*rows[i].ParentID] = append(sentChildren[*rows[i].ParentID], rows[i])
 	}
 
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
-		if (rows[i].Type == msgTypeReply || rows[i].Type == msgTypeAnswer) && rows[i].ParentID != nil {
+		row := &rows[i]
+
+		// A question or escalation row always opens its own thread, whatever
+		// its own parent_id: type decides before parent_id gets a turn.
+		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
+			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, templates.ThreadRow{
+				ID: row.ID, Type: row.Type, Author: row.Author,
+				Body:     displayBody(row),
+				Question: question,
+			})
 			continue
 		}
-		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[rows[i].ID])
-		if err != nil {
-			return nil, err
+
+		// Any other row naming a parent was already folded into that
+		// parent's own thread above (sentChildren) and never gets a row of
+		// its own here.
+		if row.ParentID != nil {
+			continue
+		}
+
+		// The one unparented row that still gets a full message card: a
+		// thread-level owner reply.
+		if row.Type == msgTypeReply && row.Author == authorYou {
+			out = append(out, templates.ThreadRow{
+				ID: row.ID, Type: row.Type, Author: row.Author,
+				Body: displayBody(row),
+			})
+			continue
+		}
+
+		line, show := dividerLine(row)
+		if !show {
+			continue
 		}
 		out = append(out, templates.ThreadRow{
-			ID: rows[i].ID, Type: rows[i].Type, Author: rows[i].Author,
-			Body:     displayBody(&rows[i]),
-			Question: question,
+			ID: row.ID, Type: row.Type, Author: row.Author,
+			Body: line, Divider: true,
 		})
 	}
 	return out, nil
+}
+
+// dividerLine computes an unparented, non-root row's one-line timeline text
+// (design/threading-design.md (d)): an "update" marker goes through
+// updateLine, whose own second return tells buildThreadRows whether to show
+// it at all; every other type (chiefly "state", but defensively any other
+// type this view does not expect loose, such as a stray "resolved" or
+// "answer" row with no parent) goes through displayBody and is always
+// shown, the same unconditional rendering a state separator already gets
+// today.
+func dividerLine(m *store.MessageRow) (string, bool) {
+	if m.Type == msgTypeUpdate {
+		return updateLine(m)
+	}
+	return displayBody(m), true
 }
 
 // collectSentAnswers scans rows (already visibleRows-filtered, so every
@@ -702,13 +824,21 @@ func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOp
 	return strings.Join(parts, ", ")
 }
 
-// sentChildText formats one sent reply or answer row that names a question
-// as its parent, for that question's own SentReplies (bug fix 10): a plain
-// reply's own Body, or an answer's payload run through sentAnswerText, the
-// same formatting its locked note already uses. Any other type, or an
-// answer whose payload fails to decode, renders empty, which the caller
-// skips rather than adding a blank line.
-func sentChildText(m *store.MessageRow, options []templates.ThreadOption) string {
+// sentChildText formats one sent row that names a question as its parent,
+// for that question's own SentReplies (bug fix 10, extended by D31 and
+// D31-4a): a plain reply's own Body -- the owner's typed text, or D31's own
+// agent reply, both the same shape -- an answer's payload run through
+// sentAnswerText, the same formatting its locked note already uses, a
+// resolved row (D31, section 22.3: the settling decision when the agent
+// wrote one, or a bare acknowledgement for the owner-abandoned and
+// ResolveQuestions paths, which post with no Body of their own), or a
+// followup row (D32, section 22.12.2: the owner reopening an already-
+// settled thread, not written by any job or store code yet on this
+// branch). Any other type, or an answer whose payload fails to decode,
+// renders empty, which the caller skips rather than adding a blank line --
+// the row is still accounted for in the question's own MessageCount
+// (buildThreadRows), just with nothing of its own to show under SentReplies.
+func sentChildText(m *store.MessageRow, options []templates.ThreadOption, key string) string {
 	switch m.Type {
 	case msgTypeReply:
 		return m.Body
@@ -718,6 +848,13 @@ func sentChildText(m *store.MessageRow, options []templates.ThreadOption) string
 			return ""
 		}
 		return sentAnswerText(ap, options)
+	case msgTypeResolved:
+		if m.Author == authorZing {
+			return "Settled: " + m.Body
+		}
+		return "Resolved."
+	case msgTypeFollowup:
+		return "You reopened " + key + "."
 	default:
 		return ""
 	}
@@ -842,7 +979,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 	if len(children) > 0 {
 		q.SentReplies = make([]string, 0, len(children))
 		for i := range children {
-			if text := sentChildText(&children[i], options); text != "" {
+			if text := sentChildText(&children[i], options, payload.Key); text != "" {
 				q.SentReplies = append(q.SentReplies, text)
 			}
 		}
@@ -923,68 +1060,113 @@ func displayBody(m *store.MessageRow) string {
 	case msgTypeAnswer:
 		return answerLine(m)
 	case msgTypeUpdate:
-		return updateLine(m)
+		// The Feed view (displayFeedMessages) has no notion of a hidden row --
+		// every ticket's every message is a line there -- so a marker
+		// updateLine hides from the Thread view (buildThreadRows' own
+		// dividerLine, which checks the second return value) still shows its
+		// raw body here, the same defensive fallback an unrecognized marker
+		// already gets.
+		if line, ok := updateLine(m); ok {
+			return line
+		}
+		return m.Body
 	default:
 		return m.Body
 	}
 }
 
+// MarkerRecognized reports whether updateLine actually registers m's own
+// body, for cmd/zing's e2e second guard (design/threading-design.md: "it
+// renders every ticket and asserts that updateLine recognized every update
+// row the run wrote. That catches a new marker that someone writes but
+// never registers, which the hand-kept table cannot."). A non-"update" row
+// has no marker to recognize, so it always reports true. updateLine's own
+// registered cases always rewrite the body into either an owner-facing
+// sentence or nothing (a deliberately hidden marker, shown == false); only
+// its unregistered default case echoes the raw body back unchanged with
+// shown == true, so that one shape -- a marker whose prefix updateLine's
+// switch does not list at all -- is what this reports false for, without
+// this function re-listing every updateMarker* prefix a second time.
+func MarkerRecognized(m store.MessageRow) bool {
+	if m.Type != msgTypeUpdate {
+		return true
+	}
+	line, shown := updateLine(&m)
+	return !shown || line != m.Body
+}
+
 // updateLine recognizes the known planning-bookkeeping markers a type=
 // "update" message's Body carries (F012: the owner should never read
 // "planreview v3 pending" or a raw response.PathError line) and returns an
-// owner-facing sentence instead. A body that matches none of the known
-// updateMarker* prefixes is not a marker this view knows about, so it falls
-// through unchanged, the same defensive fallback stateLine, escalationLine,
-// and answerLine already use for a payload they cannot decode.
-func updateLine(m *store.MessageRow) string {
+// owner-facing sentence in its place. The second return reports whether the
+// Thread view should show this row at all (design/threading-design.md (d),
+// task D31-4a): false only for the two D31 conversation markers, pure
+// request/acknowledgement bookkeeping with no sentence worth showing (they
+// exist only so PlanningConversation can compute its delivery watermark);
+// every other known marker, and a body that matches none of the known
+// updateMarker* prefixes -- not a marker this view recognizes -- both come
+// back true, the same defensive fallback stateLine, escalationLine, and
+// answerLine already use for a payload they cannot decode. Every true case
+// renders as a one-line timeline divider (buildThreadRows), not the full
+// card this function's callers used to feed into.
+func updateLine(m *store.MessageRow) (string, bool) {
 	body := m.Body
 	switch {
+	case strings.HasPrefix(body, updateMarkerConversationPendingPrefix):
+		return "", false
+	case strings.HasPrefix(body, updateMarkerConversationDeliveredPrefix):
+		return "", false
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
-		return "Plan review found only minor findings. Planning resumes automatically to address them."
+		return "Plan review found only minor findings. Planning resumes automatically to address them.", true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
-		return "Planning resumed with the review findings."
+		return "Planning resumed with the review findings.", true
 	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
-		return validationErrorsLine(body)
+		return validationErrorsLine(body), true
 	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
-		return "The agent received the check results."
+		return "The agent received the check results.", true
 	case strings.HasPrefix(body, updateMarkerResponseInvalidPrefix):
-		return "The agent's last response could not be used. Zing retries once."
+		return "The agent's last response could not be used. Zing retries once.", true
 	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
-		return "The scenario set changed before approval. Zing re-reads it on the next tick."
+		return "The scenario set changed before approval. Zing re-reads it on the next tick.", true
 	case strings.HasPrefix(body, updateMarkerClaimsOkPrefix):
-		return "Claims checked for run " + strings.TrimPrefix(body, updateMarkerClaimsOkPrefix) + "."
+		return "Claims checked for run " + strings.TrimPrefix(body, updateMarkerClaimsOkPrefix) + ".", true
 	case strings.HasPrefix(body, updateMarkerClaimErrorsPendingPrefix):
-		return claimErrorsPendingLine(body)
+		return claimErrorsPendingLine(body), true
 	case strings.HasPrefix(body, updateMarkerClaimErrorsDeliveredPrefix):
-		return "Claim errors sent back to run " + strings.TrimPrefix(body, updateMarkerClaimErrorsDeliveredPrefix) + "."
+		return "Claim errors sent back to run " + strings.TrimPrefix(body, updateMarkerClaimErrorsDeliveredPrefix) + ".", true
 	case strings.HasPrefix(body, updateMarkerPerimeterResolvedPrefix):
-		return "Perimeter decided for run " + strings.TrimPrefix(body, updateMarkerPerimeterResolvedPrefix) + "."
+		return "Perimeter decided for run " + strings.TrimPrefix(body, updateMarkerPerimeterResolvedPrefix) + ".", true
 	case body == updateMarkerRetryRequested:
-		return "Retry requested."
+		return "Retry requested.", true
 	case strings.HasPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix):
-		return "Perimeter question dropped for run " + strings.TrimPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix) + "."
+		return "Perimeter question dropped for run " + strings.TrimPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix) + ".", true
 	case isReviewMarker(body):
 		if line, ok := reviewUpdateLine(body); ok {
-			return line
+			return line, true
 		}
-		return body
+		return body, true
 	case isJudgeMarker(body):
 		if line, ok := judgeUpdateLine(body); ok {
-			return line
+			return line, true
 		}
-		return body
+		return body, true
 	case isShippingMarker(body):
 		if line, ok := shippingUpdateLine(body); ok {
-			return line
+			return line, true
 		}
-		return body
+		return body, true
 	case isRespondMarker(body):
 		if line, ok := respondUpdateLine(body); ok {
-			return line
+			return line, true
 		}
-		return body
+		return body, true
+	case isFixMarker(body):
+		if line, ok := fixUpdateLine(body); ok {
+			return line, true
+		}
+		return body, true
 	default:
-		return body
+		return body, true
 	}
 }
 
@@ -1330,6 +1512,63 @@ func respondBatchStartedLine(rest string, hasRest bool) (string, bool) {
 		count = len(strings.Split(tidLine, ","))
 	}
 	return fmt.Sprintf("Answering %d review threads.", count), true
+}
+
+// isFixMarker reports whether body carries job/fix.go's own "fix requested "
+// or "fix landed " prefix: fixUpdateLine's own exact-shape parse runs
+// behind, the same two-step prefix-then-parse pattern isReviewMarker uses.
+func isFixMarker(body string) bool {
+	return strings.HasPrefix(body, updateMarkerFixRequestedPrefix) || strings.HasPrefix(body, updateMarkerFixLandedPrefix)
+}
+
+// fixUpdateLine renders one of job/fix.go's own two marker shapes as an
+// owner-facing sentence: "fix requested <kind> after run <R>" (opening a
+// fix unit, its own text kept below the header) and "fix landed <mid> sha
+// <sha>" (closing one). ok is false when body's prefix matched but the rest
+// of its shape did not, the same defensive fallback reviewUpdateLine's own
+// default case uses.
+func fixUpdateLine(body string) (string, bool) {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	switch {
+	case strings.HasPrefix(first, updateMarkerFixRequestedPrefix):
+		return fixRequestedLine(first, rest, hasRest)
+	case strings.HasPrefix(first, updateMarkerFixLandedPrefix):
+		return fixLandedLine(first)
+	default:
+		return "", false
+	}
+}
+
+// fixRequestedLine renders "fix requested <kind> after run <R>"'s own first
+// line (job/fix.go's fixRequestMessage): kind is read generically, rather
+// than hardcoded to FixKind's four values, the same elision reviewRoundLine
+// and judgeRoundLine already use for a round or run number. The marker's
+// own text (lines 2..) is kept below the header, the same
+// claimErrorsPendingLine pattern.
+func fixRequestedLine(first, rest string, hasRest bool) (string, bool) {
+	tail := strings.TrimPrefix(first, updateMarkerFixRequestedPrefix)
+	kind, after, ok := strings.Cut(tail, " ")
+	if !ok || !strings.HasPrefix(after, "after run ") {
+		return "", false
+	}
+	runID := strings.TrimPrefix(after, "after run ")
+	header := "Fix requested after run " + runID + " (" + kind + "):"
+	if hasRest {
+		return header + "\n" + rest, true
+	}
+	return header, true
+}
+
+// fixLandedLine renders "fix landed <mid> sha <sha>" (building.go's land
+// and its adopted-commit twin): the request's own message id plays no part
+// in the sentence, the same elision judgeRoundLine's "verdicts" case uses
+// for the run id.
+func fixLandedLine(first string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerFixLandedPrefix))
+	if len(fields) != 3 || fields[1] != "sha" {
+		return "", false
+	}
+	return "Fix landed at " + sha7(fields[2]) + ".", true
 }
 
 // claimErrorsPendingLine renders a "claim errors pending run <rid>" body's

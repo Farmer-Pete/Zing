@@ -95,7 +95,7 @@ func Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress) templ.Com
 						if templ_7745c5c3_Err != nil {
 							return templ_7745c5c3_Err
 						}
-					} else if row.IsState() {
+					} else if row.Divider {
 						templ_7745c5c3_Err = stateSeparator(row).Render(ctx, templ_7745c5c3_Buffer)
 						if templ_7745c5c3_Err != nil {
 							return templ_7745c5c3_Err

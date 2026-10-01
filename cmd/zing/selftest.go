@@ -1322,7 +1322,35 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if err := verifySelftestRespondAnsweredThenReady(msgs); err != nil {
 		return err
 	}
+	if err := verifySelftestMarkersAllRecognized(msgs); err != nil {
+		return err
+	}
 	return verifySelftestCohortSealed(ctx, st, ticketID)
+}
+
+// verifySelftestMarkersAllRecognized is the design report's second guard
+// (design/threading-design.md, "Render every message inside the thread it
+// belongs to"): after the full pipeline, every "update" marker msgs carries
+// must be one console.MarkerRecognized actually registers, not a shape
+// nobody told buildThreadRows about. The hand-kept updateMarker* table in
+// internal/console/views.go cannot catch a new marker someone's job code
+// starts writing but never registers there -- this does, by checking the
+// real bodies a real run wrote. msgs is the one ticket
+// TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered drives through
+// the whole pipeline (reviewing, judging, shipping, respond), so this
+// already sees every marker kind that path writes; a future e2e fixture
+// with more than one ticket would need this called per ticket, the same way
+// verifySelftestE2E's other checks would.
+func verifySelftestMarkersAllRecognized(msgs []store.MessageRow) error {
+	for i := range msgs {
+		if msgs[i].Type != selftestMsgTypeUpdate {
+			continue
+		}
+		if !console.MarkerRecognized(msgs[i]) {
+			return fmt.Errorf("message %d: console does not recognize update marker %q", msgs[i].ID, msgs[i].Body)
+		}
+	}
+	return nil
 }
 
 // selftestMsgTypeUpdate is store.MessageRow.Type's own "update" value, the

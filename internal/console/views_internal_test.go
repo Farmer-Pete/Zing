@@ -9,6 +9,8 @@ package console
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +24,17 @@ import (
 func updateRow(body string) *store.MessageRow {
 	return &store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
 }
+
+// testBodyConversationPending is one "conversation pending" marker body,
+// shared by TestConversationMarkersHidden, markerShapeCases, and
+// TestMarkerRecognized (goconst: three literal copies of the same string
+// is one too many).
+const testBodyConversationPending = "conversation pending run 31 batch 4"
+
+// testBodyUnknownMarker is one body that matches none of updateLine's own
+// marker prefixes, shared by TestDisplayBody_UnknownUpdateBodyIsUnchanged,
+// TestUnknownMarkerIsADivider, and TestMarkerRecognized (goconst).
+const testBodyUnknownMarker = "some future bookkeeping marker nobody recognizes yet"
 
 // TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
 // "planreview vN pending" marker (job.planreviewPendingMarker) no longer
@@ -112,7 +125,7 @@ func TestDisplayBody_SealMismatchIsHumanReadable(t *testing.T) {
 // they cannot decode.
 func TestDisplayBody_UnknownUpdateBodyIsUnchanged(t *testing.T) {
 	t.Parallel()
-	const body = "some future bookkeeping marker nobody recognizes yet"
+	const body = testBodyUnknownMarker
 	if got := displayBody(updateRow(body)); got != body {
 		t.Errorf("displayBody(%q) = %q, want it unchanged", body, got)
 	}
@@ -137,7 +150,7 @@ func TestUpdateLineBuildMarkers(t *testing.T) {
 		},
 		{"claim errors delivered", "claim errors delivered run 12", "Claim errors sent back to run 12."},
 		{"perimeter resolved", "perimeter resolved run 9", "Perimeter decided for run 9."},
-		{"retry requested", "retry requested", "Retry requested."},
+		{"retry requested", updateMarkerRetryRequested, "Retry requested."},
 		{"perimeter question dropped", "perimeter question dropped run 4", "Perimeter question dropped for run 4."},
 	}
 	for _, tc := range cases {
@@ -277,6 +290,48 @@ func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
 			"Replied to 2 threads; 1 go to a fix run.",
 		},
 		{"fix replies posted", "fix replies posted 8", "Replied to the fixed threads."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := displayBody(updateRow(tc.body)); got != tc.want {
+				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpdateLineFixMarkers proves job/fix.go's own two marker shapes --
+// "fix requested <kind> after run <R>" (fixRequestMessage) and "fix landed
+// <mid> sha <sha>" (building.go's land and its adopted-commit twin) -- each
+// render as their own owner-facing sentence (task D31-4a: cmd/zing's e2e
+// second guard caught the real pipeline writing the first of these with no
+// updateMarker* case recognizing it).
+func TestUpdateLineFixMarkers(t *testing.T) {
+	t.Parallel()
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct{ name, body, want string }{
+		{
+			"fix requested failure",
+			"fix requested failure after run 5\ns2: expected 200, got 500",
+			"Fix requested after run 5 (failure):\ns2: expected 200, got 500",
+		},
+		{
+			"fix requested findings",
+			"fix requested findings after run 6\n2 findings remain",
+			"Fix requested after run 6 (findings):\n2 findings remain",
+		},
+		{
+			"fix requested ci_log",
+			"fix requested ci_log after run 7\nthe build step failed",
+			"Fix requested after run 7 (ci_log):\nthe build step failed",
+		},
+		{
+			"fix requested threads",
+			"fix requested threads after run 8\n2 threads need a reply",
+			"Fix requested after run 8 (threads):\n2 threads need a reply",
+		},
+		{"fix landed", "fix landed 3 sha " + sha, "Fix landed at 0123456."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -535,5 +590,387 @@ func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.
 	}
 	if got := lockedRows[0].Question.StateLabel; got != "answered" {
 		t.Errorf("locked answered question StateLabel = %q, want %q", got, "answered")
+	}
+}
+
+// messagesCheckValues parses 0001_init.sql's messages table and returns its
+// type and author CHECK lists, in schema order (task D31-4a,
+// design/threading-design.md's guard): a parse off the real migration, not a
+// hand-kept copy, so adding a type or an author to the schema breaks
+// TestNoMessageKindRendersOutsideItsThread until buildThreadRows gives it a
+// home, rather than silently rendering it as a loose card forever.
+func messagesCheckValues(t *testing.T) (types, authors []string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "store", "migrations", "0001_init.sql"))
+	if err != nil {
+		t.Fatalf("read 0001_init.sql: %v", err)
+	}
+	src := string(data)
+	start := strings.Index(src, "CREATE TABLE messages")
+	if start < 0 {
+		t.Fatalf("0001_init.sql: no CREATE TABLE messages")
+	}
+	end := strings.Index(src[start:], ");")
+	if end < 0 {
+		t.Fatalf("0001_init.sql: messages table has no closing );")
+	}
+	block := src[start : start+end]
+	return parseCheckList(t, block, "type IN"), parseCheckList(t, block, "author IN")
+}
+
+// parseCheckList extracts the first quoted, comma-separated CHECK (... IN
+// (...)) list in block that follows marker.
+func parseCheckList(t *testing.T, block, marker string) []string {
+	t.Helper()
+	i := strings.Index(block, marker)
+	if i < 0 {
+		t.Fatalf("messages table: no %q", marker)
+	}
+	rest := block[i+len(marker):]
+	open := strings.Index(rest, "(")
+	closeAt := strings.Index(rest, ")")
+	if open < 0 || closeAt < 0 || closeAt < open {
+		t.Fatalf("messages table: malformed %q list", marker)
+	}
+	var out []string
+	for v := range strings.SplitSeq(rest[open+1:closeAt], ",") {
+		v = strings.Trim(strings.TrimSpace(v), "'")
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// seedQuestionRow builds a minimal, valid "question" row (id 1, key "Q1")
+// for TestNoMessageKindRendersOutsideItsThread to parent synthetic rows to.
+func seedQuestionRow(t *testing.T) store.MessageRow {
+	t.Helper()
+	payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	return store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeQuestion, Author: authorZing, Payload: payload}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+}
+
+// markerShapeCases is every known "update" marker body shape this view must
+// place somewhere other than a loose top-level card (task D31-4a): one
+// example per shape, collected from the marker constants and Sprintf
+// formats across internal/job and internal/store (and, for the kinds
+// console already recognizes by name, the same literal examples
+// TestUpdateLineBuildMarkers, TestUpdateLineReviewMarkers, and
+// TestUpdateLineJudgeShippingRespondMarkers above already use). The last
+// two groups are D31's own conversation pending/delivered pair (hidden
+// outright, TestConversationMarkersHidden's own narrower proof) and D32's
+// gate markers (plan section 22.12.1, not written by any job or store code
+// yet on this branch, enumerated from the plan text alone). "fix
+// requested"/"fix landed" (internal/job/fix.go, building.go) had no
+// updateMarker* case until cmd/zing's e2e second guard
+// (verifySelftestMarkersAllRecognized) caught the real pipeline writing one
+// nobody had registered here; fixUpdateLine now renders both.
+var markerShapeCases = []struct{ name, body string }{
+	{"planreview pending", "planreview v3 pending"},
+	{"planreview delivered", "planreview v3 delivered"},
+	{"validation errors pending", "validation errors pending run 7\nscenarios/scenario[0]/then: then must not be empty"},
+	{"validation errors delivered", "validation errors delivered run 7"},
+	{"response invalid", "response invalid run 9\nmissing required field \"plan\""},
+	{"seal mismatch", "seal mismatch cohort 4"},
+	{"claims ok", "claims ok run 12"},
+	{"claim errors pending", "claim errors pending run 12\nclaims/test_exit: observed 1, want 0"},
+	{"claim errors delivered", "claim errors delivered run 12"},
+	{"perimeter resolved", "perimeter resolved run 9"},
+	{"retry requested", updateMarkerRetryRequested},
+	{"perimeter question dropped", "perimeter question dropped run 4"},
+	{"review round done", "review round 1 done sha abc123 lenses correctness,security\nkept 2 dropped 1 merged 1"},
+	{"review round asked", "review round 2 asked\nruns 5,6\ndone correctness"},
+	{"review round failed", "review round 1 failed\nlens security: timed out"},
+	{"review round void", "review round 1 void\nhead moved from a to b"},
+	{"review discussed", "review discussed r1f2\nrun 12 batch r1f2 kept 1"},
+	{"review note", "review note r1f2\nb.go:3 is generated, see the header"},
+	{"judge round started", "judge round 1 started sha 0123456789abcdef0123456789abcdef01234567 after run 5"},
+	{"judge round verdicts", "judge round 1 verdicts run 7"},
+	{"judge round passed", "judge round 1 passed"},
+	{"judge round failed", "judge round 1 failed\ns2,s3"},
+	{"judge round retry", "judge round 2 retry after run 9"},
+	{"judge coverage failed", "judge coverage failed run 12\nmissing verdict for scenario s2"},
+	{"judge coverage delivered", "judge coverage delivered run 12"},
+	{"judge check", "judge check 1 s2 exit 0"},
+	{"pr opened", "pr opened 42"},
+	{"ci waiting", "ci waiting ci,lint"},
+	{"reviewers re-requested", "reviewers re-requested 0123456789abcdef0123456789abcdef01234567\nalice,bob"},
+	{"pr ready", "pr ready 0123456789abcdef0123456789abcdef01234567"},
+	{"pr draft", "pr draft 0123456789abcdef0123456789abcdef01234567"},
+	{"threads blocking", "threads blocking t3f9a0c1b2d4e5f60,t1a2b3c4d5e6f7081"},
+	{"merge asked", "merge asked 0123456789abcdef0123456789abcdef01234567"},
+	{"merge held", "merge held 0123456789abcdef0123456789abcdef01234567"},
+	{"merge withdrawn", "merge withdrawn 0123456789abcdef0123456789abcdef01234567"},
+	{"merge refused", "merge refused 0123456789abcdef0123456789abcdef01234567\nthe head moved"},
+	{"pr merged", "pr merged 0123456789abcdef0123456789abcdef01234567"},
+	{
+		"respond batch started",
+		"respond batch 1 started sha 0123456789abcdef0123456789abcdef01234567 after run 5\n" +
+			"t3f9a0c1b2d4e5f60,t1a2b3c4d5e6f7081\nseen t3f9a0c1b2d4e5f60=d1,t1a2b3c4d5e6f7081=d2",
+	},
+	{"respond coverage failed", "respond coverage failed run 9\nthread t3f9a0c1b2d4e5f60 is not in this batch"},
+	{"respond coverage delivered", "respond coverage delivered run 9"},
+	{"respond batch stale", "respond batch 2 stale\nthe pull request head moved"},
+	{"respond batch skipped", "respond batch 3 skipped"},
+	{
+		"respond batch retry",
+		"respond batch 4 retry sha 0123456789abcdef0123456789abcdef01234567 after run 11\n" +
+			"t3f9a0c1b2d4e5f60\nseen t3f9a0c1b2d4e5f60=d1",
+	},
+	{"respond applied", "respond applied 7\nreplied 3 fixing 1 skipped 0"},
+	{"fix replies posted", "fix replies posted 8"},
+	// fix requested/landed (internal/job/fix.go's fixRequestMessage,
+	// building.go's two land call sites, and judging.go's, reviewing.go's,
+	// and shipping.go's own fixRequested*Prefix constants): fixUpdateLine's
+	// own case.
+	{"fix requested failure", "fix requested failure after run 5\nthe scenario still fails"},
+	{"fix requested findings", "fix requested findings after run 5\n2 findings remain"},
+	{"fix requested ci_log", "fix requested ci_log after run 5\nthe build step failed"},
+	{"fix requested threads", "fix requested threads after run 5\n2 threads need a reply"},
+	{"fix landed", "fix landed 3 sha 0123456789abcdef0123456789abcdef01234567"},
+	// D31's own conversation markers (store/reserve.go, conversation_reads.go).
+	{"conversation pending", testBodyConversationPending},
+	{"conversation delivered", "conversation delivered run 31 batch 4"},
+	// D32's own markers (plan section 22.12.1), not written by any job or
+	// store code yet on this branch.
+	{"gate confirmed", "gate confirmed run 40 plan v2 gate 12 answer 99"},
+	{"gate approval cancelled by run", "gate approval cancelled gate 12 run 41"},
+	{"gate approval cancelled by batch", "gate approval cancelled gate 12 batch 7"},
+	{"seal refused", "seal refused gate 12\napproval of gate question 12 was cancelled"},
+}
+
+// TestNoMessageKindRendersOutsideItsThread is the permanent guard for
+// placement by structure (task D31-4a, design/threading-design.md (d)): it
+// enumerates every messages.type value crossed with every author (both
+// parsed from the real schema, messagesCheckValues), parented to a question
+// or not, plus every known marker shape (markerShapeCases), and asserts
+// that a parented row never produces a top-level row of its own, that only
+// a question or an escalation opens its own thread, and that no row
+// produces a plain message card except an unparented reply authored "you".
+func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
+	t.Parallel()
+	types, authors := messagesCheckValues(t)
+	if len(types) == 0 || len(authors) == 0 {
+		t.Fatalf("messagesCheckValues returned no types/authors: %v / %v", types, authors)
+	}
+
+	t.Run("every type and author, parented or not", func(t *testing.T) {
+		t.Parallel()
+		for _, typ := range types {
+			for _, author := range authors {
+				for _, parented := range []bool{true, false} {
+					name := typ + "_" + author
+					if parented {
+						name += "_parented"
+					} else {
+						name += "_unparented"
+					}
+					t.Run(name, func(t *testing.T) {
+						t.Parallel()
+						question := seedQuestionRow(t)
+						row := store.MessageRow{ID: 2, Message: store.Message{Type: typ, Author: author}} //nolint:modernize // keyed on purpose
+						switch typ {
+						case msgTypeEscalation:
+							// escalationLine prefers a non-empty Body over
+							// decoding Payload, so a bare escalation row
+							// still renders without a payload.
+							row.Body = "escalation summary"
+						case msgTypeQuestion:
+							// A second, distinct question row, so
+							// buildThreadQuestion decodes a valid payload and
+							// opens its own interactive group rather than
+							// falling back to a plain card for a payload it
+							// cannot parse.
+							payload, err := json.Marshal(response.QuestionPayload{Key: "Q2", Kind: response.QuestionKindQuestion})
+							if err != nil {
+								t.Fatalf("marshal question payload: %v", err)
+							}
+							row.Payload = payload
+						}
+						if parented {
+							qid := question.ID
+							row.ParentID = &qid
+						}
+
+						got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil)
+						if err != nil {
+							t.Fatalf("buildThreadRows: %v", err)
+						}
+
+						switch {
+						case typ == msgTypeQuestion || typ == msgTypeEscalation:
+							if len(got) != 2 {
+								t.Fatalf("%s/%s always opens its own thread: got %d rows, want 2: %+v", typ, author, len(got), got)
+							}
+							if typ == msgTypeQuestion && got[1].Question == nil {
+								t.Errorf("question row did not open its own interactive group: %+v", got[1])
+							}
+						case parented:
+							if len(got) != 1 {
+								t.Fatalf("a parented %s/%s row produced %d top-level rows, want 1 (folded into its question): %+v",
+									typ, author, len(got), got)
+							}
+						case typ == msgTypeReply && author == authorYou:
+							if len(got) != 2 {
+								t.Fatalf("unparented reply/you: got %d rows, want 2 (the question plus its own card): %+v", len(got), got)
+							}
+							if got[1].Question != nil || got[1].Divider {
+								t.Errorf("unparented reply/you did not render as a plain message card: %+v", got[1])
+							}
+						default:
+							if len(got) != 2 {
+								t.Fatalf("unparented %s/%s: got %d rows, want 2 (the question plus a divider): %+v",
+									typ, author, len(got), got)
+							}
+							if got[1].Question != nil {
+								t.Errorf("unparented %s/%s rendered as a question group: %+v", typ, author, got[1])
+							}
+							if !got[1].Divider {
+								t.Errorf("unparented %s/%s rendered as a full card, not a one-line divider: %+v", typ, author, got[1])
+							}
+						}
+					})
+				}
+			}
+		}
+	})
+
+	t.Run("every known marker shape", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range markerShapeCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				t.Run("parented, folds into its question", func(t *testing.T) {
+					t.Parallel()
+					question := seedQuestionRow(t)
+					qid := question.ID
+					row := store.MessageRow{ID: 2, Message: store.Message{ //nolint:modernize // keyed on purpose
+						Type: msgTypeUpdate, Author: authorSystem, Body: tc.body, ParentID: &qid,
+					}}
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil)
+					if err != nil {
+						t.Fatalf("buildThreadRows: %v", err)
+					}
+					if len(got) != 1 {
+						t.Fatalf("parented marker %q produced %d top-level rows, want 1 (folded into its question): %+v",
+							tc.body, len(got), got)
+					}
+				})
+
+				t.Run("unparented, never a card", func(t *testing.T) {
+					t.Parallel()
+					row := store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: tc.body}} //nolint:modernize // keyed on purpose
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil)
+					if err != nil {
+						t.Fatalf("buildThreadRows: %v", err)
+					}
+					switch len(got) {
+					case 0:
+						// Hidden: acceptable (D31's own conversation markers).
+					case 1:
+						if got[0].Question != nil || !got[0].Divider {
+							t.Errorf("marker %q rendered as a full card, not a divider or hidden: %+v", tc.body, got[0])
+						}
+					default:
+						t.Fatalf("marker %q produced %d rows, want 0 or 1: %+v", tc.body, len(got), got)
+					}
+				})
+			})
+		}
+	})
+}
+
+// TestUnknownMarkerIsADivider proves the default fallback for an "update"
+// marker buildThreadRows does not recognize: a one-line divider carrying
+// the marker's own raw body, never a card -- the defensive fallback
+// updateLine's own default case always had, now reached through
+// buildThreadRows (task D31-4a) instead of threadMessageRow.
+func TestUnknownMarkerIsADivider(t *testing.T) {
+	t.Parallel()
+	const body = testBodyUnknownMarker
+	row := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: body}} //nolint:modernize // keyed on purpose
+
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("buildThreadRows returned %d rows, want 1: %+v", len(got), got)
+	}
+	if !got[0].Divider {
+		t.Errorf("unknown marker did not render as a divider: %+v", got[0])
+	}
+	if got[0].Question != nil {
+		t.Errorf("unknown marker rendered a question group: %+v", got[0])
+	}
+	if got[0].Body != body {
+		t.Errorf("divider body = %q, want the marker's raw body %q", got[0].Body, body)
+	}
+}
+
+// TestConversationMarkersHidden proves D31's own "conversation pending" and
+// "conversation delivered" markers (store/reserve.go,
+// store/conversation_reads.go) never render in the Thread view at all --
+// not as a card, not even as a divider -- since neither carries a word the
+// owner would read as content (design/threading-design.md (d)).
+func TestConversationMarkersHidden(t *testing.T) {
+	t.Parallel()
+	rows := []store.MessageRow{
+		{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyConversationPending}},             //nolint:modernize // keyed on purpose
+		{ID: 2, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "conversation delivered run 31 batch 4"}}, //nolint:modernize // keyed on purpose
+	}
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("conversation markers rendered %d rows, want 0 (hidden): %+v", len(got), got)
+	}
+}
+
+// TestMarkerRecognized proves the exported predicate cmd/zing's e2e second
+// guard calls (design/threading-design.md: "asserts that updateLine
+// recognized every update row the run wrote"): a known marker and a
+// deliberately hidden one both report true, an unregistered marker reports
+// false, and a non-"update" row always reports true (nothing to
+// recognize).
+func TestMarkerRecognized(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		row  store.MessageRow
+		want bool
+	}{
+		{
+			"a known marker is recognized",
+			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: updateMarkerRetryRequested}}, //nolint:modernize // keyed on purpose
+			true,
+		},
+		{
+			"a deliberately hidden marker is recognized",
+			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyConversationPending}}, //nolint:modernize // keyed on purpose
+			true,
+		},
+		{
+			"an unregistered marker is not recognized",
+			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyUnknownMarker}}, //nolint:modernize // keyed on purpose
+			false,
+		},
+		{
+			"a non-update row has nothing to recognize",
+			store.MessageRow{Message: store.Message{Type: msgTypeState, Author: authorSystem, Body: "queued -> planning"}}, //nolint:modernize // keyed on purpose
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := MarkerRecognized(tc.row); got != tc.want {
+				t.Errorf("MarkerRecognized(%+v) = %v, want %v", tc.row, got, tc.want)
+			}
+		})
 	}
 }
